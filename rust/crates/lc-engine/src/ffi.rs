@@ -1428,6 +1428,41 @@ fn runtime_snapshot_mismatch(
                         id, expected_object.position, actual_object.position
                     ));
                 }
+                // Sub-pixel 16.16 state: the integer compare masks drift
+                // until a pixel boundary crossing — compare the raw fixed
+                // values (None ⇒ itofix(position), the lossless case).
+                let expected_fix = expected_object.fixed_position.unwrap_or_else(|| {
+                    FixedVec2::from_ints(expected_object.position.x, expected_object.position.y)
+                });
+                let actual_fix = actual_object.fixed_position.unwrap_or_else(|| {
+                    FixedVec2::from_ints(actual_object.position.x, actual_object.position.y)
+                });
+                if expected_fix != actual_fix {
+                    problems.push(format!(
+                        "object {} subpix position rust ({},{}), cpp ({},{})",
+                        id,
+                        expected_fix.x.val(),
+                        expected_fix.y.val(),
+                        actual_fix.x.val(),
+                        actual_fix.y.val()
+                    ));
+                }
+                let expected_fixv = expected_object.fixed_velocity.unwrap_or_else(|| {
+                    FixedVec2::from_ints(expected_object.velocity.x, expected_object.velocity.y)
+                });
+                let actual_fixv = actual_object.fixed_velocity.unwrap_or_else(|| {
+                    FixedVec2::from_ints(actual_object.velocity.x, actual_object.velocity.y)
+                });
+                if expected_fixv != actual_fixv {
+                    problems.push(format!(
+                        "object {} subpix velocity rust ({},{}), cpp ({},{})",
+                        id,
+                        expected_fixv.x.val(),
+                        expected_fixv.y.val(),
+                        actual_fixv.x.val(),
+                        actual_fixv.y.val()
+                    ));
+                }
                 if expected_object.velocity != actual_object.velocity {
                     problems.push(format!(
                         "object {} velocity rust {:?}, cpp {:?}",
@@ -2264,6 +2299,7 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     }
         }
         if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
+            let detail = format!("frame {frame}: {detail}");
             set_error(error_out, detail);
             return false;
         }
@@ -2298,6 +2334,7 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     }
 
     if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
+            let detail = format!("frame {frame}: {detail}");
         set_error(error_out, detail);
         return false;
     }
