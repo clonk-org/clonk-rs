@@ -9413,6 +9413,103 @@ mod game_start_sync {
         );
     }
 
+    // GoldRush DoInitialize (Script.c:33-35) pins unowned crew NPCs from
+    // the SCENARIO-SCRIPT context: `while(pObj = FindObjectOwner(0,-1,
+    // 0,0,0,0,OCF_CrewMember,0,0,pObj)) AddEffect("StayThere",...)`.
+    // The Fx handlers are scenario GLOBALS (Script.c:553-564) — resolved
+    // through GetFuncRecursive in C++ (C4Effect.cpp:31-40).
+    #[test]
+    #[ignore = "RED until host_world_context_from_snapshot carries OCF (task #14)"]
+    fn scenario_script_pins_unowned_crew_with_stay_there_like_cpp() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        let npc = defs.join("Npc.c4d");
+        std::fs::create_dir_all(&npc).expect("npc dir");
+        std::fs::write(
+            npc.join("DefCore.txt"),
+            "[DefCore]\nid=NPCX\nName=Npc\nCategory=66056\nCrewMember=1\nWidth=8\nHeight=20\nOffset=-4,-10\n",
+        )
+        .expect("npc core");
+
+        let scenario_dir = dir.path().join("Sync.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Sync\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("core");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=NPCX\nNumber=30\nCategory=66056\nX=50\nY=50\nAlive=1\n\n\
+             [Object]\nid=NPCX\nNumber=31\nCategory=66056\nX=90\nY=50\nAlive=1\n",
+        )
+        .expect("objects");
+        std::fs::write(
+            scenario_dir.join("Script.c"),
+            "#strict\n\
+             protected func InitializePlayer(iPlr) {\n\
+               var i, pObj;\n\
+               while(pObj = FindObjectOwner(0,-1,0,0,0,0,OCF_CrewMember,0,0,pObj))\n\
+                 AddEffect(\"StayThere\",pObj,1,35,pObj);\n\
+               return(1);\n\
+             }\n\
+             global func FxStayThereStart(pTarget, iNumber, fTmp)\n\
+             {\n\
+               if(fTmp) return();\n\
+               EffectVar(0, pTarget, iNumber) = GetX(pTarget);\n\
+               EffectVar(1, pTarget, iNumber) = GetY(pTarget);\n\
+             }\n",
+        )
+        .expect("script");
+
+        let resolver = ProbeResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(3);
+        scenario.apply(&mut engine).expect("scenario applies");
+        engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Test".into(),
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+            })
+            .expect("join succeeds");
+
+        let snapshot = engine.snapshot();
+        let pinned = snapshot
+            .objects
+            .iter()
+            .filter(|object| {
+                object.definition_id == "NPCX"
+                    && object.effects.iter().any(|e| e.name == "StayThere")
+            })
+            .count();
+        assert_eq!(pinned, 2, "both unowned crew NPCs got StayThere");
+        let stored = snapshot
+            .objects
+            .iter()
+            .find(|object| object.id.as_u64() == 30)
+            .and_then(|object| {
+                object
+                    .effects
+                    .iter()
+                    .find(|e| e.name == "StayThere")
+                    .map(|e| e.vars.clone())
+            })
+            .expect("effect present");
+        assert!(
+            matches!(stored.first(), Some(crate::effect::EffectVarValue::Int(50))),
+            "the GLOBAL FxStayThereStart stored GetX via the seam \
+             (C4Effect.cpp:31-40 GetFuncRecursive), got {stored:?}"
+        );
+    }
+
     // C4Game::Synchronize's tail broadcasts ~UpdateTransferZone to EVERY
     // object (C4Game.cpp:3710, C4ObjectList.cpp:734-739) AFTER the
     // FixRandom re-fix. GoldRush oracle: the placed cannon's handler

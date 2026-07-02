@@ -3102,7 +3102,7 @@ fn construction_delta_from_percent(percent: i32) -> i32 {
 const LEGACY_MAX_PHYSICAL: i32 = 100_000;
 const CONTACT_DIRECTION_MASK: u32 = CNAT_LEFT | CNAT_RIGHT | CNAT_TOP | CNAT_BOTTOM | CNAT_CENTER;
 
-fn compute_vertex_contact(
+pub(crate) fn compute_vertex_contact(
     landscape: Option<&Landscape>,
     position: Vector2,
     vertex: &ObjectVertex,
@@ -14454,7 +14454,12 @@ impl EffectHostContext {
                 .definition_script(world_object.definition_id())?
                 .clone(),
         };
+        // GetFuncRecursive walks the def script up to Game.ScriptEngine
+        // (C4Aul.cpp): GLOBAL script functions resolve for nested calls
+        // and effect callbacks alike (GoldRush's FxStayThereStart lives
+        // in the scenario script, C4Effect.cpp:31-40).
         let resolvable = script.has_function(function)
+            || script.has_global_function(function)
             || (host_fallback && script.has_host_function(function));
         if !resolvable {
             return None;

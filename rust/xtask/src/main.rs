@@ -542,6 +542,16 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         .unwrap_or_default();
     for id in &obj_dump {
         println!("OBJDUMP joined {id} {:?}", engine.debug_object_by_id(*id));
+        if let Some(object) = engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.id.as_u64() == *id)
+        {
+            let effects: Vec<String> =
+                object.effects.iter().map(|e| e.name.clone()).collect();
+            println!("OBJDUMP effects {id} {effects:?} owner={} alive={} def={} crew={}", object.owner, object.alive, object.definition_id, object.crew_member);
+        }
     }
     for frame in 0..ticks {
         let started = std::time::Instant::now();
