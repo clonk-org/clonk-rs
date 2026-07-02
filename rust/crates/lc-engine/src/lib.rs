@@ -16997,7 +16997,8 @@ impl Engine {
             .apply_update_with_library(&update, library);
         object.state.action.target = None;
         object.state.action.target2 = None;
-        object.state.command_direction = CommandDirection::Stop;
+        // ObjectActionJump never touches ComDir (C4ObjectCom.cpp:49-62):
+        // the walker keeps steering mid-flight and resumes on landing.
         if matches!(result, ActionUpdateResult::Applied) {
             if next_action == "Jump" {
                 // ObjectActionJump mobilizes (C4ObjectCom.cpp:56).
@@ -19291,6 +19292,14 @@ impl Engine {
                 definition.set_clonk_names(names);
             }
         }
+    }
+
+    /// Debug helper: landscape solidity probe.
+    pub fn debug_landscape_is_solid(&self, x: i32, y: i32) -> bool {
+        self.landscape
+            .as_ref()
+            .map(|landscape| landscape.is_solid_at(x, y))
+            .unwrap_or(false)
     }
 
     /// Debug helper: a definition's physical + an action's procedure.

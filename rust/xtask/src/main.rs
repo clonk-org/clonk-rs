@@ -533,6 +533,12 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
             println!("SPAWN {id} {definition}");
         }
     }
+    if std::env::var("LC_XTASK_PROBE_SOLID").is_ok() {
+        for y in 618..=635 {
+            let solid = engine.debug_landscape_is_solid(3925, y);
+            println!("SOLID 3925,{y} = {solid}");
+        }
+    }
     log_watched(&engine, "joined");
     // LC_XTASK_OBJ_DUMP=3,42: print per-object forensics after the join
     // and every 5 frames.
@@ -571,11 +577,12 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
                             let effects: Vec<&str> =
                                 object.effects.iter().map(|e| e.name.as_str()).collect();
                             println!(
-                                "OBJDUMP f{frame} {id} effects {effects:?} commands {:?} pos {:?} act {} ph {}",
+                                "OBJDUMP f{frame} {id} effects {effects:?} commands {:?} pos {:?} act {} ph {} comdir {:?}",
                                 object.command_stack,
                                 object.position,
                                 object.action.name,
-                                object.action.phase
+                                object.action.phase,
+                                object.command_direction
                             );
                         }
                     }
