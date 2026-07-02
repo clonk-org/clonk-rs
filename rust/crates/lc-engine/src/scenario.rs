@@ -115,6 +115,10 @@ struct ScenarioDefinition {
     /// the rest of the core).
     vertices: Vec<lc_resources::definition::DefVertex>,
     shape: Option<lc_resources::definition::PictureRect>,
+    /// The FULL DefCore for legacy defs — applied via
+    /// Engine::apply_resource_core so no core field silently drops
+    /// (physicals/Float/Timer/Grab did).
+    core: Option<lc_resources::definition::DefCore>,
 }
 
 #[derive(Debug, Clone)]
@@ -563,6 +567,13 @@ impl Scenario {
             // Real content gets the C++ callback arguments (no parameters;
             // AbortCall gets the last phase — C4Object.cpp:4154-4182).
             compiled.set_c4_callback_convention(true);
+            // Legacy defs carry the FULL DefCore: apply it wholesale
+            // (physicals, Float, Timer/TimerCall, Grab, fire properties,
+            // ... — the hand-picked setters below only cover the DSL
+            // manifest surface and silently dropped the rest).
+            if let Some(core) = &definition.core {
+                Engine::apply_resource_core(&mut compiled, core);
+            }
             if let Some(actions) = &definition.actions {
                 compiled.configure_actions(actions.default_action.clone(), actions.specs.clone());
                 compiled.configure_action_graphics(actions.graphics.clone());
@@ -860,6 +871,7 @@ impl Scenario {
                     line_connect: 0,
                     vertices: Vec::new(),
                     shape: None,
+                    core: None,
                 }
             };
 
@@ -4227,6 +4239,7 @@ fn scenario_definition_from_resource(
         additional_graphics,
     } = resource;
     let actions = action_map.map(|map| convert_action_map(&map));
+    let full_core = core.clone();
 
     ScenarioDefinition {
         id: core.id,
@@ -4256,6 +4269,7 @@ fn scenario_definition_from_resource(
         line_connect: core.line_connect,
         vertices: core.vertices,
         shape: core.shape,
+        core: Some(full_core),
     }
 }
 
@@ -6151,6 +6165,7 @@ global func Step(state, frame, random)
                 line_connect: 0,
                 vertices: Vec::new(),
                 shape: None,
+                core: None,
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
@@ -6241,6 +6256,7 @@ global func Step(state, frame, random)
                 line_connect: 0,
                 vertices: Vec::new(),
                 shape: None,
+                core: None,
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,

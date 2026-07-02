@@ -533,6 +533,12 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
             println!("SPAWN {id} {definition}");
         }
     }
+    if std::env::var("LC_XTASK_OBJ_DUMP").is_ok() {
+        println!(
+            "DEFPHYS BIRD {:?}",
+            engine.debug_definition_physical("BIRD", "Fly")
+        );
+    }
     log_watched(&engine, "joined");
     // LC_XTASK_OBJ_DUMP=3,42: print per-object forensics after the join
     // and every 5 frames.
@@ -557,7 +563,7 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         let started = std::time::Instant::now();
         match engine.tick() {
             Ok(snapshot) => {
-                if !obj_dump.is_empty() && frame % 5 == 0 {
+                if !obj_dump.is_empty() {
                     for id in &obj_dump {
                         println!(
                             "OBJDUMP f{frame} {id} {:?}",

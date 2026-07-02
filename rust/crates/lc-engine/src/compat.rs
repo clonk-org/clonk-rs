@@ -1754,6 +1754,16 @@ fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnFrameCounter (C4Script.cpp): Game.FrameCounter — the current
+/// simulation frame.
+fn frame_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let frame = borrow.as_ref().map(|context| context.frame as i32).unwrap_or(0);
+        Ok(Value::Int(frame))
+    })
+}
+
 /// FnSetPlrViewRange (C4Script.cpp:5286-5293): the object's FoW view
 /// range — presentation/FoW only (PlrViewRange serializes but the
 /// comparator does not cover it); acknowledged (PORT_STATUS).
@@ -3586,6 +3596,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPortrait", get_portrait);
     script.register_host_function("SetVisibility", set_visibility);
     script.register_host_function("SetPlrViewRange", set_plr_view_range);
+    script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("SetSolidMask", set_solid_mask);
     script.register_host_function("ChangeDef", change_def);
     script.register_host_function("GetPlrDownDouble", get_plr_down_double);
@@ -15991,6 +16002,7 @@ mod tests {
         "FindObjects",
         "FindOtherContents",
         "Format",
+        "FrameCounter",
         "FreeRect",
         "GBackLiquid",
         "GBackSemiSolid",

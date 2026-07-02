@@ -19106,6 +19106,71 @@ impl Engine {
             .map(|definition| definition.has_function(name))
     }
 
+    /// Applies the C4Def DefCore metadata onto a compiled definition —
+    /// shared by `from_resource` and the legacy scenario loader so no
+    /// core field is silently dropped (physicals/Float/Timer/Grab were).
+    pub(crate) fn apply_resource_core(
+        definition: &mut Definition,
+        core: &lc_resources::definition::DefCore,
+    ) {
+        definition.set_crew_member(core.crew_member);
+        definition.set_category(core.category);
+        definition.set_value(core.value);
+        definition.set_mass(core.mass);
+        definition.set_picture(core.picture.map(DefinitionPicture::from));
+        definition.set_solid_mask(core.solid_mask.map(DefinitionTargetRect::from));
+        definition.set_shape_rect(core.shape.map(DefinitionRect::from));
+        definition.set_shape_vertices(
+            core.vertices
+                .iter()
+                .map(|vertex| {
+                    ObjectVertex::new(vertex.x, vertex.y)
+                        .with_cnat(vertex.cnat)
+                        .with_friction(vertex.friction)
+                })
+                .collect(),
+        );
+        definition.set_contact_density(core.contact_density);
+        definition.set_contact_function_calls(core.contact_function_calls);
+        definition.set_collection_rect(core.collection.map(DefinitionRect::from));
+        definition.set_collection_limit(core.collection_limit);
+        definition.set_fire_properties(
+            core.contact_incinerate,
+            core.no_burn_decay,
+            core.no_burn_damage,
+        );
+        definition.set_burn_turn_to(core.burn_turn_to.clone());
+        definition.set_incomplete_activity(core.incomplete_activity);
+        definition.set_no_breath(core.no_breath);
+        definition.set_grab(core.grab);
+        definition.float_line = core.float_line;
+        definition.set_physical(core.physical);
+        definition.set_collectible(core.collectible);
+        definition.set_constructable(core.constructable);
+        definition.set_construction_offset(core.con_size_off);
+        definition.set_stretch_growth(core.stretch_growth);
+        definition.set_basement(core.basement);
+        definition.set_rotateable(core.rotateable);
+        definition.set_border_bound(core.border_bound);
+        definition.set_upright_attach(core.upright_attach);
+        definition.set_no_stabilize(core.no_stabilize);
+        definition.set_timer(core.timer);
+        definition.set_timer_call(core.timer_call.clone());
+        definition.set_line_connect(core.line_connect);
+    }
+
+    /// Debug helper: a definition's physical + an action's procedure.
+    pub fn debug_definition_physical(&self, id: &str, action: &str) -> Option<(i32, Option<String>)> {
+        self.definitions.get(&DefinitionId::from(id)).map(|def| {
+            (
+                def.physical().float,
+                def.action_library()
+                    .procedure_name_for_action(action)
+                    .map(|s| s.to_string()),
+            )
+        })
+    }
+
     /// Debug helper: is `name` a global script function?
     pub fn debug_global_has_function(&self, name: &str) -> bool {
         self.global_script_functions

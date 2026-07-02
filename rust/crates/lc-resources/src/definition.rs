@@ -1856,6 +1856,24 @@ NextAction=Dup
     }
 
     #[test]
+    fn parse_real_bird_defcore_physical_float() {
+        // The real CRLF content file (skipped when the content tree is
+        // absent) — pins the [Physical] Float=200 parse that drives the
+        // DFA_FLOAT speed clamp.
+        let Ok(bytes) = std::fs::read(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../content/Objects.c4d/Animals.c4d/Bird.c4d/DefCore.txt"
+            ),
+        ) else {
+            return;
+        };
+        let core = parse_def_core(&bytes).expect("parses");
+        assert_eq!(core.physical.float, 200, "[Physical] Float=200");
+        assert_eq!(core.physical.energy, 40000, "[Physical] Energy=40000");
+    }
+
+    #[test]
     fn parse_def_core_physical_section() {
         // C4PhysicalInfo via the [Physical] DefCore section
         // (C4Def.cpp:459-460, name map C4InfoCore.cpp:181-205); defaults are
