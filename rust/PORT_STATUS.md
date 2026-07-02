@@ -488,6 +488,32 @@ full-scenario shadow-diff (see Parity harnesses).
   work: synchronous effect-Start spawn materialization, GrabObjectInfo
   (C4ObjectInfo model), the GC4V trigger hunt; then re-measure.
 
+- **2026-07-02 third wave — the join-cascade is id-exact and its
+  effects/actions match (commits 15a2af69..EffectVar-reads):**
+  JumpControl/FlightControl ported into MoveTo (C4Command.cpp:316-326,
+  1816-1920: diagonal free jump, high-angle side move, low-side-contact
+  mirrors; Angle/Distance/SolidOnWhichSide/AdjustMoveToTarget); the
+  ENERGY model is raw physical scale (C4Object.cpp:191-192,1345-1364:
+  Init Energy=GetPhysical, DoEnergy percent*1000, GetEnergy percent,
+  FAIR-CREW promotion — crew 55000 pinned via a temporary C++ probe;
+  bandit 25000 follows from scripts); per-object SolidMask (saved
+  0,0,0,0,0,0 = OFF; SetSolidMask host fn); ObjectSnapshot.ocf + the
+  snapshot world feed carries OCF (OCF-filtered finds worked on nothing
+  at join — GoldRush's StayThere NPC pinning never ran); scenario-script
+  `global func`s merge into the engine-global table; EffectVar writes
+  AND reads (incl. --EffectVar) go through the host reference (were
+  env-slot shims; ScheduleCall one-shots now fire and self-remove);
+  Construction/Initialize run SYNCHRONOUSLY inside CreateObject
+  (C4Game.cpp:1107-1127) with GetSFunc own-script resolution for object
+  Calls vs GetFuncRecursive+globals for effect callbacks (the global
+  fallback recursed); DoGravity's liquid-float branch
+  (C4Object.cpp:4644-4661). Headless: bandits = [OrderDefend,
+  AIBanditNoMove] (no stray Life), NPCs = [StayThere] with home coords
+  in EffectVars — all matching the C++ oracle. Live wall was 67-75
+  before this wave; re-measure pending (display locked - SetDisplayMode
+  crash). Remaining known: walker/bird/fish ±1 movement rounding,
+  bubble ±1 creation timing, small owner/command/vertex residues.
+
 ## Gates
 
 - **`cargo test --workspace`: GREEN** (~1240 pass, cargo exit 0). The old
