@@ -1473,14 +1473,19 @@ fn runtime_snapshot_mismatch(
                         id, expected_object.command_direction, actual_object.command_direction
                     ));
                 }
-                // start_dispatched is Rust-internal bookkeeping (the C++
-                // import never sets it) — normalize before comparing.
+                // The ABI transports name/priority/interval/timer only
+                // (LcEngineEffectSnapshot) — normalize the untransported
+                // fields (vars, command target, Rust-internal
+                // start_dispatched) before comparing.
                 let normalize = |effects: &[EffectState]| -> Vec<EffectState> {
                     effects
                         .iter()
                         .cloned()
                         .map(|mut effect| {
                             effect.start_dispatched = false;
+                            effect.vars.clear();
+                            effect.command_target = None;
+                            effect.command_id = None;
                             effect
                         })
                         .collect()
