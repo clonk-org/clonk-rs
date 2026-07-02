@@ -3132,6 +3132,17 @@ impl Object {
         if let Some(position) = delta.position {
             self.fixed_position = FixedVec2::from_ints(position.x, position.y);
         }
+        // C4Object::SetAction resyncs the fixed coords to the integer
+        // position once past its early returns (C4Object.cpp:4144).
+        if outcome
+            .action_change
+            .as_ref()
+            .map(|change| change.requested_name_change)
+            .unwrap_or(false)
+        {
+            self.fixed_position =
+                FixedVec2::from_ints(self.state.position.x, self.state.position.y);
+        }
         // No reprojection from the fixed coords otherwise: C++ x/y only
         // change via explicit assignment or movement — DoCon's initial
         // adjust legitimately leaves y and fixtoi(fix_y) split.
@@ -13907,6 +13918,15 @@ impl Engine {
                 let result = object                    .state
                     .action
                     .apply_update_with_library(&action, &action_library);
+                // C4Object::SetAction resyncs the fixed coords to the
+                // integer position once past its early returns
+                // (C4Object.cpp:4144).
+                if action.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
+                    object.fixed_position = FixedVec2::from_ints(
+                        object.state.position.x,
+                        object.state.position.y,
+                    );
+                }
                 if matches!(result, ActionUpdateResult::Applied)
                     && (requested_name_change || object.state.action.name != previous_action.name)
                 {
@@ -17142,6 +17162,14 @@ impl Engine {
         let result = object            .state
             .action
             .apply_update_with_library(&update, &library);
+        // SetAction fix resync (C4Object.cpp:4144) — only past the
+        // NoOtherAction early returns.
+        if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
+            object.fixed_position = FixedVec2::from_ints(
+                object.state.position.x,
+                object.state.position.y,
+            );
+        }
         if clear_targets {
             object.state.action.target = None;
             object.state.action.target2 = None;
@@ -17199,6 +17227,14 @@ impl Engine {
         let result = object            .state
             .action
             .apply_update_with_library(&update, library);
+        // SetAction fix resync (C4Object.cpp:4144) — only past the
+        // NoOtherAction early returns.
+        if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
+            object.fixed_position = FixedVec2::from_ints(
+                object.state.position.x,
+                object.state.position.y,
+            );
+        }
         object.state.action.target = None;
         object.state.action.target2 = None;
         // ObjectActionJump never touches ComDir (C4ObjectCom.cpp:49-62):
@@ -18370,6 +18406,14 @@ impl Engine {
         let result = object            .state
             .action
             .apply_update_with_library(&update, &library);
+        // SetAction fix resync (C4Object.cpp:4144) — only past the
+        // NoOtherAction early returns.
+        if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
+            object.fixed_position = FixedVec2::from_ints(
+                object.state.position.x,
+                object.state.position.y,
+            );
+        }
         if matches!(result, ActionUpdateResult::Applied)
             && previous.name != object.state.action.name
         {
@@ -19168,6 +19212,14 @@ impl Engine {
         let result = object            .state
             .action
             .apply_update_with_library(&update, &library);
+        // SetAction fix resync (C4Object.cpp:4144) — only past the
+        // NoOtherAction early returns.
+        if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
+            object.fixed_position = FixedVec2::from_ints(
+                object.state.position.x,
+                object.state.position.y,
+            );
+        }
         if matches!(result, ActionUpdateResult::Applied)
             && previous.name != object.state.action.name
         {

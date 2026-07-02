@@ -580,14 +580,15 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
                             let effects: Vec<&str> =
                                 object.effects.iter().map(|e| e.name.as_str()).collect();
                             println!(
-                                "OBJDUMP f{frame} {id} effects {effects:?} commands {:?} pos {:?} act {} ph {} comdir {:?} mobile {} vel {:?}",
+                                "OBJDUMP f{frame} {id} effects {effects:?} commands {:?} pos {:?} act {} ph {} comdir {:?} mobile {} vel {:?} cont {:?}",
                                 object.command_stack,
                                 object.position,
                                 object.action.name,
                                 object.action.phase,
                                 object.command_direction,
                                 object.mobile,
-                                object.velocity
+                                object.velocity,
+                                object.container
                             );
                         }
                     }
