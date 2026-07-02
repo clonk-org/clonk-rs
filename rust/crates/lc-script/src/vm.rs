@@ -1581,7 +1581,7 @@ impl<'a> Vm<'a> {
         if let Value::Proplist(map) = &target {
             if let Some(Value::Int(id)) = map.get("id") {
                 if *id > 0 {
-                    target = Value::Object(*id);
+                    target = Value::Object(*id as u64);
                 }
             }
         }
