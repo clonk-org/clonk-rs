@@ -1808,6 +1808,63 @@ fn set_solid_mask(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnChangeDef (C4Script.cpp) -> C4Object::ChangeDef
+/// (C4Object.cpp:1180-1231): swap the target to a new definition in
+/// place. Routed through the pending update; the engine fold performs
+/// the swap (action to ActIdle, shape/vertices/category from the new
+/// def, solid mask reset).
+fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
+    let new_id = match args.first() {
+        Some(Value::String(id)) | Some(Value::C4Id(id)) if !id.is_empty() => id.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "ChangeDef",
+        "obj",
+    )?;
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(target) = target {
+        if Some(target) != active {
+            return match call_world_object_function(target, "ChangeDef", &[Value::C4Id(new_id)])
+            {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let known = context
+            .world
+            .definition_metadata(&new_id)
+            .is_some();
+        if !known {
+            return Ok(Value::Bool(false)); // C4Id2Def miss
+        }
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        object.pending_update.change_def = Some(new_id);
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnGetPlrDownDouble (C4Script.cpp): the player's double-Down control
+/// latch. Control input is not replayed into the shadow engine
+/// (PORT_STATUS) - always false, like an idle player.
+fn get_plr_down_double(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _ = parse_optional_i32(args.first(), "GetPlrDownDouble", "player")?;
+    Ok(Value::Bool(false))
+}
+
 /// FnSetVisibility (C4Script.cpp:3860-3869): a draw gate
 /// (pObj->Visibility), not modeled in the simulation yet — acknowledged
 /// (PORT_STATUS).
@@ -3530,6 +3587,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetVisibility", set_visibility);
     script.register_host_function("SetPlrViewRange", set_plr_view_range);
     script.register_host_function("SetSolidMask", set_solid_mask);
+    script.register_host_function("ChangeDef", change_def);
+    script.register_host_function("GetPlrDownDouble", get_plr_down_double);
     script.register_host_function("SetClrModulation", set_clr_modulation);
     script.register_host_function("GetCrewCount", get_crew_count);
     script.register_host_function("GetCursor", get_cursor_host);
@@ -15901,6 +15960,7 @@ mod tests {
         "Call",
         "CastBackParticles",
         "CastParticles",
+        "ChangeDef",
         "ClearParticles",
         "Contained",
         "Contents",
@@ -15984,6 +16044,7 @@ mod tests {
         "GetPlayerName",
         "GetPlayerTeam",
         "GetPlayerType",
+        "GetPlrDownDouble",
         "GetPlrKnowledge",
         "GetPlrValue",
         "GetPlrValueGain",

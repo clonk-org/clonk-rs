@@ -2302,6 +2302,7 @@ impl ObjectDelta {
         if let Some(rect) = update.solid_mask_override {
             self.solid_mask_override = Some(rect);
         }
+
         if let Some(alive) = update.alive {
             self.alive = Some(alive);
         }
@@ -2386,6 +2387,10 @@ pub struct ObjectUpdate {
     /// SetSolidMask's rect update (Some = set; zero-area = mask OFF).
     #[serde(default)]
     pub solid_mask_override: Option<DefinitionTargetRect>,
+    /// FnChangeDef's definition swap (C4Object::ChangeDef,
+    /// C4Object.cpp:1180-1231).
+    #[serde(default)]
+    pub change_def: Option<String>,
     pub position: Option<Vector2>,
     pub velocity: Option<Vector2>,
     /// Sub-pixel velocity in 16.16 fixed-point, set by precision-aware script
@@ -13564,6 +13569,7 @@ impl Engine {
             crew_member,
             portrait_source,
             solid_mask_override: update_solid_mask,
+            change_def,
             alive,
             container,
             vertices,
@@ -13587,6 +13593,7 @@ impl Engine {
         };
 
         let mut energy_died = false;
+        let mut pending_change_def: Option<String> = None;
         let (object_id, previous_owner, new_owner, new_crew, container_change) = {
             let object = &mut self.objects[index];
             let previous_owner = object.state.owner;
@@ -13670,6 +13677,9 @@ impl Engine {
             if let Some(rect) = update_solid_mask {
                 object.state.solid_mask_override = Some(rect);
             }
+            if let Some(new_def) = change_def.clone() {
+                pending_change_def = Some(new_def);
+            }
             if let Some(alive) = alive {
                 object.state.alive = alive;
             }
@@ -13746,6 +13756,13 @@ impl Engine {
         }
         self.refresh_elimination_state();
         self.check_game_over()?;
+
+        // FnChangeDef -> C4Object::ChangeDef (C4Object.cpp:1180-1231):
+        // executed after the scoped mutations so the swap sees the final
+        // state of this update.
+        if let Some(new_def) = pending_change_def {
+            self.change_object_def(index, &new_def);
+        }
 
         Ok(())
     }
@@ -14168,9 +14185,11 @@ impl Engine {
                 let object = &self.objects[index];
                 (object.state.owner, object.state.crew_member)
             };
+            let mut nested_change_def = None;
             {
                 let object = &mut self.objects[index];
                 if let Some(update) = outcome.update {
+                    nested_change_def = update.change_def.clone();
                     let delta: ObjectDelta = update.into();
                     let apply_outcome = object.apply_delta(&delta, &action_library);
                     if let Some(change) = apply_outcome.action_change {
@@ -14194,6 +14213,10 @@ impl Engine {
                     let mut applied = object.apply_effect_commands(&outcome.effects);
                     effect_events.append(&mut applied);
                 }
+            }
+            // FnChangeDef from a nested call (C4Object.cpp:1180-1231)
+            if let Some(new_def) = nested_change_def {
+                self.change_object_def(index, &new_def);
             }
             self.update_sector_for_index(index);
 
@@ -18814,6 +18837,8 @@ impl Engine {
         object.state.vertices = vertices;
         object.shape_template = template;
         object.own_shape_vertices = None;
+        // SolidMask falls back to the NEW def default (C4Object.cpp:1213)
+        object.state.solid_mask_override = None;
         // Non-rotateable defs reset rotation (C4Object.cpp:1211)
         if rotateable == 0 {
             object.state.rotation = 0;
@@ -32367,6 +32392,120 @@ func Trigger() {
             bandit.state.effects.iter().all(|e| e.name != "Life"),
             "RemoveEffect right after CreateObject killed it - and \
              materialization must NOT re-run Initialize (no second Life)"
+        );
+    }
+
+    // FnChangeDef -> C4Object::ChangeDef (C4Object.cpp:1180-1231): the
+    // object swaps to the new definition in place - number/position/owner
+    // survive, the action resets to ActIdle, dir 0, rotation clears for
+    // non-rotateable defs, the solid mask resets to the NEW def default
+    // and the shape/vertices rebuild from the new def (WGTW/CTWR tower
+    // handlers rely on it during the game-start UpdateTransferZone
+    // broadcast).
+    #[test]
+    fn change_def_swaps_definition_in_place_like_cpp() {
+        let mut engine = Engine::with_seed(0);
+        let mut old_def = simple_definition("OLDD");
+        old_def.set_shape_rect(Some(DefinitionRect::new(-4, -4, 8, 8)));
+        old_def.configure_actions(
+            None,
+            HashMap::from([("Spin".to_string(), ActionSpec::default().with_delay(1))]),
+        );
+        engine.register_definition(old_def).expect("old registers");
+        let mut new_def = simple_definition("NEWD");
+        new_def.set_shape_rect(Some(DefinitionRect::new(-8, -2, 16, 4)));
+        new_def.set_shape_vertices(vec![ObjectVertex { x: 0, y: 3, cnat: 0, friction: 77 }]);
+        engine.register_definition(new_def).expect("new registers");
+        let caller = Definition::from_script(
+            "CALL",
+            "Caller",
+            "#strict\nfunc Swap(pObj) { return(ChangeDef(NEWD, pObj)); }\n",
+        )
+        .expect("caller compiles");
+        engine.register_definition(caller).expect("caller registers");
+
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("OLDD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 50))
+                    .with_owner(3)
+                    .with_action(ActionState::new("Spin")),
+            )
+            .expect("target spawns");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(caller_id).expect("caller exists");
+        let target_value = compat::object_reference_value(target);
+        engine
+            .call_object_function(idx, "Swap", vec![target_value])
+            .expect("swap runs");
+
+        let idx = engine.find_object_index(target).expect("target survives");
+        let object = &engine.objects[idx];
+        assert_eq!(object.definition_id.as_str(), "NEWD", "definition swapped");
+        // Spawn bottom-growth put the center at 50-(8-4)=46; ChangeDef
+        // must not move it (C4Object::ChangeDef never touches x/y).
+        assert_eq!(object.state.position, Vector2::new(50, 46), "position kept");
+        assert_eq!(object.state.owner, 3, "owner kept");
+        assert_eq!(
+            object.state.action.name,
+            crate::action::DEFAULT_ACTION_NAME,
+            "SetAction(ActIdle) at def change (C4Object.cpp:1190)"
+        );
+        assert_eq!(
+            object.state.vertices.first().map(|v| v.friction),
+            Some(77),
+            "shape/vertices rebuilt from the NEW def (UpdateFace)"
+        );
+    }
+
+    // DFA_FLOAT clamps BOTH axes to lLimit = FIXED100(Physical.Float)
+    // every exec (C4Object.cpp:5284-5285): a loaded bird with saved
+    // XDir=-3 slows to -2.0 on its first frame (BIRD [Physical]
+    // Float=200; the live class rust (-3,0) vs cpp (-2,0)).
+    #[test]
+    fn float_procedure_clamps_loaded_velocity_to_the_physical_limit() {
+        let mut engine = Engine::with_seed(0);
+        let mut bird = Definition::from_script("BIRD", "Bird", "#strict\n").expect("compiles");
+        bird.configure_actions(
+            None,
+            HashMap::from([(
+                "Fly".to_string(),
+                ActionSpec::default()
+                    .with_procedure("FLOAT")
+                    .with_delay(1)
+                    .with_length(20),
+            )]),
+        );
+        let mut physical = PhysicalInfo::default();
+        physical.float = 200;
+        bird.set_physical(physical);
+        engine.register_definition(bird).expect("bird registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("BIRD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 20))
+                    .with_action(ActionState::new("Fly"))
+                    .with_loaded(true)
+                    .with_fixed_velocity(FixedVec2 {
+                        x: itofix(-3),
+                        y: C4Fixed::ZERO,
+                    }),
+            )
+            .expect("bird spawns");
+        let idx = engine.find_object_index(id).expect("bird exists");
+        engine.objects[idx].state.mobile = true;
+
+        engine.tick().expect("tick");
+        let idx = engine.find_object_index(id).expect("bird exists");
+        assert_eq!(
+            engine.objects[idx].fixed_velocity.x.val(),
+            -math::fixed100(200).val(),
+            "xdir clamps to -lLimit on the first DFA_FLOAT exec (C4Object.cpp:5285)"
         );
     }
 
