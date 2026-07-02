@@ -9299,6 +9299,76 @@ mod game_start_sync {
         assert_eq!(phase, 0, "Idle carries no phase");
     }
 
+    // C4Game::Synchronize's tail broadcasts ~UpdateTransferZone to EVERY
+    // object (C4Game.cpp:3710, C4ObjectList.cpp:734-739) AFTER the
+    // FixRandom re-fix. GoldRush oracle: the placed cannon's handler
+    // (Cannon.c4d/Script.c:20-25) re-runs Initialize() because the stale
+    // saved Action=Stand loaded as Idle - SetAction("Ready") +
+    // SetDir(Random(2)) (the first draw of the fresh ledger) + the GC4V
+    // crosshair as the FIRST created object (C++ NEWOBJ 1420, frame 0,
+    // pre-join).
+    #[test]
+    fn game_start_broadcasts_update_transfer_zone_like_cpp() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        let cannon = defs.join("Cannon.c4d");
+        std::fs::create_dir_all(&cannon).expect("cannon dir");
+        std::fs::write(
+            cannon.join("DefCore.txt"),
+            "[DefCore]\nid=CANN\nName=Cannon\nCategory=16\n",
+        )
+        .expect("defcore");
+        std::fs::write(
+            cannon.join("ActMap.txt"),
+            "[Action]\nName=Ready\nDelay=0\nLength=8\n",
+        )
+        .expect("actmap");
+        std::fs::write(
+            cannon.join("Script.c"),
+            "#strict\n\
+             protected func Initialize() {\n\
+                 SetAction(\"Ready\");\n\
+                 SetDir(Random(2));\n\
+                 CreateObject(MARK, 0, 0, -1);\n\
+                 return(1);\n\
+             }\n\
+             protected func UpdateTransferZone() { if(ActIdle()) Initialize(); return(1); }\n",
+        )
+        .expect("script");
+        let marker = defs.join("Marker.c4d");
+        std::fs::create_dir_all(&marker).expect("marker dir");
+        std::fs::write(
+            marker.join("DefCore.txt"),
+            "[DefCore]\nid=MARK\nName=Marker\nCategory=16\n",
+        )
+        .expect("marker core");
+
+        write_scenario(
+            dir.path(),
+            "[Object]\nid=CANN\nNumber=439\nCategory=16\nX=100\nY=100\nAction=Stand\n",
+        );
+        let (engine, _) = load(dir.path());
+
+        let (_, action, ..) = engine.debug_object_by_id(439).expect("cannon exists");
+        assert_eq!(
+            action, "Ready",
+            "the ~UpdateTransferZone broadcast re-ran Initialize (Cannon.c4d:23)"
+        );
+        assert!(
+            engine.debug_object_by_id(440).is_some(),
+            "the crosshair-analog is the FIRST created object (C++ 1420)"
+        );
+
+        // The Random(2) draw came off the FRESH post-Synchronize ledger.
+        let mut fresh = crate::rng::LcgRng::seed_from_u64(11);
+        fresh.random(2);
+        assert_eq!(
+            engine.debug_rng_clone().random(1_000_000),
+            fresh.random(1_000_000),
+            "SetDir(Random(2)) drew after the FixRandom re-fix (C4Game.cpp:3695,3710)"
+        );
+    }
+
     // C4Game::Synchronize re-fixes the RNG AFTER the weather-init draws
     // (C4Game.cpp:3695): the post-apply ledger is a FRESH FixRandom(seed)
     // stream — the join draws from position zero.

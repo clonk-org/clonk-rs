@@ -5823,7 +5823,7 @@ impl Definition {
                     self.crew_member,
                     state.draw_transform,
                     state.base_graphics.clone(),
-                )
+                ).with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
@@ -5994,7 +5994,7 @@ impl Definition {
                     self.crew_member,
                     state.draw_transform,
                     state.base_graphics.clone(),
-                )
+                ).with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
@@ -6157,7 +6157,7 @@ impl Definition {
                     self.crew_member,
                     state.draw_transform,
                     state.base_graphics.clone(),
-                )
+                ).with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
@@ -6344,7 +6344,7 @@ impl Definition {
                     self.crew_member,
                     state.draw_transform,
                     state.base_graphics.clone(),
-                )
+                ).with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
@@ -6462,7 +6462,7 @@ impl Definition {
             self.crew_member,
             state.draw_transform,
             state.base_graphics.clone(),
-        )
+        ).with_definition_id(self.id.as_str())
         .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
@@ -6595,7 +6595,7 @@ impl Definition {
             self.crew_member,
             state.draw_transform,
             state.base_graphics.clone(),
-        )
+        ).with_definition_id(self.id.as_str())
         .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
@@ -6719,7 +6719,7 @@ impl Definition {
             self.crew_member,
             state.draw_transform,
             state.base_graphics.clone(),
-        )
+        ).with_definition_id(self.id.as_str())
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
@@ -6848,7 +6848,7 @@ impl Definition {
             self.crew_member,
             state.draw_transform,
             state.base_graphics.clone(),
-        )
+        ).with_definition_id(self.id.as_str())
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
@@ -6974,7 +6974,7 @@ impl Definition {
             self.crew_member,
             state.draw_transform,
             state.base_graphics.clone(),
-        )
+        ).with_definition_id(self.id.as_str())
         .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
@@ -7442,7 +7442,7 @@ impl Definition {
                     self.crew_member,
                     state.draw_transform,
                     state.base_graphics.clone(),
-                )
+                ).with_definition_id(self.id.as_str())
                 .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
@@ -18803,6 +18803,33 @@ impl Engine {
             object.upright_t_attach = 0;
         }
         self.rng = LcgRng::seed_from_u64(self.random_seed);
+        // C4Game::Synchronize's tail: TransferZones.Synchronize()
+        // broadcasts ~UpdateTransferZone to EVERY object AFTER the
+        // FixRandom re-fix (C4Game.cpp:3695,3710; C4ObjectList.cpp:
+        // 734-739). GoldRush's placed cannon re-runs Initialize() here
+        // (Cannon.c4d/Script.c:20-25) — SetAction Ready, SetDir(Random(2))
+        // as the fresh ledger's first draw, and the GC4V crosshair as the
+        // first created object.
+        let ids: Vec<ObjectId> = self.objects.iter().map(|object| object.id).collect();
+        for id in ids {
+            let Some(index) = self.find_object_index(id) else {
+                continue;
+            };
+            let has_handler = self
+                .definitions
+                .get(&self.objects[index].definition_id)
+                .map(|definition| definition.has_function("UpdateTransferZone"))
+                .unwrap_or(false);
+            if !has_handler {
+                continue;
+            }
+            if let Err(error) = tolerate_script_error(
+                self.call_object_function(index, "UpdateTransferZone", Vec::new())
+                    .map(|_| ()),
+            ) {
+                tracing::warn!(id = id.as_u64(), %error, "UpdateTransferZone broadcast failed");
+            }
+        }
     }
 
     /// Debug helper: does a definition's compiled script define `name`?
@@ -31727,6 +31754,81 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(object.effects[0].name, "Boost");
         assert_eq!(object.effects[0].priority, 50);
         assert_eq!(object.effects[0].timer, 2);
+    }
+
+    // The AmmoHud pair: AHUD#1's Initialize counts its own def
+    // (excluding itself) and creates the partner when none exists; the
+    // partner's Initialize then counts 1 and stops (AmmoHud.c4d:17-18,22;
+    // C++ NEWOBJ 1422/1423).
+    #[test]
+    fn initialize_time_self_count_spawns_exactly_one_partner_like_cpp() {
+        let script = r#"#strict
+local pOld;
+local fSecond;
+protected func Initialize()
+{
+  SetPosition(56,86);
+  Local(0) = Local(1) = 0;
+  SetCategory(C4D_StaticBack|C4D_Parallax|C4D_Foreground|C4D_MouseIgnore|C4D_IgnoreFoW);
+  SetVisibility(VIS_Owner);
+  SetAction("AmmoHud");
+  if(!(fSecond=HudCount()))
+    CreateObject(GetID(),0,0,GetOwner());
+}
+protected func HudCount() { return(ObjectCount(GetID(),0,0,0,0,0,0,0,0,GetOwner())); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut hud = Definition::from_script("AHUD", "Hud", script).expect("compiles");
+        hud.configure_actions(
+            None,
+            HashMap::from([("AmmoHud".to_string(), ActionSpec::default())]),
+        );
+        engine.register_definition(hud).expect("hud registers");
+        engine
+            .spawn_object(SpawnConfig::new("AHUD").with_category(CATEGORY_OBJECT))
+            .expect("hud spawns");
+        let count = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "AHUD")
+            .count();
+        assert_eq!(count, 2, "one spawn yields the pair, no more (AmmoHud.c4d:17)");
+    }
+
+    // FnObjectCount passes cthr->Obj as pExclude - LOCAL CALLS EXCLUDE
+    // THE CALLER (C4Script.cpp FnObjectCount -> Game.ObjectCount, same as
+    // FindObjectOwner). The AmmoHud pair depends on it: AHUD#1's
+    // Initialize runs HudCount() = ObjectCount(GetID(),...) and must see
+    // 0 (itself excluded) to create its partner (AmmoHud.c4d:17-18,22;
+    // C++ NEWOBJ 1423 AHUD creator=AHUD(1422)).
+    #[test]
+    fn object_count_excludes_the_calling_object_like_cpp() {
+        let script = r#"#strict
+local iSeen;
+func Probe() {
+    iSeen = ObjectCount(GetID());
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let hud = Definition::from_script("AHUD", "Hud", script).expect("compiles");
+        engine.register_definition(hud).expect("hud registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("AHUD").with_category(CATEGORY_OBJECT))
+            .expect("hud spawns");
+        engine
+            .spawn_object(SpawnConfig::new("AHUD").with_category(CATEGORY_OBJECT))
+            .expect("second hud spawns");
+        let idx = engine.find_object_index(id).expect("hud exists");
+        engine
+            .call_object_function(idx, "Probe", Vec::new())
+            .expect("probe runs");
+        let idx = engine.find_object_index(id).expect("hud exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iSeen"),
+            Some(&Value::Int(1)),
+            "the caller is excluded: 2 huds minus self (FnObjectCount pExclude)"
+        );
     }
 
     // Cowboy.c4d Recruitment creates the AHUD with the recruit's owner

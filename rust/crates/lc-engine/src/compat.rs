@@ -4656,6 +4656,9 @@ fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
 #[derive(Clone, Debug)]
 pub(crate) struct HostObjectContext<'a> {
     pub id: ObjectId,
+    /// The object's definition — GetID's source when the world snapshot
+    /// predates the object (its own materialize-time Initialize).
+    pub definition_id: Option<String>,
     pub container: Option<ObjectId>,
     pub status: ObjectStatus,
     pub energy: i32,
@@ -4780,6 +4783,7 @@ impl<'a> HostObjectContext<'a> {
     ) -> Self {
         Self {
             id,
+            definition_id: None,
             container,
             status,
             energy,
@@ -4830,6 +4834,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_own_mass(mut self, own_mass: i32) -> Self {
         self.own_mass = own_mass;
+        self
+    }
+
+    pub fn with_definition_id(mut self, definition_id: impl Into<String>) -> Self {
+        self.definition_id = Some(definition_id.into());
         self
     }
 
@@ -10963,6 +10972,11 @@ fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
             if let Some(world_object) = context.get_world_object(object_id) {
                 return Ok(Value::C4Id(world_object.definition_id().to_string()));
             }
+            // The world snapshot predates the object during its own
+            // materialize-time Initialize — the scope knows its def.
+            if let Some(definition_id) = object.definition_id.clone() {
+                return Ok(Value::C4Id(definition_id));
+            }
         }
 
         Ok(Value::Nil)
@@ -14133,6 +14147,7 @@ impl EffectHostContext {
         let object = object.map(|ctx| {
             let HostObjectContext {
                 id,
+                definition_id,
                 container,
                 status,
                 energy,
@@ -14169,7 +14184,8 @@ impl EffectHostContext {
                 physical_changes,
                 definition_physical,
             } = ctx;
-            ObjectScopeContext::new(
+            {
+                let mut scope = ObjectScopeContext::new(
                 id,
                 container,
                 status,
@@ -14205,7 +14221,10 @@ impl EffectHostContext {
                 temporary_physical,
                 physical_changes,
                 definition_physical,
-            )
+            );
+                scope.definition_id = definition_id;
+                scope
+            }
         });
         let global = Some(EffectScopeContext::new(global_effects));
         Self {
@@ -14453,7 +14472,7 @@ impl EffectHostContext {
     ) -> Option<(ObjectScopeContext, HashMap<String, Value>)> {
         let metadata = self.world.definition_metadata(object.definition_id())?;
         let state = object.full_state()?;
-        let scope = ObjectScopeContext::new(
+        let mut scope = ObjectScopeContext::new(
             object.id,
             state.container,
             state.status,
@@ -14490,6 +14509,7 @@ impl EffectHostContext {
             state.physical_changes.clone(),
             metadata.physical,
         );
+        scope.definition_id = Some(object.definition_id().to_string());
         Some((scope, state.local_vars.clone()))
     }
 
@@ -14878,6 +14898,7 @@ impl EffectScopeContext {
 
 struct ObjectScopeContext {
     id: ObjectId,
+    definition_id: Option<String>,
     current_container: Option<ObjectId>,
     status: ObjectStatus,
     effects: EffectScopeContext,
@@ -14968,6 +14989,7 @@ impl ObjectScopeContext {
         let clamped_damage = damage.max(0);
         let clamped_construction = construction.clamp(0, FULL_CON);
         Self {
+            definition_id: None,
             id,
             current_container: container,
             status,
