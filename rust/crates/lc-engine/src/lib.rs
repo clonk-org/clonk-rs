@@ -8596,6 +8596,47 @@ fn attach_direction(attach: u32) -> (i32, i32) {
     }
 }
 
+/// The C4Object::ExecAction per-procedure Action.t_attach map
+/// (C4Object.cpp:4690-5437): the switch arms OR procedure-specific
+/// attach bits over the pre-switch state (CNAT_None | UprightAttach |
+/// the ActMap Attach's MultiAttach flag, :4703/:4758) — only the
+/// no-procedure default case applies the FULL ActMap Attach (:5427);
+/// DIG and SWIM RESET the whole register to CNAT_None (:4916/:4967).
+fn procedure_t_attach(
+    procedure: ActionProcedure,
+    is_idle: bool,
+    direction: Direction,
+    actmap_attach: u32,
+    upright_attach: u32,
+) -> u32 {
+    if is_idle {
+        return upright_attach;
+    }
+    let base = upright_attach | (actmap_attach & CNAT_MULTI_ATTACH);
+    match procedure {
+        ActionProcedure::Walk
+        | ActionProcedure::Kneel
+        | ActionProcedure::Throw
+        | ActionProcedure::Bridge
+        | ActionProcedure::Build
+        | ActionProcedure::Push
+        | ActionProcedure::Pull
+        | ActionProcedure::Chop
+        | ActionProcedure::Fight => base | CNAT_BOTTOM,
+        ActionProcedure::Scale => {
+            base | if direction == Direction::Left {
+                CNAT_LEFT
+            } else {
+                CNAT_RIGHT
+            }
+        }
+        ActionProcedure::Hang => base | CNAT_TOP,
+        ActionProcedure::Dig | ActionProcedure::Swim => CNAT_NONE,
+        ActionProcedure::Undefined | ActionProcedure::Other => upright_attach | actmap_attach,
+        _ => base,
+    }
+}
+
 fn shape_attach(
     vertices: &[ObjectVertex],
     position: &mut Vector2,
@@ -15778,9 +15819,15 @@ impl Engine {
             contact_function_calls,
             border_bound,
             shape_rect,
-            // Action.t_attach = ActMap Attach | the ExecAction upright-attach
-            // OR (C4Object.cpp:4703).
-            attach: attach | self.objects[idx].upright_t_attach,
+            // Action.t_attach per the ExecAction procedure map
+            // (C4Object.cpp:4690-5437; upright-attach OR :4703).
+            attach: procedure_t_attach(
+                action_procedure,
+                action_library.is_idle_action(&action_name),
+                self.objects[idx].state.direction,
+                attach,
+                self.objects[idx].upright_t_attach,
+            ),
             rotateable,
             action_procedure,
             layer_bounds,
@@ -32630,6 +32677,54 @@ func Trigger() {
             object.state.vertices.first().map(|v| v.friction),
             Some(77),
             "shape/vertices rebuilt from the NEW def (UpdateFace)"
+        );
+    }
+
+    // DFA_WALK arms Action.t_attach |= CNAT_Bottom every exec
+    // (C4Object.cpp:4790-4792): a loaded walker standing one pixel INTO
+    // the ground snaps up via Shape.Attach in the same frame (the INDI
+    // 479-vs-478 resting-height class; C4Shape.cpp:165).
+    #[test]
+    fn walkers_snap_to_one_pixel_above_ground_like_cpp() {
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(200, 100)); // ground from y=100
+        let mut walker = Definition::from_script("WLKR", "Walker", "#strict\n").expect("compiles");
+        walker.set_shape_rect(Some(DefinitionRect::new(-3, -8, 6, 16)));
+        walker.set_shape_vertices(vec![ObjectVertex {
+            x: 0,
+            y: 8,
+            cnat: CNAT_BOTTOM,
+            friction: 50,
+        }]);
+        walker.configure_actions(
+            None,
+            HashMap::from([(
+                "Walk".to_string(),
+                ActionSpec::default()
+                    .with_procedure("WALK")
+                    .with_delay(1)
+                    .with_length(8),
+            )]),
+        );
+        engine.register_definition(walker).expect("registers");
+
+        // Bottom vertex at 92+8 = 100 = INSIDE the ground row: the C++
+        // attach shifts the position up one pixel (vertex to 99).
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("WLKR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 92))
+                    .with_action(ActionState::new("Walk"))
+                    .with_loaded(true),
+            )
+            .expect("spawns");
+        engine.tick().expect("tick");
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(
+            engine.objects[idx].state.position.y,
+            91,
+            "walk attach snaps the stander up one pixel (C4Shape::Attach)"
         );
     }
 
