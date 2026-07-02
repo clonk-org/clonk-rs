@@ -773,6 +773,7 @@ impl Scenario {
         // BEFORE InitPlayers (C4Game.cpp:474-475) — collapse every fixed
         // position to itofix(x,y,r) and re-fix the synced RNG. A no-op
         // for synthetic scenarios (created spawns already satisfy both).
+        engine.inherit_include_clonk_names();
         engine.game_start_synchronize();
         Ok(created)
     }

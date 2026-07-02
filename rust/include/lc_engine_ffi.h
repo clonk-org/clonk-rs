@@ -224,6 +224,12 @@ bool lc_engine_runtime_record_control_ini(
     const char *ini_data,
     char **error_message);
 bool lc_engine_runtime_reset(LcEngineRuntimeHandle *handle, char **error_message);
+bool lc_engine_runtime_check_rng(
+    LcEngineRuntimeHandle *handle,
+    uint64_t frame,
+    uint32_t hold,
+    int32_t count);
+
 bool lc_engine_runtime_advance_to_frame(
     LcEngineRuntimeHandle *handle,
     uint64_t frame,

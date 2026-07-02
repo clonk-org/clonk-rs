@@ -129,6 +129,9 @@ pub(crate) struct DefinitionMetadata {
     /// DefCore `LineConnect` bits (C4D_Power_Consumer etc.;
     /// FnEnergyCheck, C4Script.cpp:1845-1856).
     pub line_connect: u32,
+    /// ClonkNames newline count (C4ObjectInfoList::New's name draw range,
+    /// C4InfoCore.cpp:411); None = use the game standard names.
+    pub clonk_name_newlines: Option<i32>,
 }
 
 /// `SetPhysical`/`GetPhysical` modes (C4Script.cpp:552-555).
@@ -418,6 +421,13 @@ pub(crate) struct HostWorldContext {
     /// C4RULE_StructuresNeedEnergy (Game.Rules; FnEnergyCheck gates on
     /// it, C4Script.cpp:1845-1856).
     structures_need_energy: bool,
+    /// Game.Names newline count (the New() fallback name range).
+    standard_name_newlines: i32,
+    /// Idle crew infos per (player, definition) — C4ObjectInfoList::GetIdle
+    /// hits skip the New name draw (C4Player.cpp:1186-1195). Consumed
+    /// entries decrement so several MakeCrewMember calls in one script
+    /// call keep drawing like C++.
+    idle_crew_counts: RefCell<HashMap<(i32, String), u32>>,
     /// Names of loaded particle defs (C4ParticleSystem::GetDef,
     /// C4Particles.cpp:465-473). `None` = no registry attached (legacy
     /// fixture contexts): name lookups behave permissively. `Some` = engine
@@ -457,6 +467,8 @@ impl Default for HostWorldContext {
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
             structures_need_energy: false,
+            standard_name_newlines: 0,
+            idle_crew_counts: RefCell::new(HashMap::new()),
             team_home_base_rule: false,
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
@@ -470,6 +482,16 @@ impl Default for HostWorldContext {
 impl HostWorldContext {
     pub(crate) fn with_structures_need_energy(mut self, value: bool) -> Self {
         self.structures_need_energy = value;
+        self
+    }
+
+    pub(crate) fn with_crew_name_sources(
+        mut self,
+        standard_name_newlines: i32,
+        idle_crew_counts: HashMap<(i32, String), u32>,
+    ) -> Self {
+        self.standard_name_newlines = standard_name_newlines;
+        self.idle_crew_counts = RefCell::new(idle_crew_counts);
         self
     }
 
@@ -583,6 +605,8 @@ impl HostWorldContext {
             next_object_id,
             team_home_base_rule,
             structures_need_energy: false,
+            standard_name_newlines: 0,
+            idle_crew_counts: RefCell::new(HashMap::new()),
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
@@ -3784,6 +3808,20 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SoundLevel", sound_level);
 }
 
+/// One synced draw through the active random context (host-side engine
+/// draws that C++ makes inside script-called engine functions).
+fn draw_context_random(range: i32) -> Result<i32, RuntimeError> {
+    RANDOM_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("random context unavailable"))?
+            .clone();
+        let mut rng = context.rng.borrow_mut();
+        Ok(rng.random(range))
+    })
+}
+
 pub(crate) fn enter_random_context(rng: LcgRng) -> RandomContextGuard {
     RANDOM_CONTEXT.with(|cell| {
         assert!(
@@ -6784,6 +6822,44 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
             .unwrap_or(false);
         if !crew_def {
             return Ok(false); // Def->CrewMember required (C4Player.cpp:1170)
+        }
+        // C4Player::MakeCrewMember info selection (C4Player.cpp:1180-1199):
+        // the gate is `!pObj->Info` — an object that already carries a crew
+        // info skips; an idle info skips the New; otherwise
+        // C4ObjectInfoList::New draws the name Random over the def's
+        // ClonkNames (or the game standard names) — a synced ledger draw
+        // that must fire INSIDE this call.
+        let already_crew = context
+            .object_context()
+            .map(|object| {
+                context
+                    .world
+                    .crew_ranks
+                    .contains_key(&object.id().as_u64())
+            })
+            .unwrap_or(false);
+        if !already_crew {
+            let definition_id = context
+                .object_context()
+                .and_then(|object| object.definition_id.clone());
+            if let Some(definition_id) = definition_id {
+                let mut idle = context.world.idle_crew_counts.borrow_mut();
+                let key = (player, definition_id.clone());
+                match idle.get_mut(&key) {
+                    Some(count) if *count > 0 => {
+                        *count -= 1;
+                    }
+                    _ => {
+                        let newlines = context
+                            .world
+                            .definition_metadata(&definition_id)
+                            .and_then(|metadata| metadata.clonk_name_newlines)
+                            .unwrap_or(context.world.standard_name_newlines);
+                        drop(idle);
+                        draw_context_random(newlines)?;
+                    }
+                }
+            }
         }
         let Some(object) = context.object_context_mut() else {
             return Ok(false);
@@ -11480,6 +11556,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 line_connect: 0,
+                clonk_name_newlines: None,
             });
         let definition_category = metadata.category;
 
@@ -11693,6 +11770,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 line_connect: 0,
+                clonk_name_newlines: None,
             });
         let definition_category = metadata.category;
 
@@ -13073,6 +13151,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 line_connect: 0,
+                clonk_name_newlines: None,
             });
 
         let mut last = Value::Nil;
@@ -17496,6 +17575,7 @@ mod tests {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 line_connect: 0,
+                clonk_name_newlines: None,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -17536,6 +17616,7 @@ mod tests {
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
                     line_connect: 0,
+                clonk_name_newlines: None,
                 },
             ),
             (
@@ -17554,6 +17635,7 @@ mod tests {
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
                     line_connect: 0,
+                clonk_name_newlines: None,
                 },
             ),
         ]);
@@ -17596,6 +17678,7 @@ mod tests {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 line_connect: 0,
+                clonk_name_newlines: None,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -17651,6 +17734,7 @@ mod tests {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 line_connect: 0,
+                clonk_name_newlines: None,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -17715,6 +17799,7 @@ mod tests {
             physical: lc_resources::PhysicalInfo::default(),
             components: Vec::new(),
             line_connect: 0,
+                clonk_name_newlines: None,
         };
         metadata.components = vec![("WOOD".to_string(), 3), ("METL".to_string(), 1)];
         let world = HostWorldContext::with_landscape(
@@ -18132,6 +18217,7 @@ mod tests {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 line_connect: 0,
+                clonk_name_newlines: None,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -18171,6 +18257,7 @@ mod tests {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 line_connect: 0,
+                clonk_name_newlines: None,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -18226,6 +18313,7 @@ mod tests {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 line_connect: 0,
+                clonk_name_newlines: None,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21433,6 +21521,7 @@ mod tests {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 line_connect: 0,
+                clonk_name_newlines: None,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21485,6 +21574,7 @@ mod tests {
             physical: PhysicalInfo::default(),
             components: Vec::new(),
             line_connect: 0,
+                clonk_name_newlines: None,
         };
         let definitions = HashMap::from([
             ("Workshop".to_string(), workshop_metadata.clone()),

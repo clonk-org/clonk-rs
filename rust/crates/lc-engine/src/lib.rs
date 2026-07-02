@@ -10762,6 +10762,9 @@ impl Engine {
                                 })
                                 .collect(),
                             line_connect: definition.line_connect(),
+                            clonk_name_newlines: definition
+                                .clonk_names()
+                                .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32),
                         },
                     )
                 })
@@ -10851,6 +10854,13 @@ impl Engine {
                 .map(ScenarioScript::script_arc),
         )
         .with_structures_need_energy(self.structures_need_energy)
+        .with_crew_name_sources(
+            self.standard_names
+                .as_ref()
+                .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32)
+                .unwrap_or(0),
+            self.idle_crew_counts(),
+        )
     }
 
     /// The shared definition-script table host contexts carry (nested
@@ -10893,7 +10903,10 @@ impl Engine {
             host.adopt_statics_into_globals();
         }
         let snapshot = self.snapshot();
-        let random = self.next_random_i32();
+        // The `random` Initialize argument is the command-DSL fixture
+        // convention — real content (c4_args) burns no synced draw
+        // (C++ passes no such argument).
+        let random = if c4_args { 0 } else { self.next_random_i32() };
         let rng_state = self.rng.clone();
         let initialize = script.initialize(
             &snapshot,
@@ -19187,6 +19200,52 @@ impl Engine {
         definition.set_line_connect(core.line_connect);
     }
 
+    /// Idle crew infos per (player, definition id) — the GetIdle pool
+    /// (C4ObjectInfoList.cpp:113-142) visible to MakeCrewMember's host
+    /// seam so it draws the New name Random exactly when C++ does.
+    fn idle_crew_counts(&self) -> HashMap<(i32, String), u32> {
+        let mut counts = HashMap::new();
+        for (&number, roster) in &self.crew_rosters {
+            for info in roster {
+                if !info.in_action {
+                    *counts
+                        .entry((number, info.id.clone()))
+                        .or_insert(0u32) += 1;
+                }
+            }
+        }
+        counts
+    }
+
+    /// C4Def::IncludeDefinition (C4Def.cpp:1358-1361): a definition
+    /// without its own ClonkNames inherits the included definition's —
+    /// each include overwrites the un-owned slot, so the LAST include
+    /// wins (TRPR #include COWB gets the 13 cowboy names).
+    pub fn inherit_include_clonk_names(&mut self) {
+        let inherited: Vec<(DefinitionId, Option<String>)> = self
+            .definitions
+            .iter()
+            .filter(|(_, definition)| definition.clonk_names().is_none())
+            .filter_map(|(id, definition)| {
+                let mut names = None;
+                let mut found = false;
+                for include in definition.includes() {
+                    if let Some(source) = self.definitions.get(&DefinitionId::from(include.as_str()))
+                    {
+                        names = source.clonk_names().map(str::to_owned);
+                        found = true;
+                    }
+                }
+                found.then(|| (id.clone(), names))
+            })
+            .collect();
+        for (id, names) in inherited {
+            if let Some(definition) = self.definitions.get_mut(&id) {
+                definition.set_clonk_names(names);
+            }
+        }
+    }
+
     /// Debug helper: a definition's physical + an action's procedure.
     pub fn debug_definition_physical(&self, id: &str, action: &str) -> Option<(i32, Option<String>)> {
         self.definitions.get(&DefinitionId::from(id)).map(|def| {
@@ -21515,7 +21574,19 @@ impl Engine {
                 .map(|definition| definition.has_initialize)
                 .unwrap_or(false)
         {
-            let random = self.next_random_i32();
+            // The `random` Initialize argument is the command-DSL fixture
+            // convention — real content (c4 callback args) burns no synced
+            // draw (C4Object.cpp:4154-4182 passes none).
+            let c4_convention = self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| definition.c4_callback_args)
+                .unwrap_or(false);
+            let random = if c4_convention {
+                0
+            } else {
+                self.next_random_i32()
+            };
             let rng_state = self.rng.clone();
             let (
                 CommandBatch {
@@ -22042,6 +22113,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     physical: lc_resources::PhysicalInfo::default(),
                     components: Vec::new(),
                     line_connect: 0,
+                    clonk_name_newlines: None,
                 },
             )
         })

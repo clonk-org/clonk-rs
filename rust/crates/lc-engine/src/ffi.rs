@@ -370,6 +370,8 @@ pub struct RuntimeHandle {
     /// C4PlayerInfo registry (Game.PlayerInfos): CID_PlrInfo fills it,
     /// CID_JoinPlr resolves `InfoID` against it (C4Control.cpp:716-722).
     player_infos: HashMap<i32, ControlPlayerInfoEntry>,
+    /// One-shot latch for the RNG-ledger divergence report.
+    rng_mismatch_reported: bool,
 }
 
 impl RecorderHandle {
@@ -397,6 +399,7 @@ impl RuntimeHandle {
             control_packets: BTreeMap::new(),
             player_controls: HashMap::new(),
             player_infos: HashMap::new(),
+            rng_mismatch_reported: false,
         }
     }
 
@@ -2157,6 +2160,36 @@ pub extern "C" fn lc_engine_runtime_path_free(buffer: *mut LcEngineRuntimePathRe
     unsafe {
         drop(Box::from_raw(buffer));
     }
+}
+
+/// Compares the C++ synced-RNG registers (RandomHold/RandomCount,
+/// C4Random.h:29-30) against the runtime engine's ledger each frame and
+/// logs the FIRST divergence — the ledger is the root cause behind
+/// every Random-driven AI decision split (MONS Activity etc.).
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_check_rng(
+    handle: *mut RuntimeHandle,
+    frame: u64,
+    hold: u32,
+    count: i32,
+) -> bool {
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        return false;
+    };
+    let rng = runtime.engine.debug_rng_clone();
+    let matches = rng.hold == hold && rng.count == count;
+    if !matches && !runtime.rng_mismatch_reported {
+        runtime.rng_mismatch_reported = true;
+        tracing::error!(
+            frame,
+            rust_hold = rng.hold,
+            rust_count = rng.count,
+            cpp_hold = hold,
+            cpp_count = count,
+            "synced RNG ledger diverged"
+        );
+    }
+    matches
 }
 
 #[no_mangle]

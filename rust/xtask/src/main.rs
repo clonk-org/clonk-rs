@@ -533,12 +533,6 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
             println!("SPAWN {id} {definition}");
         }
     }
-    if std::env::var("LC_XTASK_OBJ_DUMP").is_ok() {
-        println!(
-            "DEFPHYS BIRD {:?}",
-            engine.debug_definition_physical("BIRD", "Fly")
-        );
-    }
     log_watched(&engine, "joined");
     // LC_XTASK_OBJ_DUMP=3,42: print per-object forensics after the join
     // and every 5 frames.
@@ -576,7 +570,13 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
                         {
                             let effects: Vec<&str> =
                                 object.effects.iter().map(|e| e.name.as_str()).collect();
-                            println!("OBJDUMP f{frame} {id} effects {effects:?}");
+                            println!(
+                                "OBJDUMP f{frame} {id} effects {effects:?} commands {:?} pos {:?} act {} ph {}",
+                                object.command_stack,
+                                object.position,
+                                object.action.name,
+                                object.action.phase
+                            );
                         }
                     }
                 }
