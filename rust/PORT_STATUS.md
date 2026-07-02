@@ -535,6 +535,36 @@ full-scenario shadow-diff (see Parity harnesses).
   action pair, vertices 3, owner 1, effects 1. Known pre-existing flake:
   lc-network control_sync_and_reconnect_smoke (TCP race).
 
+- **2026-07-02 fifth wave — wall 46 -> 27 and the divergence is now
+  frame-stamped + sub-pixel visible:** the comparator diffs raw 16.16
+  fixed position/velocity (integer compares masked drift until pixel
+  crossings), prefixes reports with the frame, carries
+  Mobile/InLiquid/Timer over the ABI, and checks RandomHold/RandomCount
+  inside compare (the join ledger is draw-for-draw identical after:
+  ClonkNames include-inheritance for TRPR, the MakeCrewMember New name
+  draw in-call, and no fixture 'random' args on real-content
+  Initialize). Movement-core fixes from the frame-1 forensics: the
+  C4Object::ExecAction per-procedure gravity map (FLOAT/SWIM/WALK never
+  gravitate - only Idle+Mobile/FLIGHT/LIFT/default), the per-procedure
+  t_attach map (WALK arms CNAT_Bottom every exec -> standing walkers
+  snap 1px above ground like C++), DFA_FLIGHT is gravity-only (no
+  ComDir steering), NoAttachAction keeps ComDir, C4Command::Get's
+  pursuit tail with its synced Random(2)/Random(15) draws, speed-scaled
+  phase advance (fixtoi(|xdir|*10) for WALK), and the pre-existing
+  shadow-ABI arg-order scramble (hud/known-owner pointer groups) is
+  fixed - the garbage 'eliminated crew owners' in every dump was that.
+  ALSO: GoldRush headless is now warning-free end-to-end; Fling/Stuck/
+  Inside/GetVisibility/Jump/EnergyCheck/FrameCounter/ChangeDef/
+  GetPlrDownDouble host fns landed; GetContact/AddCommand/GetMaterial
+  follow the C++ signatures. REMAINING at 27 (frame-1): six walkers'
+  fix_x differ by exactly half a WalkAccel step (integers match),
+  horse/rider ride linkage (1421/1425 Mobile + action swaps), trapper
+  placement -4px, tree 402 Breeze/Still, owner 1428, effects 597 NoDmg,
+  vertices 3. NOTE: the live runtime imports the C++ landscape, so
+  landscape pixel parity (ChunkOZoom shapes) is only exercised headless
+  - the headless world lacks ground under some walkers (monsters jump
+  where live C++ walks).
+
 ## Gates
 
 - **`cargo test --workspace`: GREEN** (~1240 pass, cargo exit 0). The old
