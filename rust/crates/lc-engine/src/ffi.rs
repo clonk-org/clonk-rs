@@ -1470,7 +1470,19 @@ fn runtime_snapshot_mismatch(
                         id, expected_object.command_direction, actual_object.command_direction
                     ));
                 }
-                if expected_object.effects != actual_object.effects {
+                // start_dispatched is Rust-internal bookkeeping (the C++
+                // import never sets it) — normalize before comparing.
+                let normalize = |effects: &[EffectState]| -> Vec<EffectState> {
+                    effects
+                        .iter()
+                        .cloned()
+                        .map(|mut effect| {
+                            effect.start_dispatched = false;
+                            effect
+                        })
+                        .collect()
+                };
+                if normalize(&expected_object.effects) != normalize(&actual_object.effects) {
                     let describe = |effects: &[EffectState]| -> String {
                         effects
                             .iter()
