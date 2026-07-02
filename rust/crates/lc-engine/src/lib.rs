@@ -14484,7 +14484,8 @@ impl Engine {
                 .filter(|object| object.state.owner == owner && object.state.crew_member)
                 .map(|object| object.id)
                 .collect();
-            crew.sort_unstable();
+            // Newest-first like C4Player::Crew (Add stMain).
+            crew.sort_unstable_by_key(|id| std::cmp::Reverse(id.as_u64()));
             let focus = self
                 .crew_selection
                 .get(&owner)
@@ -14520,7 +14521,9 @@ impl Engine {
                     })
                     .map(|object| object.id)
                     .collect();
-                crew.sort_unstable();
+                // Newest-first like C4Player::Crew (Add stMain inserts new
+                // crew before older ones; GetCrew/GetHiRank follow it).
+                crew.sort_unstable_by_key(|id| std::cmp::Reverse(id.as_u64()));
                 state.crew = crew;
                 state.cursor = self
                     .crew_selection
