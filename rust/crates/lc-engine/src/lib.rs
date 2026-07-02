@@ -20672,6 +20672,30 @@ impl Engine {
             definition_stretch_growth,
             definition_rotateable,
         );
+        // C4Game::NewObject runs DoCon(iCon, fInitial=true) on every
+        // freshly CREATED object; the straight-con bottom y-adjust keeps
+        // the con-0 bottom — the given y — fixed while the shape grows:
+        // the final center is y - (Shape.Hgt + Shape.y) at the spawn
+        // construction (C4Object.cpp:1401-1470). Loaded objects keep
+        // their saved center (C4GameObjects::Load never re-cons).
+        let position = if loaded {
+            position
+        } else {
+            let grown_rect = transformed_shape_rect(
+                shape_template.rect,
+                construction.clamp(0, FULL_CON),
+                shape_template.stretch_growth,
+                shape_template.rotateable,
+                0,
+            );
+            match grown_rect {
+                Some(rect) => Vector2::new(
+                    position.x,
+                    position.y.saturating_sub(rect.height + rect.y),
+                ),
+                None => position,
+            }
+        };
         // Objects.txt vertices are the CURRENT effective shape serialized
         // by C4Shape::CompileFunc (C4Shape.cpp:495-515) — already Con/
         // rotation-transformed, loaded VERBATIM. Future UpdateShape
@@ -23513,8 +23537,10 @@ mod tests {
         let torch = engine.spawn_object(
             SpawnConfig::new("Torch").with_position(Vector2::new(40, 20)),
         )?;
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 28 - (16 - 8)
+        // keeps the tree center at (41,20), on top of the shapeless torch.
         let tree = engine.spawn_object(
-            SpawnConfig::new("Tree").with_position(Vector2::new(41, 20)),
+            SpawnConfig::new("Tree").with_position(Vector2::new(41, 28)),
         )?;
         let torch_idx = engine.find_object_index(torch).expect("torch exists");
         assert!(engine.incinerate_object(torch_idx, 7, false, None)?);
@@ -32838,8 +32864,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .register_definition(definition)
             .expect("definition registers");
 
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 15 - (10 - 5)
+        // puts the center at (40,10).
         let id = engine
-            .spawn_object(SpawnConfig::new("Target").with_position(Vector2::new(40, 10)))
+            .spawn_object(SpawnConfig::new("Target").with_position(Vector2::new(40, 15)))
             .expect("spawn succeeds");
 
         let hit = engine
@@ -32870,11 +32898,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .register_definition(target)
             .expect("target definition registers");
 
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 25 - (10 - 5)
+        // puts both centers at (20,20), so the probe point lies inside both.
         engine
-            .spawn_object(SpawnConfig::new("Blocker").with_position(Vector2::new(20, 20)))
+            .spawn_object(SpawnConfig::new("Blocker").with_position(Vector2::new(20, 25)))
             .expect("blocker spawns");
         engine
-            .spawn_object(SpawnConfig::new("Target").with_position(Vector2::new(20, 20)))
+            .spawn_object(SpawnConfig::new("Target").with_position(Vector2::new(20, 25)))
             .expect("target spawns");
 
         assert!(engine
@@ -32896,11 +32926,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         item_definition.set_collectible(true);
         engine.register_definition(item_definition)?;
 
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 30 - (20 - 10)
+        // keeps the crew center at (70,20) beside the shapeless Gem.
         let crew = engine.spawn_object(
             SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
-                .with_position(Vector2::new(70, 20)),
+                .with_position(Vector2::new(70, 30)),
         )?;
         let item =
             engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(115, 20)))?;
@@ -33193,8 +33225,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mover_id = engine
             .spawn_object(SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 5)))
             .expect("mover spawns");
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 6 - (1 + 0)
+        // keeps the blocker center — and its solid mask — at (5,5).
         engine
-            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 5)))
+            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 6)))
             .expect("blocker spawns");
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
@@ -33259,7 +33293,9 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let mover_id =
             engine.spawn_object(SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 5)))?;
-        engine.spawn_object(SpawnConfig::new("BLCK").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 5)))?;
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 6 - (1 + 0)
+        // keeps the blocker center — and its mask origin — at (5,5).
+        engine.spawn_object(SpawnConfig::new("BLCK").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 6)))?;
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
@@ -33330,8 +33366,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mover_id = engine
             .spawn_object(SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 5)))
             .expect("mover spawns");
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 6 - (1 + 0)
+        // keeps the blocker center — and its solid mask — at (5,5).
         engine
-            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 5)))
+            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 6)))
             .expect("blocker spawns");
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
@@ -33424,8 +33462,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
                     .with_energy(1000000),
             )
             .expect("mover spawns");
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 6 - (1 + 0)
+        // keeps the blocker center — and its solid mask — at (5,5).
         engine
-            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 5)))
+            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 6)))
             .expect("blocker spawns");
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO));
@@ -33456,9 +33496,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         // scales only VtxY at src/C4Shape.cpp:121-127. Finally DoCon preserves
         // the old bottom edge for straight objects at src/C4Object.cpp:1462-1468.
         //
-        // Hand-derived golden: full shape y=0,h=4 and object y=8 gives old bottom
-        // 12. Changing Con from FullCon to FullCon/2 jolts Hgt 4->2 and VtxY 4->2,
-        // then bottom preservation moves y to 12 - 2 - 0 = 10.
+        // Hand-derived golden: the spawn y 8 is the con-0 bottom, so the
+        // full-con center is 8 - (4 + 0) = 4 (C4Object.cpp:1462-1468) and the
+        // bottom stays 8. Changing Con from FullCon to FullCon/2 jolts Hgt
+        // 4->2 and VtxY 4->2, then bottom preservation moves y to 8 - 2 - 0 = 6.
         let mut definition = simple_definition("Structure");
         definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 4)));
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 4).with_cnat(CNAT_BOTTOM)]);
@@ -33475,7 +33516,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let object = engine.object_snapshot(id).expect("object present");
         assert_eq!(object.construction, FULL_CON / 2);
-        assert_eq!(object.position, Vector2::new(3, 10));
+        assert_eq!(object.position, Vector2::new(3, 6));
         assert_eq!(object.vertices[0].y, 2);
         assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
         Ok(())
@@ -33492,7 +33533,9 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         // Hand-derived golden: the definition base vertex is y=4, but the owned
         // base vertex is y=8. After restore, changing Con from FullCon to
         // FullCon/2 must jolt the owned base to y=4, not the definition base to
-        // y=2. The full shape y=8,h=4 has old bottom 12, so the straight-object        // bottom preserve also moves y to 12 - 2 - 0 = 10.
+        // y=2. The spawn y 8 is the con-0 bottom, so the full-con center is
+        // 8 - (4 + 0) = 4 (C4Object.cpp:1462-1468); the straight-object
+        // bottom preserve then moves y to 8 - 2 - 0 = 6.
         let mut definition = simple_definition("OwnedShape");
         definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 4)));
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 4).with_cnat(CNAT_BOTTOM)]);
@@ -33515,7 +33558,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let object = restored.object_snapshot(id).expect("object present");
         assert_eq!(object.construction, FULL_CON / 2);
-        assert_eq!(object.position, Vector2::new(3, 10));
+        assert_eq!(object.position, Vector2::new(3, 6));
         assert_eq!(object.vertices[0].y, 4);
         assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
         Ok(())
@@ -33529,9 +33572,11 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         // at src/C4Shape.cpp:105-116, then DoCon preserves the straight-object        // bottom at src/C4Object.cpp:1462-1468.
         //
         // Hand-derived golden: shape x=2,w=6,h=4 and vertex (8,4) at 50%
-        // construction stretch to shape x=1,w=3,h=2 and vertex (4,2). The old
-        // bottom is y 8 + shape.y 0 + h 4 = 12, so bottom preservation moves y
-        // to 12 - 2 - 0 = 10.
+        // construction stretch to shape x=1,w=3,h=2 and vertex (4,2). The
+        // spawn y 8 is the con-0 bottom, so the full-con center is
+        // 8 - (4 + 0) = 4 (C4Object.cpp:1462-1468); the old bottom is
+        // y 4 + shape.y 0 + h 4 = 8 and bottom preservation moves y to
+        // 8 - 2 - 0 = 6.
         let temp = tempfile::tempdir().expect("tempdir");
         let def_dir = temp.path().join("Stretch.ocd");
         std::fs::create_dir(&def_dir).expect("create definition directory");
@@ -33557,7 +33602,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let object = engine.object_snapshot(id).expect("object present");
         assert_eq!(object.construction, FULL_CON / 2);
-        assert_eq!(object.position, Vector2::new(3, 10));
+        assert_eq!(object.position, Vector2::new(3, 6));
         assert_eq!(object.vertices[0].x, 4);
         assert_eq!(object.vertices[0].y, 2);
         assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
@@ -34754,6 +34799,71 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         );
     }
 
+    // C4Game::NewObject runs DoCon(FullCon, fInitial) on every freshly
+    // CREATED object: the straight-con bottom y-adjust keeps the con-0
+    // bottom — the given y — fixed while the shape grows, so the final
+    // center is y - (Shape.Hgt + Shape.y) (C4Object.cpp:1401-1470). The
+    // live oracle: CreateObject(COAC,28,270) rests at 250 (Hgt 40, y -20),
+    // BNDT at 560 -> 550 (Hgt 20, y -10), NDWA 50 -> 49 (Hgt 2). Loaded
+    // objects keep their saved center verbatim.
+    #[test]
+    fn created_objects_grow_from_the_given_bottom_like_cpp() {
+        let mut bandit = simple_definition("BNDT");
+        bandit.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(bandit)
+            .expect("bandit registers");
+        engine
+            .register_definition(simple_definition("MARK"))
+            .expect("marker registers");
+
+        let created = engine
+            .spawn_object(
+                SpawnConfig::new("BNDT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(100, 560)),
+            )
+            .expect("bandit spawns");
+        let idx = engine.find_object_index(created).expect("bandit exists");
+        assert_eq!(
+            engine.objects[idx].state.position,
+            Vector2::new(100, 550),
+            "created objects: y - (Hgt + Shape.y) = 560 - (20 - 10) (C4Object.cpp:1467)"
+        );
+        assert_eq!(
+            engine.objects[idx].fixed_position.y.val(),
+            itofix(550).val(),
+            "fix follows the adjusted center"
+        );
+
+        let loaded = engine
+            .spawn_object(
+                SpawnConfig::new("BNDT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(100, 560))
+                    .with_loaded(true),
+            )
+            .expect("loaded spawns");
+        let idx = engine.find_object_index(loaded).expect("loaded exists");
+        assert_eq!(
+            engine.objects[idx].state.position,
+            Vector2::new(100, 560),
+            "loaded objects keep the saved center"
+        );
+
+        // Shapeless fixture defs shift by nothing.
+        let marker = engine
+            .spawn_object(
+                SpawnConfig::new("MARK")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 5)),
+            )
+            .expect("marker spawns");
+        let idx = engine.find_object_index(marker).expect("marker exists");
+        assert_eq!(engine.objects[idx].state.position, Vector2::new(5, 5));
+    }
+
     // Mirrors C4Object::Stabilize (C4Movement.cpp:488-516) at the
     // ExecMovement static branch (:579): a resting object tilted within
     // ±StableRange (±10, C4Physics.h:23, after ±180 normalization) snaps
@@ -35321,11 +35431,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         item_definition.set_ocf_base(ocf::GRAB | ocf::CARRYABLE);
         engine.register_definition(item_definition)?;
 
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 16 - (32 - 16)
+        // keeps the crew center at (0,0) with the Gems in its collection area.
         let crew = engine.spawn_object(
             SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
-                .with_position(Vector2::new(0, 0)),
+                .with_position(Vector2::new(0, 16)),
         )?;
         engine.select_crew(1, vec![crew])?;
         engine.set_crew_cursor(1, Some(crew))?;
@@ -35350,11 +35462,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         item_definition.set_ocf_base(ocf::GRAB | ocf::CARRYABLE);
         engine.register_definition(item_definition)?;
 
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 16 - (32 - 16)
+        // keeps the crew center at (0,0) with the Gems in its collection area.
         let crew = engine.spawn_object(
             SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
-                .with_position(Vector2::new(0, 0)),
+                .with_position(Vector2::new(0, 16)),
         )?;
         engine.select_crew(1, vec![crew])?;
         engine.set_crew_cursor(1, Some(crew))?;
@@ -35389,11 +35503,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         item_definition.set_collectible(true);
         engine.register_definition(item_definition)?;
 
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 16 - (32 - 16)
+        // keeps the crew center at (0,0) with the Gems in its collection area.
         let crew = engine.spawn_object(
             SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
-                .with_position(Vector2::new(0, 0)),
+                .with_position(Vector2::new(0, 16)),
         )?;
         let item =
             engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(2, 0)))?;
@@ -35422,11 +35538,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         item_definition.set_collectible(true);
         engine.register_definition(item_definition)?;
 
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 16 - (32 - 16)
+        // keeps the crew center at (0,0) with the Gems in its collection area.
         let crew = engine.spawn_object(
             SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
-                .with_position(Vector2::new(0, 0)),
+                .with_position(Vector2::new(0, 16)),
         )?;
         let first =
             engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(3, 0)))?;
@@ -35465,11 +35583,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         structure_definition.set_ocf_base(ocf::ENTRANCE | ocf::CONTAINER);
         engine.register_definition(structure_definition)?;
 
+        // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 16 - (32 - 16)
+        // keeps the crew center at (0,0) with the Gems in its collection area.
         let crew = engine.spawn_object(
             SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
-                .with_position(Vector2::new(0, 0)),
+                .with_position(Vector2::new(0, 16)),
         )?;
         engine.select_crew(1, vec![crew])?;
         engine.set_crew_cursor(1, Some(crew))?;
