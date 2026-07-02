@@ -521,6 +521,12 @@ impl RuntimeHandle {
             start_y = joined.start_y,
             "player joined via control"
         );
+        // Creation-order forensics for the numbering-skew epic (visible
+        // with LC_RUST_ENGINE_LOG): dump the join-cascade id -> definition
+        // table so live runs can be diffed against the headless order.
+        for (id, definition) in self.engine.spawn_dump_from(1419) {
+            tracing::info!(id, definition, "SPAWNDUMP");
+        }
         Ok(())
     }
 
@@ -1346,7 +1352,7 @@ fn runtime_snapshot_mismatch(
 ) -> Option<String> {
     if expected.frame != actual.frame {
         return Some(format!(
-            "expected frame {}, got {}",
+            "frame rust {}, cpp {}",
             expected.frame, actual.frame
         ));
     }
@@ -1376,7 +1382,7 @@ fn runtime_snapshot_mismatch(
             }
         }
         return Some(format!(
-            "object count mismatch (expected {}, got {}; runtime missing: [{}]; runtime extra: [{}])",
+            "object count mismatch (rust {}, cpp {}; runtime missing: [{}]; runtime extra: [{}])",
             expected.objects.len(),
             actual.objects.len(),
             missing.join(", "),
@@ -1406,61 +1412,61 @@ fn runtime_snapshot_mismatch(
                 // alive/energy/effects field noise.
                 if expected_object.definition_id != actual_object.definition_id {
                     problems.push(format!(
-                        "object {} definition expected {}, got {}",
+                        "object {} definition rust {}, cpp {}",
                         id, expected_object.definition_id, actual_object.definition_id
                     ));
                 }
                 if expected_object.position != actual_object.position {
                     problems.push(format!(
-                        "object {} position expected {:?}, got {:?}",
+                        "object {} position rust {:?}, cpp {:?}",
                         id, expected_object.position, actual_object.position
                     ));
                 }
                 if expected_object.velocity != actual_object.velocity {
                     problems.push(format!(
-                        "object {} velocity expected {:?}, got {:?}",
+                        "object {} velocity rust {:?}, cpp {:?}",
                         id, expected_object.velocity, actual_object.velocity
                     ));
                 }
                 if expected_object.energy != actual_object.energy {
                     problems.push(format!(
-                        "object {} energy expected {}, got {}",
+                        "object {} energy rust {}, cpp {}",
                         id, expected_object.energy, actual_object.energy
                     ));
                 }
                 if expected_object.owner != actual_object.owner {
                     problems.push(format!(
-                        "object {} owner expected {}, got {}",
+                        "object {} owner rust {}, cpp {}",
                         id, expected_object.owner, actual_object.owner
                     ));
                 }
                 if expected_object.crew_member != actual_object.crew_member {
                     problems.push(format!(
-                        "object {} crew member expected {}, got {}",
+                        "object {} crew member rust {}, cpp {}",
                         id, expected_object.crew_member, actual_object.crew_member
                     ));
                 }
                 if expected_object.alive != actual_object.alive {
                     problems.push(format!(
-                        "object {} alive expected {}, got {}",
+                        "object {} alive rust {}, cpp {}",
                         id, expected_object.alive, actual_object.alive
                     ));
                 }
                 if expected_object.action.name != actual_object.action.name {
                     problems.push(format!(
-                        "object {} action expected {}, got {}",
+                        "object {} action rust {}, cpp {}",
                         id, expected_object.action.name, actual_object.action.name
                     ));
                 }
                 if expected_object.action.phase != actual_object.action.phase {
                     problems.push(format!(
-                        "object {} action phase expected {}, got {}",
+                        "object {} action phase rust {}, cpp {}",
                         id, expected_object.action.phase, actual_object.action.phase
                     ));
                 }
                 if expected_object.command_direction != actual_object.command_direction {
                     problems.push(format!(
-                        "object {} command direction expected {:?}, got {:?}",
+                        "object {} command direction rust {:?}, cpp {:?}",
                         id, expected_object.command_direction, actual_object.command_direction
                     ));
                 }
@@ -1469,18 +1475,18 @@ fn runtime_snapshot_mismatch(
                 }
                 if expected_object.vertices != actual_object.vertices {
                     problems.push(format!(
-                        "object {} vertices mismatch (expected {:?}, got {:?})",
+                        "object {} vertices mismatch (rust {:?}, cpp {:?})",
                         id, expected_object.vertices, actual_object.vertices
                     ));
                 }
             }
-            None => problems.push(format!("missing object {}", id)),
+            None => problems.push(format!("object {} only on the RUST side", id)),
         }
     }
 
     for id in actual_objects.keys() {
         if !expected_objects.contains_key(id) {
-            problems.push(format!("unexpected object {}", id));
+            problems.push(format!("object {} only on the CPP side", id));
         }
     }
 
@@ -1498,56 +1504,56 @@ fn runtime_snapshot_mismatch(
 
     if expected.crew_selection != actual.crew_selection {
         problems.push(format!(
-            "crew selection mismatch (expected {:?}, got {:?})",
+            "crew selection mismatch (rust {:?}, cpp {:?})",
             expected.crew_selection, actual.crew_selection
         ));
     }
 
     if expected.crew_roles != actual.crew_roles {
         problems.push(format!(
-            "crew roles mismatch (expected {:?}, got {:?})",
+            "crew roles mismatch (rust {:?}, cpp {:?})",
             expected.crew_roles, actual.crew_roles
         ));
     }
 
     if expected.known_crew_owners != actual.known_crew_owners {
         problems.push(format!(
-            "known crew owners mismatch (expected {:?}, got {:?})",
+            "known crew owners mismatch (rust {:?}, cpp {:?})",
             expected.known_crew_owners, actual.known_crew_owners
         ));
     }
 
     if expected.eliminated_crew_owners != actual.eliminated_crew_owners {
         problems.push(format!(
-            "eliminated crew owners mismatch (expected {:?}, got {:?})",
+            "eliminated crew owners mismatch (rust {:?}, cpp {:?})",
             expected.eliminated_crew_owners, actual.eliminated_crew_owners
         ));
     }
 
     if expected.controls != actual.controls {
         problems.push(format!(
-            "controls mismatch (expected {:?}, got {:?})",
+            "controls mismatch (rust {:?}, cpp {:?})",
             expected.controls, actual.controls
         ));
     }
 
     if expected.hud != actual.hud {
         problems.push(format!(
-            "hud mismatch (expected {:?}, got {:?})",
+            "hud mismatch (rust {:?}, cpp {:?})",
             expected.hud, actual.hud
         ));
     }
 
     if expected.surfaces != actual.surfaces {
         problems.push(format!(
-            "surface hash mismatch (expected {:?}, got {:?})",
+            "surface hash mismatch (rust {:?}, cpp {:?})",
             expected.surfaces, actual.surfaces
         ));
     }
 
     if expected.network_packets != actual.network_packets {
         problems.push(format!(
-            "network packets mismatch (expected {:?}, got {:?})",
+            "network packets mismatch (rust {:?}, cpp {:?})",
             expected.network_packets, actual.network_packets
         ));
     }

@@ -18665,6 +18665,19 @@ impl Engine {
         ObjectId::new(id)
     }
 
+    /// Debug helper: (id, definition) rows at or above `min_id`, sorted —
+    /// the creation-order forensics feed for the numbering-skew epic.
+    pub fn spawn_dump_from(&self, min_id: u64) -> Vec<(u64, String)> {
+        let mut rows: Vec<(u64, String)> = self
+            .objects
+            .iter()
+            .filter(|object| object.id.as_u64() >= min_id)
+            .map(|object| (object.id.as_u64(), object.definition_id.clone()))
+            .collect();
+        rows.sort();
+        rows
+    }
+
     fn find_object_index(&self, id: ObjectId) -> Option<usize> {
         let generation = self.objects_generation.get();
         {

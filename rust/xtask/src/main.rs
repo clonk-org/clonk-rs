@@ -505,6 +505,22 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         start_y = joined.start_y,
         "scenario-errors: player joined"
     );
+    // Creation-order forensics for the numbering-skew epic: dump the
+    // post-load id -> definition table (LC_XTASK_SPAWN_DUMP=<min id>).
+    if let Ok(min_id) = std::env::var("LC_XTASK_SPAWN_DUMP") {
+        let min_id: u64 = min_id.parse().unwrap_or(0);
+        let mut rows: Vec<_> = engine
+            .snapshot()
+            .objects
+            .iter()
+            .filter(|object| object.id.as_u64() >= min_id)
+            .map(|object| (object.id.as_u64(), object.definition_id.clone()))
+            .collect();
+        rows.sort();
+        for (id, definition) in rows {
+            println!("SPAWN {id} {definition}");
+        }
+    }
     log_watched(&engine, "joined");
     for frame in 0..ticks {
         let started = std::time::Instant::now();
