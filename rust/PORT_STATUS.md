@@ -583,6 +583,28 @@ full-scenario shadow-diff (see Parity harnesses).
   tree Breeze/Still, 702's ground (solid-mask/landscape), owner/effects
   singletons, vertices 3.
 
+- **2026-07-02 seventh wave — DoCon y/fix split + honest position
+  export:** a temporary C++ DoCon probe pinned the real creation
+  semantics: the initial bottom adjust writes the INT y only (fix_y
+  keeps the given center; SetAction at C4Object.cpp:4144 and the Tick10
+  rearm resync; action-less rule objects stay split forever), Line defs
+  never con-scale (no adjust), and the con-0 entry shape drives the
+  strgt_con_b math (docon_initial_center_y mirrors it exactly).
+  CreateObject applies the adjust AT THE SEAM (sibling script lines read
+  the final center - the ConnectWagon beam class), carrying the raw
+  fixed alongside; apply_delta no longer reprojects positions from
+  fixed. The scenario-script world context now carries the ENGINE's
+  full metadata table (was category-only with no shapes/physicals).
+  The bridge exports C++'s TRUE x/y instead of fixtoi(fix) - the
+  integer compare is now apples-to-apples, which EXPOSED two real
+  classes the masking hid: wagon contents rust 255-vs-cpp 250
+  (contained-position bookkeeping vs CopyMotion, C4Movement.cpp:
+  518-529) and seam-adjust misses on 1x1 helper defs (NOPC -1). The
+  wall METRIC therefore reads 80 at frame 1 - more truth, not a
+  regression: the previous 25 hid these under fixtoi. NEXT: the
+  contained-contents class, the NOPC-like adjust misses, then the
+  walker fix half-steps.
+
 ## Gates
 
 - **`cargo test --workspace`: GREEN** (~1240 pass, cargo exit 0). The old
