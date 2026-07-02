@@ -3718,7 +3718,10 @@ impl Object {
         let procedure = library
             .and_then(|lib| lib.procedure_name_for_action(&self.state.action.name))
             .map(|name| name.to_string());
-        let position = self.position_pixels();
+        // The INT position is the sim-state x/y (C++ exports object->x/y);
+        // it may legitimately differ from fixtoi(fix) after the DoCon
+        // initial split — the fixed coords travel separately below.
+        let position = self.state.position;
         let velocity = self.velocity_pixels();
         // Persist the exact `rdir`/`fix_r` only while actively rotating; a static
         // object's orientation is fully captured by the whole-degree `rotation`.

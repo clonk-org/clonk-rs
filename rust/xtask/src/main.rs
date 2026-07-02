@@ -540,7 +540,9 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         }
     }
     if std::env::var("LC_XTASK_PROBE_SHAPE").is_ok() {
-        println!("SHAPE COAC {:?}", engine.debug_definition_shape("COAC"));
+        for id in ["COAC", "NOPC", "NDWA", "_TLK"] {
+            println!("SHAPE {id} {:?}", engine.debug_definition_shape(id));
+        }
     }
     log_watched(&engine, "joined");
     // LC_XTASK_OBJ_DUMP=3,42: print per-object forensics after the join
