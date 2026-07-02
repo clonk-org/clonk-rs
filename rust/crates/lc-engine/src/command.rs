@@ -576,6 +576,77 @@ mod tests {
     }
 
     #[test]
+    fn get_pursuit_moves_with_the_random_offset_like_cpp() {
+        // C4Command::Get outside pursuit (C4Command.cpp:1288-1290): target
+        // not in collection range and not in jump range -> AddCommand
+        // MoveTo(Target->x + Random(15) - 7, Target->y, 25). The Random
+        // draw advances the synced ledger.
+        let actor_id = ObjectId::new(501);
+        let target_id = ObjectId::new(502);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(100, 100);
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(300, 100);
+        target.collectible = true;
+        target.construction = FULL_CON;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor_id, actor);
+        objects.insert(target_id, target);
+        let players = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let rng = std::cell::RefCell::new(crate::LcgRng::seed_from_u64(7));
+        let expected_offset = {
+            let mut probe = rng.borrow().clone();
+            probe.random(15) - 7
+        };
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            rng: Some(&rng),
+            landscape: None,
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state = GetState::from_request(
+            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
+        )
+        .expect("state created");
+        let result = state.step(&ctx);
+
+        let move_to = result
+            .operations
+            .iter()
+            .find_map(|operation| match operation {
+                CommandOperation::PushFront(request) if request.id == CommandId::MoveTo => {
+                    Some(request)
+                }
+                _ => None,
+            })
+            .expect("pursuit pushes MoveTo");
+        assert_eq!(
+            move_to.tx,
+            Some(300 + expected_offset),
+            "MoveTo x = Target->x + Random(15) - 7 (C4Command.cpp:1290)"
+        );
+        assert_eq!(move_to.ty, Some(100), "MoveTo y = Target->y");
+        assert_eq!(move_to.update_interval, 25, "iUpdateInterval 25");
+        assert_eq!(
+            rng.borrow().count,
+            crate::LcgRng::seed_from_u64(7).count + 1,
+            "exactly one ledger draw"
+        );
+    }
+
+    #[test]
     fn get_transfers_item_when_in_range() {
         let actor_id = ObjectId::new(100);
         let target_id = ObjectId::new(200);
@@ -9673,16 +9744,56 @@ impl GetState {
             return self.transfer_to_actor(ctx, target_id, update);
         }
 
-        if self.should_issue_move(ctx.frame) {
-            let mut result = CommandStepResult::running(update);
-            let request = CommandRequest::new(CommandId::MoveTo)
-                .with_target(Some(target_id))
-                .with_update_interval(10);
-            result.operations.push(CommandOperation::PushFront(request));
-            return result;
+        // C4Command::Get outside pursuit (C4Command.cpp:1267-1290).
+        let mut result = CommandStepResult::running(update);
+        let tx = target_snapshot.position.x;
+        let ty = target_snapshot.position.y;
+
+        // Target in jumping range above the clonk: try the side-move jump
+        // (C4Command.cpp:1272-1287) — Random(2) picks the side (a synced
+        // ledger draw).
+        let above = ctx.position.y - ty;
+        if (-10..=10).contains(&(ctx.position.x - tx)) && (30..=50).contains(&above) {
+            if let Some(rng) = ctx.rng {
+                let side = if rng.borrow_mut().random(2) != 0 { -1 } else { 1 };
+                let side_x = ctx.position.x + side * above;
+                let path_clear = ctx.landscape.is_none_or(|landscape| {
+                    landscape.path_is_clear(
+                        Vector2::new(side_x, ctx.position.y),
+                        Vector2::new(tx, ty),
+                    )
+                });
+                if path_clear {
+                    result.operations.push(CommandOperation::PushFront(
+                        CommandRequest::new(CommandId::Jump)
+                            .with_tx(Some(tx))
+                            .with_ty(Some(ty)),
+                    ));
+                    // (CollectionLimit drop, C4Command.cpp:1282-1284, is
+                    // unmodeled — GoldRush clonks have no CollectionLimit.)
+                    result.operations.push(CommandOperation::PushFront(
+                        CommandRequest::new(CommandId::MoveTo)
+                            .with_tx(Some(side_x))
+                            .with_ty(Some(ctx.position.y))
+                            .with_update_interval(50),
+                    ));
+                }
+            }
         }
 
-        CommandStepResult::running(update)
+        // Move to target with the random pickup offset (C4Command.cpp:1290):
+        // MoveTo(Target->x + Random(15) - 7, Target->y, 25).
+        let offset = ctx
+            .rng
+            .map(|rng| rng.borrow_mut().random(15) - 7)
+            .unwrap_or(0);
+        result.operations.push(CommandOperation::PushFront(
+            CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(tx + offset))
+                .with_ty(Some(ty))
+                .with_update_interval(25),
+        ));
+        result
     }
 }
 

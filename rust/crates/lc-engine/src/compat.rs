@@ -126,6 +126,9 @@ pub(crate) struct DefinitionMetadata {
     /// DefCore `Components` in list order (C4IDList; GetComponent's
     /// count/index forms, C4Script.cpp:2685-2709).
     pub components: Vec<(String, u32)>,
+    /// DefCore `LineConnect` bits (C4D_Power_Consumer etc.;
+    /// FnEnergyCheck, C4Script.cpp:1845-1856).
+    pub line_connect: u32,
 }
 
 /// `SetPhysical`/`GetPhysical` modes (C4Script.cpp:552-555).
@@ -412,6 +415,9 @@ pub(crate) struct HostWorldContext {
     crew_selection: Rc<HashMap<i32, CrewSelectionState>>,
     next_object_id: u64,
     team_home_base_rule: bool,
+    /// C4RULE_StructuresNeedEnergy (Game.Rules; FnEnergyCheck gates on
+    /// it, C4Script.cpp:1845-1856).
+    structures_need_energy: bool,
     /// Names of loaded particle defs (C4ParticleSystem::GetDef,
     /// C4Particles.cpp:465-473). `None` = no registry attached (legacy
     /// fixture contexts): name lookups behave permissively. `Some` = engine
@@ -450,6 +456,7 @@ impl Default for HostWorldContext {
             player_order: Rc::new(Vec::new()),
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
+            structures_need_energy: false,
             team_home_base_rule: false,
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
@@ -461,6 +468,15 @@ impl Default for HostWorldContext {
 }
 
 impl HostWorldContext {
+    pub(crate) fn with_structures_need_energy(mut self, value: bool) -> Self {
+        self.structures_need_energy = value;
+        self
+    }
+
+    pub(crate) fn structures_need_energy(&self) -> bool {
+        self.structures_need_energy
+    }
+
     #[cfg(test)]
     pub(crate) fn from_objects<I>(objects: I) -> Self
     where
@@ -566,6 +582,7 @@ impl HostWorldContext {
             crew_selection: Rc::new(crew_selection),
             next_object_id,
             team_home_base_rule,
+            structures_need_energy: false,
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
@@ -3622,6 +3639,11 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetVertexNum", get_vertex_num);
     script.register_host_function("GetVertex", get_vertex);
     script.register_host_function("GetVertexContact", get_vertex_contact);
+    script.register_host_function("Stuck", stuck);
+    script.register_host_function("Inside", inside);
+    script.register_host_function("GetVisibility", get_visibility);
+    script.register_host_function("Jump", jump);
+    script.register_host_function("EnergyCheck", energy_check);
     script.register_host_function("GetContact", get_contact);
     script.register_host_function("PathFree", path_free);
     script.register_host_function("GetPath", get_path);
@@ -8591,6 +8613,125 @@ fn get_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnInside (C4Script.cpp:3350-3353): value within [lo, hi] inclusive.
+fn inside(args: &[Value]) -> Result<Value, RuntimeError> {
+    let value = value_to_i32(args.first().unwrap_or(&Value::Nil), "Inside", "value")?;
+    let lo = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "Inside", "lo")?;
+    let hi = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "Inside", "hi")?;
+    Ok(Value::Bool(value >= lo && value <= hi))
+}
+
+/// FnGetVisibility (C4Script.cpp:3871-3877): pObj->Visibility. The
+/// visibility register is draw-only and unmodeled (SetVisibility is an
+/// acknowledged no-op) — reports the C4Object default 0 (VIS_All).
+fn get_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _ = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "GetVisibility", "obj"))
+        .transpose()?;
+    Ok(Value::Int(0))
+}
+
+/// FnJump (C4Script.cpp:358-363): ObjectComJump — routed as a
+/// front-pushed Jump command on the target (the executor runs the
+/// walking gate + jump kinematics).
+fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "Jump", "obj"))
+        .transpose()?
+        .flatten();
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(target) = target {
+        if Some(target) != active {
+            return match call_world_object_function(target, "Jump", &[]) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let pushed = object.push_command_front(CommandRequest::new(CommandId::Jump));
+        Ok(Value::Bool(pushed))
+    })
+}
+
+/// FnEnergyCheck (C4Script.cpp:1845-1856): true when the
+/// StructuresNeedEnergy rule is off, the object has enough energy, or
+/// the def is not a power consumer. (The NeedEnergy HUD flag is
+/// unmodeled.)
+fn energy_check(args: &[Value]) -> Result<Value, RuntimeError> {
+    let energy = value_to_i32(args.first().unwrap_or(&Value::Nil), "EnergyCheck", "energy")?;
+    let target = args
+        .get(1)
+        .map(|arg| parse_object_reference_argument(arg, "EnergyCheck", "obj"))
+        .transpose()?
+        .flatten();
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        if !context.world.structures_need_energy() {
+            return Ok(Value::Bool(true));
+        }
+        let target = target.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(target) = target else {
+            return Ok(Value::Nil);
+        };
+        let Some(object) = context.get_world_object(target) else {
+            return Ok(Value::Nil);
+        };
+        if object.energy >= energy {
+            return Ok(Value::Bool(true));
+        }
+        let is_consumer = context
+            .world
+            .definition_metadata(&object.definition_id)
+            .map(|metadata| metadata.line_connect & 32 != 0)
+            .unwrap_or(false);
+        Ok(Value::Bool(!is_consumer))
+    })
+}
+
+/// FnStuck (C4Script.cpp:1858-1862): Shape.CheckContact(x, y) — is any
+/// shape vertex inside solid at the current position (C4Shape.cpp
+/// CheckContact probes GBackSolid per vertex).
+fn stuck(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target_id = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "Stuck", "obj"))
+        .transpose()?
+        .flatten();
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some((position, vertices)) = resolve_vertices(context, target_id) else {
+            return Ok(Value::Nil);
+        };
+        let Some(landscape) = context.landscape_ref() else {
+            return Ok(Value::Bool(false));
+        };
+        let stuck = vertices
+            .iter()
+            .any(|vertex| landscape.is_solid_at(position.x + vertex.x, position.y + vertex.y));
+        Ok(Value::Bool(stuck))
+    })
+}
+
 fn get_vertex_contact(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
         return Err(RuntimeError::new(
@@ -8653,42 +8794,26 @@ fn get_vertex_contact(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "GetContact: requires a vertex index argument",
-        ));
-    }
-
-    let vertex_index = value_to_i32(&args[0], "GetContact", "index")?;
-    let mut arg_index = 1;
-    let mut mask: u32 = 0;
-
-    if let Some(arg) = args.get(arg_index) {
-        match arg {
-            Value::Int(value) => {
-                if *value > 0 {
-                    mask = *value as u32;
-                }
-                arg_index += 1;
-            }
-            Value::Nil => {
-                arg_index += 1;
-            }
-            _ => {}
+    // FnGetContact(pObj, iVertex, dwCheck) — C4Script.cpp:5611-5626:
+    // the OBJECT comes first; iVertex -1 ORs all vertex contacts. A
+    // non-object in the pObj slot coerces to nil (self) like C4Value.
+    let target_id = match args.first() {
+        Some(value @ (Value::Object(_) | Value::Proplist(_))) => {
+            parse_object_reference_argument(value, "GetContact", "obj")?
         }
-    }
-
-    let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(arg_index) {
-        target_id = parse_object_reference_argument(arg, "GetContact", "object")?;
-        arg_index += 1;
-    }
-
-    if arg_index < args.len() {
-        return Err(RuntimeError::new(
-            "GetContact: additional arguments are not supported",
-        ));
-    }
+        _ => None,
+    };
+    let vertex_index = match args.get(1) {
+        None | Some(Value::Nil) => -1,
+        Some(value) => value_to_i32(value, "GetContact", "vertex")?,
+    };
+    let mask = match args.get(2) {
+        None | Some(Value::Nil) => 0u32,
+        Some(value) => {
+            let raw = value_to_i32(value, "GetContact", "mask")?;
+            if raw > 0 { raw as u32 } else { 0 }
+        }
+    };
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -8943,12 +9068,16 @@ fn fallback_without_context(query: LandscapeQuery) -> bool {
 }
 
 fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 2 {
-        return Err(RuntimeError::new("GetMaterial expects 2 arguments: x, y"));
-    }
-
-    let local_x = value_to_i32(&args[0], "GetMaterial", "x")?;
-    let local_y = value_to_i32(&args[1], "GetMaterial", "y")?;
+    // C++ pads missing script args with zero (FnGetMaterial(x, y),
+    // C4Script.cpp:2222-2226): GetMaterial() probes the object center.
+    let local_x = match args.first() {
+        None | Some(Value::Nil) => 0,
+        Some(value) => value_to_i32(value, "GetMaterial", "x")?,
+    };
+    let local_y = match args.get(1) {
+        None | Some(Value::Nil) => 0,
+        Some(value) => value_to_i32(value, "GetMaterial", "y")?,
+    };
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -10508,6 +10637,26 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
+    // C++ FnAddCommand leads with the object slot (pObj, szCommand, ...;
+    // C4Script.cpp:870-874); 0/nil means the calling object. The
+    // name-first form stays for the command-DSL fixtures. Like
+    // SetCommand, only the SELF form is dispatchable (documented gap).
+    let mut args = args;
+    let mut leading_target: Option<ObjectId> = None;
+    let leads_with_object_slot = matches!(
+        (args.first(), args.get(1)),
+        (
+            Some(Value::Object(_) | Value::Proplist(_)),
+            _
+        ) | (
+            Some(Value::Nil | Value::Int(0)),
+            Some(Value::String(_))
+        )
+    );
+    if leads_with_object_slot {
+        leading_target = parse_object_reference_argument(&args[0], "AddCommand", "target")?;
+        args = &args[1..];
+    }
     if args.is_empty() {
         return Err(RuntimeError::new(
             "AddCommand expects at least 1 argument: command name",
@@ -10541,6 +10690,15 @@ fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
         };
+        if let Some(target) = leading_target {
+            if target != object.id() {
+                tracing::warn!(
+                    ?target,
+                    "AddCommand on a FOREIGN object is not dispatchable yet; ignoring"
+                );
+                return Ok(Value::Bool(false));
+            }
+        }
 
         let success = object.push_command_front(request);
         Ok(Value::Bool(success))
@@ -11321,6 +11479,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                line_connect: 0,
             });
         let definition_category = metadata.category;
 
@@ -11533,6 +11692,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                line_connect: 0,
             });
         let definition_category = metadata.category;
 
@@ -12912,6 +13072,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                line_connect: 0,
             });
 
         let mut last = Value::Nil;
@@ -15993,6 +16154,7 @@ mod tests {
         "DoHomebaseMaterial",
         "DoHomebaseProduction",
         "EffectVar",
+        "EnergyCheck",
         "Enter",
         "Exit",
         "FindContents",
@@ -16073,6 +16235,7 @@ mod tests {
         "GetVertexContact",
         "GetVertexNum",
         "GetViewCursor",
+        "GetVisibility",
         "GetWealth",
         "GetWind",
         "GetX",
@@ -16081,6 +16244,8 @@ mod tests {
         "GetYDir",
         "GrabObjectInfo",
         "InLiquid",
+        "Inside",
+        "Jump",
         "Log",
         "MakeCrewMember",
         "Material",
@@ -16152,6 +16317,7 @@ mod tests {
         "Sound",
         "SoundLevel",
         "Sqrt",
+        "Stuck",
         "TrainPhysical",
         "WildcardMatch",
     ];
@@ -17329,6 +17495,7 @@ mod tests {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                line_connect: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -17368,6 +17535,7 @@ mod tests {
                     basement: 0,
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
+                    line_connect: 0,
                 },
             ),
             (
@@ -17385,6 +17553,7 @@ mod tests {
                     basement: 0,
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
+                    line_connect: 0,
                 },
             ),
         ]);
@@ -17426,6 +17595,7 @@ mod tests {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                line_connect: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -17480,6 +17650,7 @@ mod tests {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                line_connect: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -17543,6 +17714,7 @@ mod tests {
             basement: 0,
             physical: lc_resources::PhysicalInfo::default(),
             components: Vec::new(),
+            line_connect: 0,
         };
         metadata.components = vec![("WOOD".to_string(), 3), ("METL".to_string(), 1)];
         let world = HostWorldContext::with_landscape(
@@ -17959,6 +18131,7 @@ mod tests {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                line_connect: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -17997,6 +18170,7 @@ mod tests {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                line_connect: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -18051,6 +18225,7 @@ mod tests {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                line_connect: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -19504,7 +19679,7 @@ mod tests {
             &[],
             world,
             1,
-            || get_contact(&[Value::Int(-1)]),
+            || get_contact(&[Value::Nil, Value::Int(-1)]),
         );
 
         let value = result.expect("GetContact succeeds");
@@ -21257,6 +21432,7 @@ mod tests {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                line_connect: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21308,6 +21484,7 @@ mod tests {
             basement: 0,
             physical: PhysicalInfo::default(),
             components: Vec::new(),
+            line_connect: 0,
         };
         let definitions = HashMap::from([
             ("Workshop".to_string(), workshop_metadata.clone()),

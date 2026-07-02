@@ -10761,6 +10761,7 @@ impl Engine {
                                     (component.id.as_str().to_string(), component.count)
                                 })
                                 .collect(),
+                            line_connect: definition.line_connect(),
                         },
                     )
                 })
@@ -10849,6 +10850,7 @@ impl Engine {
                 .as_ref()
                 .map(ScenarioScript::script_arc),
         )
+        .with_structures_need_energy(self.structures_need_energy)
     }
 
     /// The shared definition-script table host contexts carry (nested
@@ -22022,6 +22024,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     basement: 0,
                     physical: lc_resources::PhysicalInfo::default(),
                     components: Vec::new(),
+                    line_connect: 0,
                 },
             )
         })
