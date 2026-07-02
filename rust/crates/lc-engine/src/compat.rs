@@ -132,6 +132,12 @@ pub(crate) struct DefinitionMetadata {
     /// ClonkNames newline count (C4ObjectInfoList::New's name draw range,
     /// C4InfoCore.cpp:411); None = use the game standard names.
     pub clonk_name_newlines: Option<i32>,
+    /// DefCore StretchGrowth (the con-scaling mode; DoCon's bottom
+    /// adjust shape math).
+    pub stretch_growth: bool,
+    /// DefCore Line type (C4D_Line*; nonzero skips con-scaling and the
+    /// DoCon bottom adjust — C4Object::UpdateShape's early return).
+    pub line: i32,
 }
 
 /// `SetPhysical`/`GetPhysical` modes (C4Script.cpp:552-555).
@@ -630,6 +636,14 @@ impl HostWorldContext {
 
     /// Attach the engine's compiled definition scripts for nested script
     /// calls. See the `definition_scripts` field docs.
+    pub(crate) fn with_definition_metadata(
+        mut self,
+        definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
+    ) -> Self {
+        self.definitions = definitions;
+        self
+    }
+
     pub(crate) fn with_definition_scripts(
         mut self,
         scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
@@ -11759,6 +11773,8 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 components: Vec::new(),
                 line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
             });
         let definition_category = metadata.category;
 
@@ -11772,9 +11788,24 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .unwrap_or(OWNER_NONE);
 
         let owner = owner_override.unwrap_or(base_owner);
-        let position = Vector2::new(
+        // C4Game::NewObject's DoCon(fInitial) bottom-growth adjust runs
+        // BEFORE the next script line executes (C4Object.cpp:1401-1470):
+        // the created object's center is y - (Shape.Hgt + Shape.y), and
+        // sibling calls in the same script (ConnectWagon's beam offsets)
+        // read the FINAL position.
+        let raw_position = Vector2::new(
             base_position.x.saturating_add(x_offset),
             base_position.y.saturating_add(y_offset),
+        );
+        let position = Vector2::new(
+            raw_position.x,
+            crate::docon_initial_center_y(
+                metadata.shape,
+                metadata.stretch_growth,
+                metadata.line,
+                crate::FULL_CON,
+                raw_position.y,
+            ),
         );
 
         let id = context.allocate_object_id();
@@ -11787,6 +11818,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         // Creation callbacks run synchronously below - materialization
         // must not repeat Initialize (C4Game.cpp:1117-1127).
         spawn.initialized = true;
+        spawn.position_adjusted = true;
 
         let preview_ocf = ocf::compute(
             metadata.ocf_base,
@@ -11973,6 +12005,8 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 components: Vec::new(),
                 line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
             });
         let definition_category = metadata.category;
 
@@ -13354,6 +13388,8 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 components: Vec::new(),
                 line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
             });
 
         let mut last = Value::Nil;
@@ -17786,6 +17822,8 @@ mod tests {
                 components: Vec::new(),
                 line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -17827,6 +17865,8 @@ mod tests {
                     components: Vec::new(),
                     line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
                 },
             ),
             (
@@ -17846,6 +17886,8 @@ mod tests {
                     components: Vec::new(),
                     line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
                 },
             ),
         ]);
@@ -17889,6 +17931,8 @@ mod tests {
                 components: Vec::new(),
                 line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -17945,6 +17989,8 @@ mod tests {
                 components: Vec::new(),
                 line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -18010,6 +18056,8 @@ mod tests {
             components: Vec::new(),
             line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
         };
         metadata.components = vec![("WOOD".to_string(), 3), ("METL".to_string(), 1)];
         let world = HostWorldContext::with_landscape(
@@ -18428,6 +18476,8 @@ mod tests {
                 components: Vec::new(),
                 line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -18468,6 +18518,8 @@ mod tests {
                 components: Vec::new(),
                 line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -18524,6 +18576,8 @@ mod tests {
                 components: Vec::new(),
                 line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21732,6 +21786,8 @@ mod tests {
                 components: Vec::new(),
                 line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21785,6 +21841,8 @@ mod tests {
             components: Vec::new(),
             line_connect: 0,
                 clonk_name_newlines: None,
+                stretch_growth: false,
+                line: 0,
         };
         let definitions = HashMap::from([
             ("Workshop".to_string(), workshop_metadata.clone()),

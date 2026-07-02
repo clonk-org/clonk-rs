@@ -185,6 +185,11 @@ pub struct DefCore {
     /// of Con — IsInLiquidCheck probes GBackLiquid(x, y + Float*Con/FullCon
     /// - 1) (C4Object.cpp:5609-5612).
     pub float_line: i32,
+    /// `Line=` (C4D_Line* type tokens, C4Def.cpp:318-332); Line objects
+    /// skip UpdateShape and their vertices span the action targets.
+    pub line: i32,
+    /// `LineIntersect=` (0 wrapping, 1 direct vertex assignment).
+    pub line_intersect: i32,
     /// `Grab` (C4Def.cpp): 0 none, 1 grab+push, 2 grab-only.
     pub grab: i32,
     /// `NoBreath` (C4Def.cpp:409): exempt from the ExecLife breathing check.
@@ -447,6 +452,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut no_breath = false;
     let mut grab = 0;
     let mut float_line = 0;
+    let mut line_type: i32 = 0;
+    let mut line_intersect: i32 = 0;
     let mut no_burn_damage = false;
     let mut burn_turn_to: Option<String> = None;
     let mut incomplete_activity = false;
@@ -592,6 +599,22 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "nobreath" => {
                 no_breath = parse_bool(value);
             }
+            "line" => {
+                line_type = match value.trim() {
+                    "C4D_LinePower" => 1,
+                    "C4D_LineSource" => 2,
+                    "C4D_LineDrain" => 3,
+                    "C4D_LineLightning" => 4,
+                    "C4D_LineVolcano" => 5,
+                    "C4D_LineRope" => 6,
+                    "C4D_LineColored" => 7,
+                    "C4D_LineVertex" => 8,
+                    other => parse_i32(other).unwrap_or(0),
+                };
+            }
+            "lineintersect" => {
+                line_intersect = parse_i32(value).unwrap_or(0);
+            }
             "float" => {
                 float_line = parse_i32(value).unwrap_or(0);
             }
@@ -709,6 +732,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         no_breath,
         grab,
         float_line,
+        line: line_type,
+        line_intersect,
         no_burn_damage,
         burn_turn_to,
         incomplete_activity,

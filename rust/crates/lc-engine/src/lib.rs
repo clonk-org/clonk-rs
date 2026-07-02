@@ -4188,6 +4188,11 @@ pub struct SpawnConfig {
     /// C4Game.cpp:1117-1127) - materialization must not repeat them.
     #[serde(default)]
     pub initialized: bool,
+    /// The DoCon bottom-growth y-adjust already happened at the creation
+    /// seam (CreateObject computed the preview from the FINAL center) —
+    /// materialization must not re-apply it.
+    #[serde(default)]
+    pub position_adjusted: bool,
 }
 
 impl SpawnConfig {
@@ -4223,6 +4228,7 @@ impl SpawnConfig {
             loaded: false,
             solid_mask: None,
             initialized: false,
+            position_adjusted: false,
         }
     }
 
@@ -5024,6 +5030,8 @@ pub struct Definition {
     /// `Float` DefCore value (C4Def.cpp:379): IsInLiquidCheck buoyancy line
     /// offset (C4Object.cpp:5609-5612).
     float_line: i32,
+    line: i32,
+    line_intersect: i32,
     /// Grab DefCore value: 0 none, 1 grab+push, 2 grab-only (C4Object.cpp:1763).
     grab: i32,
     burn_turn_to: Option<String>,
@@ -5149,6 +5157,8 @@ impl Definition {
             no_burn_decay: false,
             no_breath: false,
             float_line: 0,
+            line: 0,
+            line_intersect: 0,
             grab: 0,
             no_burn_damage: false,
             burn_turn_to: None,
@@ -5612,6 +5622,22 @@ impl Definition {
     }
 
     /// `Float` DefCore value (C4Def.cpp:379) — the buoyancy line.
+    pub fn line(&self) -> i32 {
+        self.line
+    }
+
+    pub fn set_line(&mut self, line: i32) {
+        self.line = line;
+    }
+
+    pub fn line_intersect(&self) -> i32 {
+        self.line_intersect
+    }
+
+    pub fn set_line_intersect(&mut self, line_intersect: i32) {
+        self.line_intersect = line_intersect;
+    }
+
     pub fn set_float_line(&mut self, float_line: i32) {
         self.float_line = float_line;
     }
@@ -7666,6 +7692,7 @@ impl ScenarioScript {
         audio: AudioRegistry,
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
+        definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_initialize {
             return Ok((ScenarioBatch::default(), audio, rng));
@@ -7689,6 +7716,7 @@ impl ScenarioScript {
             audio,
             particle_defs,
             definition_scripts,
+            definition_metadata,
         )
     }
 
@@ -7705,6 +7733,7 @@ impl ScenarioScript {
         audio: AudioRegistry,
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
+        definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_step {
             return Ok((ScenarioBatch::default(), audio, rng));
@@ -7730,6 +7759,7 @@ impl ScenarioScript {
             audio,
             particle_defs,
             definition_scripts,
+            definition_metadata,
         )
     }
 
@@ -7751,6 +7781,7 @@ impl ScenarioScript {
         audio: AudioRegistry,
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
+        definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
@@ -7758,7 +7789,11 @@ impl ScenarioScript {
         // Definition scripts ride along so nested calls (obj->Method on
         // objects the scenario script creates or finds) resolve like the
         // broadcast path (FindSameNameFunc on the target's def).
+        // The snapshot world's metadata table only knows categories — the
+        // ENGINE's full table (shapes, physicals, ActMaps) rides along so
+        // CreateObject applies the DoCon bottom adjust and OCF correctly.
         let world = host_world_context_from_snapshot(snapshot)
+            .with_definition_metadata(definition_metadata)
             .with_particle_defs(particle_defs)
             .with_definition_scripts(definition_scripts);
         let next_object_id = world.next_object_id();
@@ -8481,6 +8516,39 @@ fn transformed_shape_vertices(
         rotated_vertices(&scaled, rotation)
     } else {
         scaled
+    }
+}
+
+/// The C4Object::DoCon(fInitial) straight-con bottom adjust
+/// (C4Object.cpp:1463-1470): strgt_con_b is computed from the ENTRY
+/// (con-0) shape, and the move fires ONLY when the con growth actually
+/// resized the shape — a def whose con-0 shape equals its full shape
+/// (1x1 connect beams) keeps the given center.
+pub(crate) fn docon_initial_center_y(
+    shape: Option<DefinitionRect>,
+    stretch_growth: bool,
+    line: i32,
+    construction: i32,
+    given_y: i32,
+) -> i32 {
+    // Line objects never con-scale their shape (C4Object::UpdateShape
+    // returns early for Def->Line, C4Object.cpp:322-324): no adjust.
+    if line != 0 {
+        return given_y;
+    }
+    let zero = transformed_shape_rect(shape, 0, stretch_growth, 0, 0);
+    let grown = transformed_shape_rect(
+        shape,
+        construction.clamp(0, FULL_CON),
+        stretch_growth,
+        0,
+        0,
+    );
+    match (zero, grown) {
+        (Some(zero), Some(grown)) if zero.height != grown.height || zero.y != grown.y => {
+            given_y + zero.y + zero.height - grown.height - grown.y
+        }
+        _ => given_y,
     }
 }
 
@@ -10849,6 +10917,8 @@ impl Engine {
                                 })
                                 .collect(),
                             line_connect: definition.line_connect(),
+                            stretch_growth: definition.stretch_growth(),
+                            line: definition.line(),
                             clonk_name_newlines: definition
                                 .clonk_names()
                                 .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32),
@@ -10995,6 +11065,7 @@ impl Engine {
         // (C++ passes no such argument).
         let random = if c4_args { 0 } else { self.next_random_i32() };
         let rng_state = self.rng.clone();
+        let definition_metadata_table = self.definition_metadata_table();
         let initialize = script.initialize(
             &snapshot,
             rng_state,
@@ -11005,6 +11076,8 @@ impl Engine {
             self.audio_registry.clone(),
             self.particle_system.def_names(),
             self.definition_script_table(),
+        
+            definition_metadata_table,
         );
         // Initialize is a game call: a script error logs and the scenario
         // still runs WITH its script installed (C++ fail-safe exec,
@@ -11141,6 +11214,7 @@ impl Engine {
         let audio_state = self.audio_registry.clone();
         let particle_defs = self.particle_system.def_names();
         let definition_scripts = self.definition_script_table();
+        let definition_metadata_for_call = self.definition_metadata_table();
         let script = match self.scenario_script.as_mut() {
             Some(script) if script.has_function(function) => script,
             Some(_) => return Ok(()),
@@ -11158,6 +11232,8 @@ impl Engine {
             audio_state,
             particle_defs,
             definition_scripts,
+        
+            definition_metadata_for_call,
         )?;
         self.rng = new_rng;
         self.audio_registry = audio_state;
@@ -12786,6 +12862,7 @@ impl Engine {
             let environment = self.environment;
             let global_effects = self.global_effects.clone();
             let particle_defs = self.particle_system.def_names();
+            let definition_metadata_table = self.definition_metadata_table();
             let (batch, audio_state, new_rng) = {
                 let definition_scripts = self.definition_script_table();
                 let script = self
@@ -12803,7 +12880,9 @@ impl Engine {
                     self.audio_registry.clone(),
                     particle_defs,
                     definition_scripts,
-                )?
+                
+                        definition_metadata_table.clone(),
+                    )?
             };
             self.rng = new_rng;
             self.audio_registry = audio_state;
@@ -19357,6 +19436,8 @@ impl Engine {
         definition.set_no_breath(core.no_breath);
         definition.set_grab(core.grab);
         definition.float_line = core.float_line;
+        definition.set_line(core.line);
+        definition.set_line_intersect(core.line_intersect);
         definition.set_physical(core.physical);
         definition.set_collectible(core.collectible);
         definition.set_constructable(core.constructable);
@@ -19416,6 +19497,13 @@ impl Engine {
                 definition.set_clonk_names(names);
             }
         }
+    }
+
+    /// Debug helper: a definition's shape rect.
+    pub fn debug_definition_shape(&self, id: &str) -> Option<DefinitionRect> {
+        self.definitions
+            .get(&DefinitionId::from(id))
+            .and_then(|definition| definition.shape_rect())
     }
 
     /// Debug helper: landscape solidity probe.
@@ -21375,6 +21463,7 @@ impl Engine {
             local_vars,
             loaded,
             solid_mask,
+            position_adjusted,
             initialized,
         } = config;
 
@@ -21387,6 +21476,7 @@ impl Engine {
             definition_shape_rect,
             definition_stretch_growth,
             definition_rotateable,
+            definition_line,
         ) = {
             let definition_ref = self
                 .definitions
@@ -21401,6 +21491,7 @@ impl Engine {
                 definition_ref.shape_rect(),
                 definition_ref.stretch_growth(),
                 definition_ref.rotateable(),
+                definition_ref.line(),
             )
         };
         let mut initial_action = match action {
@@ -21447,23 +21538,19 @@ impl Engine {
         // the final center is y - (Shape.Hgt + Shape.y) at the spawn
         // construction (C4Object.cpp:1401-1470). Loaded objects keep
         // their saved center (C4GameObjects::Load never re-cons).
-        let position = if loaded {
+        let position = if loaded || position_adjusted {
             position
         } else {
-            let grown_rect = transformed_shape_rect(
-                shape_template.rect,
-                construction.clamp(0, FULL_CON),
-                shape_template.stretch_growth,
-                shape_template.rotateable,
-                0,
-            );
-            match grown_rect {
-                Some(rect) => Vector2::new(
-                    position.x,
-                    position.y.saturating_sub(rect.height + rect.y),
+            Vector2::new(
+                position.x,
+                docon_initial_center_y(
+                    shape_template.rect,
+                    shape_template.stretch_growth,
+                    definition_line,
+                    construction,
+                    position.y,
                 ),
-                None => position,
-            }
+            )
         };
         // Objects.txt vertices are the CURRENT effective shape serialized
         // by C4Shape::CompileFunc (C4Shape.cpp:495-515) — already Con/
@@ -22308,6 +22395,8 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     components: Vec::new(),
                     line_connect: 0,
                     clonk_name_newlines: None,
+                    stretch_growth: false,
+                    line: 0,
                 },
             )
         })

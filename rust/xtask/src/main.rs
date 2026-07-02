@@ -539,6 +539,9 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
             println!("SOLID 3925,{y} = {solid}");
         }
     }
+    if std::env::var("LC_XTASK_PROBE_SHAPE").is_ok() {
+        println!("SHAPE COAC {:?}", engine.debug_definition_shape("COAC"));
+    }
     log_watched(&engine, "joined");
     // LC_XTASK_OBJ_DUMP=3,42: print per-object forensics after the join
     // and every 5 frames.
