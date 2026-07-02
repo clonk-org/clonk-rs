@@ -563,6 +563,15 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
                             "OBJDUMP f{frame} {id} {:?}",
                             engine.debug_object_by_id(*id)
                         );
+                        if let Some(object) = snapshot
+                            .objects
+                            .iter()
+                            .find(|object| object.id.as_u64() == *id)
+                        {
+                            let effects: Vec<&str> =
+                                object.effects.iter().map(|e| e.name.as_str()).collect();
+                            println!("OBJDUMP f{frame} {id} effects {effects:?}");
+                        }
                     }
                 }
                 if frame % 10 == 0 || started.elapsed().as_millis() > 500 {
