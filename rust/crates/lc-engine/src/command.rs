@@ -6397,6 +6397,9 @@ pub enum CommandOperation {
     Clear,
     PushFront(CommandRequest),
     PushBack(CommandRequest),
+    /// FnFinishCommand (C4Script.cpp:947-957): mark the index-th stack
+    /// entry finished (success) or bump its failure counter.
+    Finish { index: i32, success: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6784,9 +6787,35 @@ impl CommandStack {
                 CommandOperation::PushBack(request) => {
                     let _ = self.push_back(request);
                 }
+                CommandOperation::Finish { index, success } => {
+                    self.finish_entry(index, success);
+                }
             }
         }
         Some(result)
+    }
+
+    /// FnFinishCommand (C4Script.cpp:947-957): walk to the index-th
+    /// command; success drops it (Finished commands complete on their
+    /// next Execute — the stack model removes immediately), failure
+    /// bumps the entry's failure counter.
+    pub fn finish_entry_public(&mut self, index: i32, success: bool) {
+        self.finish_entry(index, success);
+    }
+
+    fn finish_entry(&mut self, index: i32, success: bool) {
+        if index < 0 {
+            return;
+        }
+        let index = index as usize;
+        if index >= self.entries.len() {
+            return;
+        }
+        if success {
+            self.entries.remove(index);
+        } else if let Some(entry) = self.entries.get_mut(index) {
+            entry.failures = entry.failures.saturating_add(1);
+        }
     }
 
     fn record_failure(&mut self, mode: CommandMode) {

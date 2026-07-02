@@ -1256,17 +1256,17 @@ fn get_player_count(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "GetPlayerByIndex expects at least 1 argument: index",
-        ));
-    }
     if args.len() > 2 {
         return Err(RuntimeError::new(
             "GetPlayerByIndex expects at most 2 arguments: index and type",
         ));
     }
-    let index = value_to_i32(&args[0], "GetPlayerByIndex", "index")?;
+    // C++ pads missing script args with zero: GetPlayerByIndex() is the
+    // first player (GoldRush Script1's intro camera).
+    let index = match args.first() {
+        None | Some(Value::Nil) => 0,
+        Some(value) => value_to_i32(value, "GetPlayerByIndex", "index")?,
+    };
     let filter = parse_player_type_filter(args.get(1), "GetPlayerByIndex")?;
     if index < 0 {
         return Ok(Value::Int(OWNER_NONE));
@@ -1803,6 +1803,25 @@ fn frame_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
         let frame = borrow.as_ref().map(|context| context.frame as i32).unwrap_or(0);
         Ok(Value::Int(frame))
     })
+}
+
+/// FnCloseMenu (C4Script.cpp:4302-4307): closes the object's menu — the
+/// menu register is frontend-side in this engine (menu_requests flow to
+/// the UI); the comparator does not cover it. Acknowledged.
+fn close_menu(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _ = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "CloseMenu", "obj"))
+        .transpose()?;
+    Ok(Value::Bool(true))
+}
+
+/// FnSetPlrView (C4Script.cpp:2545-2550): the player's view target —
+/// a viewport/drawing concern (C4PVM_Target); acknowledged no-op like
+/// SetPlrViewRange.
+fn set_plr_view(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _ = parse_optional_i32(args.first(), "SetPlrView", "player")?;
+    Ok(Value::Bool(true))
 }
 
 /// FnSetPlrViewRange (C4Script.cpp:5286-5293): the object's FoW view
@@ -3637,6 +3656,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPortrait", get_portrait);
     script.register_host_function("SetVisibility", set_visibility);
     script.register_host_function("SetPlrViewRange", set_plr_view_range);
+    script.register_host_function("CloseMenu", close_menu);
+    script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("SetSolidMask", set_solid_mask);
     script.register_host_function("ChangeDef", change_def);
@@ -3666,6 +3687,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Stuck", stuck);
     script.register_host_function("Inside", inside);
     script.register_host_function("GetVisibility", get_visibility);
+    script.register_host_function("FinishCommand", finish_command);
+    script.register_host_function("SetCrewEnabled", set_crew_enabled);
     script.register_host_function("Fling", fling);
     script.register_host_function("Jump", jump);
     script.register_host_function("EnergyCheck", energy_check);
@@ -5413,6 +5436,7 @@ pub(crate) struct EffectContextOutcome {
     pub player_commands: Vec<PlayerCommand>,
     pub audio: AudioOutcome,
     pub trigger_game_over: bool,
+    pub script_go: Option<bool>,
     pub next_object_id: u64,
     /// VM-final locals of an effect callback that ran in its command
     /// target's own context (pFn->Exec(pCommandTarget, ...),
@@ -5438,6 +5462,7 @@ impl EffectContextOutcome {
         player_commands: Vec<PlayerCommand>,
         audio: AudioOutcome,
         trigger_game_over: bool,
+        script_go: Option<bool>,
         next_object_id: u64,
     ) -> Self {
         Self {
@@ -5458,6 +5483,7 @@ impl EffectContextOutcome {
             player_commands,
             audio,
             trigger_game_over,
+            script_go,
             next_object_id,
             context_locals: None,
         }
@@ -5485,6 +5511,7 @@ impl EffectContextOutcome {
                 events: Vec::new(),
             },
             trigger_game_over: false,
+            script_go: None,
             next_object_id,
             context_locals: None,
         }
@@ -8709,6 +8736,88 @@ fn get_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(0))
 }
 
+/// FnSetCrewEnabled (C4Script.cpp:4814-4836): CrewDisabled = !enabled;
+/// disabling also deselects (the cursor re-adjust runs on the engine
+/// selection refresh).
+fn set_crew_enabled(args: &[Value]) -> Result<Value, RuntimeError> {
+    let enabled = matches!(args.first(), Some(Value::Bool(true)) | Some(Value::Int(1)));
+    let target = args
+        .get(1)
+        .map(|arg| parse_object_reference_argument(arg, "SetCrewEnabled", "obj"))
+        .transpose()?
+        .flatten();
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(target) = target {
+        if Some(target) != active {
+            return match call_world_object_function(
+                target,
+                "SetCrewEnabled",
+                &[Value::Bool(enabled)],
+            ) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        object.pending_update.crew_disabled = Some(!enabled);
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnFinishCommand (C4Script.cpp:947-957): mark the iCommandNum-th
+/// command of the target finished (success) or bump its failures.
+fn finish_command(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "FinishCommand", "obj"))
+        .transpose()?
+        .flatten();
+    let success = matches!(args.get(1), Some(Value::Bool(true)) | Some(Value::Int(1)));
+    let index = parse_optional_i32(args.get(2), "FinishCommand", "command")?.unwrap_or(0);
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(target) = target {
+        if Some(target) != active {
+            return match call_world_object_function(
+                target,
+                "FinishCommand",
+                &[Value::Int(0), Value::Bool(success), Value::Int(index)],
+            ) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        object
+            .command_operations
+            .push(CommandOperation::Finish { index, success });
+        Ok(Value::Bool(true))
+    })
+}
+
 /// FnFling (C4Script.cpp:347-356) -> C4Object::Fling
 /// (C4Object.cpp:1612-1624): optional half-speed add, then the Tumble
 /// action if the ActMap has one, else the Jump action (after the
@@ -9402,12 +9511,22 @@ fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
 /// (iFreeDensity -> ClearRectDensity) clears everything in the column
 /// model (PORT_STATUS).
 /// FnScriptGo (C4Script.cpp:2782-2786): switches the scenario script
-/// counter (Game.Script.Go) that drives the timed Script%d sections. The
-/// counter subsystem is not ported yet — the switch is accepted so
-/// intro sequences do not abort their callers (PORT_STATUS).
+/// counter gate (Game.Script.Go) that drives the timed Script%d
+/// sections (C4GameScriptHost::Execute, C4ScriptHost.cpp:222-232).
 fn script_go(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = args.first().map(Value::as_bool).unwrap_or(false);
-    Ok(Value::Bool(true))
+    let go = match args.first() {
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::Int(value)) => *value != 0,
+        _ => false,
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(true));
+        };
+        context.script_go_request = Some(go);
+        Ok(Value::Bool(true))
+    })
 }
 
 fn free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -14588,6 +14707,7 @@ struct EffectHostContext {
     audio: AudioRegistry,
     next_object_id: u64,
     trigger_game_over: bool,
+    script_go_request: Option<bool>,
     game_over_triggered: bool,
     /// Saved `object` scopes of in-flight nested calls, one per nesting
     /// level (`None` = the level had no object scope). The active scope is
@@ -14717,6 +14837,7 @@ impl EffectHostContext {
             audio,
             next_object_id,
             trigger_game_over: false,
+            script_go_request: None,
             game_over_triggered,
             dormant_scopes: Vec::new(),
             nested_objects: HashMap::new(),
@@ -15245,6 +15366,7 @@ impl EffectHostContext {
                 events: audio_events,
             },
             self.trigger_game_over,
+            self.script_go_request,
             self.next_object_id,
         );
         outcome.particles = self.pending_particles;
@@ -16296,6 +16418,7 @@ mod tests {
         "CastParticles",
         "ChangeDef",
         "ClearParticles",
+        "CloseMenu",
         "Contained",
         "Contents",
         "ContentsCount",
@@ -16325,6 +16448,7 @@ mod tests {
         "FindObjectOwner",
         "FindObjects",
         "FindOtherContents",
+        "FinishCommand",
         "Fling",
         "Format",
         "FrameCounter",
@@ -16446,6 +16570,7 @@ mod tests {
         "SetComDir",
         "SetCommand",
         "SetComponent",
+        "SetCrewEnabled",
         "SetDir",
         "SetEntrance",
         "SetGraphics",
@@ -16458,6 +16583,7 @@ mod tests {
         "SetPhase",
         "SetPhysical",
         "SetPlrKnowledge",
+        "SetPlrView",
         "SetPlrViewRange",
         "SetPortrait",
         "SetPosition",

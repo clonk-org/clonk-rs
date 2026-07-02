@@ -1753,9 +1753,11 @@ impl<'a> Parser<'a> {
                 unreachable!()
             };
 
-            // Check for initializer
+            // Check for initializer — parsed BELOW the comma level so the
+            // declaration-list comma stays with this loop (`static const
+            // A = 5, B = 1;` declares TWO constants, Talker.c4d:5-6).
             let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
-                Some(self.parse_expression()?)
+                Some(self.parse_assignment()?)
             } else {
                 None
             };
@@ -1820,6 +1822,19 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
+#[test]
+fn static_const_multi_declarators_parse() {
+    // Talker.c4d:5-6: static const _TLK_ID = _TLK,\n _TLK_TimerInterval = 1;
+    let source = "#strict\n\nstatic const    _TLK_ID                  = _TLK,\n        _TLK_TimerInterval   = 1;\n";
+    let script = crate::Script::compile(source).expect("compiles");
+    let names: Vec<&str> = script
+        .var_decls()
+        .iter()
+        .map(|decl| decl.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["_TLK_ID", "_TLK_TimerInterval"]);
+}
+
     use super::*;
 
     fn parse_script(source: &str) -> Result<Script, ParseError> {

@@ -1898,6 +1898,9 @@ pub struct ObjectState {
     pub category: i32,
     #[serde(default)]
     pub crew_member: bool,
+    /// C4Object::CrewDisabled (FnSetCrewEnabled, C4Script.cpp:4814-4836).
+    #[serde(default)]
+    pub crew_disabled: bool,
     #[serde(default = "default_alive")]
     pub alive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2052,6 +2055,7 @@ pub(crate) fn preview_spawn_state(
         owner,
         category,
         crew_member: false,
+        crew_disabled: false,
         alive: true,
         base_graphics: None,
         graphics_overlays: Vec::new(),
@@ -2159,6 +2163,9 @@ impl ObjectState {
         if let Some(crew_member) = delta.crew_member {
             self.crew_member = crew_member;
         }
+        if let Some(crew_disabled) = delta.crew_disabled {
+            self.crew_disabled = crew_disabled;
+        }
         if let Some(portrait_source) = &delta.portrait_source {
             self.portrait_source = Some(portrait_source.clone());
         }
@@ -2232,6 +2239,7 @@ struct ObjectDelta {
     category: Option<i32>,
     own_mass: Option<i32>,
     crew_member: Option<bool>,
+    crew_disabled: Option<bool>,
     alive: Option<bool>,
     container: Option<Option<ObjectId>>,
     vertices: Option<Vec<ObjectVertex>>,
@@ -2295,6 +2303,9 @@ impl ObjectDelta {
         }
         if let Some(crew_member) = update.crew_member {
             self.crew_member = Some(crew_member);
+        }
+        if let Some(crew_disabled) = update.crew_disabled {
+            self.crew_disabled = Some(crew_disabled);
         }
         if let Some(portrait_source) = update.portrait_source {
             self.portrait_source = Some(portrait_source);
@@ -2363,6 +2374,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             owner: update.owner,
             category: update.category,
             crew_member: update.crew_member,
+            crew_disabled: update.crew_disabled,
             portrait_source: update.portrait_source,
             solid_mask_override: update.solid_mask_override,
             alive: update.alive,
@@ -2428,6 +2440,7 @@ pub struct ObjectUpdate {
     pub own_mass: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
+    pub crew_disabled: Option<bool>,
     #[serde(default)]
     pub alive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3669,6 +3682,9 @@ impl Object {
                 CommandOperation::PushBack(request) => {
                     let _ = self.commands.push_back(request);
                 }
+                CommandOperation::Finish { index, success } => {
+                    self.commands.finish_entry_public(index, success);
+                }
             }
         }
     }
@@ -4066,14 +4082,14 @@ pub enum EngineError {
     #[error("script error in {function} of `{definition}`")]
     Script {
         definition: String,
-        function: &'static str,
+        function: String,
         #[source]
         source: ScriptError,
     },
     #[error("invalid script output in {function} of `{definition}`: {detail}")]
     InvalidScriptOutput {
         definition: String,
-        function: &'static str,
+        function: String,
         detail: String,
     },
     #[error("object id `{0}` is already in use")]
@@ -5069,7 +5085,7 @@ impl Definition {
         let compiled_script =
             lc_script::Script::compile(source).map_err(|parse_error| EngineError::Script {
                 definition: id.clone(),
-                function: "load",
+                function: "load".to_string(),
                 source: parse_error.into(),
             })?;
 
@@ -5933,7 +5949,7 @@ impl Definition {
         let mut environment_delta = env_guard.finish();
         let (result, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
-            function: "Initialize",
+            function: "Initialize".to_string(),
             source,
         })?;
         let mut batch = parse_command(&self.id, "Initialize", result)?;
@@ -5956,6 +5972,7 @@ impl Definition {
             player_commands: host_player_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
+            script_go: host_script_go,
             next_object_id,
             other_objects,
             context_locals: _,
@@ -6014,6 +6031,9 @@ impl Definition {
         }
         if host_trigger_game_over {
             batch.trigger_game_over = true;
+        }
+        if host_script_go.is_some() {
+            batch.script_go = host_script_go;
         }
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng, next_object_id))
@@ -6104,7 +6124,7 @@ impl Definition {
         let mut environment_delta = env_guard.finish();
         let (_result, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
-            function: "Construction",
+            function: "Construction".to_string(),
             source,
         })?;
         // Construction() return value is not used (it just returns 0 or nil)
@@ -6130,6 +6150,7 @@ impl Definition {
             player_commands: host_player_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
+            script_go: host_script_go,
             next_object_id,
             other_objects,
             context_locals: _,
@@ -6168,6 +6189,9 @@ impl Definition {
         }
         if host_trigger_game_over {
             batch.trigger_game_over = true;
+        }
+        if host_script_go.is_some() {
+            batch.script_go = host_script_go;
         }
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng, next_object_id))
@@ -6267,7 +6291,7 @@ impl Definition {
         let mut environment_delta = env_guard.finish();
         let (result, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
-            function: "Step",
+            function: "Step".to_string(),
             source,
         })?;
         let mut batch = parse_command(&self.id, "Step", result)?;
@@ -6289,6 +6313,7 @@ impl Definition {
             player_commands: host_player_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
+            script_go: host_script_go,
             next_object_id,
             other_objects,
             context_locals: _,
@@ -6347,6 +6372,9 @@ impl Definition {
         }
         if host_trigger_game_over {
             batch.trigger_game_over = true;
+        }
+        if host_script_go.is_some() {
+            batch.script_go = host_script_go;
         }
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng, next_object_id))
@@ -6454,7 +6482,7 @@ impl Definition {
         let environment_delta = env_guard.finish();
         let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
-            function: kind.context(),
+            function: kind.context().to_string(),
             source,
         })?;
 
@@ -6572,7 +6600,7 @@ impl Definition {
         let environment_delta = env_guard.finish();
         let (value, _updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
-            function: "MenuEntries",
+            function: "MenuEntries".to_string(),
             source,
         })?;
         // MenuEntries shouldn't modify local vars, so we discard them
@@ -6594,14 +6622,14 @@ impl Definition {
         {
             return Err(EngineError::InvalidScriptOutput {
                 definition: self.id.clone(),
-                function: "MenuEntries",
+                function: "MenuEntries".to_string(),
                 detail: "callback must not modify game state".to_string(),
             });
         }
         if !environment_delta.is_empty() || !physics_delta.is_empty() {
             return Err(EngineError::InvalidScriptOutput {
                 definition: self.id.clone(),
-                function: "MenuEntries",
+                function: "MenuEntries".to_string(),
                 detail: "callback must not modify global state".to_string(),
             });
         }
@@ -6705,7 +6733,7 @@ impl Definition {
         let environment_delta = env_guard.finish();
         let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
-            function: "MenuCommand",
+            function: "MenuCommand".to_string(),
             source,
         })?;
         // Store updated local variables
@@ -6722,7 +6750,7 @@ impl Definition {
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: self.id.clone(),
-                    function: "MenuCommand",
+                    function: "MenuCommand".to_string(),
                     detail: format!("expected bool or nil (got {})", other.type_name()),
                 })
             }
@@ -6830,7 +6858,7 @@ impl Definition {
         let environment_delta = env_guard.finish();
         let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
-            function: "Control",
+            function: "Control".to_string(),
             source,
         })?;
         // Store updated local variables
@@ -6847,7 +6875,7 @@ impl Definition {
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: self.id.clone(),
-                    function: "Control",
+                    function: "Control".to_string(),
                     detail: format!(
                         "control function `{function}` must return bool or nil (got {})",
                         other.type_name()
@@ -6961,7 +6989,7 @@ impl Definition {
             let function_label: &'static str = Box::leak(function.to_string().into_boxed_str());
             EngineError::Script {
                 definition: self.id.clone(),
-                function: function_label,
+                function: function_label.to_string(),
                 source,
             }
         })?;
@@ -7084,7 +7112,7 @@ impl Definition {
         let environment_delta = env_guard.finish();
         let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: format!("{}::{}", self.id, function),
-            function: "MenuCallback",
+            function: "MenuCallback".to_string(),
             source,
         })?;
         // Store updated local variables
@@ -7101,7 +7129,7 @@ impl Definition {
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: self.id.clone(),
-                    function: "MenuCallback",
+                    function: "MenuCallback".to_string(),
                     detail: format!(
                         "callback `{}` must return bool or nil (got {})",
                         function_name,
@@ -7129,7 +7157,7 @@ impl Definition {
         let Value::Array(entries) = value else {
             return Err(EngineError::InvalidScriptOutput {
                 definition: self.id.clone(),
-                function: "MenuEntries",
+                function: "MenuEntries".to_string(),
                 detail: format!("expected array (got {})", value.type_name()),
             });
         };
@@ -7139,7 +7167,7 @@ impl Definition {
             let Value::Proplist(props) = entry else {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: self.id.clone(),
-                    function: "MenuEntries",
+                    function: "MenuEntries".to_string(),
                     detail: format!(
                         "entry {index} must be a proplist (got {})",
                         entry.type_name()
@@ -7152,7 +7180,7 @@ impl Definition {
                 Some(other) => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: self.id.clone(),
-                        function: "MenuEntries",
+                        function: "MenuEntries".to_string(),
                         detail: format!(
                             "entry {index} field `label` must be non-empty string (got {})",
                             other.type_name()
@@ -7162,7 +7190,7 @@ impl Definition {
                 None => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: self.id.clone(),
-                        function: "MenuEntries",
+                        function: "MenuEntries".to_string(),
                         detail: format!("entry {index} missing required field `label`"),
                     })
                 }
@@ -7173,7 +7201,7 @@ impl Definition {
                 Some(other) => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: self.id.clone(),
-                        function: "MenuEntries",
+                        function: "MenuEntries".to_string(),
                         detail: format!(
                             "entry {index} field `callback` must be non-empty string (got {})",
                             other.type_name()
@@ -7183,7 +7211,7 @@ impl Definition {
                 None => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: self.id.clone(),
-                        function: "MenuEntries",
+                        function: "MenuEntries".to_string(),
                         detail: format!("entry {index} missing required field `callback`"),
                     })
                 }
@@ -7195,7 +7223,7 @@ impl Definition {
                 Some(other) => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: self.id.clone(),
-                        function: "MenuEntries",
+                        function: "MenuEntries".to_string(),
                         detail: format!(
                             "entry {index} field `description` must be string (got {})",
                             other.type_name()
@@ -7570,7 +7598,7 @@ impl Definition {
             })
             .map_err(|source| EngineError::Script {
                 definition: format!("{}::{}::{}", self.id, effect.name, function_label),
-                function: "EffectCallback",
+                function: "EffectCallback".to_string(),
                 source,
             })
     }
@@ -7597,7 +7625,7 @@ impl ScenarioScript {
             .load_script(source)
             .map_err(|source| EngineError::Script {
                 definition: name.clone(),
-                function: "load",
+                function: "load".to_string(),
                 source,
             })?;
         compat::register_host_functions(&mut script);
@@ -7712,7 +7740,7 @@ impl ScenarioScript {
     #[allow(clippy::too_many_arguments)]
     fn call_raw(
         &mut self,
-        function: &'static str,
+        function: &str,
         args: Vec<Value>,
         snapshot: &SimulationSnapshot,
         rng: LcgRng,
@@ -7748,7 +7776,7 @@ impl ScenarioScript {
         let mut environment_delta = env_guard.finish();
         let result = result.map_err(|source| EngineError::Script {
             definition: self.name.clone(),
-            function,
+            function: function.to_string(),
             source,
         })?;
 
@@ -7769,6 +7797,7 @@ impl ScenarioScript {
             player_commands: host_player_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
+            script_go: host_script_go,
             next_object_id: _,
             other_objects,
             context_locals: _,
@@ -7782,7 +7811,7 @@ impl ScenarioScript {
         {
             return Err(EngineError::InvalidScriptOutput {
                 definition: self.name.clone(),
-                function,
+                function: function.to_string(),
                 detail: "scenario scripts may not enqueue object commands".into(),
             });
         }
@@ -7827,6 +7856,9 @@ impl ScenarioScript {
         }
         if host_trigger_game_over {
             batch.trigger_game_over = true;
+        }
+        if host_script_go.is_some() {
+            batch.script_go = host_script_go;
         }
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng))
@@ -7902,6 +7934,7 @@ impl ScenarioScript {
             player_commands: host_player_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
+            script_go: host_script_go,
             next_object_id: _,
             other_objects,
             context_locals: _,
@@ -7933,6 +7966,9 @@ impl ScenarioScript {
         batch.audio.extend(host_audio.events);
         if host_trigger_game_over {
             batch.trigger_game_over = true;
+        }
+        if host_script_go.is_some() {
+            batch.script_go = host_script_go;
         }
         let audio_state = audio_guard.finish();
         (value, finals, batch, audio_state, rng)
@@ -7980,6 +8016,7 @@ struct CommandBatch {
     messages: Vec<MessageCommand>,
     player_commands: Vec<PlayerCommand>,
     trigger_game_over: bool,
+    script_go: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -7998,6 +8035,7 @@ struct ScenarioBatch {
     messages: Vec<MessageCommand>,
     player_commands: Vec<PlayerCommand>,
     trigger_game_over: bool,
+    script_go: Option<bool>,
 }
 
 pub struct Engine {
@@ -8036,6 +8074,12 @@ pub struct Engine {
     objects: Vec<Object>,
     next_object_id: u64,
     pub(crate) rng: LcgRng,
+    /// Game.Script.Go — the scenario Script%d counter gate (FnScriptGo,
+    /// C4Script.cpp:2782-2786).
+    scenario_script_go: bool,
+    /// Game.Script.Counter — the next Script%d section
+    /// (C4GameScriptHost::Execute, C4ScriptHost.cpp:222-232).
+    scenario_script_counter: i32,
     /// Game.Parameters.RandomSeed - kept for the game-start re-fix
     /// (C4Game::Synchronize, C4Game.cpp:3695).
     random_seed: u64,
@@ -9336,6 +9380,8 @@ impl Engine {
             objects: Vec::new(),
             next_object_id: 1,
             rng: LcgRng::seed_from_u64(seed),
+            scenario_script_go: false,
+            scenario_script_counter: 0,
             random_seed: seed,
             frame: 0,
             landscape: None,
@@ -11011,8 +11057,8 @@ impl Engine {
 
     fn broadcast_scenario_function(
         &mut self,
-        function: &'static str,
-        mut extra_args: Vec<Value>,
+        function: &str,
+        extra_args: Vec<Value>,
     ) -> Result<(), EngineError> {
         // C4GameScriptHost::GRBroadcast (C4ScriptHost.cpp:234-249): every
         // live object with a C4D_Goal|C4D_Rule|C4D_Environment category bit
@@ -11058,6 +11104,18 @@ impl Engine {
             }
         }
 
+        self.call_scenario_script_function(function, extra_args)
+    }
+
+    /// Runs a function on the SCENARIO SCRIPT ONLY (Game.Script.Call) —
+    /// the direct-call half of GRBroadcast, also used by the Script%d
+    /// counter sections (C4GameScriptHost::Execute, C4ScriptHost.cpp:
+    /// 222-232).
+    fn call_scenario_script_function(
+        &mut self,
+        function: &str,
+        mut extra_args: Vec<Value>,
+    ) -> Result<(), EngineError> {
         if self.scenario_script.is_none() {
             return Ok(());
         }
@@ -11106,6 +11164,7 @@ impl Engine {
         let _ = self.apply_scenario_batch(batch)?;
         Ok(())
     }
+
 
     fn check_game_over(&mut self) -> Result<(), EngineError> {
         if self.game_over_triggered || !self.players_registered {
@@ -11281,6 +11340,7 @@ impl Engine {
             messages,
             player_commands,
             trigger_game_over,
+            script_go,
         } = batch;
 
         if !player_commands.is_empty() {
@@ -11363,6 +11423,9 @@ impl Engine {
         // objects they just created (C++ creates them live mid-call), so
         // outcomes may target this batch's fresh ids.
         self.apply_nested_object_outcomes(other_objects)?;
+        if let Some(go) = script_go {
+            self.scenario_script_go = go;
+        }
         if trigger_game_over {
             self.request_game_over()?;
         }
@@ -12700,6 +12763,14 @@ impl Engine {
         }
         self.apply_landscape_temperature_conversions();
         self.tick_player_systems();
+        // C4GameScriptHost::Execute (C4ScriptHost.cpp:222-232): while
+        // Game.Script.Go, every 10th frame calls Script%d with the counter
+        // post-incrementing — the timed intro/movie sections.
+        if self.scenario_script_go && frame % 10 == 0 && self.scenario_script.is_some() {
+            let section = format!("Script{}", self.scenario_script_counter);
+            self.scenario_script_counter += 1;
+            tolerate_script_error(self.call_scenario_script_function(&section, Vec::new()))?;
+        }
         // The per-tick scenario Step (and its `random` argument DRAW) is a
         // JSON-fixture convention: C++ never calls Step on scenario
         // scripts, and the draw would shift the synced stream every frame.
@@ -12990,6 +13061,7 @@ impl Engine {
                     effect_spawns,
                     effect_next_object_id,
                     triggered_game_over,
+                    effect_script_go,
                     audio_state,
                     new_rng,
                 ) = {
@@ -13034,6 +13106,9 @@ impl Engine {
                     for command in event_messages {
                         self.messages.apply_command(command);
                     }
+                }
+                if let Some(go) = effect_script_go {
+                    self.scenario_script_go = go;
                 }
                 if triggered_game_over {
                     self.request_game_over()?;
@@ -13080,6 +13155,7 @@ impl Engine {
                     effect_spawns,
                     effect_next_object_id,
                     triggered_game_over,
+                    effect_script_go,
                     audio_state,
                     new_rng,
                 ) = {
@@ -13124,6 +13200,9 @@ impl Engine {
                     for command in event_messages {
                         self.messages.apply_command(command);
                     }
+                }
+                if let Some(go) = effect_script_go {
+                    self.scenario_script_go = go;
                 }
                 if triggered_game_over {
                     self.request_game_over()?;
@@ -13348,8 +13427,12 @@ impl Engine {
                 messages,
                 player_commands,
                 trigger_game_over,
+            script_go,
             } = command;
 
+            if let Some(go) = script_go {
+                self.scenario_script_go = go;
+            }
             if trigger_game_over {
                 self.request_game_over()?;
             }
@@ -13438,6 +13521,7 @@ impl Engine {
                     effect_spawns,
                     effect_next_object_id,
                     triggered_game_over,
+                    effect_script_go,
                     audio_state,
                     new_rng,
                 ) = {
@@ -13484,6 +13568,9 @@ impl Engine {
                     for command in event_messages {
                         self.messages.apply_command(command);
                     }
+                }
+                if let Some(go) = effect_script_go {
+                    self.scenario_script_go = go;
                 }
                 if triggered_game_over {
                     self.request_game_over()?;
@@ -13649,6 +13736,7 @@ impl Engine {
             status,
             owner,
             crew_member,
+            crew_disabled,
             portrait_source,
             solid_mask_override: update_solid_mask,
             change_def,
@@ -13752,6 +13840,9 @@ impl Engine {
             }
             if let Some(crew_member) = crew_member {
                 object.state.crew_member = crew_member;
+            }
+            if let Some(crew_disabled) = crew_disabled {
+                object.state.crew_disabled = crew_disabled;
             }
             if let Some(portrait_source) = portrait_source {
                 object.state.portrait_source = Some(portrait_source);
@@ -14027,6 +14118,7 @@ impl Engine {
             player_commands,
             audio: outcome_audio,
             trigger_game_over,
+            script_go,
             next_object_id,
             context_locals,
         } = outcome;
@@ -14064,6 +14156,9 @@ impl Engine {
             }
         }
 
+        if let Some(go) = script_go {
+            self.scenario_script_go = go;
+        }
         if trigger_game_over {
             self.request_game_over()?;
         }
@@ -14173,6 +14268,7 @@ impl Engine {
                 effect_spawns,
                 effect_next_object_id,
                 triggered_game_over,
+                effect_script_go,
                 audio_state,
                 new_rng,
             ) = Self::run_effect_events_for_object(
@@ -14210,7 +14306,10 @@ impl Engine {
                     self.messages.apply_command(command);
                 }
             }
-            if triggered_game_over {
+            if let Some(go) = effect_script_go {
+                    self.scenario_script_go = go;
+                }
+                if triggered_game_over {
                 self.request_game_over()?;
             }
             if !physics_delta.is_empty() {
@@ -14337,6 +14436,7 @@ impl Engine {
                     effect_spawns,
                     effect_next_object_id,
                     triggered_game_over,
+                    effect_script_go,
                     audio_state,
                     new_rng,
                 ) = Self::run_effect_events_for_object(
@@ -14373,6 +14473,9 @@ impl Engine {
                     for command in event_messages {
                         self.messages.apply_command(command);
                     }
+                }
+                if let Some(go) = effect_script_go {
+                    self.scenario_script_go = go;
                 }
                 if triggered_game_over {
                     self.request_game_over()?;
@@ -14894,6 +14997,7 @@ impl Engine {
                     owner: snapshot.owner,
                     category: snapshot.category,
                     crew_member: snapshot.crew_member,
+                    crew_disabled: false,
                     alive: snapshot.alive,
                     base_graphics: snapshot.base_graphics.clone(),
                     graphics_overlays: snapshot.graphics_overlays.clone(),
@@ -15051,6 +15155,7 @@ impl Engine {
             Vec<SpawnConfig>,
             u64,
             bool,
+            Option<bool>,
             AudioRegistry,
             LcgRng,
         ),
@@ -15069,6 +15174,7 @@ impl Engine {
                 Vec::new(),
                 next_object_id,
                 false,
+                None,
                 audio,
                 rng,
             ));
@@ -15092,6 +15198,7 @@ impl Engine {
         let mut pending_player_commands = Vec::new();
         let mut pending_landscape_ops = Vec::new();
         let mut game_over_requested = false;
+        let mut script_go_requested: Option<bool> = None;
         let mut checked_started: HashSet<String> = HashSet::new();
         let mut denied_started: HashSet<String> = HashSet::new();
 
@@ -15293,6 +15400,7 @@ impl Engine {
                 player_commands: effect_player_commands,
                 audio: outcome_audio,
                 trigger_game_over,
+            script_go,
                 context_locals,
                 spawns,
                 next_object_id,
@@ -15377,6 +15485,9 @@ impl Engine {
                 pending_messages.extend(event_messages);
             }
 
+            if script_go.is_some() {
+                script_go_requested = script_go;
+            }
             if trigger_game_over {
                 game_over_requested = true;
             }
@@ -15396,6 +15507,7 @@ impl Engine {
             pending_spawns,
             next_object_id,
             game_over_requested,
+            script_go_requested,
             current_audio,
             rng,
         ))
@@ -21411,6 +21523,7 @@ impl Engine {
                 owner,
                 category: initial_category,
                 crew_member: initial_crew_member,
+                crew_disabled: false,
                 // C4Object::Init sets Alive only for C4D_Living categories
                 // (C4Object.cpp:191); loaded objects compile it with default
                 // false (C4Object.cpp:2756).
@@ -21545,6 +21658,7 @@ impl Engine {
                     messages,
                     player_commands,
                     trigger_game_over,
+            script_go,
                 },
                 audio_state,
                 new_rng,
@@ -21581,6 +21695,9 @@ impl Engine {
             self.rng = new_rng;
             self.next_object_id = next_object_id;
             self.audio_registry = audio_state;
+            if let Some(go) = script_go {
+                self.scenario_script_go = go;
+            }
             if trigger_game_over {
                 self.request_game_over()?;
             }
@@ -21675,6 +21792,7 @@ impl Engine {
                     messages,
                     player_commands,
                     trigger_game_over,
+            script_go,
                 },
                 audio_state,
                 new_rng,
@@ -21712,6 +21830,9 @@ impl Engine {
             self.rng = new_rng;
             self.next_object_id = next_object_id;
             self.audio_registry = audio_state;
+            if let Some(go) = script_go {
+                self.scenario_script_go = go;
+            }
             if trigger_game_over {
                 self.request_game_over()?;
             }
@@ -21786,6 +21907,7 @@ impl Engine {
                 effect_spawns,
                 effect_next_object_id,
                 triggered_game_over,
+                effect_script_go,
                 audio_state,
                 new_rng,
             ) = Self::run_effect_events_for_object(
@@ -21823,7 +21945,10 @@ impl Engine {
                     self.messages.apply_command(command);
                 }
             }
-            if triggered_game_over {
+            if let Some(go) = effect_script_go {
+                    self.scenario_script_go = go;
+                }
+                if triggered_game_over {
                 self.request_game_over()?;
             }
             if !physics_delta.is_empty() {
@@ -22128,6 +22253,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         owner: snapshot.owner,
         category: snapshot.category,
         crew_member: snapshot.crew_member,
+        crew_disabled: false,
         alive: snapshot.alive,
         base_graphics: snapshot.base_graphics.clone(),
         graphics_overlays: snapshot.graphics_overlays.clone(),
@@ -22364,7 +22490,7 @@ fn merge_physics_delta(target: &mut PhysicsDelta, source: &PhysicsDelta) {
 
 fn parse_scenario_command(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<ScenarioBatch, EngineError> {
     match value {
@@ -22407,7 +22533,7 @@ fn parse_scenario_command(
                     other => {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: format!("unexpected key `{other}`"),
                         });
                     }
@@ -22476,7 +22602,7 @@ fn truncate_to_i32(value: u64) -> i32 {
 
 fn parse_command(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<CommandBatch, EngineError> {
     match value {
@@ -22493,7 +22619,7 @@ fn parse_command(
 
 fn parse_command_from_proplist(
     definition: &str,
-    function: &'static str,
+    function: &str,
     map: HashMap<String, Value>,
 ) -> Result<CommandBatch, EngineError> {
     let mut batch = CommandBatch::default();
@@ -22564,7 +22690,7 @@ fn parse_command_from_proplist(
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!("unexpected key `{other}`"),
                 });
             }
@@ -22583,7 +22709,7 @@ fn ensure_action_update(update: &mut ObjectUpdate) -> &mut ActionUpdate {
 
 fn value_to_action(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<Option<ActionUpdate>, EngineError> {
     match value {
@@ -22592,7 +22718,7 @@ fn value_to_action(
         Value::Proplist(map) => parse_action_update(definition, function, map).map(Some),
         other => Err(EngineError::InvalidScriptOutput {
             definition: definition.to_string(),
-            function,
+            function: function.to_string(),
             detail: format!(
                 "expected string, proplist, or nil for action, got {}",
                 other.type_name()
@@ -22603,7 +22729,7 @@ fn value_to_action(
 
 fn parse_action_update(
     definition: &str,
-    function: &'static str,
+    function: &str,
     map: HashMap<String, Value>,
 ) -> Result<ActionUpdate, EngineError> {
     let mut update = ActionUpdate::default();
@@ -22614,7 +22740,7 @@ fn parse_action_update(
                 other => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: format!(
                             "expected string for action.name, got {}",
                             other.type_name()
@@ -22631,7 +22757,7 @@ fn parse_action_update(
                 if ticks < 0 {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: "action.ticks must be >= 0".to_string(),
                     });
                 }
@@ -22652,7 +22778,7 @@ fn parse_action_update(
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!("unexpected key `{other}` in action proplist"),
                 });
             }
@@ -22663,7 +22789,7 @@ fn parse_action_update(
 
 fn value_to_vector(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<Vector2, EngineError> {
     match value {
@@ -22673,7 +22799,7 @@ fn value_to_vector(
                 other => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: format!("expected int for x component, got {}", other.type_name()),
                     })
                 }
@@ -22683,7 +22809,7 @@ fn value_to_vector(
                 other => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: format!("expected int for y component, got {}", other.type_name()),
                     })
                 }
@@ -22692,7 +22818,7 @@ fn value_to_vector(
         }
         other => Err(EngineError::InvalidScriptOutput {
             definition: definition.to_string(),
-            function,
+            function: function.to_string(),
             detail: format!("expected array of two ints, got {}", other.type_name()),
         }),
     }
@@ -22700,7 +22826,7 @@ fn value_to_vector(
 
 fn value_to_physics_delta(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<PhysicsDelta, EngineError> {
     match value {
@@ -22715,7 +22841,7 @@ fn value_to_physics_delta(
                         other => {
                             return Err(EngineError::InvalidScriptOutput {
                                 definition: definition.to_string(),
-                                function,
+                                function: function.to_string(),
                                 detail: format!(
                                     "physics.gravity expects int or nil, got {}",
                                     other.type_name()
@@ -22726,7 +22852,7 @@ fn value_to_physics_delta(
                     other => {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: format!("unexpected physics key `{other}`"),
                         })
                     }
@@ -22736,7 +22862,7 @@ fn value_to_physics_delta(
         }
         other => Err(EngineError::InvalidScriptOutput {
             definition: definition.to_string(),
-            function,
+            function: function.to_string(),
             detail: format!(
                 "expected proplist or nil for physics, got {}",
                 other.type_name()
@@ -22747,14 +22873,14 @@ fn value_to_physics_delta(
 
 fn value_to_int(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<i32, EngineError> {
     match value {
         Value::Int(v) => Ok(v),
         other => Err(EngineError::InvalidScriptOutput {
             definition: definition.to_string(),
-            function,
+            function: function.to_string(),
             detail: format!("expected int, got {}", other.type_name()),
         }),
     }
@@ -22762,33 +22888,33 @@ fn value_to_int(
 
 fn value_to_direction(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<Direction, EngineError> {
     let raw = value_to_int(definition, function, value)?;
     Direction::from_script_value(raw).ok_or_else(|| EngineError::InvalidScriptOutput {
         definition: definition.to_string(),
-        function,
+        function: function.to_string(),
         detail: format!("unsupported direction value {raw}"),
     })
 }
 
 fn value_to_command_direction(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<CommandDirection, EngineError> {
     let raw = value_to_int(definition, function, value)?;
     CommandDirection::from_script_value(raw).ok_or_else(|| EngineError::InvalidScriptOutput {
         definition: definition.to_string(),
-        function,
+        function: function.to_string(),
         detail: format!("unsupported command_direction value {raw}"),
     })
 }
 
 fn value_to_object_reference(
     definition: &str,
-    function: &'static str,
+    function: &str,
     field: &str,
     value: Value,
 ) -> Result<Option<ObjectId>, EngineError> {
@@ -22812,7 +22938,7 @@ fn value_to_object_reference(
             Some(Value::Int(id)) if *id >= 0 => Ok(Some(ObjectId::new(*id as u64))),
             Some(other) => Err(EngineError::InvalidScriptOutput {
                 definition: definition.to_string(),
-                function,
+                function: function.to_string(),
                 detail: format!(
                     "expected int for action.{} proplist id, got {}",
                     field,
@@ -22823,7 +22949,7 @@ fn value_to_object_reference(
         },
         other => Err(EngineError::InvalidScriptOutput {
             definition: definition.to_string(),
-            function,
+            function: function.to_string(),
             detail: format!(
                 "expected object, int, proplist, or nil for action.{field}, got {}",
                 other.type_name()
@@ -22834,14 +22960,14 @@ fn value_to_object_reference(
 
 fn value_to_bool(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<bool, EngineError> {
     match value {
         Value::Bool(v) => Ok(v),
         other => Err(EngineError::InvalidScriptOutput {
             definition: definition.to_string(),
-            function,
+            function: function.to_string(),
             detail: format!("expected bool, got {}", other.type_name()),
         }),
     }
@@ -22849,7 +22975,7 @@ fn value_to_bool(
 
 fn value_to_spawns(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<Vec<SpawnConfig>, EngineError> {
     let array = match value {
@@ -22858,7 +22984,7 @@ fn value_to_spawns(
         other => {
             return Err(EngineError::InvalidScriptOutput {
                 definition: definition.to_string(),
-                function,
+                function: function.to_string(),
                 detail: format!("expected array for spawn list, got {}", other.type_name()),
             })
         }
@@ -22871,7 +22997,7 @@ fn value_to_spawns(
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!("spawn entry must be proplist, got {}", other.type_name()),
                 })
             }
@@ -22882,14 +23008,14 @@ fn value_to_spawns(
             Some(other) => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!("spawn definition must be string, got {}", other.type_name()),
                 })
             }
             None => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: "spawn entry missing `definition`".into(),
                 })
             }
@@ -22970,7 +23096,7 @@ fn value_to_spawns(
 
 fn value_to_commands(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<Vec<QueuedCommand>, EngineError> {
     let array = match value {
@@ -22978,7 +23104,7 @@ fn value_to_commands(
         other => {
             return Err(EngineError::InvalidScriptOutput {
                 definition: definition.to_string(),
-                function,
+                function: function.to_string(),
                 detail: format!("expected array for commands, got {}", other.type_name()),
             })
         }
@@ -22991,7 +23117,7 @@ fn value_to_commands(
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!(
                         "expected proplist for command entry, got {}",
                         other.type_name()
@@ -23014,7 +23140,7 @@ fn value_to_commands(
                     if raw_delay < 0 {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: "delay must be >= 0".into(),
                         });
                     }
@@ -23063,7 +23189,7 @@ fn value_to_commands(
                 other => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: format!("unexpected key `{other}` in command entry"),
                     });
                 }
@@ -23084,7 +23210,7 @@ fn value_to_commands(
 
 fn value_to_effect_commands(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<Vec<EffectCommand>, EngineError> {
     let entries = match value {
@@ -23093,7 +23219,7 @@ fn value_to_effect_commands(
         other => {
             return Err(EngineError::InvalidScriptOutput {
                 definition: definition.to_string(),
-                function,
+                function: function.to_string(),
                 detail: format!("expected array for effects, got {}", other.type_name()),
             })
         }
@@ -23106,7 +23232,7 @@ fn value_to_effect_commands(
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!("effect entry must be proplist, got {}", other.type_name()),
                 })
             }
@@ -23117,14 +23243,14 @@ fn value_to_effect_commands(
             Some(other) => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!("effects.op must be string, got {}", other.type_name()),
                 })
             }
             None => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: "effect entry missing `op`".into(),
                 })
             }
@@ -23136,7 +23262,7 @@ fn value_to_effect_commands(
                     map.remove("name")
                         .ok_or_else(|| EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: "effect add entry missing `name`".into(),
                         })?;
                 let name = match name_value {
@@ -23144,7 +23270,7 @@ fn value_to_effect_commands(
                     other => {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: format!(
                                 "effect name must be string, got {}",
                                 other.type_name()
@@ -23166,7 +23292,7 @@ fn value_to_effect_commands(
                         if interval < 0 {
                             return Err(EngineError::InvalidScriptOutput {
                                 definition: definition.to_string(),
-                                function,
+                                function: function.to_string(),
                                 detail: "effect interval must be >= 0".into(),
                             });
                         }
@@ -23181,7 +23307,7 @@ fn value_to_effect_commands(
                         if timer < 0 {
                             return Err(EngineError::InvalidScriptOutput {
                                 definition: definition.to_string(),
-                                function,
+                                function: function.to_string(),
                                 detail: "effect timer must be >= 0".into(),
                             });
                         }
@@ -23196,7 +23322,7 @@ fn value_to_effect_commands(
                     Some(other) => {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: format!(
                                 "effect command_target must be int or nil, got {}",
                                 other.type_name()
@@ -23211,7 +23337,7 @@ fn value_to_effect_commands(
                     Some(other) => {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: format!(
                                 "effect command_target_id must be string or nil, got {}",
                                 other.type_name()
@@ -23223,7 +23349,7 @@ fn value_to_effect_commands(
                 if let Some((key, _)) = map.into_iter().next() {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: format!("unexpected key `{}` in effect add entry", key),
                     });
                 }
@@ -23241,7 +23367,7 @@ fn value_to_effect_commands(
                     map.remove("name")
                         .ok_or_else(|| EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: "effect remove entry missing `name`".into(),
                         })?;
                 let name = match name_value {
@@ -23249,7 +23375,7 @@ fn value_to_effect_commands(
                     other => {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: format!(
                                 "effect name must be string, got {}",
                                 other.type_name()
@@ -23260,7 +23386,7 @@ fn value_to_effect_commands(
                 if let Some((key, _)) = map.into_iter().next() {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: format!("unexpected key `{}` in effect remove entry", key),
                     });
                 }
@@ -23270,7 +23396,7 @@ fn value_to_effect_commands(
                 if let Some((key, _)) = map.into_iter().next() {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: format!("unexpected key `{}` in effect clear entry", key),
                     });
                 }
@@ -23279,7 +23405,7 @@ fn value_to_effect_commands(
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!("unsupported effect op `{}`", other),
                 });
             }
@@ -23291,7 +23417,7 @@ fn value_to_effect_commands(
 
 fn value_to_landscape_commands(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<Vec<LandscapeCommand>, EngineError> {
     let entries = match value {
@@ -23300,7 +23426,7 @@ fn value_to_landscape_commands(
         other => {
             return Err(EngineError::InvalidScriptOutput {
                 definition: definition.to_string(),
-                function,
+                function: function.to_string(),
                 detail: format!(
                     "expected array for landscape commands, got {}",
                     other.type_name()
@@ -23316,7 +23442,7 @@ fn value_to_landscape_commands(
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!(
                         "landscape entry must be proplist, got {}",
                         other.type_name()
@@ -23330,14 +23456,14 @@ fn value_to_landscape_commands(
             Some(other) => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!("landscape.op must be string, got {}", other.type_name()),
                 })
             }
             None => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: "landscape entry missing `op`".into(),
                 })
             }
@@ -23350,7 +23476,7 @@ fn value_to_landscape_commands(
                     None => {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: "landscape lower entry missing `start`".into(),
                         })
                     }
@@ -23361,7 +23487,7 @@ fn value_to_landscape_commands(
                     None => {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: "landscape lower entry missing `height`".into(),
                         })
                     }
@@ -23374,7 +23500,7 @@ fn value_to_landscape_commands(
                     if width <= 0 {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: "landscape lower width must be > 0".into(),
                         });
                     }
@@ -23386,7 +23512,7 @@ fn value_to_landscape_commands(
                 if end <= start {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: "landscape lower end must be greater than start".into(),
                     });
                 }
@@ -23394,7 +23520,7 @@ fn value_to_landscape_commands(
                 if let Some((key, _)) = map.into_iter().next() {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: format!("unexpected key `{}` in landscape lower entry", key),
                     });
                 }
@@ -23407,7 +23533,7 @@ fn value_to_landscape_commands(
                     None => {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: "landscape set_liquid entry missing `column`".into(),
                         })
                     }
@@ -23421,7 +23547,7 @@ fn value_to_landscape_commands(
                 if let Some((key, _)) = map.into_iter().next() {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: format!("unexpected key `{}` in landscape set_liquid entry", key),
                     });
                 }
@@ -23434,7 +23560,7 @@ fn value_to_landscape_commands(
                     None => {
                         return Err(EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
-                            function,
+                            function: function.to_string(),
                             detail: "landscape clear_liquid entry missing `column`".into(),
                         })
                     }
@@ -23445,7 +23571,7 @@ fn value_to_landscape_commands(
                 if let Some((key, _)) = map.into_iter().next() {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
-                        function,
+                        function: function.to_string(),
                         detail: format!("unexpected key `{}` in landscape clear_liquid entry", key),
                     });
                 }
@@ -23455,7 +23581,7 @@ fn value_to_landscape_commands(
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!("unsupported landscape op `{other}`"),
                 });
             }
@@ -23467,7 +23593,7 @@ fn value_to_landscape_commands(
 
 fn value_to_liquid_segments(
     definition: &str,
-    function: &'static str,
+    function: &str,
     value: Value,
 ) -> Result<Vec<LiquidSegment>, EngineError> {
     let entries = match value {
@@ -23476,7 +23602,7 @@ fn value_to_liquid_segments(
         other => {
             return Err(EngineError::InvalidScriptOutput {
                 definition: definition.to_string(),
-                function,
+                function: function.to_string(),
                 detail: format!(
                     "landscape segments must be array or nil, got {}",
                     other.type_name()
@@ -23492,7 +23618,7 @@ fn value_to_liquid_segments(
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: format!(
                         "landscape segment must be proplist, got {}",
                         other.type_name()
@@ -23506,7 +23632,7 @@ fn value_to_liquid_segments(
                 .remove("top")
                 .ok_or_else(|| EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: "landscape segment missing `top`".into(),
                 })?;
 
@@ -23515,7 +23641,7 @@ fn value_to_liquid_segments(
                 .remove("bottom")
                 .ok_or_else(|| EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
-                    function,
+                    function: function.to_string(),
                     detail: "landscape segment missing `bottom`".into(),
                 })?;
 
@@ -23525,7 +23651,7 @@ fn value_to_liquid_segments(
         if let Some((key, _)) = segment_map.into_iter().next() {
             return Err(EngineError::InvalidScriptOutput {
                 definition: definition.to_string(),
-                function,
+                function: function.to_string(),
                 detail: format!("unexpected key `{}` in landscape segment entry", key),
             });
         }

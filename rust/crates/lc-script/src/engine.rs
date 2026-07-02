@@ -288,14 +288,38 @@ impl Engine {
             return;
         };
         self.var_decls.retain(|var_decl| {
-            if var_decl.kind == crate::ast::VarDeclKind::Static {
-                table
-                    .borrow_mut()
-                    .entry(var_decl.name.clone())
-                    .or_insert_with(|| crate::vm::value_cell(Value::Nil));
-                false
-            } else {
-                true
+            match var_decl.kind {
+                crate::ast::VarDeclKind::Static => {
+                    table
+                        .borrow_mut()
+                        .entry(var_decl.name.clone())
+                        .or_insert_with(|| crate::vm::value_cell(Value::Nil));
+                    false
+                }
+                // `static const` names are engine-global constants in C4Aul
+                // (every script sees them — Talker.c4d's _TLK_TimerInterval
+                // is read from GLOBAL funcs executing in other hosts).
+                // Initializers are constant expressions; literals and
+                // references to already-registered constants resolve here.
+                crate::ast::VarDeclKind::StaticConst => {
+                    let value = match &var_decl.init {
+                        Some(crate::ast::Expr::Literal(literal)) => {
+                            Value::from(literal.clone())
+                        }
+                        Some(crate::ast::Expr::Variable(name)) => table
+                            .borrow()
+                            .get(name)
+                            .map(|cell| cell.borrow().clone())
+                            .unwrap_or(Value::Nil),
+                        _ => Value::Nil,
+                    };
+                    table
+                        .borrow_mut()
+                        .entry(var_decl.name.clone())
+                        .or_insert_with(|| crate::vm::value_cell(value));
+                    false
+                }
+                _ => true,
             }
         });
     }
