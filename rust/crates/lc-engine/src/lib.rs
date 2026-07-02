@@ -21289,13 +21289,13 @@ impl Engine {
             }
         }
 
-        // Loaded objects keep their Objects.txt position verbatim
-        // (C4GameObjects::Load compiles and denumerates only — no
-        // collision resolution); cave/interior content sits below the
-        // column surface by design.
-        if !loaded {
-            self.apply_landscape(&mut object);
-        }
+        // No spawn-time landscape resolution AT ALL: C4Game::NewObject
+        // places the object exactly where Init+DoCon computed it
+        // (C4Game.cpp:1085-1127) — contacts resolve in movement. Loaded
+        // objects keep their Objects.txt position verbatim likewise. The
+        // GoldRush wagon (CreateObject(COAC,28,270) -> center 250, 20px
+        // above the road) FLOATS at first; snapping it to the surface
+        // displaced it and its 30+ contents (the (0,-20) live class).
         self.objects.push(object);
         self.note_objects_changed();
         let index = self.objects.len() - 1;
@@ -33079,9 +33079,20 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             engine.spawn_object(SpawnConfig::new("Slider").with_position(Vector2::new(5, 12)))?;
         let idx = engine.find_object_index(id).expect("object exists");
 
-        assert_eq!(engine.objects[idx].state.position.y, 10);
-        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 49152);
-        assert_eq!(engine.objects[idx].state.velocity.x, 1);
+        // C4Game::NewObject performs NO landscape resolution: the object
+        // spawns exactly where Init+DoCon put it — even inside solid —
+        // and keeps the script-set velocity; contacts resolve in movement
+        // (C4Game.cpp:1085-1127). The old spawn-time snap+friction was a
+        // port-ism (it displaced the GoldRush wagon by 20px).
+        assert_eq!(engine.objects[idx].state.position.y, 12);
+        // SetXDir's default precision is 10 (FnSetXDir, C4Script.cpp:705):
+        // 15 -> 1.5 px/frame.
+        assert_eq!(
+            engine.objects[idx].fixed_velocity.x.val(),
+            98_304,
+            "SetXDir(15) survives the spawn untouched"
+        );
+        assert_eq!(engine.objects[idx].state.velocity.x, 2);
         Ok(())
     }
 
