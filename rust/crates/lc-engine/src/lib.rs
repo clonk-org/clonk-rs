@@ -5115,10 +5115,9 @@ impl Definition {
                 specs.insert(action_name.clone(), spec);
                 visuals.insert(action_name.clone(), graphics);
             }
-            let default_action = action_map
-                .default_action
-                .clone()
-                .or_else(|| specs.keys().next().cloned());
+            // Real ActMaps carry no default action: C++ objects start
+            // ActIdle (C4Object::Init). Only DSL manifests set one.
+            let default_action = action_map.default_action.clone();
             definition.configure_actions(default_action.clone(), specs);
             definition.configure_action_graphics(visuals);
         }
@@ -7941,6 +7940,9 @@ pub struct Engine {
     objects: Vec<Object>,
     next_object_id: u64,
     pub(crate) rng: LcgRng,
+    /// Game.Parameters.RandomSeed - kept for the game-start re-fix
+    /// (C4Game::Synchronize, C4Game.cpp:3695).
+    random_seed: u64,
     frame: u64,
     landscape: Option<Landscape>,
     sectors: Option<SectorMap>,
@@ -9197,6 +9199,7 @@ impl Engine {
             objects: Vec::new(),
             next_object_id: 1,
             rng: LcgRng::seed_from_u64(seed),
+            random_seed: seed,
             frame: 0,
             landscape: None,
             sectors: None,
@@ -18716,6 +18719,57 @@ impl Engine {
         self.environment.meteorite = meteorite;
         self.environment.volcano = volcano;
         self.environment.earthquake = earthquake;
+    }
+
+    /// Debug/test helper: (definition, action name, phase, position, fix)
+    /// for one object id.
+    pub fn debug_object_by_id(&self, id: u64) -> Option<(String, String, i32, Vector2, i32)> {
+        self.objects
+            .iter()
+            .find(|object| object.id.as_u64() == id)
+            .map(|object| {
+                (
+                    object.definition_id.clone(),
+                    object.state.action.name.clone(),
+                    object.state.action.phase,
+                    object.state.position,
+                    crate::math::fixtoi(object.fixed_position.y),
+                )
+            })
+    }
+
+    /// Debug/test helper: the action names + default of a definition's
+    /// library.
+    pub fn debug_action_library(&self, id: &str) -> Option<(String, Vec<String>)> {
+        self.definitions.get(&DefinitionId::from(id)).map(|def| {
+            let library = def.action_library();
+            (
+                library.default_action().to_string(),
+                library.specs().keys().cloned().collect(),
+            )
+        })
+    }
+
+    /// C4Game::Init tail (C4Game.cpp:474-475): SyncClearance +
+    /// Synchronize(false) run after InitGame and before InitPlayers.
+    /// Per object (C4Object::SyncClearance, C4Object.cpp:3803-3815) the
+    /// fixed position collapses to itofix(x,y,r) — discarding loaded
+    /// FixX/FixY/FixR — and transient contact state clears; then the
+    /// synced RNG re-fixes to the seed (C4Game.cpp:3695), erasing the
+    /// weather-init draws' ledger offset (their VALUES stay).
+    pub(crate) fn game_start_synchronize(&mut self) {
+        for object in &mut self.objects {
+            object.fixed_position = crate::math::FixedVec2 {
+                x: itofix(object.state.position.x),
+                y: itofix(object.state.position.y),
+            };
+            object.fixed_rotation = itofix(object.state.rotation);
+            // t_contact/InMat are recomputed per tick in this engine; the
+            // C++ resets (C4Object.cpp:3805-3807) have no persistent
+            // counterpart here. OCF refreshes on the next tick's compute.
+            object.upright_t_attach = 0;
+        }
+        self.rng = LcgRng::seed_from_u64(self.random_seed);
     }
 
     /// Debug/test helper: a clone of the synced RNG for ledger-position

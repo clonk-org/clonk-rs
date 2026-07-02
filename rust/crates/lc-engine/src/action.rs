@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::{math::C4Fixed, ObjectId};
 
-const DEFAULT_ACTION_NAME: &str = "Idle";
+pub(crate) const DEFAULT_ACTION_NAME: &str = "Idle";
 
 /// Configuration for how an action should advance and transition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -263,16 +263,12 @@ pub struct ActionLibrary {
 
 impl ActionLibrary {
     pub fn new(default_action: Option<String>, mut specs: HashMap<String, ActionSpec>) -> Self {
-        let default = default_action
-            .or_else(|| {
-                if specs.contains_key(DEFAULT_ACTION_NAME) {
-                    Some(DEFAULT_ACTION_NAME.to_string())
-                } else {
-                    None
-                }
-            })
-            .or_else(|| specs.keys().next().cloned())
-            .unwrap_or_else(|| DEFAULT_ACTION_NAME.to_string());
+        // C++ has no default-action concept: objects start ActIdle unless
+        // a script or the loader sets one (C4Object::Init leaves Act =
+        // ActIdle). Only the synthetic fixture DSL supplies an explicit
+        // default; never fabricate one from the map (HashMap order is
+        // nondeterministic).
+        let default = default_action.unwrap_or_else(|| DEFAULT_ACTION_NAME.to_string());
 
         if !specs.contains_key(&default) {
             specs.insert(default.clone(), ActionSpec::default());

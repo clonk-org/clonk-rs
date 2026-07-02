@@ -758,6 +758,11 @@ impl Scenario {
                 Err(other) => return Err(other.into()),
             }
         }
+        // C4Game::Init tail: SyncClearance + Synchronize AFTER InitGame,
+        // BEFORE InitPlayers (C4Game.cpp:474-475) — collapse every fixed
+        // position to itofix(x,y,r) and re-fix the synced RNG. A no-op
+        // for synthetic scenarios (created spawns already satisfy both).
+        engine.game_start_synchronize();
         Ok(created)
     }
 
@@ -8403,12 +8408,14 @@ global func Step(state, frame, random)
         assert_eq!(environment.volcano, volcano);
         assert_eq!(environment.earthquake, earthquake);
 
-        // The ledger POSITION must line up too: the next synced draw on
-        // both streams agrees.
+        // After the draws, C4Game::Synchronize re-fixes the ledger
+        // (C4Game.cpp:474,3695): the post-apply position is a FRESH
+        // FixRandom(seed) stream, not the post-draw position.
+        let mut fresh = crate::rng::LcgRng::seed_from_u64(7);
         assert_eq!(
             engine.debug_rng_clone().random(1_000_000),
-            replay.random(1_000_000),
-            "the ledger advanced by exactly the C++ init draws"
+            fresh.random(1_000_000),
+            "game-start Synchronize re-fixes the ledger after the weather draws"
         );
     }
 
@@ -8578,10 +8585,13 @@ global func Step(state, frame, random)
         // Ingestion snapshot before any tick.
         let mover = idx_of(&engine, 80);
         assert!(engine.objects[mover].state.mobile, "Mobile=1 sticks");
+        // FixX/FixY load verbatim (C4Object.cpp:2762) but the game-start
+        // SyncClearance collapses them to itofix(x,y) before InitPlayers
+        // (C4Object.cpp:3810, C4Game.cpp:474) — 15 px exactly.
         assert_eq!(
             engine.objects[mover].fixed_position.x.val(),
-            999_424,
-            "FixX restores the exact sub-pixel position (C4Object.cpp:2762)"
+            crate::math::itofix(15).val(),
+            "SyncClearance reduces FixX to itofix(x) at game start"
         );
         assert_eq!(
             engine.objects[mover].state.position,
@@ -8605,9 +8615,11 @@ global func Step(state, frame, random)
         );
         let spinner = idx_of(&engine, 82);
         assert_eq!(engine.objects[spinner].state.rotation, 90);
+        // fix_r also collapses to itofix(r) at game start
+        // (C4Object.cpp:3811).
         assert_eq!(
             engine.objects[spinner].fixed_rotation.val(),
-            5_914_624,
+            crate::math::itofix(90).val(),
             "FixR restores the exact rotation accumulator (C4Object.cpp:2764)"
         );
         assert_eq!(
@@ -8616,12 +8628,16 @@ global func Step(state, frame, random)
             "RDir restores the angular velocity (C4Object.cpp:2767)"
         );
 
-        // Frame 1: the Mobile mover integrates from its sub-pixel state
-        // (999424 + 45875 = 1045299 -> 15.95 -> pixel 16, fixtoi rounds to
-        // nearest); the frozen object holds position AND its stale dirs.
+        // Frame 1: the Mobile mover integrates from its game-start
+        // SyncClearance'd position (itofix(15) + 45875 = 1028915 -> 15.70
+        // -> pixel 16, fixtoi rounds to nearest); the frozen object holds
+        // position AND its stale dirs.
         engine.tick().expect("tick succeeds");
         let mover = idx_of(&engine, 80);
-        assert_eq!(engine.objects[mover].fixed_position.x.val(), 1_045_299);
+        assert_eq!(
+            engine.objects[mover].fixed_position.x.val(),
+            crate::math::itofix(15).val() + 45_875
+        );
         assert_eq!(engine.objects[mover].state.position.x, 16);
         let frozen = idx_of(&engine, 81);
         assert_eq!(engine.objects[frozen].state.position.x, 25);
@@ -9159,3 +9175,137 @@ global func Step(state, frame, random)
     }
 }
 
+
+#[cfg(test)]
+mod game_start_sync {
+    use super::*;
+    use tempfile::tempdir;
+
+    struct ProbeResolver {
+        roots: Vec<std::path::PathBuf>,
+    }
+    impl LegacyDefinitionResolver for ProbeResolver {
+        fn resolve_definition_groups(
+            &self,
+            scenario: &Group,
+            identifier: &str,
+        ) -> Result<Vec<Group>, ScenarioError> {
+            let normalized = identifier.replace('\\', "/");
+            let path = std::path::Path::new(&normalized);
+            let mut groups = Vec::new();
+            if let Ok(child) = scenario.open_child(path) {
+                groups.push(child);
+            }
+            for root in &self.roots {
+                let candidate = root.join(path);
+                if candidate.exists() {
+                    groups.push(Group::open(&candidate)?);
+                }
+            }
+            Ok(groups)
+        }
+    }
+
+    fn write_palm_def(defs: &std::path::Path) {
+        let palm = defs.join("Palm.c4d");
+        std::fs::create_dir_all(&palm).expect("palm dir");
+        std::fs::write(
+            palm.join("DefCore.txt"),
+            "[DefCore]\nid=PALM\nName=Palm\nCategory=1\nWidth=40\nHeight=56\nOffset=-20,-28\nVertices=1\nVertexY=22\n",
+        )
+        .expect("defcore");
+        std::fs::write(
+            palm.join("ActMap.txt"),
+            "[Action]\nName=Still\nDelay=4\nLength=1\nNextAction=Still\n\n[Action]\nName=Breeze\nDelay=2\nLength=20\nNextAction=Breeze\n",
+        )
+        .expect("actmap");
+    }
+
+    fn load(dir: &std::path::Path) -> (Engine, Scenario) {
+        let resolver = ProbeResolver {
+            roots: vec![dir.to_path_buf()],
+        };
+        let scenario_dir = dir.join("Sync.c4s");
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(11);
+        scenario.apply(&mut engine).expect("scenario applies");
+        (engine, scenario)
+    }
+
+    fn write_scenario(dir: &std::path::Path, objects: &str) {
+        let scenario_dir = dir.join("Sync.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Sync\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("core");
+        std::fs::write(scenario_dir.join("Objects.txt"), objects).expect("objects");
+    }
+
+    // C4Game::Init runs SyncClearance + Synchronize AFTER InitGame and
+    // BEFORE InitPlayers (C4Game.cpp:474-475): every object's fixed
+    // position collapses to itofix(x,y,r) (C4Object::SyncClearance,
+    // C4Object.cpp:3803-3815) — grown trees carry y != fixtoi(fix_y) in
+    // the savefile because DoCon adjusts y without touching fix_y — and
+    // the loaded action restores only when the name resolves in the
+    // ActMap (C4Object.cpp:2840-2849); C4Action::Default leaves Name
+    // empty, so records without Action= stay ActIdle (no def default:
+    // C++ has no such concept). GoldRush oracle: TRE2 #3 (no Action=,
+    // FixY 28px below Y) sits at (204,258) Idle in C++; PLM1 #42 keeps
+    // Action=Breeze Phase=18.
+    #[test]
+    fn loaded_objects_sync_clearance_and_action_rules_like_cpp() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        write_palm_def(&defs);
+        write_scenario(
+            dir.path(),
+            "[Object]\nid=PALM\nNumber=3\nCategory=1\nX=204\nY=258\nFixX=f1129054208\nFixY=f1133445120\n\n\
+             [Object]\nid=PALM\nNumber=42\nCategory=1\nX=981\nY=280\nAction=Breeze\nPhase=18\nActionTime=500\n\n\
+             [Object]\nid=PALM\nNumber=43\nCategory=1\nX=100\nY=100\nAction=Stand\nPhase=2\n",
+        );
+        let (engine, _) = load(dir.path());
+
+        let (_, action, phase, position, fix_y) =
+            engine.debug_object_by_id(3).expect("tree exists");
+        assert_eq!(action, crate::action::DEFAULT_ACTION_NAME, "no Action= -> ActIdle");
+        assert_eq!(position, Vector2::new(204, 258), "saved center kept");
+        assert_eq!(
+            fix_y, 258,
+            "SyncClearance collapses fix to itofix(y) (C4Object.cpp:3810)"
+        );
+
+        let (_, action, phase, ..) = engine.debug_object_by_id(42).expect("palm exists");
+        assert_eq!(action, "Breeze", "resolved saved action survives");
+        assert_eq!(phase, 18, "saved phase survives");
+
+        let (_, action, phase, ..) = engine.debug_object_by_id(43).expect("third exists");
+        assert_eq!(
+            action,
+            crate::action::DEFAULT_ACTION_NAME,
+            "unresolvable saved action (CCAN Stand) falls to Idle, not a def default"
+        );
+        assert_eq!(phase, 0, "Idle carries no phase");
+    }
+
+    // C4Game::Synchronize re-fixes the RNG AFTER the weather-init draws
+    // (C4Game.cpp:3695): the post-apply ledger is a FRESH FixRandom(seed)
+    // stream — the join draws from position zero.
+    #[test]
+    fn game_start_refixes_the_ledger_after_weather_draws_like_cpp() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        write_palm_def(&defs);
+        write_scenario(dir.path(), "");
+        let (engine, _) = load(dir.path());
+
+        let mut fresh = crate::rng::LcgRng::seed_from_u64(11);
+        assert_eq!(
+            engine.debug_rng_clone().random(1_000_000),
+            fresh.random(1_000_000),
+            "post-apply ledger = fresh FixRandom(seed) (C4Game.cpp:3695)"
+        );
+    }
+}
