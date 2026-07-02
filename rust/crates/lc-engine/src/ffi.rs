@@ -2162,35 +2162,6 @@ pub extern "C" fn lc_engine_runtime_path_free(buffer: *mut LcEngineRuntimePathRe
     }
 }
 
-/// Compares the C++ synced-RNG registers (RandomHold/RandomCount,
-/// C4Random.h:29-30) against the runtime engine's ledger each frame and
-/// logs the FIRST divergence — the ledger is the root cause behind
-/// every Random-driven AI decision split (MONS Activity etc.).
-#[no_mangle]
-pub extern "C" fn lc_engine_runtime_check_rng(
-    handle: *mut RuntimeHandle,
-    frame: u64,
-    hold: u32,
-    count: i32,
-) -> bool {
-    let Some(runtime) = (unsafe { handle.as_mut() }) else {
-        return false;
-    };
-    let rng = runtime.engine.debug_rng_clone();
-    let matches = rng.hold == hold && rng.count == count;
-    if !matches && !runtime.rng_mismatch_reported {
-        runtime.rng_mismatch_reported = true;
-        tracing::error!(
-            frame,
-            rust_hold = rng.hold,
-            rust_count = rng.count,
-            cpp_hold = hold,
-            cpp_count = count,
-            "synced RNG ledger diverged"
-        );
-    }
-    matches
-}
 
 #[no_mangle]
 pub extern "C" fn lc_engine_runtime_compare_snapshot(
@@ -2218,6 +2189,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     network_packet_count: usize,
     controls: *const *const c_char,
     control_count: usize,
+    rng_hold: u32,
+    rng_count: i32,
     error_out: *mut *mut c_char,
 ) -> bool {
     let Some(runtime) = (unsafe { handle.as_mut() }) else {
@@ -2272,6 +2245,23 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             expected.controls = entries.clone();
         } else {
             expected.controls.clear();
+    // The synced-RNG registers must match once both engines completed the
+    // frame (C4Random.h:29-30) — report the FIRST divergence; a ledger slip
+    // precedes and explains most downstream state diffs.
+    {
+        let rng = runtime.engine.debug_rng_clone();
+        if (rng.hold != rng_hold || rng.count != rng_count) && !runtime.rng_mismatch_reported {
+            runtime.rng_mismatch_reported = true;
+            tracing::error!(
+                frame,
+                rust_hold = rng.hold,
+                rust_count = rng.count,
+                cpp_hold = rng_hold,
+                cpp_count = rng_count,
+                "synced RNG ledger diverged"
+            );
+        }
+    }
         }
         if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
             set_error(error_out, detail);
@@ -2964,7 +2954,10 @@ global func Step(state, frame, random)
         assert_eq!(recorded.effects.len(), 1);
         assert_eq!(recorded.owner, -1);
         assert!(recorded.crew_member);
-        assert_eq!(recorded.action.ticks, 2);
+        // The ABI action_ticks slot carries C4Object Action.Time (the
+        // bridge exports obj->Action.Time); the phase-delay counter is
+        // not transported.
+        assert_eq!(recorded.action.time, 2);
 
         let effect = &recorded.effects[0];
         assert_eq!(effect.name, "FxFire");

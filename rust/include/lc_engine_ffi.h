@@ -164,6 +164,10 @@ void lc_engine_recorder_record(
     size_t crew_selection_count,
     const LcEngineCrewRoleSnapshot *crew_roles,
     size_t crew_role_count,
+    const int32_t *known_crew_owners,
+    size_t known_crew_owner_count,
+    const int32_t *eliminated_crew_owners,
+    size_t eliminated_crew_owner_count,
     const LcEngineHudPlayerSnapshot *hud_players,
     size_t hud_player_count,
     const LcEngineSurfaceSnapshot *surfaces,
@@ -171,11 +175,7 @@ void lc_engine_recorder_record(
     const LcEngineNetworkPacketSnapshot *network_packets,
     size_t network_packet_count,
     const char *const *controls,
-    size_t control_count,
-    const int32_t *known_crew_owners,
-    size_t known_crew_owner_count,
-    const int32_t *eliminated_crew_owners,
-    size_t eliminated_crew_owner_count);
+    size_t control_count);
 char *lc_engine_recorder_export_json(LcEngineRecorderHandle *handle);
 void lc_engine_recorder_free(LcEngineRecorderHandle *handle);
 
@@ -224,12 +224,6 @@ bool lc_engine_runtime_record_control_ini(
     const char *ini_data,
     char **error_message);
 bool lc_engine_runtime_reset(LcEngineRuntimeHandle *handle, char **error_message);
-bool lc_engine_runtime_check_rng(
-    LcEngineRuntimeHandle *handle,
-    uint64_t frame,
-    uint32_t hold,
-    int32_t count);
-
 bool lc_engine_runtime_advance_to_frame(
     LcEngineRuntimeHandle *handle,
     uint64_t frame,
@@ -325,6 +319,10 @@ bool lc_engine_runtime_compare_snapshot(
     size_t crew_selection_count,
     const LcEngineCrewRoleSnapshot *crew_roles,
     size_t crew_role_count,
+    const int32_t *known_crew_owners,
+    size_t known_crew_owner_count,
+    const int32_t *eliminated_crew_owners,
+    size_t eliminated_crew_owner_count,
     const LcEngineHudPlayerSnapshot *hud_players,
     size_t hud_player_count,
     const LcEngineSurfaceSnapshot *surfaces,
@@ -333,10 +331,8 @@ bool lc_engine_runtime_compare_snapshot(
     size_t network_packet_count,
     const char *const *controls,
     size_t control_count,
-    const int32_t *known_crew_owners,
-    size_t known_crew_owner_count,
-    const int32_t *eliminated_crew_owners,
-    size_t eliminated_crew_owner_count,
+    uint32_t rng_hold,
+    int32_t rng_count,
     char **error_message);
 char *lc_engine_runtime_export_snapshot_json(
     LcEngineRuntimeHandle *handle,

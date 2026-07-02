@@ -1,3 +1,4 @@
+#include "C4Random.h"
 #include "RustEngineBridge.h"
 
 #ifdef USE_RUST_ENGINE_VALIDATION
@@ -2070,6 +2071,10 @@ void OnFrame(C4Game &game) {
             crew_selection.size(),
             crew_role_data,
             crew_roles.size(),
+            known_owners,
+            buffer.known_crew_owners.size(),
+            eliminated_owners,
+            buffer.eliminated_crew_owners.size(),
             hud_player_data,
             hud_players.size(),
             surface_data,
@@ -2077,11 +2082,7 @@ void OnFrame(C4Game &game) {
             network_data,
             network_count,
             control_data,
-            control_count,
-            known_owners,
-            buffer.known_crew_owners.size(),
-            eliminated_owners,
-            buffer.eliminated_crew_owners.size());
+            control_count);
     }
 
     if (g_runtime && !g_runtime_disabled) {
@@ -2118,6 +2119,10 @@ void OnFrame(C4Game &game) {
                     crew_selection.size(),
                     crew_role_data,
                     crew_roles.size(),
+                    known_owners,
+                    buffer.known_crew_owners.size(),
+                    eliminated_owners,
+                    buffer.eliminated_crew_owners.size(),
                     hud_player_data,
                     hud_players.size(),
                     surface_data,
@@ -2126,10 +2131,8 @@ void OnFrame(C4Game &game) {
                     network_count,
                     control_data,
                     control_count,
-                    known_owners,
-                    buffer.known_crew_owners.size(),
-                    eliminated_owners,
-                    buffer.eliminated_crew_owners.size(),
+                    RandomHold,
+                    RandomCount,
                     &error_message)) {
                 RustStringPtr error = MakeString(error_message);
                 if (error) {
