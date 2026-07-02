@@ -565,6 +565,24 @@ full-scenario shadow-diff (see Parity harnesses).
   - the headless world lacks ground under some walkers (monsters jump
   where live C++ walks).
 
+- **2026-07-02 sixth wave — the intro movie machinery runs:** the
+  scenario Script%d counter is ported (C4GameScriptHost::Execute,
+  every 10th frame while Game.Script.Go; ScriptGo threads through the
+  host outcome), Script1 fires StartMovie and the Talker/Movie effect
+  chain executes to 120 ticks with zero warnings. Fixed on the way: the
+  parser dropped every declarator after the first in `static const A =
+  X, B = Y;` (initializers parsed at the comma-sequence level);
+  static-const names now register as engine-global constants like the
+  C4Aul link; FinishCommand/SetCrewEnabled(CrewDisabled state)/
+  SetPlrView/CloseMenu host fns; GetPlayerByIndex arg padding; crew
+  lists are NEWEST-first like C4ObjectList stMain (GetCrew order,
+  GetHiRank tie-break - the wagon rider is now the same crew member in
+  both engines). Wall holds at 27 (the compare stops at frame 1, before
+  the movie): walker fix_x half-steps, the wagon/horse/rider action
+  variants (Ride-vs-RideStill, horse Turn), trapper placement -4px,
+  tree Breeze/Still, 702's ground (solid-mask/landscape), owner/effects
+  singletons, vertices 3.
+
 ## Gates
 
 - **`cargo test --workspace`: GREEN** (~1240 pass, cargo exit 0). The old
