@@ -18665,6 +18665,65 @@ impl Engine {
         ObjectId::new(id)
     }
 
+    /// C4Weather::Init's scenario evaluates (C4Weather.cpp:36-70): the
+    /// synced-RNG init draws in exact order — Season, YearSpeed, Climate
+    /// (100 - value - 50), Wind (= TargetWind), the NoInitialize-gated
+    /// rain block (the gate Rain.Evaluate plus per-cloud
+    /// Random(320)/Random(GBackWdt)/Rain.Evaluate; LaunchCloud object
+    /// creation is NOT modeled yet), Lightning, then the Disasters
+    /// (Meteorite/Volcano/Earthquake). Replaying these keeps the whole
+    /// ledger aligned with C++ from frame 0.
+    pub(crate) fn apply_weather_init(&mut self, init: &crate::scenario::LegacyWeatherInit) {
+        let season = init.season.evaluate(&mut self.rng);
+        let year_speed = init.year_speed.evaluate(&mut self.rng);
+        let climate = 100 - init.climate.evaluate(&mut self.rng) - 50;
+        let wind = init.wind.evaluate(&mut self.rng);
+        if !init.no_initialize {
+            let rain = init.rain.evaluate(&mut self.rng);
+            if rain != 0 {
+                let width = self
+                    .landscape
+                    .as_ref()
+                    .map(|landscape| landscape.width() as i32)
+                    .unwrap_or(0);
+                let clouds = (width / 500).min(5);
+                for _ in 0..clouds.max(0) {
+                    let _width = width / 15 + self.rng.random(320);
+                    let _x = self.rng.random(width.max(1));
+                    let _strength = init.rain.evaluate(&mut self.rng);
+                    // LaunchCloud (C4Weather.cpp:104+) is not modeled —
+                    // only its ledger draws are replayed.
+                }
+                tracing::warn!(
+                    clouds,
+                    "weather-init rain clouds: ledger draws replayed, LaunchCloud objects not modeled"
+                );
+            }
+            self.environment.precipitation = rain.clamp(0, 100) as u8 as i32;
+        }
+        let lightning = init.lightning.evaluate(&mut self.rng);
+        let meteorite = init.meteorite.evaluate(&mut self.rng);
+        let volcano = init.volcano.evaluate(&mut self.rng);
+        let earthquake = init.earthquake.evaluate(&mut self.rng);
+
+        self.environment.season = season.clamp(0, 100);
+        self.environment.year_speed = year_speed;
+        self.environment.climate = climate;
+        self.environment.temperature = climate;
+        self.environment.wind = wind;
+        self.environment.wind_target = wind;
+        self.environment.lightning = lightning;
+        self.environment.meteorite = meteorite;
+        self.environment.volcano = volcano;
+        self.environment.earthquake = earthquake;
+    }
+
+    /// Debug/test helper: a clone of the synced RNG for ledger-position
+    /// assertions.
+    pub fn debug_rng_clone(&self) -> crate::rng::LcgRng {
+        self.rng.clone()
+    }
+
     /// Debug helper: (id, definition) rows at or above `min_id`, sorted —
     /// the creation-order forensics feed for the numbering-skew epic.
     pub fn spawn_dump_from(&self, min_id: u64) -> Vec<(u64, String)> {

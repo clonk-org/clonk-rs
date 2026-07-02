@@ -179,7 +179,10 @@ pub struct Scenario {
     standard_names: Option<String>,
     /// `[Landscape] MapZoom` kept as a C4SVal: ScenarioInit evaluates it
     /// per configured start coordinate (C4Player.cpp:713-714).
-    map_zoom: LegacyC4SVal,
+    map_zoom: LegacyC4SVal,    /// The C4Weather::Init scenario evaluates (C4Weather.cpp:36-70):
+    /// present only for legacy scenario loads — `apply` replays the
+    /// synced-RNG init draws so the ledger matches C++ from frame 0.
+    pub(crate) weather_init: Option<LegacyWeatherInit>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -409,6 +412,7 @@ impl Scenario {
         let initial_spawns = collect_legacy_objects(group, &collected)?;
         let physics = derive_legacy_physics(&manifest)?;
         let environment = derive_legacy_environment(&manifest)?;
+        let weather_init = derive_legacy_weather_init(&manifest)?;
 
         Ok(Self {
             name: manifest.title,
@@ -420,6 +424,7 @@ impl Scenario {
             landscape,
             physics,
             environment: Some(environment),
+            weather_init: Some(weather_init),
             sky: None,
             script,
             objectives: ScenarioObjectives::from_legacy_game(&manifest.core.game),
@@ -519,6 +524,13 @@ impl Scenario {
         }
 
         engine.set_environment(self.environment.unwrap_or_default());
+        if let Some(weather_init) = self.weather_init {
+            // C4Weather::Init runs at the END of C4Game::InitGame with the
+            // ledger freshly FixRandom'd after landscape creation
+            // (C4Landscape.cpp:734) — the Rust apply draws nothing before
+            // this point, so the ledger positions line up.
+            engine.apply_weather_init(&weather_init);
+        }
         if let Some(sky) = &self.sky {
             engine.set_sky(sky.settings.clone());
         } else {
@@ -1024,6 +1036,7 @@ impl Scenario {
             landscape,
             physics,
             environment,
+            weather_init: None,
             sky,
             script,
             objectives: ScenarioObjectives::default(),
@@ -2956,6 +2969,44 @@ fn derive_legacy_physics(
     let mut physics = PhysicsSettings::default();
     physics.gravity = gravity.base();
     Ok(Some(physics))
+}
+
+/// The C4SVals C4Weather::Init evaluates at scenario start
+/// (C4Weather.cpp:36-70) plus the NoInitialize gate for the rain-cloud
+/// block (:49-58).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LegacyWeatherInit {
+    pub(crate) season: LegacyC4SVal,
+    pub(crate) year_speed: LegacyC4SVal,
+    pub(crate) climate: LegacyC4SVal,
+    pub(crate) wind: LegacyC4SVal,
+    pub(crate) rain: LegacyC4SVal,
+    pub(crate) lightning: LegacyC4SVal,
+    pub(crate) meteorite: LegacyC4SVal,
+    pub(crate) volcano: LegacyC4SVal,
+    pub(crate) earthquake: LegacyC4SVal,
+    pub(crate) no_initialize: bool,
+}
+
+fn derive_legacy_weather_init(
+    manifest: &LegacyScenarioManifest,
+) -> Result<LegacyWeatherInit, ScenarioError> {
+    let weather = manifest.sections.get("weather");
+    let disasters = manifest.sections.get("disasters");
+    // C4SWeather::Default (C4Scenario.cpp:372-379) and
+    // C4SDisasters::Default (:427-432); C4SVal::Default = (0,0,0,100).
+    Ok(LegacyWeatherInit {
+        season: legacy_c4s_value(weather, "startseason", LegacyC4SVal::new(50, 50, 0, 100))?,
+        year_speed: legacy_c4s_value(weather, "yearspeed", LegacyC4SVal::new(50, 0, 0, 100))?,
+        climate: legacy_c4s_value(weather, "climate", LegacyC4SVal::new(50, 10, 0, 100))?,
+        wind: legacy_c4s_value(weather, "wind", LegacyC4SVal::new(0, 70, -100, 100))?,
+        rain: legacy_c4s_value(weather, "rain", LegacyC4SVal::new(0, 0, 0, 100))?,
+        lightning: legacy_c4s_value(weather, "lightning", LegacyC4SVal::new(0, 0, 0, 100))?,
+        meteorite: legacy_c4s_value(disasters, "meteorite", LegacyC4SVal::new(0, 0, 0, 100))?,
+        volcano: legacy_c4s_value(disasters, "volcano", LegacyC4SVal::new(0, 0, 0, 100))?,
+        earthquake: legacy_c4s_value(disasters, "earthquake", LegacyC4SVal::new(0, 0, 0, 100))?,
+        no_initialize: manifest.core.head.no_initialize,
+    })
 }
 
 fn derive_legacy_environment(
@@ -6084,6 +6135,7 @@ global func Step(state, frame, random)
             landscape: None,
             physics: None,
             environment: None,
+            weather_init: None,
             sky: None,
             script: Some(ScenarioScriptSource {
                 name: "Script.c".into(),
@@ -6173,6 +6225,7 @@ global func Step(state, frame, random)
             landscape: None,
             physics: None,
             environment: None,
+            weather_init: None,
             sky: None,
             script: Some(ScenarioScriptSource {
                 name: "Script.c".into(),
@@ -8288,6 +8341,77 @@ global func Step(state, frame, random)
         );
     }
 
+    // C4Weather::Init at scenario start draws from the SYNCED ledger
+    // (C4Weather.cpp:36-70): Season, YearSpeed, Climate, Wind (the value
+    // trees read through GetWind), the NoInitialize-gated rain block, then
+    // Lightning and the Disasters. Every C4SVal::Evaluate draws
+    // Random(2*Rnd+1) even for Rnd=0 (C4Scenario.cpp:43-46), so the whole
+    // RNG stream shifts if any draw is skipped.
+    #[test]
+    fn scenario_apply_replays_the_weather_init_ledger_like_cpp() {
+        let dir = tempdir().expect("tempdir");
+        let defs_root = dir.path().join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=16\n",
+        )
+        .expect("write defcore");
+
+        let scenario_dir = dir.path().join("Windy.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        // GoldRush-shaped: NoInitialize=1 skips the rain block entirely
+        // (C4Weather.cpp:49) — 8 draws total.
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Windy\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Weather]\nClimate=10,0\nStartSeason=44,0\nYearSpeed=0\nWind=0,75\n",
+        )
+        .expect("write scenario core");
+
+        let mut engine = Engine::with_seed(7);
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        // Replay the exact C++ draw order on a twin RNG.
+        let mut replay = crate::rng::LcgRng::seed_from_u64(7);
+        let season = LegacyC4SVal::new(44, 0, 0, 100).evaluate(&mut replay);
+        let year_speed = LegacyC4SVal::new(0, 0, 0, 100).evaluate(&mut replay);
+        let climate = 100 - LegacyC4SVal::new(10, 0, 0, 100).evaluate(&mut replay) - 50;
+        let wind = LegacyC4SVal::new(0, 75, -100, 100).evaluate(&mut replay);
+        let lightning = LegacyC4SVal::new(0, 0, 0, 100).evaluate(&mut replay);
+        let meteorite = LegacyC4SVal::new(0, 0, 0, 100).evaluate(&mut replay);
+        let volcano = LegacyC4SVal::new(0, 0, 0, 100).evaluate(&mut replay);
+        let earthquake = LegacyC4SVal::new(0, 0, 0, 100).evaluate(&mut replay);
+
+        let environment = engine.environment();
+        assert_eq!(environment.season, season.clamp(0, 100));
+        assert_eq!(environment.year_speed, year_speed);
+        assert_eq!(environment.climate, climate);
+        assert_eq!(
+            (environment.wind, environment.wind_target),
+            (wind, wind),
+            "Wind = TargetWind = Wind.Evaluate (C4Weather.cpp:47)"
+        );
+        assert_eq!(environment.lightning, lightning);
+        assert_eq!(environment.meteorite, meteorite);
+        assert_eq!(environment.volcano, volcano);
+        assert_eq!(environment.earthquake, earthquake);
+
+        // The ledger POSITION must line up too: the next synced draw on
+        // both streams agrees.
+        assert_eq!(
+            engine.debug_rng_clone().random(1_000_000),
+            replay.random(1_000_000),
+            "the ledger advanced by exactly the C++ init draws"
+        );
+    }
+
     // Objects.txt serializes the CURRENT shape per object (C4Shape::
     // CompileFunc into the [Object] section, C4Shape.cpp:495-515):
     // Vertices/VertexX/VertexY/VertexCNAT/VertexFriction load VERBATIM —
@@ -8952,9 +9076,17 @@ global func Step(state, frame, random)
         );
 
         let configured_environment = engine.environment();
+        // The applied wind is C4Weather::Init's Wind.Evaluate draw, not the
+        // C4SVal base (C4Weather.cpp:47) — replay the init ledger to the
+        // wind draw: Season, YearSpeed, Climate precede it.
+        let mut replay = crate::rng::LcgRng::seed_from_u64(0);
+        LegacyC4SVal::new(30, 10, 0, 100).evaluate(&mut replay);
+        LegacyC4SVal::new(45, 0, 0, 100).evaluate(&mut replay);
+        LegacyC4SVal::new(60, 10, 0, 100).evaluate(&mut replay);
+        let drawn_wind = LegacyC4SVal::new(10, 5, -20, 20).evaluate(&mut replay);
         assert_eq!(
-            configured_environment.wind, 10,
-            "engine should receive wind base"
+            configured_environment.wind, drawn_wind,
+            "engine wind is the Wind.Evaluate init draw (C4Weather.cpp:47)"
         );
         assert_eq!(
             configured_environment.wind_variation, 5,
