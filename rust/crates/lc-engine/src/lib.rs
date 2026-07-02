@@ -16295,13 +16295,17 @@ impl Engine {
                         math::fixed100(physical.float),
                     );
                 }
-                ActionProcedure::Float | ActionProcedure::Flight => {
+                ActionProcedure::Float => {
                     apply_float_command_movement(
                         &mut object.fixed_velocity,
                         command_direction,
                         movement_profile,
                     );
                 }
+                // DFA_FLIGHT is gravity + Mobile only (C4Object.cpp:
+                // 4875-4886) — ComDir never steers a flier; JumpControl
+                // and landing transitions handle direction.
+                ActionProcedure::Flight => {}
                 ActionProcedure::Swim => {
                     if physical.swim != 0 {
                         pending_direction = apply_swim_physical_movement(
@@ -26809,13 +26813,15 @@ global func MenuCommand(state, kind, selection)
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity, Vector2::new(3, 3));
+        // DFA_FLIGHT is gravity + Mobile only (C4Object.cpp:4875-4886):
+        // ComDir never steers a flier, so only GravAccel accumulates.
+        assert_eq!(object.velocity, Vector2::new(0, 0));
         assert_eq!(
-            object                .fixed_velocity
-                .expect("gravity should remain sub-pixel")
-                .y
-                .val(),
-            196739
+            object
+                .fixed_velocity
+                .map(|velocity| velocity.y.val())
+                .unwrap_or(0),
+            engine.physics.gravity_as_c4fixed().val()
         );
     }
 
