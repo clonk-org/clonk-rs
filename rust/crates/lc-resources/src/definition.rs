@@ -429,6 +429,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
     let mut shape: Option<PictureRect> = None;
+    let mut shape_width: Option<i32> = None;
+    let mut shape_height: Option<i32> = None;
+    let mut shape_offset: Option<(i32, i32)> = None;
     let mut solid_mask: Option<TargetRect> = None;
     let mut vertex_count: usize = 0;
     let mut vertex_x = [0i32; C4D_MAX_VERTEX];
@@ -533,6 +536,22 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "shape" => {
                 shape = parse_rect(value);
+            }
+            // C4Def::CompileFunc maps Width/Height/Offset straight into
+            // Shape.Wdt/Hgt/x/y (C4Def.cpp) — CR DefCores never carry a
+            // combined Shape= key.
+            "width" => {
+                shape_width = parse_i32(value);
+            }
+            "height" => {
+                shape_height = parse_i32(value);
+            }
+            "offset" => {
+                let mut parts = value.split(',').map(str::trim);
+                shape_offset = Some((
+                    parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                    parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                ));
             }
             "solidmask" => {
                 solid_mask =
@@ -666,7 +685,19 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         mass: object_mass,
         picture,
         color_by_owner,
-        shape,
+        shape: shape.or_else(|| {
+            (shape_width.is_some() || shape_height.is_some() || shape_offset.is_some()).then(
+                || {
+                    let (x, y) = shape_offset.unwrap_or((0, 0));
+                    PictureRect {
+                        x,
+                        y,
+                        width: shape_width.unwrap_or(0),
+                        height: shape_height.unwrap_or(0),
+                    }
+                },
+            )
+        }),
         solid_mask,
         vertices,
         contact_density,
@@ -1674,6 +1705,20 @@ const CATEGORY_FLAGS: &[(&str, i32)] = &[
 
 #[cfg(test)]
 mod tests {
+
+    // C4Def::CompileFunc maps Width/Height/Offset into Shape.Wdt/Hgt/x/y
+    // (C4Def.cpp) — CR DefCores carry no combined Shape= key. The GoldRush
+    // wagon COAC (Width=48 Height=40 Offset=-24,-20) needs this rect for
+    // the NewObject bottom-growth adjust.
+    #[test]
+    fn defcore_width_height_offset_compose_the_shape_rect() {
+        let core = parse_def_core(
+            b"[DefCore]\nid=COAC\nName=Coach\nWidth=48\nHeight=40\nOffset=-24,-20\n",
+        )
+        .expect("core parses");
+        let shape = core.shape.expect("shape synthesized");
+        assert_eq!((shape.x, shape.y, shape.width, shape.height), (-24, -20, 48, 40));
+    }
     use super::*;
     use std::fs;
     use std::path::{Path, PathBuf};
