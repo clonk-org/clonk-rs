@@ -209,6 +209,10 @@ pub struct DefCore {
     pub upright_attach: u32,
     /// NoStabilize (C4Def.cpp:402): opts out of the Stabilize upright snap.
     pub no_stabilize: bool,
+    /// Timer= interval in frames (default 35, C4Def.cpp:298).
+    pub timer: i32,
+    /// TimerCall= function name (C4Def.cpp:299); None when absent/empty.
+    pub timer_call: Option<String>,
     pub components: Vec<DefComponent>,
     pub line_connect: u32,
     /// `CanBeBase` (C4Def.cpp DefCore): marks structures usable as the
@@ -454,6 +458,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut upright_attach: u32 = 0;
     // NoStabilize (C4Def.cpp:402, default 0): opts out of C4Object::Stabilize.
     let mut no_stabilize = false;
+    // Timer=/TimerCall= (C4Def.cpp:298-299): the per-object Def timer.
+    let mut timer: i32 = 35;
+    let mut timer_call: Option<String> = None;
     let mut components: Vec<DefComponent> = Vec::new();
     let mut line_connect: u32 = 0;
 
@@ -616,6 +623,15 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "nostabilize" => {
                 no_stabilize = parse_bool(value);
             }
+            "timer" => {
+                timer = parse_i32(value).unwrap_or(35);
+            }
+            "timercall" => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    timer_call = Some(trimmed.to_string());
+                }
+            }
             "components" => {
                 components = parse_components(value);
             }
@@ -675,6 +691,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         border_bound,
         upright_attach,
         no_stabilize,
+        timer,
+        timer_call,
         components,
         line_connect,
         can_be_base,

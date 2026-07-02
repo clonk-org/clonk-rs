@@ -3110,6 +3110,9 @@ struct LegacyObjectRecord {
     mobile: Option<bool>,
     /// Whole-degree rotation (`Rotation=`, C4Object.cpp:2744).
     rotation: Option<i32>,
+    /// Mid-cycle Def TimerCall counter (`Timer=`, default 0,
+    /// C4Object.cpp:2738).
+    timer: Option<i32>,
     /// The CURRENT shape's vertices, serialized by C4Shape::CompileFunc
     /// into the [Object] section (C4Shape.cpp:495-515): the effective
     /// post-Con/rotation shape, loaded verbatim.
@@ -3265,6 +3268,14 @@ impl LegacyObjectRecord {
                 self.rotation = Some(parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
                         "Objects.txt line {}: invalid Rotation `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "timer" => {
+                self.timer = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Timer `{}` ({})",
                         self.line, trimmed_value, err
                     ))
                 })?);
@@ -3484,6 +3495,7 @@ impl LegacyObjectRecord {
             rdir,
             mobile,
             rotation,
+            timer,
             vertex_count,
             vertex_x,
             vertex_y,
@@ -3579,6 +3591,9 @@ impl LegacyObjectRecord {
         // false) — they bypass Init, and nothing after C4GameObjects::Load
         // rewrites the flag (C4Object.cpp:2772).
         config = config.with_mobile(mobile.unwrap_or(false));
+        if let Some(timer) = timer {
+            config = config.with_timer(timer);
+        }
         // The saved shape's vertices (C4Shape::CompileFunc into [Object],
         // C4Shape.cpp:495-515): the CURRENT effective shape, loaded
         // verbatim (spawn_single skips the Con/rotation re-transform for

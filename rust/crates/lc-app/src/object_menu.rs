@@ -1159,6 +1159,7 @@ mod tests {
             local_vars: HashMap::new(),
             in_liquid: false,
             mobile: false,
+            timer: 0,
             own_mass: 0,
             on_fire: false,
             fire_phase: 0,

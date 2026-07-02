@@ -1926,6 +1926,11 @@ pub struct ObjectState {
     /// (default false, C4Object.cpp:2772).
     #[serde(default)]
     pub mobile: bool,
+    /// The Def TimerCall counter (C4Object::Timer, C4Object.cpp:1085-1091):
+    /// ++ every Execute, fires Def->TimerCall and resets at Def->Timer.
+    /// Saved mid-cycle in Objects.txt (default 0, C4Object.cpp:2738).
+    #[serde(default)]
+    pub timer: i32,
     /// Script-set extra mass (C4Object::OwnMass, C4Object.cpp:94): SetMass
     /// stores iValue - Def->Mass here; Mass = max((Def->Mass + OwnMass) *
     /// Con / FullCon, 1) (UpdateMass, C4Object.cpp:497-500).
@@ -2040,6 +2045,7 @@ pub(crate) fn preview_spawn_state(
         local_vars: HashMap::new(),
         in_liquid: false,
         mobile: false,
+        timer: 0,
         own_mass: 0,
         on_fire: false,
         fire_phase: 0,
@@ -3681,6 +3687,7 @@ impl Object {
             local_vars: self.state.local_vars.clone(),
             in_liquid: self.state.in_liquid,
             mobile: self.state.mobile,
+            timer: self.state.timer,
             own_mass: self.state.own_mass,
             on_fire: self.state.on_fire,
             fire_phase: self.state.fire_phase,
@@ -4071,6 +4078,10 @@ pub struct SpawnConfig {
     /// None = the C4Object::Init rule for fresh spawns.
     #[serde(default)]
     pub mobile: Option<bool>,
+    /// Mid-cycle Def TimerCall counter (Objects.txt `Timer=`, default 0,
+    /// C4Object.cpp:2738).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timer: Option<i32>,
     /// The object is LOADED (Objects.txt / savegame), not created:
     /// C4GameObjects::Load (C4GameObjects.cpp:535-618) only compiles and
     /// denumerates — Construction/Initialize fire for new objects only
@@ -4107,6 +4118,7 @@ impl SpawnConfig {
             fixed_rotation: None,
             rotation_velocity: None,
             mobile: None,
+            timer: None,
             loaded: false,
         }
     }
@@ -4133,6 +4145,11 @@ impl SpawnConfig {
 
     pub fn with_mobile(mut self, mobile: bool) -> Self {
         self.mobile = Some(mobile);
+        self
+    }
+
+    pub fn with_timer(mut self, timer: i32) -> Self {
+        self.timer = Some(timer);
         self
     }
 
@@ -4314,6 +4331,10 @@ pub struct ObjectSnapshot {
     /// C4Object.cpp:2772).
     #[serde(default)]
     pub mobile: bool,
+    /// The Def TimerCall counter (persisted like the savegame `Timer`
+    /// field, C4Object.cpp:2738).
+    #[serde(default)]
+    pub timer: i32,
     /// C4Object::OwnMass (SetMass leftovers; persisted like the savegame).
     #[serde(default)]
     pub own_mass: i32,
@@ -4869,6 +4890,12 @@ pub struct Definition {
     /// NoStabilize=1 opts out of the small-tilt upright snap
     /// (C4Object::Stabilize, C4Movement.cpp:491).
     no_stabilize: bool,
+    /// DefCore Timer= interval in frames (default 35, C4Def.cpp:298).
+    timer: i32,
+    /// DefCore TimerCall= function name (C4Def.cpp:299), fired every
+    /// Timer-th Execute per object (C4Object.cpp:1085-1091). None when
+    /// the def names no callback (C++ links to nullptr).
+    timer_call: Option<String>,
     components: Vec<DefinitionComponent>,
     line_connect: u32,
     /// ContactIncinerate=N: 1-in-N contact-fire chance (0 = not inflammable).
@@ -4997,6 +5024,8 @@ impl Definition {
             border_bound: 0,
             upright_attach: 0,
             no_stabilize: false,
+            timer: 35,
+            timer_call: None,
             components: Vec::new(),
             line_connect: 0,
             contact_incinerate: 0,
@@ -5145,6 +5174,8 @@ impl Definition {
         definition.set_border_bound(resource.core.border_bound);
         definition.set_upright_attach(resource.core.upright_attach);
         definition.set_no_stabilize(resource.core.no_stabilize);
+        definition.set_timer(resource.core.timer);
+        definition.set_timer_call(resource.core.timer_call.clone());
         if !resource.core.components.is_empty() {
             let components = resource
                 .core
@@ -5554,6 +5585,22 @@ impl Definition {
 
     pub fn set_no_stabilize(&mut self, no_stabilize: bool) {
         self.no_stabilize = no_stabilize;
+    }
+
+    pub fn timer(&self) -> i32 {
+        self.timer
+    }
+
+    pub fn set_timer(&mut self, timer: i32) {
+        self.timer = timer;
+    }
+
+    pub fn timer_call(&self) -> Option<&str> {
+        self.timer_call.as_deref()
+    }
+
+    pub fn set_timer_call(&mut self, timer_call: Option<String>) {
+        self.timer_call = timer_call;
     }
 
     pub fn set_upright_attach(&mut self, upright_attach: u32) {
@@ -12936,6 +12983,38 @@ impl Engine {
             // ExecLife runs after the fire effect (C4Object.cpp:1074-1080)
             self.exec_object_life(idx, frame);
 
+            // Def TimerCall (C4Object::Execute, C4Object.cpp:1085-1091):
+            // Timer++ every Execute; reaching Def->Timer resets the counter
+            // and Execs Def->TimerCall. C++ resolves the name at link time
+            // (missing -> nullptr, no call); the Exec itself is fail-safe.
+            if self.objects[idx].state.status.is_active() && !self.objects[idx].destroyed {
+                let timer_call = self.definitions.get(&definition_id).and_then(|definition| {
+                    let interval = definition.timer().max(1);
+                    let object_timer = &mut self.objects[idx].state.timer;
+                    *object_timer += 1;
+                    (*object_timer >= interval).then(|| {
+                        *object_timer = 0;
+                        definition
+                            .timer_call()
+                            .filter(|function| definition.has_function(function))
+                            .map(str::to_string)
+                    })
+                    .flatten()
+                });
+                if let Some(function) = timer_call {
+                    tolerate_script_error(self.call_object_function(
+                        idx,
+                        &function,
+                        Vec::new(),
+                    ))?;
+                }
+                if self.objects[idx].destroyed
+                    || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
+                {
+                    continue;
+                }
+            }
+
             let object_id = self.objects[idx].id;
             // Step is the command-DSL fixture callback; real content has no
             // Step function (call_step would return an empty batch) — skip
@@ -14488,6 +14567,7 @@ impl Engine {
                     local_vars: snapshot.local_vars.clone(),
                     in_liquid: snapshot.in_liquid,
                     mobile: snapshot.mobile,
+                    timer: snapshot.timer,
                     own_mass: snapshot.own_mass,
                     on_fire: snapshot.on_fire,
                     fire_phase: snapshot.fire_phase,
@@ -20449,6 +20529,7 @@ impl Engine {
             fixed_rotation,
             rotation_velocity,
             mobile,
+            timer,
             loaded,
         } = config;
 
@@ -20569,6 +20650,7 @@ impl Engine {
                 local_vars: HashMap::new(),
                 in_liquid: in_liquid.unwrap_or(false),
                 mobile: false,
+                timer: timer.unwrap_or(0),
                 own_mass: 0,
                 on_fire: false,
                 fire_phase: 0,
@@ -21261,6 +21343,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         local_vars: snapshot.local_vars.clone(),
         in_liquid: snapshot.in_liquid,
         mobile: snapshot.mobile,
+        timer: snapshot.timer,
         own_mass: snapshot.own_mass,
         on_fire: snapshot.on_fire,
         fire_phase: snapshot.fire_phase,
@@ -34735,6 +34818,59 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert!(
             !mobile_of(&engine, tilted),
             "a 340-degree tilt is outside ±StableRange (C4Object.cpp:4701)"
+        );
+    }
+
+    // Mirrors the Def TimerCall (C4Object::Execute, C4Object.cpp:1085-1091):
+    // every object counts Timer++ per frame; reaching Def->Timer resets
+    // the counter and Execs Def->TimerCall (no pars, fail-safe). DefCore
+    // Timer= defaults to 35 (C4Def.cpp:298); Objects.txt saves the
+    // mid-cycle per-object counter (Timer=, default 0, C4Object.cpp:2738).
+    #[test]
+    fn def_timer_call_fires_on_the_def_interval_like_cpp() {
+        let script = r#"
+        local iTicks;
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        func Tick() { iTicks = iTicks + 1; return 1; }
+        "#;
+        let mut definition =
+            Definition::from_script("Fire", "Fire", script).expect("script compiles");
+        definition.set_timer(5);
+        definition.set_timer_call(Some("Tick".to_string()));
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Fire").with_category(CATEGORY_OBJECT))
+            .expect("spawn succeeds");
+
+        let ticks_of = |engine: &Engine| {
+            engine
+                .find_object_index(id)
+                .and_then(|idx| engine.objects[idx].state.local_vars.get("iTicks").cloned())
+        };
+        for _ in 1..=4 {
+            engine.tick().expect("tick succeeds");
+        }
+        assert!(
+            !matches!(ticks_of(&engine), Some(Value::Int(_))),
+            "Timer counts 1..4, below the interval (C4Object.cpp:1086)"
+        );
+        engine.tick().expect("tick succeeds");
+        assert_eq!(
+            ticks_of(&engine),
+            Some(Value::Int(1)),
+            "the 5th Execute reaches Def->Timer and fires TimerCall (C4Object.cpp:1086-1090)"
+        );
+        for _ in 6..=10 {
+            engine.tick().expect("tick succeeds");
+        }
+        assert_eq!(
+            ticks_of(&engine),
+            Some(Value::Int(2)),
+            "the counter resets and fires again every interval"
         );
     }
 
