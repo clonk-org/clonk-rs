@@ -15653,7 +15653,12 @@ impl Engine {
         }
 
         for crew in crew_map.values_mut() {
-            crew.sort_unstable_by_key(|id| id.as_u64());
+            // C4Player::Crew adds via C4ObjectList::Add(stMain)
+            // (C4Player.cpp:513/552): among same-category crew the new
+            // link inserts BEFORE the older ones — newest first. GetCrew's
+            // index order and GetHiRank's tie-break both follow it
+            // (C4Player.cpp:1003-1020 keeps the FIRST of equal ranks).
+            crew.sort_unstable_by_key(|id| std::cmp::Reverse(id.as_u64()));
         }
 
         if !self.players.is_empty() {
