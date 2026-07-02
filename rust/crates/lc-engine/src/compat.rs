@@ -11227,7 +11227,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
+    let created = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
@@ -11271,11 +11271,14 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let id = context.allocate_object_id();
 
-        let spawn = SpawnConfig::new(definition.clone())
+        let mut spawn = SpawnConfig::new(definition.clone())
             .with_position(position)
             .with_owner(owner)
             .with_category(definition_category)
             .with_id(id);
+        // Creation callbacks run synchronously below - materialization
+        // must not repeat Initialize (C4Game.cpp:1117-1127).
+        spawn.initialized = true;
 
         let preview_ocf = ocf::compute(
             metadata.ocf_base,
@@ -11323,7 +11326,31 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
 
         context.register_spawn(spawn, preview);
         Ok(object_reference_value(id))
-    })
+    });
+
+    // C4Game::NewObject runs PSF_Construction and the initial DoCon's
+    // PSF_Initialize INSIDE FnCreateObject (C4Game.cpp:1117-1127): the
+    // new object's script side effects exist the moment CreateObject
+    // returns (GoldRush bandits' appended Life effect precedes SetAI's
+    // RemoveEffect). Both are fail-silent when the def lacks them; errors
+    // log and continue like C4Object::Call(fPassError=false).
+    if let Ok(value @ Value::Object(_)) = &created {
+        if let Some(target) = object_id_from_value(value) {
+            for callback in ["Construction", "Initialize"] {
+                if let Some(Err(error)) =
+                    call_world_object_own_function(target, callback, &[])
+                {
+                    tracing::warn!(
+                        id = target.as_u64(),
+                        callback,
+                        %error,
+                        "creation callback failed; continuing like C++ fail-safe Call"
+                    );
+                }
+            }
+        }
+    }
+    created
 }
 
 fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -14026,7 +14053,7 @@ pub(crate) fn call_world_object_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_world_object_function_with(target, function, args, true, None)
+    call_world_object_function_with(target, function, args, true, true, None)
 }
 
 /// `obj->ID::Func(...)` (AB_CALLNS, C4AulParse.cpp:3160-3245): runs the
@@ -14038,7 +14065,7 @@ pub(crate) fn call_world_object_function_in_scope(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_world_object_function_with(target, function, args, false, Some(script))
+    call_world_object_function_with(target, function, args, false, false, Some(script))
 }
 
 /// Like [`call_world_object_function`], but resolves SCRIPT functions only —
@@ -14050,7 +14077,20 @@ pub(crate) fn call_world_object_script_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_world_object_function_with(target, function, args, false, None)
+    call_world_object_function_with(target, function, args, false, true, None)
+}
+
+/// Object-call resolution (`C4Object::Call` -> GetSFunc): the target's OWN
+/// script chain only — engine-global script functions do NOT resolve
+/// (unlike GetFuncRecursive). Creation callbacks (PSF_Construction /
+/// PSF_Initialize) use this; resolving a same-name scenario global here
+/// would recurse (a def without Initialize must be a silent miss).
+pub(crate) fn call_world_object_own_function(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_world_object_function_with(target, function, args, false, false, None)
 }
 
 fn call_world_object_function_with(
@@ -14058,11 +14098,12 @@ fn call_world_object_function_with(
     function: &str,
     args: &[Value],
     host_fallback: bool,
+    include_globals: bool,
     script_override: Option<Arc<ScriptEngine>>,
 ) -> Option<Result<Value, RuntimeError>> {
     let prep = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut().as_mut().and_then(|context| {
-            context.prepare_nested_call(target, function, host_fallback, script_override)
+            context.prepare_nested_call(target, function, host_fallback, include_globals, script_override)
         })
     })?;
     let NestedCallPrep {
@@ -14441,6 +14482,7 @@ impl EffectHostContext {
         target: ObjectId,
         function: &str,
         host_fallback: bool,
+        include_globals: bool,
         script_override: Option<Arc<ScriptEngine>>,
     ) -> Option<NestedCallPrep> {
         let world_object = self.get_world_object(target)?;
@@ -14459,7 +14501,7 @@ impl EffectHostContext {
         // and effect callbacks alike (GoldRush's FxStayThereStart lives
         // in the scenario script, C4Effect.cpp:31-40).
         let resolvable = script.has_function(function)
-            || script.has_global_function(function)
+            || (include_globals && script.has_global_function(function))
             || (host_fallback && script.has_host_function(function));
         if !resolvable {
             return None;

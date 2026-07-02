@@ -4162,6 +4162,11 @@ pub struct SpawnConfig {
     /// keeps the definition mask, C4Object.cpp:2770).
     #[serde(default)]
     pub solid_mask: Option<DefinitionTargetRect>,
+    /// Construction/Initialize already ran synchronously inside the
+    /// creating host call (C4Game::NewObject semantics,
+    /// C4Game.cpp:1117-1127) - materialization must not repeat them.
+    #[serde(default)]
+    pub initialized: bool,
 }
 
 impl SpawnConfig {
@@ -4196,6 +4201,7 @@ impl SpawnConfig {
             local_vars: HashMap::new(),
             loaded: false,
             solid_mask: None,
+            initialized: false,
         }
     }
 
@@ -21012,6 +21018,7 @@ impl Engine {
             local_vars,
             loaded,
             solid_mask,
+            initialized,
         } = config;
 
         let (
@@ -21383,6 +21390,7 @@ impl Engine {
         }
 
         if !loaded
+            && !initialized
             && self
                 .definitions
                 .get(&definition_id)
@@ -32071,9 +32079,24 @@ protected func HudCount() { return(ObjectCount(GetID(),0,0,0,0,0,0,0,0,GetOwner(
             HashMap::from([("AmmoHud".to_string(), ActionSpec::default())]),
         );
         engine.register_definition(hud).expect("hud registers");
+        // Spawn through the REAL creation path (CreateObject host fn):
+        // C4Game::NewObject adds the object to the list BEFORE the
+        // Construction/Initialize calls, so HudCount sees the first hud
+        // while the partner initializes (C4Game.cpp:1107-1127).
+        let caller = Definition::from_script(
+            "CALL",
+            "Caller",
+            "#strict\nfunc Trigger() { CreateObject(AHUD, 0, 0, -1); return(1); }\n",
+        )
+        .expect("caller compiles");
+        engine.register_definition(caller).expect("caller registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
         engine
-            .spawn_object(SpawnConfig::new("AHUD").with_category(CATEGORY_OBJECT))
-            .expect("hud spawns");
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
         let count = engine
             .objects
             .iter()
@@ -32286,6 +32309,65 @@ func Sweep() {
             })
             .count();
         assert_eq!(pinned, 2, "StayThere lands on every NPC");
+    }
+
+    // C4Game::NewObject runs PSF_Construction and (via the initial
+    // DoCon's completion) PSF_Initialize INSIDE FnCreateObject
+    // (C4Game.cpp:1117-1127): the new object's script side effects exist
+    // the moment CreateObject returns. GoldRush: every clonk's appended
+    // Initialize adds the "Life" effect (NeedFood Append.c4d) and SetAI
+    // removes it right after creating the bandit (AI.c4d:18) — deferring
+    // Initialize to materialization left the removal a no-op.
+    #[test]
+    fn create_object_runs_initialize_synchronously_like_cpp() {
+        let bandit_script = r#"#strict
+protected func Initialize() {
+    AddEffect("Life", this(), 1, 35, this());
+    return(1);
+}
+"#;
+        let caller_script = r#"#strict
+local iHadLife;
+func Trigger() {
+    var pObj = CreateObject(BNDT, 0, 0, -1);
+    iHadLife = GetEffectCount("Life", pObj);
+    RemoveEffect("Life", pObj);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let bandit =
+            Definition::from_script("BNDT", "Bandit", bandit_script).expect("bandit compiles");
+        engine.register_definition(bandit).expect("bandit registers");
+        let caller =
+            Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles");
+        engine.register_definition(caller).expect("caller registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(id).expect("caller exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iHadLife"),
+            Some(&Value::Int(1)),
+            "Initialize ran inside CreateObject: Life visible immediately \
+             (C4Game.cpp:1123-1127)"
+        );
+        let bandit = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "BNDT")
+            .expect("bandit exists");
+        assert!(
+            bandit.state.effects.iter().all(|e| e.name != "Life"),
+            "RemoveEffect right after CreateObject killed it - and \
+             materialization must NOT re-run Initialize (no second Life)"
+        );
     }
 
     // DoGravity's float branch (C4Object.cpp:4644-4661): objects with
