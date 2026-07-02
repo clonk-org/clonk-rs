@@ -514,6 +514,27 @@ full-scenario shadow-diff (see Parity harnesses).
   crash). Remaining known: walker/bird/fish ±1 movement rounding,
   bubble ±1 creation timing, small owner/command/vertex residues.
 
+- **2026-07-02 fourth wave — wall 63 -> 46; GoldRush headless runs
+  warning-free; the harness is native arm64:** per-object SolidMask
+  (saved 0-rects disable; SetSolidMask); ObjectSnapshot.ocf + the
+  snapshot world feed carries OCF (join-time OCF finds); scenario-script
+  globals in the engine table; EffectVar reference reads AND writes via
+  the host (ScheduleCall one-shots fire+self-remove); synchronous
+  Construction/Initialize inside CreateObject with GetSFunc own-script
+  resolution (vs GetFuncRecursive+globals for effect callbacks);
+  DoGravity liquid-float branch; ChangeDef + GetPlrDownDouble +
+  FrameCounter host fns; arrow calls accept effect-state maps as object
+  targets; **legacy defs carry the FULL DefCore** (physicals/Float/
+  Timer/Grab/fire/contact were silently dropped — the BIRD Float=200
+  clamp now matches C++ BIRDTRACE frame-for-frame and every def
+  physical is real). The shadow harness now builds natively
+  (build-arm64-native; no Rosetta — see the arm64 memory note); the
+  x86 and arm64 measurements agree. REMAINING at 46 distinct objects:
+  Walk-vs-Jump clonks x7 (JumpControl trigger geometry?), swim/fish
+  phase -1 x5, scattered ±1-4 rests, one Breeze/Still tree, rider/wagon
+  action pair, vertices 3, owner 1, effects 1. Known pre-existing flake:
+  lc-network control_sync_and_reconnect_smoke (TCP race).
+
 ## Gates
 
 - **`cargo test --workspace`: GREEN** (~1240 pass, cargo exit 0). The old
