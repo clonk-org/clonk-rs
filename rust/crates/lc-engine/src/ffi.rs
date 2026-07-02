@@ -1471,7 +1471,24 @@ fn runtime_snapshot_mismatch(
                     ));
                 }
                 if expected_object.effects != actual_object.effects {
-                    problems.push(format!("object {} effects differed", id));
+                    let describe = |effects: &[EffectState]| -> String {
+                        effects
+                            .iter()
+                            .map(|effect| {
+                                format!(
+                                    "{}(prio {} int {} t {})",
+                                    effect.name, effect.priority, effect.interval, effect.timer
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    problems.push(format!(
+                        "object {} effects rust [{}], cpp [{}]",
+                        id,
+                        describe(&expected_object.effects),
+                        describe(&actual_object.effects)
+                    ));
                 }
                 if expected_object.vertices != actual_object.vertices {
                     problems.push(format!(
