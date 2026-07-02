@@ -1398,6 +1398,16 @@ fn runtime_snapshot_mismatch(
     for (&id, expected_object) in &expected_objects {
         match actual_objects.get(&id) {
             Some(actual_object) => {
+                // Different definitions under the same Number = the
+                // late-spawn NUMBERING SKEW (creation order diverged);
+                // reporting it first stops the skew from masquerading as
+                // alive/energy/effects field noise.
+                if expected_object.definition_id != actual_object.definition_id {
+                    problems.push(format!(
+                        "object {} definition expected {}, got {}",
+                        id, expected_object.definition_id, actual_object.definition_id
+                    ));
+                }
                 if expected_object.position != actual_object.position {
                     problems.push(format!(
                         "object {} position expected {:?}, got {:?}",
