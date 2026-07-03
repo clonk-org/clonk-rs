@@ -728,6 +728,79 @@ mod tests {
     }
 
     #[test]
+    fn cursor_info_places_portrait_and_rank_symbol_like_c4objectinfo_draw() {
+        // Portrait aspect-fit into (border, border, 4*35/3+10, 45) and the
+        // rank cell 1:1 at iX = 4*35/3 (src/C4ObjectInfo.cpp:308-341).
+        let mut target = surface(200, 200);
+        let hud = HudGraphics::default();
+        let portrait = solid_image(150, 150, [10, 200, 30, 255]);
+        // Two 4x4 rank cells: rank 0 blue, rank 1 yellow.
+        let mut rank_pixels = Vec::new();
+        for _row in 0..4 {
+            rank_pixels.extend(std::iter::repeat_n([0u8, 0, 220, 255], 4).flatten());
+            rank_pixels.extend(std::iter::repeat_n([220u8, 220, 0, 255], 4).flatten());
+        }
+        let ranks = ImageData::new(8, 4, rank_pixels);
+        let font = bitmap_font();
+        let font = HudFont::Fallback(&font);
+        let viewport = SurfaceRect::new(0, 0, 200, 200);
+        draw_cursor_info(
+            &mut target,
+            &font,
+            &hud,
+            viewport,
+            "William",
+            0,
+            Some(&portrait),
+            Some(&ranks),
+        );
+        // Portrait: (5,5,56,45) aspect-fit -> (10,5,45,45).
+        assert_eq!(target.get_pixel(9, 20), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(target.get_pixel(11, 20), Some(Color::opaque(10, 200, 30)));
+        assert_eq!(target.get_pixel(54, 20), Some(Color::opaque(10, 200, 30)));
+        assert_eq!(target.get_pixel(56, 20), Some(Color::opaque(0, 0, 0)));
+        // Rank 0 cell at (5 + 46, 5), 4x4, blue — drawn over the portrait's
+        // right edge, exactly like C++ (iX advances 4*Hgt/3 while the
+        // portrait facet is 4*Hgt/3+10 wide, src/C4ObjectInfo.cpp:313-320).
+        assert_eq!(target.get_pixel(51, 6), Some(Color::opaque(0, 0, 220)));
+        assert_eq!(target.get_pixel(51, 10), Some(Color::opaque(10, 200, 30)));
+    }
+
+    #[test]
+    fn fixed_items_sit_right_aligned_with_symbol_spacing() {
+        // Wealth at right - (35+5), score at right - 2*(35+5), crew at
+        // right - 3*(35+5), all at y = border (src/C4Viewport.cpp:1287-1321).
+        let mut target = surface(200, 100);
+        let hud = HudGraphics {
+            wealth: Some(solid_image(60, 30, [220, 180, 0, 255])),
+            score: Some(solid_image(60, 30, [180, 90, 0, 255])),
+            crew: Some(solid_image(60, 30, [0, 0, 255, 255])),
+            ..HudGraphics::default()
+        };
+        let font = bitmap_font();
+        let font = HudFont::Fallback(&font);
+        let viewport = SurfaceRect::new(0, 0, 200, 100);
+        draw_player_fixed_items(
+            &mut target,
+            &font,
+            &hud,
+            viewport,
+            7,
+            3,
+            1,
+            1,
+            Color::opaque(255, 0, 0),
+        );
+        // Wealth icon: cgo (160,5,35,17), aspect-fit 34x17 at x 160.
+        assert_eq!(target.get_pixel(161, 10), Some(Color::opaque(220, 180, 0)));
+        // Score icon: cgo (120,5,...).
+        assert_eq!(target.get_pixel(121, 10), Some(Color::opaque(180, 90, 0)));
+        // Crew icon: cgo (80,5,...) — pure blue is ClrByOwner, so it takes
+        // the red owner color (src/C4Viewport.cpp:1320, C4Surface.cpp:236).
+        assert_eq!(target.get_pixel(81, 10), Some(Color::opaque(255, 0, 0)));
+    }
+
+    #[test]
     fn message_board_fills_bottom_strip_with_background_tile() {
         // C4MessageBoard::Draw background blit (src/C4MessageBoard.cpp:258).
         let mut target = surface(64, 64);
