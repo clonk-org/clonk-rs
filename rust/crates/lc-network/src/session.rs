@@ -1018,6 +1018,11 @@ mod tests {
     use tokio::io::duplex;
     use tokio::time::timeout;
 
+    /// Upper bound for a single event wait. Generous so loaded parallel test
+    /// runs do not trip it; a genuine failure still fails fast because the
+    /// expected event never arrives at all.
+    const EVENT_WAIT: Duration = Duration::from_secs(5);
+
     #[tokio::test(flavor = "multi_thread")]
     async fn host_emits_ready_for_single_client() {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -1040,11 +1045,7 @@ mod tests {
 
         // Drain the initial exec sync event sent to the client.
         let mut client_events = client.take_event_receiver();
-        if let Ok(Some(ClientEvent::ExecSync { .. })) =
-            tokio::time::timeout(Duration::from_millis(200), client_events.recv()).await
-        {
-            // expected
-        }
+        drain_initial_exec_sync(&mut client_events).await;
 
         let packet = ControlPacket::builder(1, 0)
             .timestamp_ms(0)
@@ -1056,7 +1057,7 @@ mod tests {
         let mut saw_ready = false;
 
         for _ in 0..8 {
-            if let Some(event) = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            if let Some(event) = tokio::time::timeout(EVENT_WAIT, events.recv())
                 .await
                 .expect("host event wait")
             {
@@ -1108,15 +1109,15 @@ mod tests {
 
         submit_control_pair(&mut host, &client, 0, vec![0xAA], vec![0x11]).await;
 
-        let first_host_ready = wait_for_host_ready(&mut host_events, Duration::from_secs(1)).await;
+        let first_host_ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(first_host_ready.tick(), 0);
 
         let first_client_ready =
-            wait_for_client_ready(&mut client_events, Duration::from_secs(1)).await;
+            wait_for_client_ready(&mut client_events, EVENT_WAIT).await;
         assert_eq!(first_client_ready.tick(), 0);
 
         client.shutdown().await.expect("client shutdown");
-        wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
+        wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
 
         let mut client_beta =
             connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
@@ -1127,18 +1128,18 @@ mod tests {
 
         submit_control_pair(&mut host, &client_beta, 1, vec![0xBB], vec![0x22]).await;
 
-        let second_host_ready = wait_for_host_ready(&mut host_events, Duration::from_secs(1)).await;
+        let second_host_ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(second_host_ready.tick(), 1);
 
         let second_client_ready =
-            wait_for_client_ready(&mut client_beta_events, Duration::from_secs(1)).await;
+            wait_for_client_ready(&mut client_beta_events, EVENT_WAIT).await;
         assert_eq!(second_client_ready.tick(), 1);
 
         client_beta
             .shutdown()
             .await
             .expect("second client shutdown");
-        wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
+        wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
 
         host.shutdown().await.expect("host shutdown");
     }
@@ -1168,7 +1169,7 @@ mod tests {
         drain_initial_exec_sync(&mut client_events).await;
 
         submit_control_pair(&mut host, &client, 0, vec![0xA0], vec![0xB0]).await;
-        let ready0 = wait_for_host_ready(&mut host_events, Duration::from_secs(1)).await;
+        let ready0 = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready0.tick(), 0);
         assert_eq!(ready0.payload(), &[0xA0, 0xB0]);
 
@@ -1180,9 +1181,9 @@ mod tests {
             .expect("host submit control");
 
         client.shutdown().await.expect("client shutdown");
-        wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
+        wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
 
-        let ready1 = wait_for_host_ready(&mut host_events, Duration::from_secs(1)).await;
+        let ready1 = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready1.tick(), 1);
         assert_eq!(ready1.payload(), &[0xC0]);
 
@@ -1214,7 +1215,7 @@ mod tests {
         drain_initial_exec_sync(&mut alpha_events).await;
 
         submit_control_pair(&mut host, &client_alpha, 0, vec![0xA1], vec![0xB2]).await;
-        let ready_packet = wait_for_host_ready(&mut host_events, Duration::from_secs(1)).await;
+        let ready_packet = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready_packet.tick(), 0);
         let expected_payload = ready_packet.payload().to_vec();
 
@@ -1227,7 +1228,7 @@ mod tests {
         let mut backlog_packets = Vec::new();
         let mut saw_exec_sync = false;
         for _ in 0..4 {
-            match timeout(Duration::from_secs(1), beta_events.recv())
+            match timeout(EVENT_WAIT, beta_events.recv())
                 .await
                 .expect("beta event wait")
             {
@@ -1255,10 +1256,10 @@ mod tests {
         assert_eq!(backlog_packets[0].payload(), expected_payload);
 
         client_beta.shutdown().await.expect("beta shutdown");
-        wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
+        wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
 
         client_alpha.shutdown().await.expect("alpha shutdown");
-        wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
+        wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
 
         host.shutdown().await.expect("host shutdown");
     }
@@ -1354,11 +1355,22 @@ mod tests {
             .expect("client submit control");
     }
 
+    /// Consumes client events up to and including the initial exec sync that
+    /// the host sends on join (see `handle_accept`). Backlog replays may
+    /// legitimately precede it, so loop instead of guessing at timings.
     async fn drain_initial_exec_sync(events: &mut mpsc::Receiver<ClientEvent>) {
-        if let Ok(Some(ClientEvent::ExecSync { .. })) =
-            timeout(Duration::from_millis(200), events.recv()).await
-        {
-            // expected initial sync packet
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await {
+                Ok(Some(ClientEvent::ExecSync { .. })) => break,
+                Ok(Some(ClientEvent::Ready { .. })) | Ok(Some(ClientEvent::Direct { .. })) => {
+                    continue
+                }
+                Ok(Some(ClientEvent::Disconnected { reason })) => {
+                    panic!("client disconnected before initial exec sync: {reason:?}")
+                }
+                Ok(None) => panic!("client event stream ended before initial exec sync"),
+                Err(_) => panic!("timed out waiting for initial exec sync"),
+            }
         }
     }
 
