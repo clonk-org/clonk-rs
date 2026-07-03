@@ -2240,6 +2240,12 @@ struct ObjectDelta {
     /// surfaces (e.g. `SetXDir`) can express fractional `C4Fixed` velocity
     /// exactly, matching C++ `pObj->xdir = itofix(n, prec)` (`C4Script.cpp:697`).
     fixed_velocity: Option<FixedVec2>,
+    /// Component-only dir writes (FnSetXDir/FnSetYDir, C4Script.cpp:
+    /// 697-732): C++ assigns ONE of xdir/ydir — the other keeps its
+    /// full sub-pixel value (a whole-vector write from a script scope
+    /// would quantize it through the int mirror).
+    fixed_velocity_x: Option<C4Fixed>,
+    fixed_velocity_y: Option<C4Fixed>,
     rotation: Option<i32>,
     /// Sub-pixel angular velocity (16.16 fixed-point degrees/frame) set by
     /// `SetRDir`. Mirrors C++ `pObj->rdir = itofix(n, prec)` (`C4Script.cpp:710`).
@@ -2288,6 +2294,12 @@ impl ObjectDelta {
         }
         if let Some(fixed_velocity) = update.fixed_velocity {
             self.fixed_velocity = Some(fixed_velocity);
+        }
+        if let Some(x) = update.fixed_velocity_x {
+            self.fixed_velocity_x = Some(x);
+        }
+        if let Some(y) = update.fixed_velocity_y {
+            self.fixed_velocity_y = Some(y);
         }
         if let Some(rotation) = update.rotation {
             self.rotation = Some(rotation);
@@ -2380,6 +2392,8 @@ impl ObjectDelta {
 impl From<ObjectUpdate> for ObjectDelta {
     fn from(update: ObjectUpdate) -> Self {
         Self {
+            fixed_velocity_x: update.fixed_velocity_x,
+            fixed_velocity_y: update.fixed_velocity_y,
             position: update.position,
             own_mass: update.own_mass,
             velocity: update.velocity,
@@ -2435,6 +2449,9 @@ pub struct ObjectUpdate {
     /// applied. Mirrors C++ storing velocity as `C4Fixed` (`C4Object.h` xdir/ydir).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed_velocity: Option<FixedVec2>,
+    /// See ObjectDelta::fixed_velocity_x — component-only SetXDir/SetYDir.
+    pub fixed_velocity_x: Option<C4Fixed>,
+    pub fixed_velocity_y: Option<C4Fixed>,
     /// Sub-pixel angular velocity (16.16 fixed degrees/frame) from `SetRDir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation_velocity: Option<C4Fixed>,
@@ -2651,6 +2668,8 @@ impl ObjectUpdate {
         self.position.is_none()
             && self.velocity.is_none()
             && self.fixed_velocity.is_none()
+            && self.fixed_velocity_x.is_none()
+            && self.fixed_velocity_y.is_none()
             && self.rotation.is_none()
             && self.rotation_velocity.is_none()
             && self.energy.is_none()
@@ -3222,9 +3241,22 @@ impl Object {
         } else {
             self.state.velocity = self.velocity_pixels();
         }
+        // Component dir writes land on the TRUE fixed velocity — the
+        // untouched component keeps its sub-pixel value (FnSetXDir only
+        // assigns xdir, C4Script.cpp:697-705).
+        if let Some(x) = delta.fixed_velocity_x {
+            self.fixed_velocity.x = x;
+            self.state.velocity = self.velocity_pixels();
+        }
+        if let Some(y) = delta.fixed_velocity_y {
+            self.fixed_velocity.y = y;
+            self.state.velocity = self.velocity_pixels();
+        }
         // Script dir writes mobilize unconditionally: FnSetXDir/FnSetYDir/
         // FnSetRDir all end in `pObj->Mobile = 1` (C4Script.cpp:705,718,732).
         if delta.fixed_velocity.is_some()
+            || delta.fixed_velocity_x.is_some()
+            || delta.fixed_velocity_y.is_some()
             || delta.velocity.is_some()
             || delta.rotation_velocity.is_some()
         {

@@ -11701,14 +11701,15 @@ fn set_velocity_component(
             }
         }
 
-        // C++ SetXDir/SetYDir set xdir/ydir = itofix(value, prec) (default
-        // precision 10), storing fractional `C4Fixed` velocity. `C4Script.cpp:697`.
-        let mut fixed = object.fixed_velocity();
-        component.assign_fixed(
-            &mut fixed,
+        // C++ SetXDir/SetYDir set ONLY xdir/ydir = itofix(value, prec)
+        // (default precision 10, C4Script.cpp:697-732) — the other
+        // component keeps its full sub-pixel value. A whole-vector write
+        // here would quantize it through the scope's int-seeded mirror
+        // (the GoldRush snake's SetXDir(0) turned ydir 2.6 into 3.0).
+        object.set_fixed_velocity_component(
+            component,
             itofix_prec(value, normalise_precision(precision)),
         );
-        object.set_fixed_velocity(fixed);
         Ok(Value::Bool(true))
     })
 }
@@ -17123,6 +17124,19 @@ impl ObjectScopeContext {
         self.pending_update.velocity = Some(Vector2::new(velocity.int_x(), velocity.int_y()));
     }
 
+    /// Component-only dir write (FnSetXDir/FnSetYDir): stages just the
+    /// touched component — the fold lands it on the object's TRUE fixed
+    /// velocity without disturbing the other component.
+    fn set_fixed_velocity_component(&mut self, component: VelocityComponent, value: C4Fixed) {
+        let mut current = self.fixed_velocity();
+        component.assign_fixed(&mut current, value);
+        self.current_fixed_velocity = current;
+        match component {
+            VelocityComponent::X => self.pending_update.fixed_velocity_x = Some(value),
+            VelocityComponent::Y => self.pending_update.fixed_velocity_y = Some(value),
+        }
+    }
+
     /// Angular velocity (`rdir`) as seen by `GetRDir`. The script object snapshot
     /// does not yet carry the live `rdir`, so the entry value reads as zero; a
     /// `SetRDir` earlier in the same call is reflected via the pending update.
@@ -21585,12 +21599,15 @@ mod tests {
         let (result, outcome) = with_object_host_context(|| set_x_dir(&args));
         assert_eq!(result.expect("SetXDir succeeds"), Value::Bool(true));
         let update = outcome.object_update.expect("velocity update recorded");
-        let fixed = update.fixed_velocity.expect("fixed velocity recorded");
-        assert_eq!(fixed.x, itofix_prec(15, 10));
-        assert_eq!(fixed.x.val(), 98304);
-        assert_eq!(fixed.y, C4Fixed::ZERO);
-        // The whole-pixel mirror is derived via fixtoi(1.5) = 2.
-        assert_eq!(update.velocity, Some(Vector2::new(2, 0)));
+        // Component-only write (C4Script.cpp:697-705): ydir is untouched.
+        let fixed_x = update.fixed_velocity_x.expect("fixed x recorded");
+        assert_eq!(fixed_x, itofix_prec(15, 10));
+        assert_eq!(fixed_x.val(), 98304);
+        assert!(update.fixed_velocity.is_none());
+        assert!(update.fixed_velocity_y.is_none());
+        // The whole-pixel mirror derives at the fold (fixtoi of the
+        // final fixed value) — no int velocity staged here.
+        assert!(update.velocity.is_none());
     }
 
     #[test]
@@ -21602,11 +21619,13 @@ mod tests {
         let value = result.expect("SetYDir succeeds");
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("velocity update recorded");
-        let fixed = update.fixed_velocity.expect("fixed velocity recorded");
-        assert_eq!(fixed.y, itofix_prec(5, 5));
-        assert_eq!(fixed.y.val(), 65536);
-        // Whole-pixel mirror is fixtoi(1.0) = 1.
-        assert_eq!(update.velocity, Some(Vector2::new(0, 1)));
+        // Component-only write (C4Script.cpp:718-732): xdir untouched, the
+        // whole-pixel mirror derives at the fold from the final fixed value.
+        let fixed_y = update.fixed_velocity_y.expect("fixed y recorded");
+        assert_eq!(fixed_y, itofix_prec(5, 5));
+        assert_eq!(fixed_y.val(), 65536);
+        assert!(update.fixed_velocity.is_none());
+        assert!(update.fixed_velocity_x.is_none());
     }
 
     #[test]
