@@ -1839,6 +1839,32 @@ fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnLandscapeWidth (C4Script.cpp:3077-3080): GBackWdt.
+fn landscape_width(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        Ok(Value::Int(
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.landscape_ref())
+                .map(|landscape| landscape.width() as i32)
+                .unwrap_or(0),
+        ))
+    })
+}
+
+/// FnLandscapeHeight (C4Script.cpp:3082-3085): GBackHgt.
+fn landscape_height(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        Ok(Value::Int(
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.landscape_ref())
+                .map(|landscape| landscape.estimated_height())
+                .unwrap_or(0),
+        ))
+    })
+}
+
 /// FnFrameCounter (C4Script.cpp): Game.FrameCounter — the current
 /// simulation frame.
 fn frame_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
@@ -4185,6 +4211,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SelectMenuItem", select_menu_item);
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("FrameCounter", frame_counter);
+    script.register_host_function("LandscapeWidth", landscape_width);
+    script.register_host_function("LandscapeHeight", landscape_height);
     script.register_host_function("SetSolidMask", set_solid_mask);
     script.register_host_function("ChangeDef", change_def);
     script.register_host_function("GetPlrDownDouble", get_plr_down_double);
@@ -18182,6 +18210,8 @@ mod tests {
         "InsertMaterial",
         "Inside",
         "Jump",
+        "LandscapeHeight",
+        "LandscapeWidth",
         "Log",
         "MakeCrewMember",
         "Material",

@@ -32778,6 +32778,42 @@ func Trigger() {
     }
 
     #[test]
+    fn landscape_width_and_height_report_gback_dimensions_like_cpp() {
+        // FnLandscapeWidth/FnLandscapeHeight (C4Script.cpp:3077-3085):
+        // GBackWdt/GBackHgt — the wild-horse ContactRight turn check reads
+        // them (Goldrush WildHorse.c).
+        let script = r#"
+        func ReadWidth() { return LandscapeWidth(); }
+        func ReadHeight() { return LandscapeHeight(); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("HORS", "Horse", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        engine.set_landscape(Landscape::flat_with_material(23, 41, None));
+        let horse = engine
+            .spawn_object(SpawnConfig::new("HORS"))
+            .expect("horse spawns");
+        engine.tick().expect("tick succeeds");
+
+        let idx = engine.find_object_index(horse).expect("horse exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "ReadWidth", Vec::new())
+                .expect("ReadWidth succeeds"),
+            Value::Int(23)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(idx, "ReadHeight", Vec::new())
+                .expect("ReadHeight succeeds"),
+            Value::Int(41)
+        );
+    }
+
+    #[test]
     fn do_damage_asks_effects_for_non_living_and_fires_callback() {
         // C4Object::DoDamage (C4Object.cpp:1330-1343): NON-living things ask
         // their effects first (the inverse of DoEnergy's Alive gate), the
@@ -38366,6 +38402,64 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
         Ok(())
+    }
+
+    #[test]
+    fn contact_callback_script_error_tolerated_like_cpp_fail_safe_exec() {
+        // C4Object::Contact runs the Contact* callbacks via C4Object::Call
+        // (C4Movement.cpp:112-119) with fPassErrors=false: a script error
+        // logs and the frame continues (C4AulExec fail-safe) — it must not
+        // abort the tick (the GoldRush wild horse's ContactRight hit this).
+        let script = r#"
+            global func ContactRight() { return NoSuchFunctionAnywhere(); }
+        "#;
+
+        let mut blocker_definition =
+            Definition::from_script("Blocker", "Blocker", "").expect("script compiles");
+        blocker_definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        blocker_definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+
+        let mut mover_definition =
+            Definition::from_script("Mover", "Mover", script).expect("script compiles");
+        mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_RIGHT)]);
+        mover_definition.set_contact_density(50);
+        mover_definition.set_contact_function_calls(true);
+
+        let mut engine = Engine::with_seed(61);
+        engine.set_landscape(Landscape::flat(20, 20));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+            .register_definition(blocker_definition)
+            .expect("blocker definition registers");
+        engine
+            .register_definition(mover_definition)
+            .expect("mover definition registers");
+
+        let mover_id = engine
+            .spawn_object(
+                SpawnConfig::new("Mover")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(4, 5)),
+            )
+            .expect("mover spawns");
+        engine
+            .spawn_object(
+                SpawnConfig::new("Blocker")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 6)),
+            )
+            .expect("blocker spawns");
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
+        engine.objects[idx].state.mobile = true;
+
+        engine
+            .tick()
+            .expect("a Contact* script error must not abort the tick");
     }
 
     #[test]
