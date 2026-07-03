@@ -11967,11 +11967,12 @@ fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
-    // C++ FnSetCommand leads with the object slot (pObj, szCommand, ...);
-    // 0/nil means the calling object. The name-first form stays for the
-    // command-DSL fixtures. Only the SELF form is dispatchable today —
-    // foreign command stacks live on the engine side of the seam, so a
-    // foreign target warns and reports false (documented gap).
+    // C++ FnSetCommand leads with the object slot (pObj, szCommand, ...;
+    // C4Script.cpp:840-844); 0/nil means the calling object. The
+    // name-first form stays for the command-DSL fixtures. A FOREIGN
+    // target re-dispatches through the reentrancy seam so the command
+    // stack write folds with the target's own nested outcome (GoldRush's
+    // StopClonk drives other clonks, Helpers.c:94).
     let mut args = args;
     let mut leading_target: Option<ObjectId> = None;
     let leads_with_object_slot = matches!(
@@ -11988,6 +11989,14 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
             "SetCommand expects at least 1 argument: command name",
         ));
     }
+    if let Some(target) = leading_target {
+        if active_object_id() != Some(target) {
+            return match call_world_object_function(target, "SetCommand", args) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -11998,15 +12007,6 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
         };
-        if let Some(target) = leading_target {
-            if target != object.id() {
-                tracing::warn!(
-                    ?target,
-                    "SetCommand on a FOREIGN object is not dispatchable yet; ignoring"
-                );
-                return Ok(Value::Bool(false));
-            }
-        }
 
         let command_name = match &args[0] {
             Value::String(name) if !name.is_empty() => name.clone(),

@@ -32959,6 +32959,69 @@ func Trigger() {
     }
 
     #[test]
+    fn set_command_dispatches_to_a_foreign_object_like_cpp() {
+        // FnSetCommand (C4Script.cpp:840-868): pObj is the FIRST parameter
+        // and may be ANY object — GoldRush's StopClonk helper halts OTHER
+        // clonks (SetCommand(pTarget, "None"), Helpers.c:94) and dialogue
+        // NPCs get MoveTo orders. An unknown command name clears the
+        // target's command stack and returns false (:847-851).
+        let script = r#"
+        func Order(target) { return SetCommand(target, "MoveTo", 0, 44, 55); }
+        func Halt(target) { return SetCommand(target, "None"); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("BOSS", "Boss", script).expect("script compiles"),
+            )
+            .expect("boss registers");
+        engine
+            .register_definition(
+                Definition::from_script("MNON", "Minion", "").expect("minion compiles"),
+            )
+            .expect("minion registers");
+        let boss = engine
+            .spawn_object(SpawnConfig::new("BOSS"))
+            .expect("boss spawns");
+        let minion = engine
+            .spawn_object(SpawnConfig::new("MNON"))
+            .expect("minion spawns");
+        engine.tick().expect("tick succeeds");
+
+        let boss_idx = engine.find_object_index(boss).expect("boss exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    boss_idx,
+                    "Order",
+                    vec![Value::Object(minion.as_u64())],
+                )
+                .expect("Order succeeds"),
+            Value::Bool(true)
+        );
+        let minion_idx = engine.find_object_index(minion).expect("minion exists");
+        assert_eq!(
+            engine.objects[minion_idx].commands.command_names(),
+            vec!["MoveTo".to_string()],
+            "the foreign target carries the command"
+        );
+
+        let boss_idx = engine.find_object_index(boss).expect("boss exists");
+        assert_eq!(
+            engine
+                .call_object_function(boss_idx, "Halt", vec![Value::Object(minion.as_u64())])
+                .expect("Halt succeeds"),
+            Value::Bool(false),
+            "unknown command name -> ClearCommands + false"
+        );
+        let minion_idx = engine.find_object_index(minion).expect("minion exists");
+        assert!(
+            engine.objects[minion_idx].commands.command_names().is_empty(),
+            "\"None\" cleared the foreign stack"
+        );
+    }
+
+    #[test]
     fn do_damage_asks_effects_for_non_living_and_fires_callback() {
         // C4Object::DoDamage (C4Object.cpp:1330-1343): NON-living things ask
         // their effects first (the inverse of DoEnergy's Alive gate), the
