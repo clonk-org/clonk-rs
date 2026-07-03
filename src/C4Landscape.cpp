@@ -1157,6 +1157,11 @@ int32_t C4Landscape::ExtractMaterial(int32_t fx, int32_t fy)
 
 bool C4Landscape::InsertMaterial(int32_t mat, int32_t tx, int32_t ty, int32_t vx, int32_t vy)
 {
+	if (getenv("LC_RNG_TRACE") && Game.FrameCounter >= 15 && Game.FrameCounter <= 19)
+	{
+		if (FILE *f = LcRngTraceFile())
+			fprintf(f, "INSMAT %d %d %d %d %d %d\n", mat, tx, ty, vx, vy, Game.FrameCounter);
+	}
 	int32_t mdens;
 	if (!MatValid(mat)) return false;
 	mdens = MatDensity(mat);

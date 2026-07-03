@@ -318,8 +318,6 @@ pub struct Landscape {
     /// exist (Engine::set_landscape).
     #[serde(default)]
     vehicle_material: Option<MaterialId>,
-    #[serde(skip)]
-    mass_mover_dirty: bool,
 }
 
 fn default_top_open() -> bool {
@@ -504,7 +502,6 @@ impl Landscape {
             top_open: true,
             bottom_open: false,
             vehicle_material: None,
-            mass_mover_dirty: false,
         })
     }
 
@@ -587,24 +584,6 @@ impl Landscape {
         true
     }
 
-    /// DigFreeSinglePix (C4Landscape.h): clears the pixel when it is
-    /// denser than its neighbour toward (dx, dy).
-    pub fn dig_free_single_pix(
-        &mut self,
-        x: i32,
-        y: i32,
-        dx: i32,
-        dy: i32,
-        materials: &MaterialSet,
-    ) {
-        if self.pixels.is_none() {
-            return;
-        }
-        if self.density_at(x, y, materials) > self.density_at(x + dx, y + dy, materials) {
-            let _ = self.dig_free_pix(x, y, materials);
-        }
-    }
-
     /// C4SolidMask plumbing: the plane's Vehicle byte, raw reads and
     /// writes. None/no-op without a pixel grid (fixture worlds keep the
     /// mask-rect overlay).
@@ -662,7 +641,6 @@ impl Landscape {
         if let Some(slot) = self.surface.get_mut(x as usize) {
             if *slot != height {
                 *slot = height;
-                self.mark_mass_mover_dirty();
                 if let Some(old) = old {
                     self.grid_track_surface(x as i32, old, height, None);
                 }
@@ -693,7 +671,6 @@ impl Landscape {
         self.ensure_liquid_capacity();
         if let Some(column) = self.liquids.get_mut(x as usize) {
             *column = LiquidColumn::from_segments(segments);
-            self.mark_mass_mover_dirty();
         }
     }
 
@@ -701,7 +678,6 @@ impl Landscape {
         self.ensure_liquid_capacity();
         if let Some(column) = self.liquids.get_mut(x as usize) {
             column.clear();
-            self.mark_mass_mover_dirty();
         }
     }
 
@@ -718,7 +694,6 @@ impl Landscape {
         if let Some(slot) = self.solid_materials.get_mut(column as usize) {
             if *slot != material {
                 *slot = material;
-                self.mark_mass_mover_dirty();
             }
         }
     }
@@ -733,7 +708,6 @@ impl Landscape {
                 *slot = material;
             }
         }
-        self.mark_mass_mover_dirty();
     }
 
     pub fn set_default_solid_material(&mut self, material: Option<MaterialId>) {
@@ -746,7 +720,6 @@ impl Landscape {
                 }
             }
         }
-        self.mark_mass_mover_dirty();
     }
 
     pub fn default_solid_material(&self) -> Option<MaterialId> {
@@ -811,7 +784,6 @@ impl Landscape {
         let world_height = self.estimate_world_height();
         let original_default = self.default_solid_material;
 
-        let mut changed = false;
         let mut default_change_indices = Vec::new();
         let mut default_change_target: Option<MaterialId> = None;
         let mut default_change_uniform = true;
@@ -871,7 +843,6 @@ impl Landscape {
                     if let Some(current) = self.solid_materials[index] {
                         if current != *target {
                             self.solid_materials[index] = Some(*target);
-                            changed = true;
                         }
                     }
                 }
@@ -882,7 +853,6 @@ impl Landscape {
                             let old = self.surface[index];
                             self.surface[index] = new_height;
                             self.grid_track_surface(index as i32, old, new_height, None);
-                            changed = true;
                         }
                     }
                 }
@@ -900,7 +870,6 @@ impl Landscape {
                             let old = self.surface[index];
                             self.surface[index] = new_height;
                             self.grid_track_surface(index as i32, old, new_height, None);
-                            changed = true;
                             removal_applied = true;
                         }
                     }
@@ -914,14 +883,12 @@ impl Landscape {
 
             if can_update_default {
                 self.default_solid_material = default_change_target;
-                changed = true;
             } else {
                 for index in default_change_indices {
                     if let Some(TemperatureConversionAction::ChangeMaterial { target, .. }) =
                         column_actions[index]
                     {
                         self.solid_materials[index] = Some(target);
-                        changed = true;
                     }
                 }
             }
@@ -948,28 +915,16 @@ impl Landscape {
             }
             if uniform && target != self.default_solid_material {
                 self.default_solid_material = target;
-                changed = true;
             }
         }
 
-        let mut liquids_changed = false;
         let temperature_lookup = |y: i32| environment.temperature_at_height(frame, y, world_height);
         for column in &mut self.liquids {
-            if column.apply_temperature_conversions(
+            let _ = column.apply_temperature_conversions(
                 materials,
                 self.default_liquid_material,
                 &temperature_lookup,
-            ) {
-                liquids_changed = true;
-            }
-        }
-
-        if liquids_changed {
-            changed = true;
-        }
-
-        if changed {
-            self.mark_mass_mover_dirty();
+            );
         }
     }
 
@@ -986,16 +941,6 @@ impl Landscape {
             self.liquids
                 .resize(self.surface.len(), LiquidColumn::default());
         }
-    }
-
-    pub(crate) fn mark_mass_mover_dirty(&mut self) {
-        self.mass_mover_dirty = true;
-    }
-
-    pub fn take_mass_mover_dirty(&mut self) -> bool {
-        let dirty = self.mass_mover_dirty;
-        self.mass_mover_dirty = false;
-        dirty
     }
 
     #[allow(dead_code)]
@@ -1204,7 +1149,6 @@ impl Landscape {
         self.ensure_liquid_capacity();
         let column = self.liquids.get_mut(index)?;
         if let Some(material) = column.remove_pixel(y) {
-            self.mark_mass_mover_dirty();
             if let Some(grid) = self.pixels.as_mut() {
                 grid.clear_pixel(x, y);
             }
@@ -1232,7 +1176,6 @@ impl Landscape {
         let desired_material = material.or(self.default_liquid_material);
         let inserted = column.insert_pixel(y, desired_material);
         if inserted {
-            self.mark_mass_mover_dirty();
             if let Some(grid) = self.pixels.as_mut() {
                 if let Some(byte) = desired_material.and_then(|id| grid.byte_for_material(id)) {
                     grid.set_byte(x, y, byte);
@@ -1253,21 +1196,16 @@ impl Landscape {
             return;
         }
         let target_height = height.max(0);
-        let mut changed = false;
         for x in clamped_start..clamped_end {
             let old = self.surface.get(x as usize).copied();
             if let Some(slot) = self.surface.get_mut(x as usize) {
                 if target_height > *slot {
                     *slot = target_height;
-                    changed = true;
                     if let Some(old) = old {
                         self.grid_track_surface(x, old, target_height, None);
                     }
                 }
             }
-        }
-        if changed {
-            self.mark_mass_mover_dirty();
         }
     }
 
@@ -1287,7 +1225,6 @@ impl Landscape {
         if let Some(slot) = self.surface.get_mut(index) {
             if *slot < target_height {
                 *slot = target_height;
-                self.mark_mass_mover_dirty();
                 if let Some(old) = old {
                     self.grid_track_surface(column, old, target_height, None);
                 }
@@ -1422,10 +1359,6 @@ impl Landscape {
                 .and_modify(|count| *count += removed_height)
                 .or_insert(removed_height);
             result.affected_columns.push((column, target_height));
-        }
-
-        if !result.affected_columns.is_empty() || !result.removed_by_material.is_empty() {
-            self.mark_mass_mover_dirty();
         }
 
         result
@@ -1886,6 +1819,54 @@ impl Landscape {
     /// Straight down first, then per `cslide` ring check left before right; a
     /// side is clogged only when both its cells are >= `mdens`; a slide fires
     /// when the side's down-cell is free. Mutates `fx`/`fy` on success.
+    /// C4Landscape::FindMatPath (C4Landscape.cpp:1226-1256): the next pixel
+    /// position toward the desired slide. Unlike FindMatSlide the sideways
+    /// step advances `fx` by exactly ONE pixel and leaves `fy` unchanged.
+    pub fn find_mat_path(
+        &self,
+        fx: &mut i32,
+        fy: &mut i32,
+        ydir: i32,
+        mdens: i32,
+        mslide: i32,
+        materials: &MaterialSet,
+    ) -> bool {
+        // One downwards
+        if self.density_at(*fx, *fy + ydir, materials) < mdens {
+            *fy += ydir;
+            return true;
+        }
+        // Find downwards slide path
+        let (mut left, mut right) = (true, true);
+        let mut cslide = 1;
+        while cslide <= mslide && (left || right) {
+            // Check left
+            if left {
+                if self.density_at(*fx - cslide, *fy, materials) >= mdens {
+                    // Left clogged
+                    left = false;
+                } else if self.density_at(*fx - cslide, *fy + ydir, materials) < mdens {
+                    // Left slide okay
+                    *fx -= 1;
+                    return true;
+                }
+            }
+            // Check right
+            if right {
+                if self.density_at(*fx + cslide, *fy, materials) >= mdens {
+                    // Right clogged
+                    right = false;
+                } else if self.density_at(*fx + cslide, *fy + ydir, materials) < mdens {
+                    // Right slide okay
+                    *fx += 1;
+                    return true;
+                }
+            }
+            cslide += 1;
+        }
+        false
+    }
+
     pub fn find_mat_slide(
         &self,
         fx: &mut i32,
@@ -1952,7 +1933,6 @@ impl Landscape {
         }
         if target == current_height {
             self.solid_materials[index] = Some(material);
-            self.mark_mass_mover_dirty();
             return true;
         }
         let old = self.surface[index];
@@ -1963,7 +1943,6 @@ impl Landscape {
             .and_then(|grid| grid.byte_for_material(material));
         self.grid_track_surface(index as i32, old, target, fill);
         self.solid_materials[index] = Some(material);
-        self.mark_mass_mover_dirty();
         true
     }
 
@@ -1988,6 +1967,76 @@ impl Landscape {
     /// point up along same-material pixels (within the material's
     /// MaxSlide) to the column top — extraction always takes the
     /// SURFACE pixel, leaving the probed spot wet.
+    /// Simulates FnExtractMaterialAmount's loop (C4Script.cpp:2264-2273:
+    /// extract while `GBackMat(x,y) == mat`, each via ExtractMaterial's
+    /// FindMatTop-then-clear) WITHOUT mutating, so the host fn can return
+    /// the exact count and stage the real extraction as an operation.
+    /// Valid while no earlier same-batch op touches these pixels.
+    pub fn simulate_extract_material_amount(
+        &self,
+        materials: &MaterialSet,
+        x: i32,
+        y: i32,
+        material: MaterialId,
+        amount: i32,
+    ) -> i32 {
+        let max_slide = materials
+            .get_by_id(material)
+            .map(|entry| entry.max_slide())
+            .unwrap_or(0);
+        let mut cleared: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+        let mat_at = |cleared: &std::collections::HashSet<(i32, i32)>, px: i32, py: i32| {
+            !cleared.contains(&(px, py)) && self.material_at(px, py) == Some(material)
+        };
+        let mut extracted = 0;
+        while extracted < amount {
+            if !mat_at(&cleared, x, y) {
+                break;
+            }
+            // FindMatTop (C4Landscape.cpp:1118-1156) against the overlay
+            let (mut tx, mut ty) = (x, y);
+            loop {
+                let mut left = true;
+                let mut right = true;
+                let mut slide = 0;
+                let mut cslide = 0;
+                while cslide <= max_slide && (left || right) {
+                    if left {
+                        if !mat_at(&cleared, tx - cslide, ty) {
+                            left = false;
+                        } else if mat_at(&cleared, tx - cslide, ty - 1) {
+                            slide = 1;
+                            break;
+                        }
+                    }
+                    if right {
+                        if !mat_at(&cleared, tx + cslide, ty) {
+                            right = false;
+                        } else if mat_at(&cleared, tx + cslide, ty - 1) {
+                            slide = 2;
+                            break;
+                        }
+                    }
+                    cslide += 1;
+                }
+                match slide {
+                    1 => {
+                        tx -= cslide;
+                        ty -= 1;
+                    }
+                    2 => {
+                        tx += cslide;
+                        ty -= 1;
+                    }
+                    _ => break,
+                }
+            }
+            cleared.insert((tx, ty));
+            extracted += 1;
+        }
+        extracted
+    }
+
     fn find_mat_top(
         &self,
         material: MaterialId,
@@ -2039,21 +2088,25 @@ impl Landscape {
         (x, y)
     }
 
-    /// C4Landscape::ExtractMaterial (C4Landscape.cpp:1148-1156) with a
-    /// materials set for the MaxSlide lookup.
-    pub fn extract_material_with(
+    /// C4Landscape::ExtractMaterial's landscape half (C4Landscape.cpp:
+    /// 1148-1153): FindMatTop + ClearPix, returning the extracted material
+    /// AND the cleared coordinates — the by-ref `fx`/`fy` the C++ passes on
+    /// to CheckInstabilityRange (:1154). The engine wrapper
+    /// (`Engine::extract_material`) fires the instability probe there.
+    pub fn extract_material_probe(
         &mut self,
         x: i32,
         y: i32,
         materials: &MaterialSet,
-    ) -> Option<MaterialId> {
+    ) -> Option<(MaterialId, i32, i32)> {
         if self.pixels.is_some() {
             let material = self.material_at(x, y)?;
             let (top_x, top_y) = self.find_mat_top(material, x, y, materials);
             self.clear_pix(top_x, top_y);
-            return Some(material);
+            return Some((material, top_x, top_y));
         }
         self.extract_material_at(x, y)
+            .map(|material| (material, x, y))
     }
 
     pub fn extract_material_at(&mut self, x: i32, y: i32) -> Option<MaterialId> {
@@ -2080,7 +2133,6 @@ impl Landscape {
             }
             let target = (*height - 1).max(0);
             *height = target;
-            self.mark_mass_mover_dirty();
             if let Some(grid) = self.pixels.as_mut() {
                 // The column op removes the TOP pixel; mirror it on the plane.
                 grid.clear_pixel(index as i32, target);
@@ -2543,7 +2595,6 @@ impl<'de> Deserialize<'de> for Landscape {
         landscape.top_open = data.top_open;
         landscape.bottom_open = data.bottom_open;
         landscape.vehicle_material = data.vehicle_material;
-        landscape.mass_mover_dirty = false;
         Ok(landscape)
     }
 }

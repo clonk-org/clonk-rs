@@ -104,6 +104,9 @@ pub(crate) struct HostWorldObject {
     /// GameCall): lets host functions build a complete object scope for
     /// another object mid-VM-call. `None` in legacy fixture contexts.
     state: Option<Rc<ObjectState>>,
+    /// C4Object::LastEnergyLossCausePlayer (kill trace) — carried beside
+    /// the state snapshot because it lives on the engine object wrapper.
+    pub last_energy_loss_cause: i32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -280,6 +283,7 @@ impl HostWorldObject {
             draw_transform,
             command_names: Vec::new(),
             state: None,
+            last_energy_loss_cause: OWNER_NONE,
         }
     }
 
@@ -305,6 +309,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_full_state(mut self, state: Rc<ObjectState>) -> Self {
         self.state = Some(state);
+        self
+    }
+
+    pub(crate) fn with_last_energy_loss_cause(mut self, cause: i32) -> Self {
+        self.last_energy_loss_cause = cause;
         self
     }
 
@@ -2056,13 +2065,13 @@ fn get_menu(args: &[Value]) -> Result<Value, RuntimeError> {
 /// 735-767): a zero punch derives from the Fight physicals
 /// (BoundBy(5*attacker/target, 0, 10)); QueryCatchBlow on the target
 /// halves punch > 1 and stops the blow; the target loses punch% energy
-/// and its ComDir stops either way; a stopped blow returns false without
-/// a fling; punch >= 10 tries the Tumble action (xdir FIXED100(150)*tdir,
-/// ydir -2), the regular path GetPunched (xdir FIXED100(250)*tdir,
-/// ydir 0) — each firing CatchBlow(punch, attacker) on success.
-/// (LastEnergyLossCausePlayer kill tracing rides the engine's DoEnergy
-/// caused-by, which the scope energy write does not carry yet — the same
-/// gap as the DoEnergy host function.)
+/// (DoEnergy with the ATTACKER's controller as caused-by, kill-trace
+/// marked) and its ComDir stops either way; a stopped blow returns false
+/// without a fling; punch >= 10 tries the Tumble action (xdir
+/// FIXED100(150)*tdir, ydir -2), the regular path GetPunched (xdir
+/// FIXED100(250)*tdir, ydir 0) — each re-writing
+/// LastEnergyLossCausePlayer unguarded and firing
+/// CatchBlow(punch, attacker) on success.
 fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "Punch", "target")?
@@ -2078,6 +2087,9 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
         let scope = context.object_context()?;
         let attacker = scope.id();
         let attacker_fight = scope.resolved_physical(false).fight;
+        // cObj->Controller — the puncher's kill credit
+        // (C4ObjectCom.cpp:749,755,762).
+        let attacker_controller = scope.controller();
         // tdir = +1, DIR_Left -> -1 (C4ObjectCom.cpp:745).
         let tdir = match scope.direction() {
             Direction::Left => -1,
@@ -2090,9 +2102,9 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
             .object_scope(target)
             .map(|scope| scope.resolved_physical(false).fight)
             .unwrap_or(0);
-        Some((attacker, attacker_fight, tdir, target_fight))
+        Some((attacker, attacker_fight, attacker_controller, tdir, target_fight))
     });
-    let Some((attacker, attacker_fight, tdir, target_fight)) = read else {
+    let Some((attacker, attacker_fight, attacker_controller, tdir, target_fight)) = read else {
         return Ok(Value::Bool(false)); // !cthr->Obj / unknown target
     };
 
@@ -2121,12 +2133,20 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
         punch /= 2; // caught blow halves damage (C4ObjectCom.cpp:743)
     }
 
-    // DoEnergy(-punch, false) + ComDir stop happen even for stopped blows.
+    // DoEnergy(-punch, false, C4FxCall_EngGetPunched, cObj->Controller)
+    // + ComDir stop happen even for stopped blows (C4ObjectCom.cpp:749-752).
     let written = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return false;
         };
+        stage_energy_loss_cause(
+            context,
+            target,
+            -punch,
+            crate::C4FX_CALL_ENG_GET_PUNCHED,
+            attacker_controller,
+        );
         context
             .object_scope_mut(target)
             .map(|scope| {
@@ -2167,6 +2187,16 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
     if !flung {
         return Ok(Value::Bool(false));
     }
+    // A successful fling writes the kill trace DIRECTLY — no
+    // UpdatLastEnergyLossCause guard ("for kill tracing when pushing
+    // enemies off a cliff", C4ObjectCom.cpp:755,762).
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.pending_update.energy_loss_cause = Some(attacker_controller);
+            }
+        }
+    });
     // PSF_CatchBlow after a successful fling (C4ObjectCom.cpp:754,762).
     if let Some(Err(error)) = call_world_object_own_function(
         target,
@@ -4482,6 +4512,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetObjectLayer", get_object_layer);
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("InsertMaterial", insert_material);
+    script.register_host_function("ExtractMaterialAmount", extract_material_amount);
     script.register_host_function("IncinerateLandscape", incinerate_landscape);
     script.register_host_function("OnFire", on_fire);
     script.register_host_function("SetGraphics", set_graphics);
@@ -6115,6 +6146,14 @@ pub(crate) enum LandscapeOperation {
     InsertMaterial {
         material: i32,
         position: Vector2,
+        velocity: Vector2,
+    },
+    /// FnExtractMaterialAmount (C4Script.cpp:2264-2273): the count was
+    /// simulated at call time; the apply reruns the REAL loop.
+    ExtractMaterialAmount {
+        material: i32,
+        position: Vector2,
+        amount: i32,
     },
 }
 
@@ -7445,11 +7484,12 @@ fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnGrabObjectInfo (C4Script.cpp:2170-2176) -> C4Object::GrabInfo
 /// (C4Object.cpp:5696-5726): `pTo` (default: the caller) takes pFrom's
 /// info section, retires its own, and re-registers as crew. The port
-/// keys "has an info" off the crew flag; the name/rank payload of
-/// C4ObjectInfo is not modeled (documented gap) — the observable
-/// effects are the return value, the grabber's crew registration and
-/// the donor losing its crew slot (GoldRush TRPR Recruitment,
-/// Trapper.c4d/Script.c:19-25).
+/// keys "has an info" off the crew flag; the transferred payload is the
+/// crew flag, the donor's portrait source and the info's permanent
+/// physicals (the GetPhysical info fallback, C4Object.cpp:2118-2134).
+/// The name/rank/experience payload of C4ObjectInfo is not modeled
+/// (documented gap: GetName reads definition metadata) — GoldRush TRPR
+/// Recruitment, Trapper.c4d/Script.c:19-25.
 fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
     let from = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
@@ -7477,30 +7517,17 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
             // own info: success (C4Object.cpp:5701)
             return Ok(Value::Bool(true));
         }
-        // only if the other object has an info (C4Object.cpp:5703)
-        let from_has_info = if Some(from) == active {
-            context
-                .object_context()
-                .map(|object| object.crew_member)
-                .unwrap_or(false)
-        } else if let Some(state) = context.nested_objects.get(&from) {
-            state.scope.crew_member
-        } else {
-            context
-                .get_world_object(from)
-                .and_then(|object| object.full_state().map(|state| state.crew_member))
-                .unwrap_or(false)
-        };
-        if !from_has_info {
+        // Materialize scopes for both sides (C++ mutates the live objects).
+        if !context.ensure_object_scope(from) || !context.ensure_object_scope(to) {
             return Ok(Value::Bool(false));
         }
-        // the donor loses its info/crew slot (C4Object.cpp:5710-5714)
-        if Some(from) == active {
-            if let Some(object) = context.object_context_mut() {
-                object.set_crew_member(false);
-            }
-        } else if let Some(state) = context.nested_objects.get_mut(&from) {
-            state.scope.set_crew_member(false);
+        // only if the other object has an info (C4Object.cpp:5703)
+        let (from_has_info, donor_physical) = context
+            .object_scope(from)
+            .map(|scope| (scope.crew_member, scope.info_physical))
+            .unwrap_or((false, None));
+        if !from_has_info {
+            return Ok(Value::Bool(false));
         }
         // the grabbed info carries the donor's portrait
         // (C4Object.cpp:5715 Info transfer; portrait rides the info)
@@ -7517,29 +7544,27 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                     .get_world_object(from)
                     .map(|object| object.definition_id().to_string())
             });
-        // the grabber recruits into its owner's crew (C4Object.cpp:5720-5723)
-        if Some(to) == active {
-            if let Some(object) = context.object_context_mut() {
-                object.set_crew_member(true);
-                if let Some(portrait) = donor_portrait {
-                    object.set_portrait_source(portrait);
-                }
-            }
-            Ok(Value::Bool(true))
-        } else if let Some(state) = context.nested_objects.get_mut(&to) {
-            state.scope.set_crew_member(true);
-            if let Some(portrait) = donor_portrait {
-                state.scope.set_portrait_source(portrait);
-            }
-            Ok(Value::Bool(true))
-        } else {
-            tracing::warn!(
-                from = from.as_u64(),
-                to = to.as_u64(),
-                "GrabObjectInfo: target outside the active/nested scopes; info transfer skipped"
-            );
-            Ok(Value::Bool(false))
+        // the donor loses its info/crew slot — and with it the info's
+        // permanent physicals (`pFrom->ClearInfo(pFrom->Info)`,
+        // C4Object.cpp:5710-5715)
+        if let Some(scope) = context.object_scope_mut(from) {
+            scope.set_crew_member(false);
+            scope.info_physical = None;
+            scope.record_physicals();
         }
+        // the grabber takes the info wholesale: crew registration, the
+        // donor's portrait and its permanent physicals
+        // (C4Object.cpp:5715-5723; GetPhysical's info fallback,
+        // C4Object.cpp:2118-2134)
+        if let Some(scope) = context.object_scope_mut(to) {
+            scope.set_crew_member(true);
+            scope.info_physical = donor_physical;
+            scope.record_physicals();
+            if let Some(portrait) = donor_portrait {
+                scope.set_portrait_source(portrait);
+            }
+        }
+        Ok(Value::Bool(true))
     })
 }
 
@@ -8377,9 +8402,14 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
+    let mut eng_type = 0;
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::Int(_) | Value::Nil => {
+            Value::Int(value) => {
+                eng_type = *value;
+                index += 1;
+            }
+            Value::Nil => {
                 index += 1;
             }
             other => {
@@ -8390,10 +8420,19 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
     }
+    // C4FxCall_EngScript default (C4Script.cpp:495).
+    if eng_type == 0 {
+        eng_type = crate::C4FX_CALL_ENG_SCRIPT;
+    }
 
+    let mut caused_by_plus_one = 0;
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::Int(_) | Value::Nil => {
+            Value::Int(value) => {
+                caused_by_plus_one = *value;
+                index += 1;
+            }
+            Value::Nil => {
                 index += 1;
             }
             other => {
@@ -8416,20 +8455,65 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("DoEnergy requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
+        // (C4Script.cpp:496-497) — resolved in the caller's scope.
+        let caused_by = if caused_by_plus_one != 0 {
+            caused_by_plus_one - 1
+        } else {
+            context
+                .object_context()
+                .map(|object| object.controller())
+                .unwrap_or(OWNER_NONE)
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        // `if (!pObj) pObj = cthr->Obj` is only the local-call default
+        // (C4Script.cpp:494) — a named target may be FOREIGN.
+        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
-
-        object.adjust_energy(change, exact);
+        stage_energy_loss_cause(context, target, change, eng_type, caused_by);
+        let Some(scope) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
+        scope.adjust_energy(change, exact);
         Ok(Value::Bool(true))
     })
+}
+
+/// The kill-trace mark of C4Object::DoEnergy (C4Object.cpp:1351-1353):
+/// negative changes (and object hits even at zero) record the causing
+/// player, with the UpdatLastEnergyLossCause guard (:1369-1378) applied
+/// at call time against the freshest tracked value.
+fn stage_energy_loss_cause(
+    context: &mut EffectHostContext,
+    target: ObjectId,
+    change: i32,
+    eng_type: i32,
+    caused_by: i32,
+) {
+    if change >= 0 && eng_type != crate::C4FX_CALL_ENG_OBJ_HIT {
+        return;
+    }
+    let tracked = context
+        .object_scope(target)
+        .and_then(|scope| scope.pending_update.energy_loss_cause)
+        .or_else(|| {
+            context
+                .get_world_object(target)
+                .map(|object| object.last_energy_loss_cause)
+        })
+        .unwrap_or(OWNER_NONE);
+    let controller = context
+        .object_scope(target)
+        .map(|scope| scope.controller())
+        .unwrap_or(OWNER_NONE);
+    if caused_by != controller || tracked < 0 {
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.pending_update.energy_loss_cause = Some(caused_by);
+        }
+    }
 }
 
 fn do_con(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -8538,9 +8622,14 @@ fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
+    let mut caused_by_plus_one = 0;
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::Int(_) | Value::Nil => {
+            Value::Int(value) => {
+                caused_by_plus_one = *value;
+                index += 1;
+            }
+            Value::Nil => {
                 index += 1;
             }
             other => {
@@ -8558,25 +8647,55 @@ fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
+    let staged = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("DoDamage requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
+        // (C4Script.cpp:511) — resolved in the caller's scope.
+        let caused_by = if caused_by_plus_one != 0 {
+            caused_by_plus_one - 1
+        } else {
+            context
+                .object_context()
+                .map(|object| object.controller())
+                .unwrap_or(OWNER_NONE)
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        // `if (!pObj) pObj = cthr->Obj` is only the local-call default
+        // (C4Script.cpp:510) — a named target may be FOREIGN.
+        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
+            return Ok(None);
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(None);
         }
-
-        object.adjust_damage(change);
-        Ok(Value::Bool(true))
-    })
+        let Some(scope) = context.object_scope_mut(target) else {
+            return Ok(None);
+        };
+        // Damage = max(Damage + iChange, 0) (C4Object.cpp:1288).
+        scope.adjust_damage(change);
+        Ok(Some((target, caused_by)))
+    })?;
+    let Some((target, caused_by)) = staged else {
+        return Ok(Value::Bool(false));
+    };
+    // The Damage engine call after the stat write (PSF_Damage "~Damage",
+    // C4Object.cpp:1290 — fail-safe exec, errors log and continue).
+    // NOT modeled: the non-living Fx*Damage effects-first hook
+    // (C4Object.cpp:1282-1286) — the host scope path has no effect
+    // DoDamage dispatch (same gap as DoEnergy's living hook).
+    if let Some(Err(error)) = call_world_object_own_function(
+        target,
+        "Damage",
+        &[Value::Int(change), Value::Int(caused_by)],
+    ) {
+        tracing::warn!(
+            %error,
+            "script error in Damage; continuing like the C++ fail-safe exec"
+        );
+    }
+    Ok(Value::Bool(true))
 }
 
 fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -8609,13 +8728,11 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|arg| parse_object_reference_argument(arg, "SetAction", "target"))
         .transpose()?
         .flatten();
-    let update_target1 = args.get(1).is_some();
     let target2 = args
         .get(2)
         .map(|arg| parse_object_reference_argument(arg, "SetAction", "target2"))
         .transpose()?
         .flatten();
-    let update_target2 = args.get(2).is_some();
     if args.len() > 4 {
         return Err(RuntimeError::new(format!(
             "SetAction: expected at most 4 arguments, got {}",
@@ -8653,12 +8770,13 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         update.set_name(name.clone());
         update.set_force(false);
 
-        // SetActionByName carries the action targets
-        // (C4Object.cpp SetActionByName -> SetAction(pTarget, pTarget2)).
-        if update_target1 {
+        // SetActionByName carries the action targets, and C4Object::SetAction
+        // assigns them ONLY when non-null (C4Object.cpp:4123-4125:
+        // `if (pTarget) Action.Target = pTarget;`) — nil preserves.
+        if target1.is_some() {
             object.set_action_target(0, target1);
         }
-        if update_target2 {
+        if target2.is_some() {
             object.set_action_target(1, target2);
         }
         if changed_action {
@@ -8934,14 +9052,16 @@ fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
 /// C4Object.cpp:5728-5752) or bring the first idTarget content to the
 /// front (DirectComContents, :5754-5775). The rotation itself is the C++
 /// cyclic relink (C4ObjectList.cpp:815-833), applied via
-/// ObjectUpdate.contents_front. Documented gaps: CanConcatPictureWith
+/// ObjectUpdate.contents_front; with fDoCalls the container's
+/// ~ControlContents(id) may veto and the new front gets
+/// ~Selection(container) with the Grab sound on a falsy return
+/// (C4Object.cpp:5760-5767); the menu Refill (:5769-5772) is
+/// presentation-only and unmodeled. Documented gaps: CanConcatPictureWith
 /// (id/color/graphics/name/overlay stack check, C4Object.cpp) is
-/// approximated by DEFINITION ID equality; the fDoCalls path
-/// (~ControlContents veto, ~Selection, the Grab sound) is not dispatched;
-/// foreign pObj targets are not dispatchable through the scope seam and
-/// report false; contents read the frame-start world view (mid-call
-/// CreateContents spawns are not visible — the FindContents staleness
-/// seam).
+/// approximated by DEFINITION ID equality; contents read the frame-start
+/// world view (mid-call CreateContents spawns are not visible — the
+/// FindContents staleness seam), so ~Selection also fires against the
+/// pre-relink view.
 fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_object = match args.first() {
         None | Some(Value::Nil | Value::Int(0)) => None,
@@ -8963,23 +9083,42 @@ fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .unwrap_or(false);
 
-    HOST_CONTEXT.with(|cell| {
+    // FnShiftContents' pObj may name ANOTHER container (C4Script.cpp:1786
+    // only defaults nil to cthr->Obj) — re-enter through the nested seam so
+    // the target's own scope runs the shift (the ObjectSetAction pattern).
+    let active = active_object_id();
+    if let Some(target) = target_object {
+        if Some(target) != active {
+            let forwarded = vec![
+                Value::Nil,
+                Value::Bool(shift_back),
+                id_target.map(Value::C4Id).unwrap_or(Value::Nil),
+                Value::Bool(do_calls),
+            ];
+            return match call_world_object_function(target, "ShiftContents", &forwarded) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    // Phase 1 (borrowed): resolve the frame-start contents view and pick
+    // the new front — released before the DirectComContents calls re-enter.
+    enum Picked {
+        Done(Value),
+        Shift {
+            container: ObjectId,
+            new_front: ObjectId,
+            new_front_id: String,
+        },
+    }
+    let picked = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
+            return Picked::Done(Value::Bool(false));
         };
         let Some(self_id) = context.object_context().map(|object| object.id()) else {
-            return Ok(Value::Bool(false));
+            return Picked::Done(Value::Bool(false));
         };
-        if let Some(target) = target_object {
-            if target != self_id {
-                tracing::warn!(
-                    ?target,
-                    "ShiftContents on a FOREIGN object is not dispatchable yet; ignoring"
-                );
-                return Ok(Value::Bool(false));
-            }
-        }
         let contents: Vec<(ObjectId, String)> = match context.get_world_object(self_id) {
             Some(container) => container
                 .contents()
@@ -8991,10 +9130,10 @@ fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                         .map(|child| (*child_id, child.definition_id().to_string()))
                 })
                 .collect(),
-            None => return Ok(Value::Bool(false)),
+            None => return Picked::Done(Value::Bool(false)),
         };
         let Some((front_id, front_definition)) = contents.first().cloned() else {
-            return Ok(Value::Bool(false));
+            return Picked::Done(Value::Bool(false));
         };
         let new_front = if let Some(id_target) = id_target {
             // Check if the ID is present within the container
@@ -9003,11 +9142,11 @@ fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 .iter()
                 .find(|(_, definition)| *definition == id_target)
             else {
-                return Ok(Value::Bool(false));
+                return Picked::Done(Value::Bool(false));
             };
             // Desired object already at front? (DirectComContents :5759.)
             if *found == front_id {
-                return Ok(Value::Bool(true));
+                return Picked::Done(Value::Bool(true));
             }
             *found
         } else {
@@ -9027,20 +9166,92 @@ fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             };
             match candidate {
                 Some((id, _)) => *id,
-                None => return Ok(Value::Bool(false)),
+                None => return Picked::Done(Value::Bool(false)),
             }
         };
-        if do_calls {
-            tracing::warn!(
-                "ShiftContents: ~ControlContents/~Selection dispatch is not modeled yet"
-            );
+        let new_front_id = contents
+            .iter()
+            .find(|(id, _)| *id == new_front)
+            .map(|(_, definition)| definition.clone())
+            .unwrap_or_default();
+        Picked::Shift {
+            container: self_id,
+            new_front,
+            new_front_id,
         }
-        let Some(object) = context.object_context_mut() else {
-            return Ok(Value::Bool(false));
+    });
+    let (container, new_front, new_front_id) = match picked {
+        Picked::Done(value) => return Ok(value),
+        Picked::Shift {
+            container,
+            new_front,
+            new_front_id,
+        } => (container, new_front, new_front_id),
+    };
+    // DirectComContents (C4Object.cpp:5760-5763): with fDoCalls the
+    // container's ~ControlContents(idNewFront) runs first — a truthy
+    // return takes over the selection (fail-safe exec, errors read false).
+    if do_calls {
+        let veto = match call_world_object_own_function(
+            container,
+            "ControlContents",
+            &[Value::C4Id(new_front_id)],
+        ) {
+            Some(Ok(value)) => value.as_bool(),
+            Some(Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    "script error in ControlContents; continuing like the C++ fail-safe exec"
+                );
+                false
+            }
+            None => false,
         };
-        object.shift_contents_front(new_front);
-        Ok(Value::Bool(true))
-    })
+        if veto {
+            return Ok(Value::Bool(true));
+        }
+    }
+    // The cyclic relink (C4ObjectList::ShiftContents, C4ObjectList.cpp:
+    // 815-833) via ObjectUpdate.contents_front.
+    let shifted = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|context| context.object_context_mut())
+            .map(|object| object.shift_contents_front(new_front))
+            .is_some()
+    });
+    if !shifted {
+        return Ok(Value::Bool(false));
+    }
+    // ~Selection(container) on the new front; a falsy return plays the
+    // Grab sound at the container (C4Object.cpp:5767).
+    if do_calls {
+        let selected = match call_world_object_own_function(
+            new_front,
+            "Selection",
+            &[object_reference_value(container)],
+        ) {
+            Some(Ok(value)) => value.as_bool(),
+            Some(Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    "script error in Selection; continuing like the C++ fail-safe exec"
+                );
+                false
+            }
+            None => false,
+        };
+        if !selected {
+            HOST_CONTEXT.with(|cell| {
+                if let Some(context) = cell.borrow_mut().as_mut() {
+                    context
+                        .audio_mut()
+                        .play_sound("Grab", Some(container), 100, false, false, None);
+                }
+            });
+        }
+    }
+    Ok(Value::Bool(true))
 }
 
 /// FnGetCommand (C4Script.cpp:918-945): walk the command stack to entry
@@ -14962,6 +15173,10 @@ fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
     let material = value_to_i32(args.first().unwrap_or(&Value::Nil), "InsertMaterial", "mat")?;
     let x = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "InsertMaterial", "x")?;
     let y = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "InsertMaterial", "y")?;
+    // FnInsertMaterial (C4Script.cpp:2207-2211): vx/vy ride into
+    // C4Landscape::InsertMaterial (FIXED10 there).
+    let vx = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "InsertMaterial", "vx")?;
+    let vy = value_to_i32(args.get(4).unwrap_or(&Value::Nil), "InsertMaterial", "vy")?;
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = match borrow.as_mut() {
@@ -14976,12 +15191,73 @@ fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
         context.register_landscape_operation(LandscapeOperation::InsertMaterial {
             material,
             position,
+            velocity: Vector2::new(vx, vy),
         });
         Ok(Value::Bool(true))
     })
 }
 
-/// FnOnFire (C4Script.cpp:1870-1877): burning when the fire flag is set or
+/// FnExtractMaterialAmount (C4Script.cpp:2264-2273): extract up to
+/// `amount` pixels while `GBackMat(x,y) == mat`, each through
+/// ExtractMaterial (FindMatTop + clear). The count is computed by an
+/// overlay simulation on the read view and the mutation staged as an
+/// operation applied on the same state.
+fn extract_material_amount(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "ExtractMaterialAmount", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ExtractMaterialAmount", "y")?;
+    let material = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "ExtractMaterialAmount",
+        "mat",
+    )?;
+    let amount = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "ExtractMaterialAmount",
+        "amount",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = match borrow.as_mut() {
+            Some(context) => context,
+            None => return Ok(Value::Int(0)),
+        };
+        let mut position = Vector2::new(x, y);
+        if let Some(object) = context.object_context() {
+            let base = object.current_position;
+            position = Vector2::new(base.x + x, base.y + y);
+        }
+        let Some(material_id) = usize::try_from(material).ok().and_then(crate::material::MaterialId::new)
+        else {
+            return Ok(Value::Int(0));
+        };
+        let Some(materials) = context.world.materials() else {
+            return Ok(Value::Int(0));
+        };
+        let extracted = context
+            .world
+            .landscape_ref()
+            .map(|landscape| {
+                landscape.simulate_extract_material_amount(
+                    materials,
+                    position.x,
+                    position.y,
+                    material_id,
+                    amount,
+                )
+            })
+            .unwrap_or(0);
+        if extracted > 0 {
+            context.register_landscape_operation(LandscapeOperation::ExtractMaterialAmount {
+                material,
+                position,
+                amount: extracted,
+            });
+        }
+        Ok(Value::Int(extracted))
+    })
+}
+
+/// FnOnFire (C4Script.cpp:1870-1877): burning when the fire flag is set or/// FnOnFire (C4Script.cpp:1870-1877): burning when the fire flag is set or
 /// any *Fire* effect (C4Fx_AnyFire) sits on the object; nil without one.
 fn on_fire(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
@@ -18253,6 +18529,7 @@ mod tests {
         "EnergyCheck",
         "Enter",
         "Exit",
+        "ExtractMaterialAmount",
         "FindContents",
         "FindObject",
         "FindObject2",
@@ -23043,6 +23320,22 @@ mod tests {
         let update = outcome.object_update.expect("action update recorded");
         let action = update.action.expect("action update exists");
         assert_eq!(action.target, Some(Some(ObjectId::new(2))));
+    }
+
+    #[test]
+    fn set_action_nil_targets_preserve_the_existing_ones_like_cpp() {
+        // C4Object::SetAction assigns the targets ONLY when given
+        // (C4Object.cpp:4123-4125: `if (pTarget) Action.Target = pTarget;`)
+        // — SetAction(name, nil, nil) keeps the previous targets, for
+        // explicit nils and omitted arguments alike.
+        let args = vec![Value::String("Jump".into()), Value::Nil, Value::Nil];
+        let (result, outcome) = with_object_host_context(|| set_action(&args));
+        let value = result.expect("SetAction returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("action update recorded");
+        let action = update.action.expect("action update exists");
+        assert_eq!(action.target, None, "nil target1 must not stage a clear");
+        assert_eq!(action.target2, None, "nil target2 must not stage a clear");
     }
 
     #[test]

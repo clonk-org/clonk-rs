@@ -2322,6 +2322,8 @@ struct ObjectDelta {
     /// `SetRDir`. Mirrors C++ `pObj->rdir = itofix(n, prec)` (`C4Script.cpp:710`).
     rotation_velocity: Option<C4Fixed>,
     energy: Option<i32>,
+    /// Kill-trace mark riding an energy write (C4Object.cpp:1351-1353).
+    energy_loss_cause: Option<i32>,
     damage: Option<i32>,
     magic_energy: Option<i32>,
     magic_capacity: Option<i32>,
@@ -2380,6 +2382,9 @@ impl ObjectDelta {
         }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
+        }
+        if let Some(cause) = update.energy_loss_cause {
+            self.energy_loss_cause = Some(cause);
         }
         if let Some(construction) = update.construction {
             self.construction = Some(construction);
@@ -2475,6 +2480,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             rotation: update.rotation,
             rotation_velocity: update.rotation_velocity,
             energy: update.energy,
+            energy_loss_cause: update.energy_loss_cause,
             construction: update.construction,
             damage: update.damage,
             magic_energy: update.magic_energy,
@@ -2533,6 +2539,12 @@ pub struct ObjectUpdate {
     #[serde(default)]
     pub rotation: Option<i32>,
     pub energy: Option<i32>,
+    /// C4Object::DoEnergy's kill-trace mark (C4Object.cpp:1351-1353),
+    /// staged with the UpdatLastEnergyLossCause guard (:1369-1378) already
+    /// applied at call time — the fold writes it through unconditionally
+    /// (Punch's post-fling write is unguarded too, C4ObjectCom.cpp:755,762).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub energy_loss_cause: Option<i32>,
     #[serde(default)]
     pub damage: Option<i32>,
     #[serde(default)]
@@ -2753,6 +2765,7 @@ impl ObjectUpdate {
             && self.rotation.is_none()
             && self.rotation_velocity.is_none()
             && self.energy.is_none()
+            && self.energy_loss_cause.is_none()
             && self.construction.is_none()
             && self.damage.is_none()
             && self.magic_energy.is_none()
@@ -3293,6 +3306,11 @@ impl Object {
         let previous_construction = self.state.construction;
         let shape_changed =
             delta.construction.is_some() || delta.rotation.is_some() || delta.vertices.is_some();
+        // Kill-trace mark BEFORE the energy write (C4Object.cpp:1351-1361)
+        // so AssignDeath credits the new cause.
+        if let Some(cause) = delta.energy_loss_cause {
+            self.last_energy_loss_cause = cause;
+        }
         let outcome = self.state.apply_delta(delta, action_library);
         if let Some(position) = delta.position {
             self.fixed_position = FixedVec2::from_ints(position.x, position.y);
@@ -4857,6 +4875,10 @@ pub struct EngineState {
     pub game_over: bool,
     #[serde(default)]
     pub landscape_insert_thrust: bool,
+    /// The persistent C4MassMoverSet slots (MassMover.c4b in C++ saves,
+    /// C4MassMover.cpp:181-217).
+    #[serde(default)]
+    pub mass_movers: MassMoverSet,
     pub rng: LcgRng,
 }
 
@@ -4942,6 +4964,9 @@ impl EngineState {
             messages: Vec::new(),
             game_over: snapshot.game_over,
             landscape_insert_thrust: false,
+            // SimulationSnapshot carries no mover slots (the C++ snapshot
+            // boundary is object-level); the set restores empty.
+            mass_movers: MassMoverSet::new(),
             rng: snapshot.rng.clone(),
         }
     }
@@ -10138,7 +10163,6 @@ impl Engine {
 
     pub fn set_landscape_insert_thrust(&mut self, enabled: bool) {
         self.landscape_insert_thrust = enabled;
-        self.mass_movers.set_landscape_insert_thrust(enabled);
     }
 
     /// Installs the scenario's C4SPlrStart slots (set by `Scenario::apply`;
@@ -11306,6 +11330,22 @@ impl Engine {
         if !result.shift_candidates.is_empty() {
             self.apply_blast_shifts(radius, &result);
         }
+        // C4Landscape::BlastFree's per-pixel BlastFreePix ends in
+        // CheckInstabilityRange (C4Landscape.cpp:959-978) for EVERY pixel
+        // of the blast circle (:1056-1063), before the material-count
+        // evaluation (:1065-1079). The column blast above cannot interleave
+        // the probes with the clears, so they run as a post-pass in the
+        // C++ scan order (residual interleaving gap until blasting is
+        // per-pixel).
+        for ycnt in -radius..=radius {
+            let remaining =
+                i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
+            let lwdt = (remaining as f64).sqrt() as i32;
+            let dpy = center.y + ycnt;
+            for xcnt in -lwdt..lwdt + i32::from(lwdt == 0) {
+                self.check_instability_range(center.x + xcnt, dpy);
+            }
+        }
         // The evaluate loop keys on the PRE-blast BlastMatCount, not on
         // what was removed (C4Landscape.cpp:1065-1079).
         if !result.pixel_count_by_material.is_empty() {
@@ -11619,6 +11659,7 @@ impl Engine {
                 .with_ocf(ocf)
                 .with_command_names(object.commands.command_names())
                 .with_full_state(Rc::new(object.state.clone()))
+                .with_last_energy_loss_cause(object.last_energy_loss_cause)
             }),
             landscape,
             definition_metadata,
@@ -12080,13 +12121,9 @@ impl Engine {
                 }
             }
             self.landscape = landscape_slot;
-            if let Some(landscape_ref) = self.landscape.as_ref() {
-                self.mass_movers
-                    .seed_from_landscape(landscape_ref, &self.materials);
-            }
-            if let Some(landscape_mut) = self.landscape.as_mut() {
-                landscape_mut.take_mass_mover_dirty();
-            }
+            // C++ landscape drawing never touches the mass-mover set —
+            // movers pinned to changed pixels die on their next Execute
+            // (C4MassMover.cpp:119).
         }
         self.apply_particle_commands(particles);
         if !transfer_zones.is_empty() {
@@ -14637,6 +14674,7 @@ impl Engine {
             rotation,
             rotation_velocity,
             energy,
+            energy_loss_cause,
             construction,
             damage,
             magic_energy,
@@ -14712,6 +14750,11 @@ impl Engine {
             }
             if let Some(rotation_velocity) = rotation_velocity {
                 object.rotation_velocity = rotation_velocity;
+            }
+            if let Some(cause) = energy_loss_cause {
+                // Kill-trace mark BEFORE the energy write
+                // (C4Object.cpp:1351-1361) so AssignDeath credits it.
+                object.last_energy_loss_cause = cause;
             }
             if let Some(energy) = energy {
                 // AssignDeath below when a nonzero energy reaches 0
@@ -15318,12 +15361,14 @@ impl Engine {
                 (object.state.owner, object.state.crew_member)
             };
             let mut nested_change_def = None;
+            let mut energy_died = false;
             {
                 let object = &mut self.objects[index];
                 if let Some(update) = outcome.update {
                     nested_change_def = update.change_def.clone();
                     let delta: ObjectDelta = update.into();
                     let apply_outcome = object.apply_delta(&delta, &action_library);
+                    energy_died = apply_outcome.energy_died;
                     if let Some(change) = apply_outcome.action_change {
                         object.record_action_event(change.previous, ActionTransitionKind::Forced);
                     }
@@ -15350,6 +15395,12 @@ impl Engine {
                 self.change_object_def(index, &new_def);
             }
             self.update_sector_for_index(index);
+            if energy_died {
+                // C4Object::DoEnergy kills synchronously when a nonzero
+                // energy reaches 0 (C4Object.cpp:1363) — foreign writes
+                // (Punch, DoEnergy on a named target) included.
+                self.assign_death(index, false)?;
+            }
 
             let (new_owner, new_crew_member) = {
                 let object = &self.objects[index];
@@ -15819,6 +15870,7 @@ impl Engine {
             pending_menu_requests: self.pending_menu_requests.clone(),
             game_over: self.game_over_triggered,
             landscape_insert_thrust: self.landscape_insert_thrust,
+            mass_movers: self.mass_movers.clone(),
             rng: self.rng.clone(),
         }
     }
@@ -15840,16 +15892,12 @@ impl Engine {
         self.environment = state.environment;
         self.environment.refresh_runtime_fields();
         self.landscape_insert_thrust = state.landscape_insert_thrust;
-        self.mass_movers
-            .set_landscape_insert_thrust(self.landscape_insert_thrust);
         self.landscape = state.landscape.clone();
-        if let Some(landscape) = self.landscape.as_ref() {
-            self.mass_movers
-                .seed_from_landscape(landscape, &self.materials);
-        }
-        if let Some(landscape) = self.landscape.as_mut() {
-            landscape.take_mass_mover_dirty();
-        } else {
+        // C4MassMoverSet::Load semantics (C4MassMover.cpp:204-217): the
+        // saved slots restore verbatim; nothing is re-derived from the
+        // landscape.
+        self.mass_movers = state.mass_movers.clone();
+        if self.landscape.is_none() {
             self.mass_movers.clear();
         }
         self.rng = state.rng.clone();
@@ -16291,15 +16339,20 @@ impl Engine {
                         current_audio,
                     )
                     .map(|(outcome, audio_state, new_rng, timer_result)| {
-                        // C4Effect::Execute (C4Effect.cpp:342-357): FxTimer
+                        // C4Effect::Execute (C4Effect.cpp:342-360): FxTimer
                         // returning C4Fx_Execute_Kill (-1, C4Effects.h:40)
-                        // kills the effect. A MISSING timer function does
-                        // nothing — `if (pEffect->pFnTimer)` guards the
-                        // whole arm, so pure marker effects (the intro's
-                        // "Divinity") persist.
-                        timer_kill = dispatch_definition
+                        // kills the effect; an elapsed interval with NO
+                        // timer function kills too ("no timer function:
+                        // mark dead after time elapsed" — the else arm at
+                        // :358-360; the intro's Divinity markers die on
+                        // their first exec in C++ as well).
+                        timer_kill = if dispatch_definition
                             .has_effect_callback(&event.effect.name, "Timer")
-                            && matches!(timer_result, Some(Value::Int(-1)));
+                        {
+                            matches!(timer_result, Some(Value::Int(-1)))
+                        } else {
+                            true
+                        };
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Stopped(reason) => dispatch_definition.call_effect_stop(
@@ -20806,7 +20859,7 @@ impl Engine {
         let change = change.saturating_mul(C4_MAX_PHYSICAL / 100);
         // Mark the damage-causing player first (C4Object.cpp:1351-1353).
         if change < 0 || cause == C4FX_CALL_ENG_OBJ_HIT {
-            self.objects[idx].last_energy_loss_cause = caused_by;
+            self.update_last_energy_loss_cause(idx, caused_by);
         }
         // Living things: ask effects for change first (C4Object.cpp:1355-1359).
         let change = if self.objects[idx].state.alive && !self.objects[idx].state.effects.is_empty()
@@ -20832,6 +20885,16 @@ impl Engine {
         };
         if self.objects[idx].state.alive && self.objects[idx].state.energy == 0 && !was_zero {
             let _ = self.assign_death(idx, false);
+        }
+    }
+
+    /// `C4Object::UpdatLastEnergyLossCause` (C4Object.cpp:1369-1378):
+    /// self-administered damage does not steal an already-tracked killer —
+    /// only a DIFFERENT player (or an empty slot) updates the kill trace.
+    fn update_last_energy_loss_cause(&mut self, idx: usize, new_cause_player: i32) {
+        let object = &mut self.objects[idx];
+        if new_cause_player != object.state.controller || object.last_energy_loss_cause < 0 {
+            object.last_energy_loss_cause = new_cause_player;
         }
     }
 
@@ -21152,6 +21215,9 @@ impl Engine {
         }
         self.rng = LcgRng::seed_from_u64(self.random_seed);
         self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
+        // MassMover.Synchronize() (C4Game.cpp:3700): consolidate the slot
+        // set and reset CreatePtr (C4MassMover.cpp:249-252).
+        self.mass_movers.synchronize();
         // C4Game::Synchronize's tail: TransferZones.Synchronize()
         // broadcasts ~UpdateTransferZone to EVERY object AFTER the
         // FixRandom re-fix (C4Game.cpp:3695,3710; C4ObjectList.cpp:
@@ -21759,20 +21825,30 @@ impl Engine {
         else {
             return;
         };
-        {
-            let landscape = self.landscape.as_mut().expect("grid mode checked");
-            for cy in 0..bake.height {
-                for cx in 0..bake.width {
-                    let saved = bake.buffer[(cy * bake.width + cx) as usize];
-                    if saved == vehicle {
-                        continue;
-                    }
-                    let lx = bake.x + cx;
-                    let ly = bake.y + cy;
-                    if landscape.grid_byte_at(lx, ly) == Some(vehicle) {
+        for cy in 0..bake.height {
+            for cx in 0..bake.width {
+                let saved = bake.buffer[(cy * bake.width + cx) as usize];
+                if saved == vehicle {
+                    continue;
+                }
+                let lx = bake.x + cx;
+                let ly = bake.y + cy;
+                if self
+                    .landscape
+                    .as_ref()
+                    .and_then(|landscape| landscape.grid_byte_at(lx, ly))
+                    == Some(vehicle)
+                {
+                    if let Some(landscape) = self.landscape.as_mut() {
                         landscape.grid_write_byte(lx, ly, saved);
                     }
                 }
+                // Instability probe per mask-used pixel — C++ Remove runs
+                // it whether or not the restore write happened
+                // (C4SolidMask.cpp:244-257); every rust removal path
+                // mirrors a C++ Remove(fCauseInstability=true) caller
+                // (C4Object.cpp:5652/5667, C4Movement.cpp:123/545).
+                self.check_instability_range(lx, ly);
             }
         }
         // Re-put overlapping masks: doubled MCVehic pixels were just
@@ -22351,15 +22427,83 @@ impl Engine {
                 LandscapeOperation::ShakeCircle { center, radius } => {
                     self.execute_shake_circle_operation(center, radius)
                 }
-                LandscapeOperation::InsertMaterial { material, position } => {
-                    if let (Some(landscape), Some(material_id)) = (
-                        self.landscape.as_mut(),
-                        usize::try_from(material).ok().and_then(MaterialId::new),
-                    ) {
-                        landscape.insert_material_at(position.x, position.y, material_id);
+                LandscapeOperation::ExtractMaterialAmount {
+                    material,
+                    position,
+                    amount,
+                } => {
+                    // FnExtractMaterialAmount (C4Script.cpp:2264-2273):
+                    // rerun the REAL loop the host fn simulated.
+                    if let Some(material_id) =
+                        usize::try_from(material).ok().and_then(MaterialId::new)
+                    {
+                        for _ in 0..amount {
+                            if self.landscape_material(position.x, position.y)
+                                != Some(material_id)
+                            {
+                                break;
+                            }
+                            if self.extract_material(position.x, position.y)
+                                != Some(material_id)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                LandscapeOperation::InsertMaterial {
+                    material,
+                    position,
+                    velocity,
+                } => {
+                    // FnInsertMaterial → C4Landscape::InsertMaterial
+                    // (C4Script.cpp:2207-2211) — the full port (slide
+                    // re-creation as PXS, reactions, thrust).
+                    if let Some(material_id) =
+                        usize::try_from(material).ok().and_then(MaterialId::new)
+                    {
+                        self.insert_material(
+                            material_id,
+                            position.x,
+                            position.y,
+                            velocity.x,
+                            velocity.y,
+                        );
                     }
                 }
             }
+        }
+    }
+
+    /// C4Landscape::DigFreePix (C4Landscape.cpp:936-944): clear DigFree
+    /// materials, then CheckInstabilityRange at the probed pixel — ALWAYS,
+    /// even when nothing clears. Returns the material like the C++ (grid
+    /// worlds only; `None` without a plane).
+    fn dig_free_pix(&mut self, tx: i32, ty: i32) -> Option<MaterialId> {
+        let mat = {
+            let materials = &self.materials;
+            self.landscape
+                .as_mut()
+                .and_then(|landscape| landscape.dig_free_pix(tx, ty, materials))
+        };
+        self.check_instability_range(tx, ty);
+        mat
+    }
+
+    /// C4Landscape::DigFreeSinglePix (C4Landscape.h:236-240): DigFreePix
+    /// (with its instability probe) only when the pixel is denser than its
+    /// neighbour toward (dx, dy).
+    fn dig_free_single_pix(&mut self, x: i32, y: i32, dx: i32, dy: i32) {
+        let denser = self
+            .landscape
+            .as_ref()
+            .map(|landscape| {
+                landscape.density_at(x, y, &self.materials)
+                    > landscape.density_at(x + dx, y + dy, &self.materials)
+            })
+            .unwrap_or(false);
+        if denser {
+            let _ = self.dig_free_pix(x, y);
         }
     }
 
@@ -22373,8 +22517,7 @@ impl Engine {
         if radius <= 0 {
             return;
         }
-        let materials = self.materials.clone();
-        let Some(landscape) = self.landscape.as_mut() else {
+        let Some(landscape) = self.landscape.as_ref() else {
             return;
         };
         let mut removal_counts: HashMap<MaterialId, i32> = HashMap::new();
@@ -22390,27 +22533,23 @@ impl Engine {
                 let line_y = center.y + ycnt;
                 let extend = i32::from(line_width == 0);
                 for xcnt in -line_width..line_width + extend {
-                    if let Some(material_id) =
-                        landscape.dig_free_pix(center.x + xcnt, line_y, &materials)
-                    {
+                    if let Some(material_id) = self.dig_free_pix(center.x + xcnt, line_y) {
                         *removal_counts.entry(material_id).or_insert(0) += 1;
                     }
                 }
-                landscape.dig_free_single_pix(center.x - line_width - 1, line_y, -1, 0, &materials);
-                landscape.dig_free_single_pix(
-                    center.x + line_width + extend,
-                    line_y,
-                    1,
-                    0,
-                    &materials,
-                );
+                self.dig_free_single_pix(center.x - line_width - 1, line_y, -1, 0);
+                self.dig_free_single_pix(center.x + line_width + extend, line_y, 1, 0);
             }
-            landscape.dig_free_single_pix(center.x, center.y - radius - 1, 0, -1, &materials);
+            self.dig_free_single_pix(center.x, center.y - radius - 1, 0, -1);
             let extend = i32::from(line_width == 0);
             for xcnt in -line_width..line_width + extend {
-                landscape.dig_free_single_pix(center.x + xcnt, center.y + radius, 0, 1, &materials);
+                self.dig_free_single_pix(center.x + xcnt, center.y + radius, 0, 1);
             }
         } else {
+            let materials = self.materials.clone();
+            let Some(landscape) = self.landscape.as_mut() else {
+                return;
+            };
             let width = landscape.width() as i32;
             let radius_sq = i64::from(radius) * i64::from(radius);
             for dx in -radius..=radius {
@@ -22452,8 +22591,7 @@ impl Engine {
         if width <= 0 || height <= 0 {
             return;
         }
-        let materials = self.materials.clone();
-        let Some(landscape) = self.landscape.as_mut() else {
+        let Some(landscape) = self.landscape.as_ref() else {
             return;
         };
         let mut removal_counts: HashMap<MaterialId, i32> = HashMap::new();
@@ -22463,12 +22601,16 @@ impl Engine {
             // toward the digger's material contents, dug free or not.
             for cx in origin.x..origin.x.saturating_add(width) {
                 for cy in origin.y..origin.y.saturating_add(height) {
-                    if let Some(material_id) = landscape.dig_free_pix(cx, cy, &materials) {
+                    if let Some(material_id) = self.dig_free_pix(cx, cy) {
                         *removal_counts.entry(material_id).or_insert(0) += 1;
                     }
                 }
             }
         } else {
+            let materials = self.materials.clone();
+            let Some(landscape) = self.landscape.as_mut() else {
+                return;
+            };
             let landscape_width = landscape.width() as i32;
             let bottom = origin.y.saturating_add(height);
             for offset in 0..width {
@@ -22628,6 +22770,20 @@ impl Engine {
                     C4Fixed::ZERO,
                     C4Fixed::ZERO,
                 );
+            }
+        }
+        // C4Landscape::ShakeFree's per-pixel ShakeFreePix ends in
+        // CheckInstabilityRange (C4Landscape.cpp:946-956) for EVERY pixel
+        // of the circle, walked top row LAST (`ycnt = rad - 1; ycnt >=
+        // -rad`, :1021-1027). The column shake above cannot interleave the
+        // probes, so they run as a post-pass in the C++ scan order.
+        for ycnt in (-radius..radius).rev() {
+            let remaining =
+                i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
+            let lwdt = (remaining as f64).sqrt() as i32;
+            let dpy = center.y + ycnt;
+            for xcnt in -lwdt..lwdt + i32::from(lwdt == 0) {
+                self.check_instability_range(center.x + xcnt, dpy);
             }
         }
     }
@@ -23161,10 +23317,10 @@ impl Engine {
                     // either splash or slide prevented interaction
                     return false;
                 }
-                // Always kill both landscape and PXS mat
-                if let Some(landscape) = self.landscape.as_mut() {
-                    let _ = landscape.extract_material_at(ls_x, ls_y);
-                }
+                // Always kill both landscape and PXS mat — a real
+                // ExtractMaterial (C4Material.cpp:682) including its
+                // CheckInstabilityRange (C4Landscape.cpp:1154).
+                let _ = self.extract_material(ls_x, ls_y);
                 if self.rng.rnd3() == 0 {
                     self.spawn_smoke(*x, *y, 3);
                 }
@@ -23203,9 +23359,21 @@ impl Engine {
                     &mut self.rng,
                 );
                 if corroded {
-                    if let Some(landscape) = self.landscape.as_mut() {
-                        let _ = landscape.extract_material_at(ls_x, ls_y);
+                    // ClearBackPix (= ClearPix) IN PLACE, then
+                    // CheckInstabilityRange at that exact pixel
+                    // (C4Material.cpp:731-733).
+                    let cleared = self
+                        .landscape
+                        .as_mut()
+                        .map(|landscape| landscape.clear_pix(ls_x, ls_y))
+                        .unwrap_or(false);
+                    if !cleared {
+                        // column-model fixture worlds keep the column removal
+                        if let Some(landscape) = self.landscape.as_mut() {
+                            let _ = landscape.extract_material_at(ls_x, ls_y);
+                        }
                     }
+                    self.check_instability_range(ls_x, ls_y);
                     // effect draws (C4Material.cpp:734-735): 1/5 smoke with a
                     // Random(3) size component, then the 1/20 sound draw
                     if self.rng.random(5) == 0 {
@@ -23346,31 +23514,6 @@ impl Engine {
         }
     }
 
-    /// `C4MassMoverSet::Execute` for the frame. The set is taken OUT of the
-    /// engine for the duration so movers can dispatch `Type=Script` material
-    /// reactions through `&mut Engine` at the exact C++ call position
-    /// (C4MassMover.cpp:163-167 — RNG order). Nothing reaches the empty
-    /// placeholder while the loop runs (no host function creates movers).
-    fn tick_mass_movers(&mut self) {
-        if self.landscape.is_none() {
-            return;
-        }
-        let mut movers = std::mem::take(&mut self.mass_movers);
-        movers.execute(self);
-        self.mass_movers = movers;
-        let dirty = self
-            .landscape
-            .as_mut()
-            .map(Landscape::take_mass_mover_dirty)
-            .unwrap_or(false);
-        if dirty {
-            if let Some(landscape) = self.landscape.as_ref() {
-                self.mass_movers
-                    .seed_from_landscape(landscape, &self.materials);
-            }
-        }
-    }
-
     /// One mass-move reaction (meeMassMove) through the engine, so
     /// `Type=Script` functions can run (mrfScript on meeMassMove,
     /// C4MassMover.cpp:163-167: xdir=ydir=Fix0, pfPosChanged=nullptr — the
@@ -23424,18 +23567,28 @@ impl Engine {
                 _ => material::MaterialReactionExecution::Unhandled,
             };
         }
-        let Some(landscape) = self.landscape.as_mut() else {
-            return material::MaterialReactionExecution::Unhandled;
+        let mut instability_probes = Vec::new();
+        let result = {
+            let Some(landscape) = self.landscape.as_mut() else {
+                return material::MaterialReactionExecution::Unhandled;
+            };
+            self.materials.execute_mass_move_reaction(
+                landscape,
+                pxs_material,
+                pxs_x,
+                pxs_y,
+                landscape_x,
+                landscape_y,
+                &mut self.rng,
+                &mut instability_probes,
+            )
         };
-        self.materials.execute_mass_move_reaction(
-            landscape,
-            pxs_material,
-            pxs_x,
-            pxs_y,
-            landscape_x,
-            landscape_y,
-            &mut self.rng,
-        )
+        // The CheckInstabilityRange half of each ExtractMaterial the
+        // reaction ran (C4Landscape.cpp:1154).
+        for (probe_x, probe_y) in instability_probes {
+            self.check_instability_range(probe_x, probe_y);
+        }
+        result
     }
 
     /// Runs a `Type=Script` material reaction function (mrfScript,
@@ -23512,6 +23665,13 @@ impl Engine {
     /// the reaction with the material below (meePXSPos), then the dead-
     /// material write with the insert-thrust recursion.
     fn insert_material(&mut self, mat: MaterialId, tx: i32, ty: i32, vx: i32, vy: i32) -> bool {
+        if std::env::var("LC_RUST_RNG_TRACE").is_ok() && (15..=19).contains(&self.frame) {
+            crate::rng::rng_trace_line(&format!(
+                "INSMAT {} {tx} {ty} {vx} {vy} {}",
+                mat.index(),
+                self.frame
+            ));
+        }
         let Some(material) = self.materials.get_by_id(mat) else {
             return false;
         };
@@ -23629,7 +23789,6 @@ impl Engine {
         let old_mat = self.landscape_material(tx, ty);
         if let Some(landscape) = self.landscape.as_mut() {
             landscape.insert_material_pix(tx, ty, mat);
-            landscape.mark_mass_mover_dirty();
         }
         if let Some(old_mat) = old_mat {
             self.insert_material(old_mat, tx, ty - 1, 0, 0);
@@ -24611,11 +24770,9 @@ impl Engine {
             if landscape.is_liquid_at(tx, ty) && !landscape.is_semi_solid_at(tx, sy) {
                 let r2 = -self.rng.random(200);
                 let r1 = self.rng.random(151) - 75;
-                let materials = self.materials.clone();
-                let extracted = self
-                    .landscape
-                    .as_mut()
-                    .and_then(|landscape| landscape.extract_material_with(tx, ty, &materials));
+                // Full ExtractMaterial (C4Effect.cpp:825) including the
+                // CheckInstabilityRange half (C4Landscape.cpp:1154).
+                let extracted = self.extract_material(tx, ty);
                 if let Some(material) = extracted {
                     self.pxs_system.create(
                         material,
@@ -24998,6 +25155,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             // cannon's Initialize from InitializePlayer
             // (Goldrush.c4s/Script.c:262 → pObj->~Initialize()).
             .with_full_state(Rc::new(object_state_from_snapshot(object)))
+            .with_last_energy_loss_cause(object.last_energy_loss_cause)
         }),
         snapshot.landscape.clone(),
         definition_metadata,
@@ -37822,6 +37980,85 @@ func Recruit() {
         );
     }
 
+    // C4Object::GrabInfo moves the WHOLE info section (C4Object.cpp:5715:
+    // `Info = pFrom->Info; pFrom->ClearInfo(pFrom->Info);`) — the
+    // C4ObjectInfo carries the crew's permanent physicals
+    // (C4ObjectInfoCore Physical, read by GetPhysical's info fallback,
+    // C4Object.cpp:2118-2134), so the grabber takes the donor's trained
+    // physicals and the donor falls back to its definition's.
+    #[test]
+    fn grab_object_info_transfers_the_info_physicals_like_cpp() {
+        let script = r#"#strict
+local iGrabbed;
+func Grab() { iGrabbed = GrabObjectInfo(FindObject(HAND)); return 1; }
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut trapper =
+            Definition::from_script("TRAP", "Trapper", script).expect("script compiles");
+        trapper.set_crew_member(true);
+        engine
+            .register_definition(trapper)
+            .expect("trapper registers");
+        let mut hand = simple_definition("HAND");
+        hand.set_crew_member(true);
+        engine.register_definition(hand).expect("hand registers");
+
+        let grabber = engine
+            .spawn_object(
+                SpawnConfig::new("TRAP")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0)
+                    .with_crew_member(true),
+            )
+            .expect("trapper spawns");
+        let donor = engine
+            .spawn_object(
+                SpawnConfig::new("HAND")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0)
+                    .with_crew_member(true),
+            )
+            .expect("hand spawns");
+
+        let trained = PhysicalInfo {
+            energy: 77_000,
+            fight: 12_000,
+            ..PhysicalInfo::default()
+        };
+        let donor_idx = engine.find_object_index(donor).expect("donor exists");
+        engine.objects[donor_idx].state.info_physical = Some(trained);
+        let grabber_idx = engine.find_object_index(grabber).expect("grabber exists");
+        engine.objects[grabber_idx].state.info_physical = Some(PhysicalInfo {
+            energy: 11_000,
+            ..PhysicalInfo::default()
+        });
+
+        engine
+            .call_object_function(grabber_idx, "Grab", Vec::new())
+            .expect("grab runs");
+
+        let grabber_idx = engine.find_object_index(grabber).expect("grabber exists");
+        assert_eq!(
+            engine.objects[grabber_idx].state.local_vars.get("iGrabbed"),
+            Some(&Value::Bool(true)),
+            "GrabObjectInfo succeeds for a crew donor (C4Object.cpp:5703)"
+        );
+        assert_eq!(
+            engine.objects[grabber_idx].state.info_physical,
+            Some(trained),
+            "the grabber takes the donor's info physicals (C4Object.cpp:5715)"
+        );
+        let donor_idx = engine.find_object_index(donor).expect("donor exists");
+        assert_eq!(
+            engine.objects[donor_idx].state.info_physical, None,
+            "ClearInfo leaves the donor without info physicals (C4Object.cpp:5715)"
+        );
+        assert!(
+            !engine.objects[donor_idx].state.crew_member,
+            "the donor loses its crew slot (Game.Players.ClearPointers, C4Object.cpp:5711-5713)"
+        );
+    }
+
     // C4Effect's constructor runs Fx*Start SYNCHRONOUSLY inside
     // FnAddEffect (C4Effect.cpp:96-152: insert, check chain, then
     // pFnStart->Exec before the ctor returns) — so objects the Start
@@ -38114,6 +38351,495 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         );
     }
 
+    // FnShiftContents' pObj parameter (C4Script.cpp:1786) targets ANOTHER
+    // object: `if (!pObj) pObj = cthr->Obj` is only the local-call default
+    // — a foreign container's contents rotate just the same.
+    #[test]
+    fn shift_contents_operates_on_a_foreign_container_like_cpp() {
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func Poke() { return ShiftContents(FindObject(CHES)); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("CHES"))
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("SWRD"))
+            .expect("sword registers");
+        engine
+            .register_definition(simple_definition("REVR"))
+            .expect("revolver registers");
+
+        let actor = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let sword = engine
+            .spawn_object(
+                SpawnConfig::new("SWRD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("sword spawns");
+        let revolver = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver spawns");
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        let result = engine
+            .call_object_function(actor_idx, "Poke", Vec::new())
+            .expect("poke runs");
+        assert_eq!(result, Value::Bool(true));
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![revolver, sword],
+            "the foreign chest rotated (C4Object.cpp:5730-5752)"
+        );
+    }
+
+    // DirectComContents with fDoCalls (C4Object.cpp:5760-5763): the
+    // container's ~ControlContents(idNewFront) runs FIRST and a truthy
+    // return takes over — the default rotation is skipped, yet
+    // C4Object::ShiftContents still reports true.
+    #[test]
+    fn shift_contents_do_calls_control_contents_veto_like_cpp() {
+        let script = r#"#strict
+local iSeen;
+func Cycle() { return ShiftContents(0, 0, 0, 1); }
+func ControlContents(id) { iSeen = id; return 1; }
+"#;
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(
+                Definition::from_script("CHES", "Chest", script).expect("script compiles"),
+            )
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("SWRD"))
+            .expect("sword registers");
+        engine
+            .register_definition(simple_definition("REVR"))
+            .expect("revolver registers");
+
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let sword = engine
+            .spawn_object(
+                SpawnConfig::new("SWRD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("sword spawns");
+        let revolver = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver spawns");
+
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        let result = engine
+            .call_object_function(chest_idx, "Cycle", Vec::new())
+            .expect("cycle runs");
+        assert_eq!(
+            result,
+            Value::Bool(true),
+            "the veto path still reports true (C4Object.cpp:5745-5746)"
+        );
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![sword, revolver],
+            "a truthy ~ControlContents vetoes the rotation (C4Object.cpp:5762)"
+        );
+        assert_eq!(
+            engine.objects[chest_idx].state.local_vars.get("iSeen"),
+            Some(&Value::C4Id("REVR".into())),
+            "~ControlContents receives the new front's id (C4VID(pTarget->id))"
+        );
+    }
+
+    // DirectComContents' selection tail (C4Object.cpp:5765-5767): after the
+    // relink the NEW front gets ~Selection(container); only a falsy return
+    // plays the Grab sound on the container.
+    #[test]
+    fn shift_contents_do_calls_selection_and_grab_sound_like_cpp() {
+        let chest_script = r#"#strict
+func Cycle() { return ShiftContents(0, 0, 0, 1); }
+"#;
+        let sword_script = r#"#strict
+local iSel;
+func Selection(pFrom) { iSel = 1; return 1; }
+"#;
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(
+                Definition::from_script("CHES", "Chest", chest_script).expect("script compiles"),
+            )
+            .expect("chest registers");
+        engine
+            .register_definition(
+                Definition::from_script("SWRD", "Sword", sword_script).expect("script compiles"),
+            )
+            .expect("sword registers");
+        engine
+            .register_definition(simple_definition("REVR"))
+            .expect("revolver registers");
+
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let revolver = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver spawns");
+        let sword = engine
+            .spawn_object(
+                SpawnConfig::new("SWRD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("sword spawns");
+
+        // First shift: SWRD comes to the front, its Selection returns 1 —
+        // no Grab sound (C4Object.cpp:5767).
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        let result = engine
+            .call_object_function(chest_idx, "Cycle", Vec::new())
+            .expect("cycle runs");
+        assert_eq!(result, Value::Bool(true));
+        let sword_idx = engine.find_object_index(sword).expect("sword exists");
+        assert_eq!(
+            engine.objects[sword_idx].state.local_vars.get("iSel"),
+            Some(&Value::Int(1)),
+            "the new front got ~Selection (C4Object.cpp:5767)"
+        );
+        assert!(
+            !engine
+                .pending_audio
+                .iter()
+                .any(|command| matches!(command, AudioCommand::PlaySound { name, .. } if name == "Grab")),
+            "a truthy Selection suppresses the Grab sound"
+        );
+
+        // Second shift: REVR (no Selection handler -> falsy) comes to the
+        // front — the Grab sound plays on the container.
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        let result = engine
+            .call_object_function(chest_idx, "Cycle", Vec::new())
+            .expect("cycle runs");
+        assert_eq!(result, Value::Bool(true));
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![revolver, sword],
+            "the second shift rotated back to the revolver"
+        );
+        assert!(
+            engine.pending_audio.iter().any(|command| matches!(
+                command,
+                AudioCommand::PlaySound { name, target, looped: false, .. }
+                    if name == "Grab" && *target == Some(chest)
+            )),
+            "a falsy Selection plays Grab on the container (StartSoundEffect, C4Object.cpp:5767)"
+        );
+    }
+
+    // FnDoEnergy's pObj (C4Script.cpp:492-499): `if (!pObj) pObj = cthr->Obj`
+    // is only the local-call default — a named FOREIGN target takes the
+    // change (C4Object::DoEnergy percent scale, C4Object.cpp:1345-1365).
+    #[test]
+    fn do_energy_reaches_a_foreign_target_like_cpp() {
+        let script = r#"#strict
+func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
+"#;
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(SpawnConfig::new("VCTM").with_category(CATEGORY_OBJECT))
+            .expect("victim spawns");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 50_000;
+        engine.objects[victim_idx].state.alive = true;
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        let result = engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        assert_eq!(result, Value::Bool(true));
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.energy,
+            40_000,
+            "-10% of C4MaxPhysical lands on the foreign target (C4Object.cpp:1347,1361)"
+        );
+    }
+
+    // C4Object::DoEnergy kills when a nonzero energy reaches zero
+    // (C4Object.cpp:1363) — on FOREIGN targets too: the nested-outcome
+    // fold must fire AssignDeath like the local fold does.
+    #[test]
+    fn do_energy_kills_a_foreign_target_at_zero_like_cpp() {
+        let script = r#"#strict
+func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
+"#;
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("victim spawns");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 10_000;
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(engine.objects[victim_idx].state.energy, 0);
+        assert!(
+            !engine.objects[victim_idx].state.alive,
+            "a nonzero energy reaching 0 assigns death (C4Object.cpp:1363)"
+        );
+    }
+
+    // FnDoEnergy's caused-by (C4Script.cpp:496-497): iCausedByPlusOne - 1,
+    // or the CALLER's controller when unset — marked on the target's
+    // LastEnergyLossCausePlayer kill trace for negative changes
+    // (C4Object.cpp:1351-1353).
+    #[test]
+    fn do_energy_threads_the_caused_by_player_like_cpp() {
+        let script = r#"#strict
+func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
+func ZapAs() { return DoEnergy(-10, FindObject(VCTM), 0, 0, 8); }
+"#;
+        let mut engine = Engine::with_seed(29);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("victim spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_idx].state.controller = 5;
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 90_000;
+
+        engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].last_energy_loss_cause, 5,
+            "unset caused-by falls back to the caller's controller (C4Script.cpp:497)"
+        );
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_idx, "ZapAs", Vec::new())
+            .expect("zap-as runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].last_energy_loss_cause, 7,
+            "an explicit plus-one caused-by decodes to player 7 (C4Script.cpp:496)"
+        );
+    }
+
+    // FnDoDamage (C4Script.cpp:508-515) -> C4Object::DoDamage
+    // (C4Object.cpp:1279-1291): the change lands on a FOREIGN target too,
+    // and the Damage script callback fires with (iChange, iCausedBy) —
+    // the caused-by defaulting to the CALLER's controller.
+    #[test]
+    fn do_damage_reaches_a_foreign_target_and_fires_damage_like_cpp() {
+        let actor_script = r#"#strict
+func Zap() { return DoDamage(3, FindObject(VCTM)); }
+"#;
+        let victim_script = r#"#strict
+local iSaw;
+local iBy;
+func Damage(iChange, iCausedBy) { iSaw = iChange; iBy = iCausedBy; return 1; }
+"#;
+        let mut engine = Engine::with_seed(31);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", actor_script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(
+                Definition::from_script("VCTM", "Victim", victim_script).expect("script compiles"),
+            )
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(SpawnConfig::new("VCTM").with_category(CATEGORY_OBJECT))
+            .expect("victim spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_idx].state.controller = 5;
+
+        let result = engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        assert_eq!(result, Value::Bool(true));
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.damage,
+            3,
+            "the foreign target takes the damage (C4Object.cpp:1288)"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].state.local_vars.get("iSaw"),
+            Some(&Value::Int(3)),
+            "the Damage callback fires with the change (C4Object.cpp:1290)"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].state.local_vars.get("iBy"),
+            Some(&Value::Int(5)),
+            "caused-by defaults to the caller's controller (C4Script.cpp:511)"
+        );
+    }
+
+    // ObjectComPunch routes the energy loss through DoEnergy with the
+    // ATTACKER's controller (C4ObjectCom.cpp:749: DoEnergy(-punch, false,
+    // C4FxCall_EngGetPunched, cObj->Controller)) — punching an enemy off
+    // a cliff must credit the puncher's kill.
+    #[test]
+    fn punch_marks_the_attackers_controller_on_the_kill_trace_like_cpp() {
+        let script = r#"#strict
+func Hit() { return Punch(FindObject(VCTM), 5); }
+"#;
+        let mut engine = Engine::with_seed(37);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("victim spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_idx].state.controller = 4;
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 50_000;
+
+        engine
+            .call_object_function(actor_idx, "Hit", Vec::new())
+            .expect("hit runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.energy,
+            45_000,
+            "the victim loses punch% energy (C4ObjectCom.cpp:749)"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].last_energy_loss_cause, 4,
+            "the punch energy loss carries the attacker's controller (C4ObjectCom.cpp:749)"
+        );
+    }
+
+    // C4Object::UpdatLastEnergyLossCause (C4Object.cpp:1369-1378):
+    // self-administered damage (cause == own Controller) does not steal an
+    // already-tracked killer — "stop-stop-throw while falling into teh
+    // abyss" keeps the pusher's kill credit.
+    #[test]
+    fn update_last_energy_loss_cause_keeps_the_tracked_killer_like_cpp() {
+        let mut engine = Engine::with_seed(19);
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true)
+                    .with_energy(50_000),
+            )
+            .expect("victim spawns");
+        let idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[idx].state.controller = 3;
+
+        // An enemy (player 5) hits first: tracked.
+        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 5);
+        assert_eq!(engine.objects[idx].last_energy_loss_cause, 5);
+        // Self-administered damage does not steal the kill
+        // (iNewCausePlr == Controller and a tracked player >= 0).
+        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 3);
+        assert_eq!(
+            engine.objects[idx].last_energy_loss_cause, 5,
+            "the tracked killer survives self-damage (C4Object.cpp:1373-1377)"
+        );
+        // A DIFFERENT player always updates.
+        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 6);
+        assert_eq!(engine.objects[idx].last_energy_loss_cause, 6);
+    }
+
     // FnGetCommand (C4Script.cpp:918-945): element 0 returns the C++
     // CommandName string of the requested stack entry; without commands
     // the call yields nil (never an error).
@@ -38204,10 +38930,10 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
     #[test]
     fn effect_timer_kill_semantics_follow_cpp() {
-        // C4Effect::Execute (C4Effect.cpp:342-357): an FxTimer returning
+        // C4Effect::Execute (C4Effect.cpp:342-360): an FxTimer returning
         // C4Fx_Execute_Kill (-1, C4Effects.h:40) kills the effect; an
-        // effect with NO timer function persists (`if (pFnTimer)` guards
-        // the arm — marker effects); a zero interval never reaches it.
+        // effect whose interval elapses with NO timer function is killed
+        // too (the else arm :358-360); a zero interval never reaches it.
         let script = r#"
         global func Initialize(state, random) {
             return { effects = [
@@ -38267,9 +38993,9 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .collect();
         assert_eq!(
             names,
-            vec!["Inert", "Mute"],
-            "Doomed killed by -1 at iTime 4; timerless Mute persists as a \
-             marker; zero-interval Inert survives"
+            vec!["Inert"],
+            "Doomed killed by -1 at iTime 4, Mute killed at its first \
+             timerless gate, zero-interval Inert survives"
         );
         let calls = call_log.lock().unwrap().clone();
         let stop_calls = calls.iter().filter(|name| *name == "FxDoomedStop").count();
@@ -39739,6 +40465,79 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .flat_map(|y| (0..width).map(move |x| (x, y)))
             .filter(|&(x, y)| landscape.grid_byte_at(x, y) == Some(vehicle))
             .collect()
+    }
+
+    #[test]
+    fn solid_mask_removal_fires_instability_on_restored_pixels() {
+        // C4SolidMask::Remove with fCauseInstability (C4SolidMask.cpp:
+        // 255-257): every restored mask pixel gets a CheckInstabilityRange —
+        // water freed from under a vehicle mask immediately re-arms its
+        // mass mover. All rust removal paths mirror C++ Remove(true, ...)
+        // callers (C4Object.cpp:5652/5667, C4Movement.cpp:123/545).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Instable=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+
+        let densities = vec![0, 100, 100, 25];
+        let names = vec![
+            None,
+            Some("Earth".into()),
+            Some("Vehicle".into()),
+            Some("Water".into()),
+        ];
+        let mut bytes = vec![0u8; 400];
+        bytes[10 * 20 + 10] = 3; // water at (10,10)
+        let grid = landscape::PixelGrid::new(20, 20, bytes, densities, names, vec![None; 4]);
+        let mut landscape = Landscape::new(20, vec![0; 20]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+
+        let mut definition = simple_definition("Bar");
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, 0, 3, 1)));
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 3, 1, 0, 0)));
+
+        let mut engine = Engine::with_seed(7);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Bar").with_position(Vector2::new(10, 10)))
+            .expect("bar spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].state.position = Vector2::new(10, 10);
+        engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
+        engine.update_solid_mask(idx);
+        assert!(
+            vehicle_pixels(&engine).contains(&(10, 10)),
+            "the mask covers the water pixel"
+        );
+        assert_eq!(engine.mass_movers.live_movers(), 0);
+
+        engine.remove_solid_mask(idx);
+
+        let landscape = engine.landscape().expect("landscape set");
+        assert_eq!(
+            landscape.material_at(10, 10),
+            Some(water),
+            "the water pixel restored from the mask buffer"
+        );
+        assert!(
+            engine.mass_movers.live_movers() >= 1,
+            "the restored water pixel re-armed a mass mover"
+        );
     }
 
     #[test]

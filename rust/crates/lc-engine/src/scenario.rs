@@ -3013,10 +3013,9 @@ fn classified_landscape(
     ));
 
     // Loaded water is at rest: C4MassMoverSet starts empty and movers are
-    // created only by landscape CHANGES, never at load — consuming the
-    // dirty mark here keeps resting liquid from seeding movers (and
-    // drawing their per-tick RNG, a lockstep hazard).
-    let _ = landscape.take_mass_mover_dirty();
+    // created only by landscape CHANGES via CheckInstability, never at
+    // load (C4Game.cpp:1782 MassMover.Default(); the c4b Load only fires
+    // for saved games).
     Ok(landscape)
 }
 

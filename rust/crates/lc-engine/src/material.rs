@@ -879,6 +879,11 @@ impl MaterialSet {
         MaterialReactionKind::Insert
     }
 
+    /// `instability_probes` collects the coordinates where the C++ reaction
+    /// ran `ExtractMaterial` — the caller (the engine) owes each one a
+    /// `CheckInstabilityRange` (C4Landscape.cpp:1154). The deferral past the
+    /// reaction's trailing Rnd3/Random draws is RNG-neutral: the probe
+    /// itself draws nothing.
     pub fn execute_mass_move_reaction(
         &self,
         landscape: &mut Landscape,
@@ -888,6 +893,7 @@ impl MaterialSet {
         landscape_x: i32,
         landscape_y: i32,
         rng: &mut LcgRng,
+        instability_probes: &mut Vec<(i32, i32)>,
     ) -> MaterialReactionExecution {
         let landscape_material = landscape.material_at(landscape_x, landscape_y);
         let reaction = self.reaction_for_event(
@@ -899,11 +905,13 @@ impl MaterialSet {
             reaction.kind,
             landscape,
             self,
+            pxs_material,
             pxs_x,
             pxs_y,
             landscape_x,
             landscape_y,
             rng,
+            instability_probes,
         )
     }
 
@@ -945,33 +953,42 @@ pub fn consume_corrosion_effect_rng(rng: &mut LcgRng) {
     let _ = rng.random(20);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_mass_move_reaction_kind(
     reaction: MaterialReactionKind,
     landscape: &mut Landscape,
     materials: &MaterialSet,
+    pxs_material: MaterialId,
     pxs_x: i32,
     pxs_y: i32,
     landscape_x: i32,
     landscape_y: i32,
     rng: &mut LcgRng,
+    instability_probes: &mut Vec<(i32, i32)>,
 ) -> MaterialReactionExecution {
     match reaction {
         MaterialReactionKind::None | MaterialReactionKind::Insert => {
             MaterialReactionExecution::Unhandled
         }
-        // OPEN (PORT_STATUS): the mass-mover reaction path has no VM access
-        // (only Landscape + LcgRng are threaded through `MassMover::execute`),
-        // so meeMassMove script reactions cannot run yet; C++ would call the
-        // function and ExtractMaterial on a truthy return
-        // (C4MassMover.cpp:163-167).
+        // meeMassMove Script reactions run at the ENGINE level
+        // (`Engine::execute_mass_move_reaction`); this builtin-kind path is
+        // never reached for them.
         MaterialReactionKind::Script { .. } => MaterialReactionExecution::Unhandled,
-        MaterialReactionKind::Convert {
-            target: Some(target),
-            ..
-        } => MaterialReactionExecution::Converted(target),
-        MaterialReactionKind::Convert { target: None, .. } => MaterialReactionExecution::Consumed,
+        // mrfConvert meeMassMove (C4Material.cpp:654-657): unconditional
+        // conversion-transfer of the MOVER's material to PXS — the convert
+        // target (even an invalid one) plays no role on this event.
+        MaterialReactionKind::Convert { .. } => {
+            MaterialReactionExecution::Converted(pxs_material)
+        }
         MaterialReactionKind::Poof => {
-            let _ = landscape.extract_material_at(landscape_x, landscape_y);
+            // mrfPoof meeMassMove (C4Material.cpp:669-670): a real
+            // ExtractMaterial — FindMatTop + clear here, the
+            // CheckInstabilityRange half owed at the cleared coordinates.
+            if let Some((_, top_x, top_y)) =
+                landscape.extract_material_probe(landscape_x, landscape_y, materials)
+            {
+                instability_probes.push((top_x, top_y));
+            }
             let _ = rng.rnd3();
             let _ = rng.rnd3();
             MaterialReactionExecution::Consumed
@@ -994,7 +1011,13 @@ fn execute_mass_move_reaction_kind(
                 corrosion_probability,
                 rng,
             ) {
-                let _ = landscape.extract_material_at(landscape_x, landscape_y);
+                // mrfCorrode meeMassMove (C4Material.cpp:707-709):
+                // ClearBackPix (= ClearPix, C4Wrappers.h:92) — an IN-PLACE
+                // clear with NO instability probe on this event.
+                if !landscape.clear_pix(landscape_x, landscape_y) {
+                    // column-model fixture worlds keep the column removal
+                    let _ = landscape.extract_material_at(landscape_x, landscape_y);
+                }
                 consume_corrosion_effect_rng(rng);
                 MaterialReactionExecution::Consumed
             } else {
