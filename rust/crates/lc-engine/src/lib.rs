@@ -8655,7 +8655,11 @@ fn horizontal_span(vertices: &[ObjectVertex]) -> i32 {
     (max_x - min_x).abs()
 }
 
-fn control_function_name(command: ControlCommand, kind: CommandKind) -> Option<String> {
+/// ComName(byCom) (C4ObjectCom.cpp:800-852): base name plus the
+/// Single/Double/Released suffix shared by the Control/Contained script
+/// callback families (PSF_Control "~Control{}" / PSF_ContainedControl
+/// "~Contained{}", C4Script.h:71-72).
+fn com_name(command: ControlCommand, kind: CommandKind) -> Option<String> {
     let base = match command {
         ControlCommand::Throw => "Throw",
         ControlCommand::Dig => "Dig",
@@ -8671,10 +8675,11 @@ fn control_function_name(command: ControlCommand, kind: CommandKind) -> Option<S
         CommandKind::Release => "Released",
     };
 
-    let mut name = String::from("Control");
-    name.push_str(base);
-    name.push_str(suffix);
-    Some(name)
+    Some(format!("{base}{suffix}"))
+}
+
+fn control_function_name(command: ControlCommand, kind: CommandKind) -> Option<String> {
+    com_name(command, kind).map(|com| format!("Control{com}"))
 }
 
 fn fight_distance_threshold(
@@ -30997,6 +31002,79 @@ public func FxGunControlControlDig(pTarget, iNumber)
             clonk_effects[0].vars.first(),
             Some(&crate::effect::EffectVarValue::Int(7)),
             "the Fx callback received (pTarget, iNumber) and wrote the effect var"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn contained_clonk_routes_dig_to_the_container_like_cpp() -> Result<(), EngineError> {
+        // C4Object::DirectCom (C4Object.cpp:3363-3367): a contained clonk
+        // hands every non-Special com to the container -
+        // `Contained->Controller = Controller; ContainedControl(byCom);
+        // return;` - which runs the container's Contained<Com> script with
+        // the clonk as parameter (sf->Exec(Contained, {C4VObj(this)}),
+        // C4Object.cpp:3221,3230). The clonk's own Control<Com> is NOT
+        // consulted. Specials bypass containment (:3364).
+        let clonk_script = r#"
+global func Initialize(state, random) { return nil; }
+func ControlDig() { SetOwner(3); return 1; }
+func ControlSpecial() { SetOwner(4); return 1; }
+"#;
+        let hut_script = r#"
+global func Initialize(state, random) { return nil; }
+func ContainedDig(pClonk) { SetOwner(5); return 1; }
+"#;
+        let mut clonk =
+            Definition::from_script("CLNK", "Clonk", clonk_script).expect("clonk script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        clonk.configure_actions(Some("Idle".to_string()), actions);
+        clonk.set_movement_profile(MovementProfile::default());
+        let hut = Definition::from_script("HUTX", "Hut", hut_script).expect("hut script compiles");
+
+        let mut engine = Engine::new();
+        engine.register_definition(clonk)?;
+        engine.register_definition(hut)?;
+        engine.register_player(PlayerConfig::new(1, "Test"))?;
+
+        let hut_id = engine
+            .spawn_object(SpawnConfig::new("HUTX"))
+            .expect("spawn hut");
+        let clonk_id = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_action(ActionState::new("Idle"))
+                    .with_container(hut_id),
+            )
+            .expect("spawn clonk");
+        engine.set_crew_cursor(1, Some(clonk_id))?;
+
+        let handled = engine.handle_control_command(1, ControlCommand::Dig, CommandKind::Press)?;
+        assert!(handled, "the container consumed the com (DirectCom returns)");
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.object(hut_id).expect("hut present").owner,
+            5,
+            "ContainedDig ran on the container"
+        );
+        assert_ne!(
+            snapshot.object(clonk_id).expect("clonk present").owner,
+            3,
+            "the clonk's ControlDig was bypassed"
+        );
+
+        // Specials skip containment: the clonk's own override runs.
+        engine.handle_control_command(1, ControlCommand::Special, CommandKind::Press)?;
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.object(clonk_id).expect("clonk present").owner,
+            4,
+            "ControlSpecial ran on the clonk despite containment"
         );
         Ok(())
     }
