@@ -2026,6 +2026,198 @@ fn get_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         .unwrap_or(Value::Int(0)))
 }
 
+/// The literal-text half of the FnAddMenuItem sprintf (C4Script.cpp:
+/// 1567-1570, fmt::sprintf(dummy, parameter, 0/1)): specifiers consume the
+/// two arguments positionally — the parameter text first (its slot was
+/// rewritten "%d" -> "%s"), then the left/right-click flag.
+fn sprintf_menu_command(format: &str, parameter: &str, click: i32) -> String {
+    let click_text = click.to_string();
+    let mut arguments = [parameter, click_text.as_str()].into_iter();
+    let mut out = String::with_capacity(format.len());
+    let mut chars = format.chars().peekable();
+    while let Some(current) = chars.next() {
+        if current != '%' {
+            out.push(current);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('%') => {
+                chars.next();
+                out.push('%');
+            }
+            Some('s') | Some('d') => {
+                chars.next();
+                out.push_str(arguments.next().unwrap_or(""));
+            }
+            _ => out.push('%'),
+        }
+    }
+    out
+}
+
+/// FnAddMenuItem (C4Script.cpp:1471-1734): appends one item to the menu
+/// object's OPEN menu. Sim-observable pieces ported: the composed
+/// left/right-click commands (new-style %d sprintf vs old-style
+/// "Fn(ID,param[,click][,value])"), the caption's %s -> def-name splice,
+/// count/no-count, C4MN_Add_PassValue, selectability, and the
+/// first-selectable selection grab (C4Menu::AddItem, C4Menu.cpp:424).
+/// Symbols are presentation, but their argument CHECKS still gate the
+/// return value (:1626,1679,1690-1693,1705-1709).
+fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
+    let caption_arg = parse_optional_string(args.first(), "AddMenuItem", "caption")?;
+    let command_arg =
+        parse_optional_string(args.get(1), "AddMenuItem", "command")?.unwrap_or_default();
+    let item_id = args.get(2).cloned().unwrap_or(Value::Nil);
+    let menu_target = parse_object_reference_argument(
+        args.get(3).unwrap_or(&Value::Nil),
+        "AddMenuItem",
+        "menu object",
+    )?;
+    let mut count = parse_optional_i32(args.get(4), "AddMenuItem", "count")?.unwrap_or(0);
+    let parameter = args.get(5).cloned().unwrap_or(Value::Nil);
+    // args[6] is the info caption — presentation only (item descriptions
+    // are not script-observable).
+    let extra = parse_optional_i32(args.get(7), "AddMenuItem", "extra")?.unwrap_or(0);
+    let xpar = args.get(8).cloned().unwrap_or(Value::Nil);
+    let xpar2 = args.get(9).cloned().unwrap_or(Value::Nil);
+
+    let Some(target) = menu_target.or(active_object_id()) else {
+        return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1474)
+    };
+    let (menu, def_name) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return (None, String::new());
+        };
+        // pDef = C4Id2Def(idItem), falling back to the menu object's own
+        // def (C4Script.cpp:1488-1489).
+        let item_def = match &item_id {
+            Value::C4Id(id) | Value::String(id) if !id.is_empty() => {
+                context.definition_metadata(id).map(|meta| meta.name.clone())
+            }
+            _ => None,
+        };
+        let def_name = item_def
+            .or_else(|| {
+                context.get_world_object(target).and_then(|object| {
+                    context
+                        .definition_metadata(object.definition_id())
+                        .map(|meta| meta.name.clone())
+                })
+            })
+            .unwrap_or_default();
+        (context.object_menu(target), def_name)
+    });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1475)
+    };
+
+    // Compose the caption with the def name (C4Script.cpp:1492-1510).
+    let mut caption = caption_arg
+        .as_deref()
+        .map(|text| text.replacen("%s", &def_name, 1))
+        .unwrap_or_default();
+
+    // Typed parameter -> command text (C4Script.cpp:1513-1546).
+    let parameter_text = match &parameter {
+        Value::Int(value) => value.to_string(),
+        Value::Bool(flag) => if *flag { "true" } else { "false" }.to_string(),
+        Value::C4Id(_) => c4id_text_of(&parameter),
+        Value::Object(number) => format!("Object({number})"),
+        Value::String(text) => format!("\"{text}\""),
+        Value::Nil => "CastAny(0)".to_string(), // C4V_Any raw 0
+        Value::Array(_) => {
+            return Err(RuntimeError::new("array as parameter to AddMenuItem"));
+        }
+        Value::Proplist(_) => {
+            return Err(RuntimeError::new("map as parameter to AddMenuItem"));
+        }
+    };
+
+    // C4MN_Add_PassValue payload (C4Script.cpp:1549-1554).
+    let own_value = (extra & 128 != 0).then(|| xpar2.as_c4_int().unwrap_or(0));
+
+    // New style (any non-IsIdentifier char, C4Strings.cpp:36-45) vs old
+    // style command composition (C4Script.cpp:1556-1597).
+    let is_identifier = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '~' | '+' | '-');
+    let (command, command2) = if command_arg.chars().any(|c| !is_identifier(c)) {
+        let dummy = command_arg.replacen("%d", "%s", 1);
+        (
+            sprintf_menu_command(&dummy, &parameter_text, 0),
+            sprintf_menu_command(&dummy, &parameter_text, 1),
+        )
+    } else if !command_arg.is_empty() {
+        let id_text = c4id_text_of(&item_id);
+        match own_value {
+            Some(value) => (
+                format!("{command_arg}({id_text},{parameter_text},0,{value})"),
+                format!("{command_arg}({id_text},{parameter_text},1,{value})"),
+            ),
+            None => (
+                format!("{command_arg}({id_text},{parameter_text})"),
+                format!("{command_arg}({id_text},{parameter_text},1)"),
+            ),
+        }
+    } else {
+        (String::new(), String::new())
+    };
+
+    // Symbol argument checks that gate the return value; the drawing
+    // itself is presentation (C4Script.cpp:1600-1723).
+    match extra & 127 {
+        // C4MN_Add_ImgObjRank / C4MN_Add_ImgObject need an object XPar.
+        3 | 4 => {
+            if !matches!(xpar, Value::Object(_)) {
+                return Ok(Value::Bool(false));
+            }
+        }
+        // C4MN_Add_ImgTextSpec needs a caption (drawn as the symbol,
+        // clearing the item caption, C4Script.cpp:1688-1697).
+        5 => {
+            if caption_arg.is_none() {
+                return Ok(Value::Bool(false));
+            }
+            caption = String::new();
+        }
+        // C4MN_Add_ImgIndexedColor rejects C4MN_Add_PassValue (:1705-1709).
+        7 => {
+            if extra & 128 != 0 {
+                return Err(RuntimeError::new(
+                    "AddMenuItem: C4MN_Add_ImgIndexedColor can not be used together with C4MN_Add_PassValue!",
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    // Zero count -> no count unless C4MN_Add_ForceCount (C4Script.cpp:1726).
+    if count == 0 && extra & 256 == 0 {
+        count = 12_345_678; // C4MN_Item_NoCount
+    }
+    let selectable = !command.is_empty();
+    // First selectable item takes the selection, WITHOUT callbacks
+    // (C4Menu::AddItem -> SetSelection(ItemCount-1, false, false)).
+    if menu.selection == -1 && selectable {
+        menu.selection = menu.items.len() as i32;
+    }
+    menu.items.push(crate::ObjectMenuItem {
+        caption,
+        command,
+        command2,
+        count,
+        item_id: c4id_text_of(&item_id),
+        selectable,
+        value: own_value,
+    });
+    let stored = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu)))
+            .unwrap_or(false)
+    });
+    Ok(Value::Bool(stored))
+}
+
 /// FnCloseMenu (C4Script.cpp:4309-4314): pObj->CloseMenu(true) — the
 /// forced close never asks MenuQueryCancel and always reports success.
 fn close_menu(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -3910,6 +4102,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPortrait", get_portrait);
     script.register_host_function("SetVisibility", set_visibility);
     script.register_host_function("SetPlrViewRange", set_plr_view_range);
+    script.register_host_function("AddMenuItem", add_menu_item);
     script.register_host_function("CloseMenu", close_menu);
     script.register_host_function("CreateMenu", create_menu);
     script.register_host_function("GetMenu", get_menu);
@@ -17773,6 +17966,7 @@ mod tests {
         "ActIdle",
         "AddCommand",
         "AddEffect",
+        "AddMenuItem",
         "AddMessage",
         "AnyContainer",
         "AppendCommand",

@@ -32593,6 +32593,98 @@ func Trigger() {
     }
 
     #[test]
+    fn add_menu_item_composes_commands_and_counts_like_cpp() {
+        // FnAddMenuItem (C4Script.cpp:1471-1734): no menu -> false; new-style
+        // commands (any non-identifier char) go through the %d->%s sprintf
+        // hack (:1560-1571), old-style function names compose
+        // "Fn(ID,param[,1][,value])" (:1573-1597); a zero count becomes
+        // C4MN_Item_NoCount unless C4MN_Add_ForceCount (:1726); items without
+        // a command are not selectable (:1729) and the first selectable item
+        // grabs the initial selection (C4Menu::AddItem, C4Menu.cpp:424).
+        let script = r#"
+        func TryEarly() { return AddMenuItem("x", "Cmd", WIPF, this()); }
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func AddPlain() { return AddMenuItem("Info", "", WIPF, this()); }
+        func AddNew() { return AddMenuItem("Easy", "SetDifficulty(0)", WIPF, this()); }
+        func AddFmt() { return AddMenuItem("Fmt", "Choose(%d,%d)", WIPF, this(), 0, 5); }
+        func AddOld() { return AddMenuItem("Old %s", "Choose", CLNK, this(), 3, 7, "info"); }
+        func AddValued() { return AddMenuItem("Val", "Choose", CLNK, this(), 0, "txt", 0, 384, 0, 42); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, Vec::new())
+                .expect("call succeeds")
+        };
+
+        assert_eq!(
+            call(&mut engine, "TryEarly"),
+            Value::Bool(false),
+            "no menu -> false (C4Script.cpp:1475)"
+        );
+        assert_eq!(call(&mut engine, "OpenMenu"), Value::Bool(true));
+        for adder in ["AddPlain", "AddNew", "AddFmt", "AddOld", "AddValued"] {
+            assert_eq!(call(&mut engine, adder), Value::Bool(true), "{adder}");
+        }
+
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu is open");
+        assert_eq!(menu.items.len(), 5);
+
+        // Command-less item: never selectable, no-count sentinel.
+        let plain = &menu.items[0];
+        assert_eq!(plain.command, "");
+        assert!(!plain.selectable);
+        assert_eq!(plain.count, 12_345_678, "C4MN_Item_NoCount");
+
+        // New style without %d: both commands are the literal text.
+        let easy = &menu.items[1];
+        assert_eq!(easy.command, "SetDifficulty(0)");
+        assert_eq!(easy.command2, "SetDifficulty(0)");
+        assert!(easy.selectable);
+
+        // New style with %d: the FIRST %d takes the parameter, the second
+        // gets 0 (left) / 1 (right) (C4Script.cpp:1563-1570).
+        let fmt = &menu.items[2];
+        assert_eq!(fmt.command, "Choose(5,0)");
+        assert_eq!(fmt.command2, "Choose(5,1)");
+
+        // Old style: Fn(ID,param) / Fn(ID,param,1); caption %s takes the
+        // item def's name (C4Script.cpp:1492-1505); explicit count kept.
+        let old = &menu.items[3];
+        assert_eq!(old.caption, "Old Clonk");
+        assert_eq!(old.command, "Choose(CLNK,7)");
+        assert_eq!(old.command2, "Choose(CLNK,7,1)");
+        assert_eq!(old.count, 3);
+        assert_eq!(old.item_id, "CLNK");
+
+        // C4MN_Add_PassValue (128) + C4MN_Add_ForceCount (256): string
+        // parameters are quoted, the value rides along, count 0 stays 0.
+        let valued = &menu.items[4];
+        assert_eq!(valued.command, "Choose(CLNK,\"txt\",0,42)");
+        assert_eq!(valued.command2, "Choose(CLNK,\"txt\",1,42)");
+        assert_eq!(valued.count, 0);
+        assert_eq!(valued.value, Some(42));
+
+        // The first SELECTABLE item took the initial selection
+        // (item 0 is not selectable, so index 1).
+        assert_eq!(menu.selection, 1);
+    }
+
+    #[test]
     fn do_damage_asks_effects_for_non_living_and_fires_callback() {
         // C4Object::DoDamage (C4Object.cpp:1330-1343): NON-living things ask
         // their effects first (the inverse of DoEnergy's Alive gate), the
