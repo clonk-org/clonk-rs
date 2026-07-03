@@ -164,8 +164,22 @@ and confirms R3 is substantially incomplete vs C++:
       ColorByOwner/`dwModClr` modulation is applied to the whole icon instead of
       only the team-colour mask pixels. Concrete bug, ties to R1 modulation
       (`blend_color_by_owner` `lib.rs:133`; sprite path `lib.rs:1854`).
-- [ ] Object sprites — wire `draw_transform`/rotation through `blit_transformed`
-      and owner-colour only via the ColorByOwner mask.
+- [x] **Object faces anchored + con-scaled like C4Object::Draw** *(2026-07-03)* —
+      sprites now take precedence over the debug vertex polygon (GoldRush trees
+      rendered as flat hash-coloured triangles before); faces anchor at the
+      shape top-left `x+Shape.x`/`y+Shape.y` (`C4Object.cpp:2231`) with
+      `C4Shape::Stretch`/`Jolt` con-scaling (`C4Shape.cpp:103-128`); idle/
+      FacetBase base faces implement DrawFace growth + construction display
+      (`C4Object.cpp:438-467`); action facets place at `cox+FacetX`/`coy+FacetY`
+      at full con and stretch over the con-scaled shape while growing
+      (`C4Object.cpp:2450-2467`); FlipDir mirrors and rotation orbit the shape
+      center; facet sources clamp to the sheet (Tree1 `Still` is 73x73 on a
+      71px sheet). Base-graphics variants (`SetGraphics`) honored + pinned.
+      Remaining: draw transforms are reduced to scale+offset (no full 2x3
+      matrix), rotated shapes anchor with the unrotated shape bbox (C++
+      rotates `Shape` in UpdateShape), MODE_Base overlays still draw the
+      whole sheet centered.
+- [ ] Object sprites — owner-colour only via the ColorByOwner mask.
 - [ ] Particles (`C4Particles` draw).
 - [ ] HUD: Rust draws a debug overlay (FRAME/POS/VEL); C++ has the upper board with
       crew portraits + wealth + scoreboard.
