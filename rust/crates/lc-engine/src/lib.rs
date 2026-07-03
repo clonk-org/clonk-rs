@@ -5231,6 +5231,12 @@ pub struct Definition {
     mass: i32,
     picture: Option<DefinitionPicture>,
     picture_image: Option<DefinitionPictureImage>,
+    /// First def portrait (C4CFN_Portraits, src/C4Components.h:88) — HUD
+    /// cursor info only (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-320).
+    portrait_image: Option<DefinitionPictureImage>,
+    /// Def rank symbols (C4Def::pRankSymbols from Rank.png,
+    /// src/C4Def.cpp:684-691) — HUD cursor info only.
+    rank_symbols_image: Option<DefinitionPictureImage>,
     sprite_image: Option<DefinitionSpriteImage>,
     sprite_variants: HashMap<String, DefinitionSpriteImage>,
     shape: Option<DefinitionRect>,
@@ -5377,6 +5383,8 @@ impl Definition {
             mass: 0,
             picture: None,
             picture_image: None,
+            portrait_image: None,
+            rank_symbols_image: None,
             sprite_image: None,
             sprite_variants: HashMap::new(),
             shape: None,
@@ -5495,6 +5503,12 @@ impl Definition {
         definition.set_solid_mask(resource.core.solid_mask.map(DefinitionTargetRect::from));
         if let Some(image) = resource.picture_image.as_ref() {
             definition.set_picture_image(Some(DefinitionPictureImage::from_resource(image)));
+        }
+        if let Some(image) = resource.portrait_image.as_ref() {
+            definition.set_portrait_image(Some(DefinitionPictureImage::from_resource(image)));
+        }
+        if let Some(image) = resource.rank_symbols_image.as_ref() {
+            definition.set_rank_symbols_image(Some(DefinitionPictureImage::from_resource(image)));
         }
         if let Some(image) = resource.graphics_image.as_ref() {
             let mask = resource.color_by_owner_mask.as_ref();
@@ -5834,6 +5848,24 @@ impl Definition {
 
     pub fn set_picture_image(&mut self, image: Option<DefinitionPictureImage>) {
         self.picture_image = image;
+    }
+
+    /// First def portrait (C4CFN_Portraits, src/C4Components.h:88).
+    pub fn portrait_image(&self) -> Option<&DefinitionPictureImage> {
+        self.portrait_image.as_ref()
+    }
+
+    pub fn set_portrait_image(&mut self, image: Option<DefinitionPictureImage>) {
+        self.portrait_image = image;
+    }
+
+    /// Def rank symbols (C4Def::pRankSymbols, src/C4Def.cpp:684-691).
+    pub fn rank_symbols_image(&self) -> Option<&DefinitionPictureImage> {
+        self.rank_symbols_image.as_ref()
+    }
+
+    pub fn set_rank_symbols_image(&mut self, image: Option<DefinitionPictureImage>) {
+        self.rank_symbols_image = image;
     }
 
     pub fn sprite_image(&self) -> Option<&DefinitionSpriteImage> {
@@ -13111,6 +13143,26 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .and_then(|definition| definition.picture_image().cloned())
+    }
+
+    /// The def's first portrait for the HUD cursor info
+    /// (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-320). Read-only
+    /// presentation data.
+    pub fn definition_portrait_image(&self, definition_id: &str) -> Option<DefinitionPictureImage> {
+        self.definitions
+            .get(definition_id)
+            .and_then(|definition| definition.portrait_image().cloned())
+    }
+
+    /// The def's own rank symbol strip (`pDef->pRankSymbols`,
+    /// src/C4ObjectInfo.cpp:334-341). Read-only presentation data.
+    pub fn definition_rank_symbols_image(
+        &self,
+        definition_id: &str,
+    ) -> Option<DefinitionPictureImage> {
+        self.definitions
+            .get(definition_id)
+            .and_then(|definition| definition.rank_symbols_image().cloned())
     }
 
     pub fn definition_sprite_image(
@@ -39437,6 +39489,45 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .bytes()
             .to_vec();
         assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn definition_exposes_portrait_and_rank_symbols_for_the_hud() -> Result<(), EngineError> {
+        // C4Def loads Portrait*.* (C4CFN_Portraits, src/C4Components.h:88,
+        // C4Def::LoadPortraits src/C4Def.cpp:1245-1259) and Rank.png
+        // (pRankSymbols, src/C4Def.cpp:684-691); the HUD cursor info draws
+        // both (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-341).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Crew.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=CRWT\nName=CrewTest\nCategory=C4D_Object\n",
+        )
+        .expect("write defcore");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
+            .save(def_dir.join("Portrait1.png"))
+            .expect("write portrait");
+        image::RgbaImage::from_pixel(4, 2, image::Rgba([40, 50, 60, 255]))
+            .save(def_dir.join("Rank.png"))
+            .expect("write rank symbols");
+
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource)?;
+
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+
+        let portrait = engine
+            .definition_portrait_image("CRWT")
+            .expect("portrait exposed");
+        assert_eq!((portrait.width(), portrait.height()), (2, 2));
+        let rank = engine
+            .definition_rank_symbols_image("CRWT")
+            .expect("rank symbols exposed");
+        assert_eq!((rank.width(), rank.height()), (4, 2));
+        Ok(())
     }
 
     #[test]

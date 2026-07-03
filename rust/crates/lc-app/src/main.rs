@@ -22,7 +22,7 @@ mod settings;
 
 use std::cmp::Ordering;
 use std::collections::{
-    hash_map::DefaultHasher, hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque,
+    hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque,
 };
 use std::convert::TryFrom;
 use std::fmt;
@@ -493,6 +493,8 @@ impl FrontendAssets {
             "Build.png",
             "EnergyBars.png",
             "SelectMark.png",
+            "Control.png",
+            "Background.png",
         ]
         .into_iter()
         .chain(STARTUP_DIALOG_IMAGES.iter().copied())
@@ -737,6 +739,8 @@ impl FrontendAssets {
             build: load("Build.png"),
             energy_bars: load("EnergyBars.png"),
             select_mark: load("SelectMark.png"),
+            control: load("Control.png"),
+            background: load("Background.png"),
         };
 
         if !missing.is_empty() {
@@ -2563,6 +2567,19 @@ struct GameApp {
     menu_render_version: u64,
     menu_frame_cache: Option<MenuFrameCache>,
     menu_backdrop_cache: StartupBackdropCache,
+    /// Wall clock of the scenario start; `Game.Time` counts real seconds
+    /// while the game runs (C4Game::Sec1Timer, src/C4Game.cpp:1737-1741).
+    run_started: Option<Instant>,
+    /// The message board's current log line and the frame it expires
+    /// (fade-in + strlen delay + fade-out at Speed 1,
+    /// src/C4MessageBoard.cpp:163-212).
+    board_line: Option<(String, u64)>,
+    /// `C4Player::ShowStartup` for the local player: keyboard hint + name
+    /// until the first control com (src/C4Player.cpp:1376,1735).
+    show_startup_hint: bool,
+    /// `LC_APP_HUD_DEBUG=1`: draw the FRAME/POS/VEL debug lines on top of
+    /// the C++-faithful HUD.
+    debug_hud: bool,
 }
 
 /// The last composed startup-menu frame. Menu mode is fully event-driven
@@ -4957,6 +4974,7 @@ impl GameApp {
             assets.cursor_atlas(),
             assets.hud_graphics(),
         );
+        graphics.set_clonk_fonts(assets.clonk_fonts.clone());
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         let audio = match AudioContext::try_new(audio_options) {
             Ok(ctx) => Some(ctx),
@@ -5026,6 +5044,10 @@ impl GameApp {
             menu_render_version: 0,
             menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
+            run_started: None,
+            board_line: None,
+            show_startup_hint: false,
+            debug_hud: std::env::var("LC_APP_HUD_DEBUG").map(|v| v == "1").unwrap_or(false),
         };
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
@@ -5047,6 +5069,7 @@ impl GameApp {
             self.assets.cursor_atlas(),
             self.assets.hud_graphics(),
         );
+        graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
         self.graphics.set_sky(self.sky.clone());
@@ -5211,36 +5234,60 @@ impl GameApp {
         }
     }
 
+    /// Fills the presentation half of the crew overlays: the def portrait
+    /// (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-320), the crew name and
+    /// rank (src/C4ObjectInfo.cpp:330-370) and the def rank symbols
+    /// (src/C4ObjectInfo.cpp:334-341).
     fn populate_crew_portraits(&self, players: &mut [PlayerOverlay]) {
         let hud_graphics = self.graphics.hud_graphics();
         let fallback_portrait = hud_graphics.crew.clone();
-        let mut cache: HashMap<String, ImageData> = HashMap::new();
+        let mut portrait_cache: HashMap<String, Option<ImageData>> = HashMap::new();
+        let mut rank_cache: HashMap<String, Option<ImageData>> = HashMap::new();
 
         for player in players.iter_mut() {
             for crew in player.crew.iter_mut() {
+                if let Some(info) = self.engine.crew_object_info(crew.object_id) {
+                    crew.label = info.name.clone();
+                    crew.rank = info.rank;
+                }
                 let Some(object) = self.snapshot.object(crew.object_id) else {
                     crew.portrait = fallback_portrait.clone();
                     continue;
                 };
 
                 let definition_id = object.definition_id.clone();
-                if let Some(picture) = self.engine.definition_picture_image(&definition_id) {
-                    let image = match cache.entry(definition_id) {
-                        Entry::Occupied(entry) => entry.get().clone(),
-                        Entry::Vacant(entry) => {
-                            let image = ImageData::from_arc(
-                                picture.width(),
-                                picture.height(),
-                                picture.pixels(),
-                            );
-                            entry.insert(image.clone());
-                            image
-                        }
-                    };
-                    crew.portrait = Some(image);
-                } else {
-                    crew.portrait = fallback_portrait.clone();
-                }
+                let portrait = portrait_cache
+                    .entry(definition_id.clone())
+                    .or_insert_with(|| {
+                        self.engine
+                            .definition_portrait_image(&definition_id)
+                            .map(|image| {
+                                ImageData::from_arc(image.width(), image.height(), image.pixels())
+                            })
+                            .or_else(|| {
+                                self.engine.definition_picture_image(&definition_id).map(
+                                    |picture| {
+                                        ImageData::from_arc(
+                                            picture.width(),
+                                            picture.height(),
+                                            picture.pixels(),
+                                        )
+                                    },
+                                )
+                            })
+                    })
+                    .clone();
+                crew.portrait = portrait.or_else(|| fallback_portrait.clone());
+                crew.rank_symbols = rank_cache
+                    .entry(definition_id.clone())
+                    .or_insert_with(|| {
+                        self.engine
+                            .definition_rank_symbols_image(&definition_id)
+                            .map(|image| {
+                                ImageData::from_arc(image.width(), image.height(), image.pixels())
+                            })
+                    })
+                    .clone();
             }
         }
     }
@@ -5396,6 +5443,9 @@ impl GameApp {
     }
 
     fn dispatch_control_event(&mut self, event: ControlEvent) -> Result<(), EngineError> {
+        // First local control com hides the startup hint
+        // (C4Player::DirectCom, src/C4Player.cpp:1376).
+        self.show_startup_hint = false;
         let mut event = event;
         if self.menu_controls_active() {
             if let Some(mapped) = map_menu_control_event(event) {
@@ -8004,17 +8054,19 @@ impl GameApp {
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
         let viewports = collect_viewport_inputs(&self.snapshot, self.local_owner, self.focus_id);
         if let Some(_focus) = self.focus_snapshot.as_ref() {
-            let mut players = collect_player_overlays(&self.snapshot, self.focus_id);
+            let startup_hint_owner = self.show_startup_hint.then_some(self.local_owner);
+            let mut players =
+                collect_player_overlays(&self.snapshot, self.focus_id, startup_hint_owner);
             self.populate_crew_portraits(&mut players);
             let overlay = GraphicsOverlay {
                 frame_text: &self.frame_text,
                 status_text: &self.status_text,
-                energy_fraction: self.energy_fraction,
+                debug_hud: self.debug_hud,
                 players,
+                game_time_seconds: self.game_time_seconds(),
+                message_board_line: self.message_board_line(),
             };
-            self.graphics
-                .update_overlay(&overlay)
-                .context("failed to update overlay")?;
+            self.graphics.update_overlay(&overlay);
             self.graphics.render_frame(&self.snapshot, &viewports);
         } else if !viewports.is_empty() {
             self.graphics.render_frame(&self.snapshot, &viewports);
@@ -8052,6 +8104,23 @@ impl GameApp {
             copy_surface(pixels, surface.width(), surface.height(), frame);
         }
         Ok(())
+    }
+
+    /// `Game.Time`: real seconds since the run started
+    /// (C4Game::Sec1Timer, src/C4Game.cpp:1737-1741).
+    fn game_time_seconds(&self) -> u64 {
+        self.run_started
+            .map(|started| started.elapsed().as_secs())
+            .unwrap_or(0)
+    }
+
+    /// The message board's current log line, dropped once its C++ fade
+    /// window has passed (src/C4MessageBoard.cpp:163-212).
+    fn message_board_line(&self) -> Option<String> {
+        self.board_line
+            .as_ref()
+            .filter(|(_, expires)| self.snapshot.frame < *expires)
+            .map(|(line, _)| line.clone())
     }
 
     fn draw_messages(&mut self) {
@@ -8578,6 +8647,8 @@ impl GameApp {
             self.assets.cursor_atlas(),
             self.assets.hud_graphics(),
         );
+        self.graphics
+            .set_clonk_fonts(self.assets.clonk_fonts.clone());
         self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics.set_sky(self.sky.clone());
         self.graphics
@@ -8752,9 +8823,10 @@ impl GameApp {
                 .set_material_colors(Arc::clone(&self.material_base_colors));
         }
 
-        let label = scenario_data
-            .name()
-            .map(|name| name.to_string())
+        // Parameters.ScenarioTitle: the Title.txt language entry beats
+        // C4S.Head.Title (C4Game.cpp:253-255).
+        let label = scenario_title_from_group(&path)
+            .or_else(|| scenario_data.name().map(|name| name.to_string()))
             .unwrap_or_else(|| scenario.title.clone());
         let ground = match scenario_data.ground_height_hint() {
             Some(hint) => hint.max(0),
@@ -9000,6 +9072,8 @@ impl GameApp {
             self.assets.cursor_atlas(),
             self.assets.hud_graphics(),
         );
+        self.graphics
+            .set_clonk_fonts(self.assets.clonk_fonts.clone());
         self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         self.graphics.set_sky(self.sky.clone());
         self.graphics
@@ -9015,6 +9089,25 @@ impl GameApp {
         self.ingame_menu = None;
         self.game_over_handled = false;
         self.mode = AppMode::Running;
+        // Game clock + startup hint + join log line for the HUD.
+        self.run_started = Some(Instant::now());
+        // ShowStartup is set on player init (C4Player.cpp:1735).
+        self.show_startup_hint = true;
+        // C4PlayerList::JoinNew logs IDS_PRC_JOINPLR "Player join: %s"
+        // (C4PlayerList.cpp:281, LanguageUS.txt:1222); one-line message
+        // board timing = fade-in + strlen delay + fade-out at line height
+        // 15 / Speed 1 (C4MessageBoard.cpp:163-212).
+        self.board_line = self
+            .engine
+            .snapshot()
+            .players
+            .iter()
+            .find(|state| state.id == self.local_owner)
+            .map(|state| {
+                let line = format!("Player join: {}", state.name);
+                let expires = self.engine.frame() + line.len() as u64 + 30;
+                (line, expires)
+            });
     }
 
     fn apply_focus_selection(&mut self) {
@@ -9494,9 +9587,24 @@ fn collect_viewport_inputs<'a>(
     inputs
 }
 
+/// The C4CFN_Title component: `Title.txt` language lines like
+/// `US:Gold Rush` (C4ComponentHost::GetLanguageString via
+/// C4Game::OpenScenario, src/C4Game.cpp:253-255). Only US is consulted
+/// until the language config is ported.
+fn scenario_title_from_group(path: &Path) -> Option<String> {
+    let group = Group::open(path).ok()?;
+    let bytes = group.read_file("Title.txt").ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix("US:"))
+        .map(|title| title.trim().to_string())
+        .find(|title| !title.is_empty())
+}
+
 fn collect_player_overlays(
     snapshot: &SimulationSnapshot,
     focus_id: Option<ObjectId>,
+    startup_hint_owner: Option<i32>,
 ) -> Vec<PlayerOverlay> {
     let detail_map: HashMap<_, _> = snapshot
         .players
@@ -9511,7 +9619,17 @@ fn collect_player_overlays(
             let (label, energy_fraction, is_focus) =
                 if let Some(object) = snapshot.object(*object_id) {
                     let label = format!("{} #{}", object.definition_id, object.id.as_u64());
-                    let energy_fraction = (object.energy.max(0).min(100) as f32) / 100.0;
+                    // Energy runs on the C4MaxPhysical scale against the
+                    // crew's physical Energy (C4Object::DrawEnergy,
+                    // src/C4Object.cpp:2692-2695).
+                    let max_energy = object
+                        .info_physical
+                        .as_ref()
+                        .map(|physical| physical.energy)
+                        .filter(|energy| *energy > 0)
+                        .unwrap_or(100);
+                    let energy_fraction =
+                        (object.energy.max(0) as f32 / max_energy as f32).clamp(0.0, 1.0);
                     let is_focus = focus_id == Some(object.id) || cursor == Some(object.id);
                     (label, energy_fraction, is_focus)
                 } else {
@@ -9524,8 +9642,18 @@ fn collect_player_overlays(
                 energy_fraction,
                 is_focus,
                 portrait: None,
+                rank: 0,
+                rank_symbols: None,
             });
         }
+        // C4Player::SelectCount (src/C4Viewport.cpp:1320); the initial
+        // selection is the cursor crew.
+        let select_count = snapshot
+            .crew_selection
+            .get(&player.owner)
+            .map(|selection| selection.selected.len() as i32)
+            .filter(|count| *count > 0)
+            .unwrap_or(i32::from(cursor.is_some()));
         let name = detail_map
             .get(&player.owner)
             .and_then(|state| {
@@ -9556,6 +9684,8 @@ fn collect_player_overlays(
             cursor,
             eliminated: player.eliminated,
             owner_color,
+            select_count,
+            show_startup: startup_hint_owner == Some(player.owner),
             crew,
         });
     }
@@ -11001,7 +11131,7 @@ mod tests {
             ..PlayerState::default()
         });
 
-        let overlay = collect_player_overlays(&snapshot, Some(focus));
+        let overlay = collect_player_overlays(&snapshot, Some(focus), Some(1));
         assert_eq!(overlay.len(), 1);
         let player = &overlay[0];
         assert_eq!(player.owner, 1);
@@ -11011,6 +11141,9 @@ mod tests {
         assert!(!player.eliminated);
         assert_eq!(player.crew.len(), 2);
         assert_eq!(player.owner_color, default_owner_color(1));
+        // SelectCount defaults to the cursor selection (C4Viewport.cpp:1320).
+        assert_eq!(player.select_count, 1);
+        assert!(player.show_startup, "startup hint owner matches");
 
         let mut focused = player
             .crew

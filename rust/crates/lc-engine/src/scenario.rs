@@ -108,6 +108,11 @@ struct ScenarioDefinition {
     graphics_image: Option<GraphicsImage>,
     color_by_owner_mask: Option<ColorByOwnerMask>,
     additional_graphics: HashMap<String, ResourceGraphicsVariant>,
+    /// First def portrait (C4CFN_Portraits, src/C4Components.h:88) for the
+    /// HUD cursor info (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-320).
+    portrait_image: Option<GraphicsImage>,
+    /// Def rank symbols (C4Def::pRankSymbols, src/C4Def.cpp:684-691).
+    rank_symbols_image: Option<GraphicsImage>,
     resource_group: Option<Group>,
     components: Vec<DefinitionComponent>,
     line_connect: u32,
@@ -635,6 +640,20 @@ impl Scenario {
                 .as_ref()
                 .map(DefinitionPictureImage::from_resource);
             compiled.set_picture_image(picture_image);
+            // HUD cursor-info assets: def portrait + rank symbols
+            // (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-341).
+            compiled.set_portrait_image(
+                definition
+                    .portrait_image
+                    .as_ref()
+                    .map(DefinitionPictureImage::from_resource),
+            );
+            compiled.set_rank_symbols_image(
+                definition
+                    .rank_symbols_image
+                    .as_ref()
+                    .map(DefinitionPictureImage::from_resource),
+            );
             let sprite_image = definition.graphics_image.as_ref().map(|image| {
                 DefinitionSpriteImage::from_resource(image, definition.color_by_owner_mask.as_ref())
             });
@@ -892,6 +911,8 @@ impl Scenario {
                     graphics_image: None,
                     color_by_owner_mask: None,
                     additional_graphics: HashMap::new(),
+                    portrait_image: None,
+                    rank_symbols_image: None,
                     resource_group: None,
                     components: Vec::new(),
                     line_connect: 0,
@@ -4569,6 +4590,8 @@ fn scenario_definition_from_resource(
         graphics_image,
         color_by_owner_mask,
         additional_graphics,
+        portrait_image,
+        rank_symbols_image,
     } = resource;
     let actions = action_map.map(|map| convert_action_map(&map));
     let full_core = core.clone();
@@ -4589,6 +4612,8 @@ fn scenario_definition_from_resource(
         graphics_image,
         color_by_owner_mask,
         additional_graphics,
+        portrait_image,
+        rank_symbols_image,
         resource_group: source_group,
         components: core
             .components
@@ -6513,6 +6538,8 @@ global func Step(state, frame, random)
                 graphics_image: None,
                 color_by_owner_mask: None,
                 additional_graphics: HashMap::new(),
+                portrait_image: None,
+                rank_symbols_image: None,
                 resource_group: None,
                 components: Vec::new(),
                 line_connect: 0,
@@ -6605,6 +6632,8 @@ global func Step(state, frame, random)
                 graphics_image: None,
                 color_by_owner_mask: None,
                 additional_graphics: HashMap::new(),
+                portrait_image: None,
+                rank_symbols_image: None,
                 resource_group: None,
                 components: Vec::new(),
                 line_connect: 0,

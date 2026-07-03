@@ -18,6 +18,15 @@ pub struct Definition {
     pub graphics_image: Option<GraphicsImage>,
     pub color_by_owner_mask: Option<ColorByOwnerMask>,
     pub additional_graphics: HashMap<String, DefinitionGraphicsVariant>,
+    /// First `Portrait*.*` def portrait (C4CFN_Portraits,
+    /// src/C4Components.h:88). C++ assigns fresh crew a *non-synced* random
+    /// portrait from the def set (`C4ObjectInfo::SetRandomPortrait`,
+    /// src/C4ObjectInfo.cpp:398-425); the Rust HUD deterministically shows
+    /// the first.
+    pub portrait_image: Option<GraphicsImage>,
+    /// The def's own rank symbol strip (`C4Def::pRankSymbols` from
+    /// Rank.png, src/C4Def.cpp:684-691).
+    pub rank_symbols_image: Option<GraphicsImage>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +59,8 @@ impl Definition {
         let picture_image = load_definition_picture(group, &core);
         let (graphics_image, color_by_owner_mask, additional_graphics) =
             load_definition_graphics(group, core.color_by_owner);
+        let portrait_image = load_plain_image(group, "Portrait1.png");
+        let rank_symbols_image = load_plain_image(group, "Rank.png");
 
         Ok(Self {
             core,
@@ -59,8 +70,18 @@ impl Definition {
             graphics_image,
             color_by_owner_mask,
             additional_graphics,
+            portrait_image,
+            rank_symbols_image,
         })
     }
+}
+
+/// Decodes a single named image from the def group, `None` when absent.
+fn load_plain_image(group: &Group, name: &str) -> Option<GraphicsImage> {
+    let data = group.read_file(name).ok()?;
+    let image = image::load_from_memory(&data).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    (width > 0 && height > 0).then(|| GraphicsImage::new(width, height, image.into_raw()))
 }
 
 /// `C4MaxPhysical` (C4InfoCore.h:31): the 100% value of every physical.

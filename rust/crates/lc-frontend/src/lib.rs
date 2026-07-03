@@ -7,6 +7,7 @@
 )]
 
 pub mod clonk_fonts;
+pub mod hud;
 pub mod startup_about_dlg;
 pub mod startup_netdlg;
 pub mod startup_options_dlg;
@@ -31,7 +32,7 @@ use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
     SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont,
 };
-use lc_gui::{DrawCommand, Gui, GuiResult, Rect as GuiRect, Size as GuiSize, WidgetId};
+use lc_gui::{Rect as GuiRect, Size as GuiSize};
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::hash::{Hash, Hasher};
@@ -48,7 +49,6 @@ pub use startup_main_menu::{MainMenuAction, MainMenuItem, StartupMainMenu};
 pub use startup_menu::{ScenarioSummary, StartupMenu, StartupMenuAction};
 pub use startup_options::{ControlOptionItem, ControlOptionsAction, ControlOptionsView};
 
-const OVERLAY_HEIGHT: f32 = 120.0;
 const MIN_VIEWPORT_ZOOM: f32 = 0.125;
 const MAX_VIEWPORT_ZOOM: f32 = 4.0;
 const CAMERA_SMOOTHING_ALPHA: f32 = 0.2;
@@ -130,6 +130,12 @@ pub struct HudGraphics {
     pub build: Option<ImageData>,
     pub energy_bars: Option<ImageData>,
     pub select_mark: Option<ImageData>,
+    /// Control.png — `sfcControl` with the `fctKeyboard` cell at (0,0,80,36)
+    /// (src/C4GraphicsResource.cpp:200-205).
+    pub control: Option<ImageData>,
+    /// Background.png — `fctBackground`, the message board backdrop tile
+    /// (src/C4GraphicsResource.cpp:209, src/C4MessageBoard.cpp:258).
+    pub background: Option<ImageData>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -339,10 +345,19 @@ impl SkyRenderState {
 }
 
 pub struct GraphicsOverlay<'a> {
+    /// Debug FRAME/POS/VEL line — drawn only when `debug_hud` is set.
     pub frame_text: &'a str,
+    /// Debug ENERGY/DAMAGE/OWNER line — drawn only when `debug_hud` is set.
     pub status_text: &'a str,
-    pub energy_fraction: f32,
+    /// Opt-in debug HUD lines (not part of the C++-faithful overlay).
+    pub debug_hud: bool,
     pub players: Vec<PlayerOverlay>,
+    /// `Game.Time` seconds for the upper board clock
+    /// (C4Game::Sec1Timer, src/C4Game.cpp:1737-1741).
+    pub game_time_seconds: u64,
+    /// The current message board log line (C4MessageBoard LogBuffer tail,
+    /// src/C4MessageBoard.cpp:271-303).
+    pub message_board_line: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -354,39 +369,28 @@ pub struct PlayerOverlay {
     pub cursor: Option<ObjectId>,
     pub eliminated: bool,
     pub owner_color: Color,
+    /// `C4Player::SelectCount` for the crew display value
+    /// (src/C4Viewport.cpp:1320).
+    pub select_count: i32,
+    /// `C4Player::ShowStartup` — keyboard hint + name until the first
+    /// control com (src/C4Player.cpp:1376, src/C4Viewport.cpp:1450).
+    pub show_startup: bool,
     pub crew: Vec<CrewOverlay>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CrewOverlay {
     pub object_id: ObjectId,
+    /// The crew member's name (`C4ObjectInfo::sName`).
     pub label: String,
     pub energy_fraction: f32,
     pub is_focus: bool,
     pub portrait: Option<ImageData>,
-}
-
-#[derive(Debug)]
-struct PlayerWidgets {
-    owner: i32,
-    header_label: WidgetId,
-    status_label: WidgetId,
-    wealth: PlayerStatWidgets,
-    score: PlayerStatWidgets,
-    crew: Vec<CrewWidgets>,
-}
-
-#[derive(Debug)]
-struct CrewWidgets {
-    portrait: WidgetId,
-    label: WidgetId,
-    gauge: WidgetId,
-}
-
-#[derive(Debug)]
-struct PlayerStatWidgets {
-    icon: WidgetId,
-    label: WidgetId,
+    /// `C4ObjectInfo::Rank` (src/C4ObjectInfo.cpp:330).
+    pub rank: i32,
+    /// The def's own rank symbols (`pDef->pRankSymbols`,
+    /// src/C4ObjectInfo.cpp:334-341); falls back to the global Rank.png.
+    pub rank_symbols: Option<ImageData>,
 }
 
 #[derive(Debug)]
@@ -430,15 +434,17 @@ struct ActiveViewport {
 
 pub struct GraphicsSystem {
     surface: Surface,
-    gui: Gui,
     font: Arc<dyn TextFont>,
+    /// The CStdFont-faithful fonts; the HUD's FontRegular when present
+    /// (C4GraphicsResource::InitFonts, src/C4GraphicsResource.cpp:144-169).
+    clonk_fonts: Option<Arc<ClonkFontSet>>,
     scenario_label_text: String,
-    scenario_label: WidgetId,
-    frame_label: WidgetId,
-    status_label: WidgetId,
-    energy_gauge: WidgetId,
-    players_container: WidgetId,
-    player_widgets: Vec<PlayerWidgets>,
+    /// Per-player HUD state fed by [`Self::update_overlay`].
+    hud_players: Vec<PlayerOverlay>,
+    game_time_seconds: u64,
+    message_board_line: Option<String>,
+    /// Debug FRAME/STATUS lines; `None` hides them (default HUD).
+    debug_hud_text: Option<(String, String)>,
     viewport_x: f32,
     viewport_y: f32,
     viewport_zoom: f32,
@@ -477,16 +483,6 @@ impl GraphicsSystem {
         cursor_atlas: Arc<CursorAtlas>,
         hud_graphics: Arc<HudGraphics>,
     ) -> Self {
-        let mut gui = Gui::new(font.clone());
-        let root = gui.root();
-        let scenario_label_widget = gui.add_label(root, scenario_label);
-        let frame_label = gui.add_label(root, "FRAME 000 X 000 Y 000 VX P00 VY P00");
-        let status_label = gui.add_label(root, "READY 00OF00 GROUND 00 BATCH 000");
-        let energy_gauge = gui.add_gauge(root);
-        gui.set_gauge_fraction(energy_gauge, 1.0)
-            .expect("initial gauge");
-        let players_container = gui.add_column(root, true);
-
         let mut surface = Surface::new(
             surface_width,
             surface_height,
@@ -496,15 +492,13 @@ impl GraphicsSystem {
 
         Self {
             surface,
-            gui,
             font,
+            clonk_fonts: None,
             scenario_label_text: scenario_label.to_string(),
-            scenario_label: scenario_label_widget,
-            frame_label,
-            status_label,
-            energy_gauge,
-            players_container,
-            player_widgets: Vec::new(),
+            hud_players: Vec::new(),
+            game_time_seconds: 0,
+            message_board_line: None,
+            debug_hud_text: None,
             viewport_x: 0.0,
             viewport_y: 0.0,
             viewport_zoom: 1.0,
@@ -643,118 +637,22 @@ impl GraphicsSystem {
         })
     }
 
-    pub fn update_overlay(&mut self, overlay: &GraphicsOverlay<'_>) -> GuiResult<()> {
-        self.ensure_player_widgets(&overlay.players)?;
-        self.gui
-            .set_label_text(self.frame_label, overlay.frame_text)?;
-        self.gui
-            .set_label_text(self.status_label, overlay.status_text)?;
-        self.gui
-            .set_gauge_fraction(self.energy_gauge, overlay.energy_fraction.clamp(0.0, 1.0))?;
+    /// Stores the HUD state drawn by [`Self::render_frame`] — the Rust
+    /// counterpart of the per-frame data reads in `C4Viewport::DrawOverlay`
+    /// (src/C4Viewport.cpp:835-882) and `C4UpperBoard::Execute`
+    /// (src/C4UpperBoard.cpp:37-44).
+    pub fn update_overlay(&mut self, overlay: &GraphicsOverlay<'_>) {
+        self.hud_players = overlay.players.clone();
+        self.game_time_seconds = overlay.game_time_seconds;
+        self.message_board_line = overlay.message_board_line.clone();
+        self.debug_hud_text = overlay
+            .debug_hud
+            .then(|| (overlay.frame_text.to_string(), overlay.status_text.to_string()));
+    }
 
-        let header_color = Color::opaque(208, 220, 252);
-        let info_color = Color::opaque(208, 208, 208);
-        let warning_color = Color::opaque(232, 174, 72);
-        let eliminated_color = Color::opaque(224, 92, 92);
-        let focus_color = Color::opaque(252, 242, 160);
-        let crew_color = Color::opaque(212, 212, 212);
-        let portrait_background = Color::opaque(18, 26, 40);
-        let portrait_focus_background = Color::opaque(32, 40, 56);
-        let portrait_frame_neutral = Color::opaque(44, 58, 84);
-        let fallback_portrait = self.hud_graphics.crew.clone();
-        let wealth_icon_image = self.hud_graphics.wealth.clone();
-        let score_icon_image = self.hud_graphics.score.clone();
-
-        for (player_overlay, widgets) in overlay.players.iter().zip(self.player_widgets.iter()) {
-            let header_text = if player_overlay.name.is_empty() {
-                format!("Player {}", player_overlay.owner)
-            } else {
-                player_overlay.name.clone()
-            };
-            self.gui.set_label_text(widgets.header_label, header_text)?;
-            self.gui
-                .set_label_color(widgets.header_label, header_color)?;
-
-            self.gui
-                .set_picture_image(widgets.wealth.icon, wealth_icon_image.clone())?;
-            self.gui
-                .set_picture_image(widgets.score.icon, score_icon_image.clone())?;
-
-            if player_overlay.eliminated {
-                self.gui.set_label_text(widgets.wealth.label, "--")?;
-                self.gui
-                    .set_label_color(widgets.wealth.label, eliminated_color)?;
-                self.gui.set_label_text(widgets.score.label, "--")?;
-                self.gui
-                    .set_label_color(widgets.score.label, eliminated_color)?;
-            } else {
-                let wealth_text = format!("{}", player_overlay.wealth);
-                self.gui.set_label_text(widgets.wealth.label, wealth_text)?;
-                self.gui.set_label_color(widgets.wealth.label, info_color)?;
-
-                let score_text = format!("{}", player_overlay.score);
-                self.gui.set_label_text(widgets.score.label, score_text)?;
-                self.gui.set_label_color(widgets.score.label, info_color)?;
-            }
-
-            if player_overlay.eliminated {
-                self.gui
-                    .set_label_text(widgets.status_label, "Eliminated")?;
-                self.gui
-                    .set_label_color(widgets.status_label, eliminated_color)?;
-            } else if player_overlay.crew.is_empty() {
-                self.gui
-                    .set_label_text(widgets.status_label, "No crew available")?;
-                self.gui
-                    .set_label_color(widgets.status_label, warning_color)?;
-            } else {
-                let crew_count = player_overlay.crew.len();
-                let status_text = if crew_count == 1 {
-                    "Crew member ready".to_string()
-                } else {
-                    format!("Crew {crew_count}")
-                };
-                self.gui.set_label_text(widgets.status_label, status_text)?;
-                self.gui.set_label_color(widgets.status_label, info_color)?;
-            }
-
-            for (crew_overlay, crew_widgets) in player_overlay.crew.iter().zip(widgets.crew.iter())
-            {
-                self.gui
-                    .set_label_text(crew_widgets.label, &crew_overlay.label)?;
-                if crew_overlay.is_focus {
-                    self.gui.set_label_color(crew_widgets.label, focus_color)?;
-                } else {
-                    self.gui.set_label_color(crew_widgets.label, crew_color)?;
-                }
-                let image = crew_overlay
-                    .portrait
-                    .clone()
-                    .or_else(|| fallback_portrait.clone());
-                self.gui.set_picture_image(crew_widgets.portrait, image)?;
-                let frame_color = if crew_overlay.is_focus {
-                    focus_color
-                } else if player_overlay.owner_color.a > 0 {
-                    player_overlay.owner_color.modulate(0.85)
-                } else {
-                    portrait_frame_neutral
-                };
-                self.gui
-                    .set_picture_frame_color(crew_widgets.portrait, frame_color)?;
-                let background_color = if crew_overlay.is_focus {
-                    portrait_focus_background
-                } else {
-                    portrait_background
-                };
-                self.gui
-                    .set_picture_background_color(crew_widgets.portrait, background_color)?;
-                self.gui.set_gauge_fraction(
-                    crew_widgets.gauge,
-                    crew_overlay.energy_fraction.clamp(0.0, 1.0),
-                )?;
-            }
-        }
-        Ok(())
+    /// Installs the CStdFont-faithful HUD fonts (FontRegular et al).
+    pub fn set_clonk_fonts(&mut self, fonts: Option<Arc<ClonkFontSet>>) {
+        self.clonk_fonts = fonts;
     }
 
     pub fn render_frame(
@@ -771,7 +669,7 @@ impl GraphicsSystem {
         let used_keys: HashSet<_> = used_camera_keys.into_iter().collect();
         self.camera_states.retain(|key, _| used_keys.contains(key));
 
-        self.draw_gui_overlay();
+        self.draw_hud();
 
         self.collect_sprite_atlas(snapshot)
     }
@@ -1173,9 +1071,24 @@ impl GraphicsSystem {
             return Vec::new();
         }
 
-        let mut overlay_height =
-            (OVERLAY_HEIGHT.round() as i32).clamp(0, self.surface_height as i32);
-        let mut available_height = (self.surface_height as i32).saturating_sub(overlay_height);
+        // Viewport area between the upper board and the message board
+        // (C4GraphicsSystem::RecalculateViewports,
+        // src/C4GraphicsSystem.cpp:343-348).
+        let chrome = self.hud_chrome_active();
+        let mut overlay_height = if chrome {
+            hud::UPPER_BOARD_HEIGHT.clamp(0, self.surface_height as i32)
+        } else {
+            0
+        };
+        let board_height = if chrome {
+            self.message_board_height()
+                .clamp(0, self.surface_height as i32)
+        } else {
+            0
+        };
+        let mut available_height = (self.surface_height as i32)
+            .saturating_sub(overlay_height)
+            .saturating_sub(board_height);
         if available_height <= 0 {
             // Surface too small to host the overlay and a viewport. Give the
             // entire surface to the viewport and suppress the overlay instead
@@ -2811,113 +2724,150 @@ impl GraphicsSystem {
         draw_image(&mut self.surface, &rect, &image);
     }
 
-    fn draw_gui_overlay(&mut self) {
-        self.gui
-            .layout(GuiSize::new(self.surface_width as f32, OVERLAY_HEIGHT));
-        for command in self.gui.render() {
-            match command {
-                DrawCommand::Quad { rect, color } => fill_rect(&mut self.surface, &rect, color),
-                DrawCommand::Text {
-                    rect,
-                    text,
-                    color,
-                    font_size,
-                    padding,
-                } => draw_text(
+    /// `Game.GraphicsResource.FontRegular` for HUD text.
+    fn hud_font(&self) -> hud::HudFont<'_> {
+        hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref())
+    }
+
+    /// The bottom border the message board strip occupies
+    /// (`MessageBoard.Output.Hgt` = one FontRegular line,
+    /// src/C4MessageBoard.cpp:73-76,228 / C4GraphicsSystem.cpp:346).
+    fn message_board_height(&self) -> i32 {
+        self.hud_font().line_height()
+    }
+
+    /// Whether the fullscreen chrome (upper board + message board) is
+    /// active. C++ only sets the boards up when their Graphics.c4g facets
+    /// loaded (`C4UpperBoard::Init` bails without `fctUpperBoard.Surface`,
+    /// src/C4UpperBoard.cpp:114-118); asset-less test setups render bare
+    /// viewports.
+    fn hud_chrome_active(&self) -> bool {
+        self.hud_graphics.upper_board.is_some()
+    }
+
+    /// The pixels the upper board texture actually covers —
+    /// `Output.Hgt = max(C4UpperBoardHeight, fctUpperBoard.Hgt)`
+    /// (src/C4UpperBoard.cpp:117-120).
+    fn upper_board_pixel_height(&self) -> i32 {
+        self.hud_graphics
+            .upper_board
+            .as_ref()
+            .map(|image| (image.height() as i32).max(hud::UPPER_BOARD_HEIGHT))
+            .unwrap_or(hud::UPPER_BOARD_HEIGHT)
+    }
+
+    /// The fullscreen overlay in the C4GraphicsSystem::Execute order:
+    /// per-viewport player HUD, then message board, then upper board
+    /// (src/C4GraphicsSystem.cpp:352-365).
+    fn draw_hud(&mut self) {
+        // Per-viewport player info (C4Viewport::DrawOverlay,
+        // src/C4Viewport.cpp:835-848).
+        let viewports = self.active_viewports.clone();
+        for viewport in &viewports {
+            let Some(player) = self
+                .hud_players
+                .iter()
+                .find(|player| player.owner == viewport.owner)
+            else {
+                continue;
+            };
+            let player = player.clone();
+            let rect = viewport.rect;
+            let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
+
+            // Cursor info: C++ draws nothing without a cursor crew member
+            // (src/C4Viewport.cpp:891-897) — the faithful "no crew"
+            // presentation is an empty corner.
+            let cursor_crew = player
+                .cursor
+                .and_then(|id| player.crew.iter().find(|crew| crew.object_id == id))
+                .or_else(|| player.crew.iter().find(|crew| crew.is_focus))
+                .or_else(|| player.crew.first());
+            if let Some(crew) = cursor_crew {
+                hud::draw_cursor_info(
                     &mut self.surface,
-                    &rect,
-                    &text,
-                    color,
-                    font_size,
-                    padding,
-                    self.font.as_ref(),
-                ),
-                DrawCommand::Image { rect, image } => draw_image(&mut self.surface, &rect, &image),
+                    &font,
+                    &self.hud_graphics,
+                    rect,
+                    &crew.label,
+                    crew.rank,
+                    crew.portrait.as_ref(),
+                    crew.rank_symbols.as_ref(),
+                );
+                hud::draw_energy_bar(
+                    &mut self.surface,
+                    &self.hud_graphics,
+                    rect,
+                    crew.energy_fraction,
+                );
+            }
+
+            hud::draw_player_fixed_items(
+                &mut self.surface,
+                &font,
+                &self.hud_graphics,
+                rect,
+                player.wealth,
+                player.score,
+                player.select_count,
+                player.crew.len() as i32,
+                player.owner_color,
+            );
+
+            if player.show_startup {
+                hud::draw_player_startup(
+                    &mut self.surface,
+                    &font,
+                    &self.hud_graphics,
+                    rect,
+                    &player.name,
+                    player.owner_color,
+                );
             }
         }
-    }
 
-    fn ensure_player_widgets(&mut self, players: &[PlayerOverlay]) -> GuiResult<()> {
-        let mut structure_changed = players.len() != self.player_widgets.len();
-        if !structure_changed {
-            structure_changed =
-                players
-                    .iter()
-                    .zip(self.player_widgets.iter())
-                    .any(|(overlay, widgets)| {
-                        overlay.owner != widgets.owner || overlay.crew.len() != widgets.crew.len()
-                    });
-        }
-        if structure_changed {
-            self.rebuild_overlay(players)?;
-        }
-        Ok(())
-    }
-
-    fn rebuild_overlay(&mut self, players: &[PlayerOverlay]) -> GuiResult<()> {
-        let mut gui = Gui::new(self.font.clone());
-        let root = gui.root();
-        let scenario_label = gui.add_label(root, self.scenario_label_text.clone());
-        let frame_label = gui.add_label(root, "");
-        let status_label = gui.add_label(root, "");
-        let energy_gauge = gui.add_gauge(root);
-        gui.set_gauge_fraction(energy_gauge, 1.0)?;
-        let players_container = gui.add_column(root, true);
-
-        const CREW_PORTRAIT_SIZE: f32 = 72.0;
-        const CREW_GAUGE_WIDTH: f32 = 72.0;
-        const CREW_GAUGE_HEIGHT: f32 = 12.0;
-        const STAT_ICON_SIZE: f32 = 20.0;
-
-        let mut player_widgets = Vec::with_capacity(players.len());
-        for player in players {
-            let player_column = gui.add_column(players_container, true);
-            let header_label = gui.add_label(player_column, "");
-            let status_label = gui.add_label(player_column, "");
-            let stats_row = gui.add_row(player_column, false);
-            let wealth_icon = gui.add_picture(stats_row, STAT_ICON_SIZE, STAT_ICON_SIZE);
-            let wealth_label = gui.add_label(stats_row, "");
-            let score_icon = gui.add_picture(stats_row, STAT_ICON_SIZE, STAT_ICON_SIZE);
-            let score_label = gui.add_label(stats_row, "");
-            let crew_row = gui.add_row(player_column, false);
-            let mut crew_widgets = Vec::with_capacity(player.crew.len());
-            for _ in &player.crew {
-                let crew_column = gui.add_column(crew_row, false);
-                let portrait = gui.add_picture(crew_column, CREW_PORTRAIT_SIZE, CREW_PORTRAIT_SIZE);
-                let label = gui.add_label(crew_column, "");
-                let gauge = gui.add_gauge(crew_column);
-                gui.set_gauge_fraction(gauge, 1.0)?;
-                gui.set_gauge_size(gauge, CREW_GAUGE_WIDTH, CREW_GAUGE_HEIGHT)?;
-                crew_widgets.push(CrewWidgets {
-                    portrait,
-                    label,
-                    gauge,
-                });
-            }
-            player_widgets.push(PlayerWidgets {
-                owner: player.owner,
-                header_label,
-                status_label,
-                wealth: PlayerStatWidgets {
-                    icon: wealth_icon,
-                    label: wealth_label,
-                },
-                score: PlayerStatWidgets {
-                    icon: score_icon,
-                    label: score_label,
-                },
-                crew: crew_widgets,
-            });
+        let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
+        if self.hud_chrome_active() {
+            hud::draw_message_board(
+                &mut self.surface,
+                &font,
+                &self.hud_graphics,
+                self.message_board_line.as_deref(),
+            );
+            hud::draw_upper_board(
+                &mut self.surface,
+                &font,
+                &self.hud_graphics,
+                &self.scenario_label_text,
+                self.game_time_seconds,
+            );
         }
 
-        self.gui = gui;
-        self.scenario_label = scenario_label;
-        self.frame_label = frame_label;
-        self.status_label = status_label;
-        self.energy_gauge = energy_gauge;
-        self.players_container = players_container;
-        self.player_widgets = player_widgets;
-        Ok(())
+        // Opt-in debug lines (replaces the old debug bar; off by default).
+        if let Some((frame_text, status_text)) = self.debug_hud_text.clone() {
+            let line_height = font.line_height();
+            let base_y = if self.hud_chrome_active() {
+                self.upper_board_pixel_height() + 2
+            } else {
+                2
+            };
+            font.draw(
+                &mut self.surface,
+                hud::SYMBOL_BORDER,
+                base_y,
+                &frame_text,
+                Color::opaque(255, 255, 255),
+                lc_graphics::clonk_font::TextAlign::Left,
+            );
+            font.draw(
+                &mut self.surface,
+                hud::SYMBOL_BORDER,
+                base_y + line_height,
+                &status_text,
+                Color::opaque(255, 255, 255),
+                lc_graphics::clonk_font::TextAlign::Left,
+            );
+        }
     }
 
     #[cfg(test)]
@@ -3026,8 +2976,9 @@ impl GraphicsSystem {
             }
         }
 
-        let overlay_height =
-            (OVERLAY_HEIGHT.round() as i32).clamp(0, self.surface_height as i32) as u32;
+        let overlay_height = self
+            .upper_board_pixel_height()
+            .clamp(0, self.surface_height as i32) as u32;
         if overlay_height > 0 {
             if let Some(snapshot) = self.surface.snapshot_region(SurfaceRect::new(
                 0,
@@ -4322,7 +4273,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_updates_clamp_energy() {
+    fn overlay_state_feeds_the_hud_render() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
         let mut graphics = GraphicsSystem::new(
@@ -4335,17 +4286,52 @@ mod tests {
             empty_cursor_atlas(),
             empty_hud_graphics(),
         );
-        graphics
-            .update_overlay(&GraphicsOverlay {
-                frame_text: "FRAME",
-                status_text: "STATUS",
-                energy_fraction: 2.5,
-                players: Vec::new(),
-            })
-            .expect("overlay updates");
+        graphics.update_overlay(&GraphicsOverlay {
+            frame_text: "FRAME",
+            status_text: "STATUS",
+            debug_hud: false,
+            players: Vec::new(),
+            game_time_seconds: 61,
+            message_board_line: Some("Player join: Test".to_string()),
+        });
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
-        // if gauge update panicked the test would fail; no additional assertion needed here
+        // Rendering with overlay state must not panic; without an
+        // UpperBoard texture the chrome stays off (C4UpperBoard::Init,
+        // src/C4UpperBoard.cpp:114-118) and the viewport spans the surface.
+    }
+
+    #[test]
+    fn chrome_layout_reserves_upper_board_and_message_board_strips() {
+        // C4GraphicsSystem::RecalculateViewports: the viewport area sits
+        // between the 50px upper board and the one-line message board
+        // (src/C4GraphicsSystem.cpp:343-348, src/C4Constants.h:77).
+        let snapshot = make_snapshot();
+        let focus = &snapshot.objects[0];
+        let board = ImageData::new(4, 55, vec![120; 4 * 55 * 4]);
+        let hud_graphics = Arc::new(HudGraphics {
+            upper_board: Some(board),
+            ..HudGraphics::default()
+        });
+        let mut graphics = GraphicsSystem::new(
+            320,
+            240,
+            150,
+            "Chrome",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            hud_graphics,
+        );
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+        let rect = graphics.active_viewports[0].rect;
+        assert_eq!(rect.y, hud::UPPER_BOARD_HEIGHT);
+        let board_height = graphics.message_board_height();
+        assert_eq!(
+            rect.height as i32,
+            240 - hud::UPPER_BOARD_HEIGHT - board_height
+        );
     }
 
     #[test]
