@@ -9743,7 +9743,7 @@ impl Engine {
                 })
                 .map(|object| object.id)
                 .collect();
-            crew.sort_unstable_by_key(|id| id.as_u64());
+            crew.sort_unstable_by_key(|id| std::cmp::Reverse(id.as_u64()));
             let mut hi_rank: Option<(ObjectId, i32)> = None;
             for id in crew {
                 let rank = self.crew_ranks.get(&id.as_u64()).copied().unwrap_or(-1);
@@ -14901,7 +14901,10 @@ impl Engine {
                 .filter(|object| object.state.owner == owner && object.state.crew_member)
                 .map(|object| object.id)
                 .collect();
-            // Newest-first like C4Player::Crew (Add stMain).
+            // The COMPARATOR surface: the bridge std::sort's its HUD crew
+            // ascending before export (RustEngineBridge.cpp:1381), so the
+            // rust snapshot mirrors that normalization. Engine-internal
+            // crew order stays newest-first.
             crew.sort_unstable_by_key(|id| id.as_u64());
             let focus = self
                 .crew_selection
@@ -14940,7 +14943,7 @@ impl Engine {
                     .collect();
                 // Newest-first like C4Player::Crew (Add stMain inserts new
                 // crew before older ones; GetCrew/GetHiRank follow it).
-                crew.sort_unstable_by_key(|id| id.as_u64());
+                crew.sort_unstable_by_key(|id| std::cmp::Reverse(id.as_u64()));
                 state.crew = crew;
                 state.cursor = self
                     .crew_selection
@@ -16082,12 +16085,11 @@ impl Engine {
         }
 
         for crew in crew_map.values_mut() {
-            // Live-bridge-verified: C4Player::Crew front-to-back reads
-            // ascending creation order for the GoldRush join (the bridge
-            // walks Crew.First->Next and exports [1421,1424,1425]).
-            // GetCrew's index order and GetHiRank's first-of-equal-ranks
-            // tie-break follow it (C4Player.cpp:1003-1020).
-            crew.sort_unstable_by_key(|id| id.as_u64());
+            // C4Player::Crew is newest-first (Add stMain inserts before
+            // older same-category crew); GetCrew's index order and
+            // GetHiRank's first-of-equal-ranks tie-break follow it
+            // (C4Player.cpp:1003-1020).
+            crew.sort_unstable_by_key(|id| std::cmp::Reverse(id.as_u64()));
         }
 
         if !self.players.is_empty() {
