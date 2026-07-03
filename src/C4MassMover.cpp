@@ -72,6 +72,11 @@ bool C4MassMoverSet::Create(int32_t x, int32_t y, bool fExecute)
 	rc.x = x; rc.y = y;
 	AddDbgRec(RCT_MMC, &rc, sizeof(rc));
 #endif
+	if (getenv("LC_RNG_TRACE") && Game.FrameCounter >= 1 && Game.FrameCounter <= 20)
+	{
+		if (FILE *f = LcRngTraceFile())
+			fprintf(f, "MOVER %d %d %d\n", x, y, Game.FrameCounter);
+	}
 	int32_t cptr = CreatePtr;
 	do
 	{

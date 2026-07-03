@@ -22338,12 +22338,24 @@ impl Engine {
                 LandscapeOperation::ShakeCircle { center, radius } => {
                     self.execute_shake_circle_operation(center, radius)
                 }
-                LandscapeOperation::InsertMaterial { material, position } => {
-                    if let (Some(landscape), Some(material_id)) = (
-                        self.landscape.as_mut(),
-                        usize::try_from(material).ok().and_then(MaterialId::new),
-                    ) {
-                        landscape.insert_material_at(position.x, position.y, material_id);
+                LandscapeOperation::InsertMaterial {
+                    material,
+                    position,
+                    velocity,
+                } => {
+                    // FnInsertMaterial → C4Landscape::InsertMaterial
+                    // (C4Script.cpp:2207-2211) — the full port (slide
+                    // re-creation as PXS, reactions, thrust).
+                    if let Some(material_id) =
+                        usize::try_from(material).ok().and_then(MaterialId::new)
+                    {
+                        self.insert_material(
+                            material_id,
+                            position.x,
+                            position.y,
+                            velocity.x,
+                            velocity.y,
+                        );
                     }
                 }
             }
@@ -23539,6 +23551,13 @@ impl Engine {
     /// the reaction with the material below (meePXSPos), then the dead-
     /// material write with the insert-thrust recursion.
     fn insert_material(&mut self, mat: MaterialId, tx: i32, ty: i32, vx: i32, vy: i32) -> bool {
+        if std::env::var("LC_RUST_RNG_TRACE").is_ok() && (15..=19).contains(&self.frame) {
+            crate::rng::rng_trace_line(&format!(
+                "INSMAT {} {tx} {ty} {vx} {vy} {}",
+                mat.index(),
+                self.frame
+            ));
+        }
         let Some(material) = self.materials.get_by_id(mat) else {
             return false;
         };

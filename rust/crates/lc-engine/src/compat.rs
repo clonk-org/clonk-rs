@@ -6115,6 +6115,7 @@ pub(crate) enum LandscapeOperation {
     InsertMaterial {
         material: i32,
         position: Vector2,
+        velocity: Vector2,
     },
 }
 
@@ -14962,6 +14963,10 @@ fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
     let material = value_to_i32(args.first().unwrap_or(&Value::Nil), "InsertMaterial", "mat")?;
     let x = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "InsertMaterial", "x")?;
     let y = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "InsertMaterial", "y")?;
+    // FnInsertMaterial (C4Script.cpp:2207-2211): vx/vy ride into
+    // C4Landscape::InsertMaterial (FIXED10 there).
+    let vx = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "InsertMaterial", "vx")?;
+    let vy = value_to_i32(args.get(4).unwrap_or(&Value::Nil), "InsertMaterial", "vy")?;
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = match borrow.as_mut() {
@@ -14976,6 +14981,7 @@ fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
         context.register_landscape_operation(LandscapeOperation::InsertMaterial {
             material,
             position,
+            velocity: Vector2::new(vx, vy),
         });
         Ok(Value::Bool(true))
     })
