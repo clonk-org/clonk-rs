@@ -13483,13 +13483,7 @@ impl Engine {
             // An early `return` inside ExecAction (the free-fall swim
             // exit) skips it entirely; movement below still runs.
             if !exec_action_returned_early {
-                let mut pre_phase_state = None;
-                if action_library
-                    .phase_call_for_action(&self.objects[idx].state.action.name)
-                    .is_some()
-                {
-                    pre_phase_state = Some(self.objects[idx].state.clone());
-                }
+
 
                 let physical_for_advance = self.object_physical(idx);
                 let advance_outcome = {
@@ -13541,9 +13535,15 @@ impl Engine {
                 if let Some(event) = advance_outcome.phase_event {
                     if let Some(function_name) = action_library.phase_call_for_action(&event.action)
                     {
-                        let state_snapshot = pre_phase_state
-                            .take()
-                            .unwrap_or_else(|| self.objects[idx].state.clone());
+                        // C++ runs the PhaseCall AFTER `Phase += Step` but
+                        // BEFORE the length-wrap SetAction
+                        // (C4Object.cpp:5448-5462): the callback sees the
+                        // POST-advance phase under the OLD action. The
+                        // event snapshot carries exactly that pair; the
+                        // rest of the state is live.
+                        let mut state_snapshot = self.objects[idx].state.clone();
+                        state_snapshot.action.name = event.action.clone();
+                        state_snapshot.action.phase = event.phase;
                         self.invoke_action_callback(
                             idx,
                             ActionCallbackKind::Phase,
