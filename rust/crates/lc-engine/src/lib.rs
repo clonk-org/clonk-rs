@@ -2032,6 +2032,7 @@ pub(crate) fn preview_spawn_state(
     owner: i32,
     category: i32,
     construction: i32,
+    vertices: Vec<ObjectVertex>,
 ) -> ObjectState {
     ObjectState {
         position,
@@ -2046,7 +2047,7 @@ pub(crate) fn preview_spawn_state(
         direction: Direction::default(),
         command_direction: CommandDirection::default(),
         effects: Vec::new(),
-        vertices: Vec::new(),
+        vertices,
         container: None,
         layer: None,
         contents: Vec::new(),
@@ -10957,6 +10958,7 @@ impl Engine {
                             line_connect: definition.line_connect(),
                             stretch_growth: definition.stretch_growth(),
                             line: definition.line(),
+                            vertices: definition.shape_vertices().to_vec(),
                             clonk_name_newlines: definition
                                 .clonk_names()
                                 .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32),
@@ -22654,6 +22656,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     clonk_name_newlines: None,
                     stretch_growth: false,
                     line: 0,
+                    vertices: Vec::new(),
                 },
             )
         })

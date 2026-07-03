@@ -139,6 +139,10 @@ pub(crate) struct DefinitionMetadata {
     /// DefCore Line type (C4D_Line*; nonzero skips con-scaling and the
     /// DoCon bottom adjust — C4Object::UpdateShape's early return).
     pub line: i32,
+    /// The definition's shape vertices (full-Con). Pending-spawn preview
+    /// scopes seed from these so creation callbacks (AdjustSeatVertex,
+    /// CHBM Connect) mutate the REAL vertex list, not an empty one.
+    pub vertices: Vec<ObjectVertex>,
 }
 
 /// `SetPhysical`/`GetPhysical` modes (C4Script.cpp:552-555).
@@ -11832,6 +11836,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                vertices: Vec::new(),
             });
         let definition_category = metadata.category;
 
@@ -11927,6 +11932,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             owner,
             definition_category,
             FULL_CON,
+            metadata.vertices.clone(),
         )));
 
         context.register_spawn(spawn, preview);
@@ -12072,6 +12078,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                vertices: Vec::new(),
             });
         let definition_category = metadata.category;
 
@@ -12144,6 +12151,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             owner,
             definition_category,
             construction_value,
+            metadata.vertices.clone(),
         )));
 
         context.register_spawn(spawn, preview);
@@ -13455,6 +13463,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                vertices: Vec::new(),
             });
 
         let mut last = Value::Nil;
@@ -13500,7 +13509,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_ocf(preview_ocf)
             .with_full_state(Rc::new({
                 let mut state =
-                    crate::preview_spawn_state(position, owner, metadata.category, FULL_CON);
+                    crate::preview_spawn_state(position, owner, metadata.category, FULL_CON, metadata.vertices.clone());
                 state.container = Some(container);
                 state
             }));
@@ -17889,6 +17898,7 @@ mod tests {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                vertices: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -17932,6 +17942,7 @@ mod tests {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                    vertices: Vec::new(),
                 },
             ),
             (
@@ -17953,6 +17964,7 @@ mod tests {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                    vertices: Vec::new(),
                 },
             ),
         ]);
@@ -17998,6 +18010,7 @@ mod tests {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                vertices: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -18056,6 +18069,7 @@ mod tests {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                vertices: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -18123,6 +18137,7 @@ mod tests {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+            vertices: Vec::new(),
         };
         metadata.components = vec![("WOOD".to_string(), 3), ("METL".to_string(), 1)];
         let world = HostWorldContext::with_landscape(
@@ -18543,6 +18558,7 @@ mod tests {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                vertices: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -18585,6 +18601,7 @@ mod tests {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                vertices: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -18643,6 +18660,7 @@ mod tests {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                vertices: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21853,6 +21871,7 @@ mod tests {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+                vertices: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21908,6 +21927,7 @@ mod tests {
                 clonk_name_newlines: None,
                 stretch_growth: false,
                 line: 0,
+            vertices: Vec::new(),
         };
         let definitions = HashMap::from([
             ("Workshop".to_string(), workshop_metadata.clone()),
