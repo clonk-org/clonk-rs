@@ -17611,6 +17611,10 @@ impl Engine {
                 ))?;
             }
             if idx < self.objects.len() && !self.objects[idx].destroyed {
+                tracing::warn!(
+                    object = self.objects[idx].id.as_u64(),
+                    "CONNECTBREAK exec_connect_line removes the line"
+                );
                 // Connect beams carry no effects in content; drop the
                 // stop events like the simple destroy paths.
                 let _ = self.objects[idx].mark_destroyed();
@@ -18190,8 +18194,11 @@ impl Engine {
             ticks: Some(0),
             force: true,
             data: None,
-            target: Some(None),
-            target2: Some(None),
+            // SetAction assigns targets only when given (C4Object.cpp:
+            // 4122-4123) — ObjectActionJump keeps the old ones (the
+            // falling HORS keeps its ConnectWagon target).
+            target: None,
+            target2: None,
             callbacks_dispatched: false,
         };
 
@@ -18206,8 +18213,6 @@ impl Engine {
             object.fixed_position =
                 FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
-        object.state.action.target = None;
-        object.state.action.target2 = None;
         // ObjectActionJump never touches ComDir (C4ObjectCom.cpp:49-62):
         // the walker keeps steering mid-flight and resumes on landing.
         if matches!(result, ActionUpdateResult::Applied) {
@@ -20176,8 +20181,10 @@ impl Engine {
             ticks: Some(0),
             force: true,
             data: None,
-            target: Some(None),
-            target2: Some(None),
+            // SetAction assigns targets only when given
+            // (C4Object.cpp:4122-4123).
+            target: None,
+            target2: None,
             callbacks_dispatched: false,
         };
         let object = &mut self.objects[idx];
@@ -20219,8 +20226,10 @@ impl Engine {
                     ticks: Some(0),
                     force: true,
                     data: None,
-                    target: Some(None),
-                    target2: Some(None),
+                    // SetAction assigns targets only when given
+                    // (C4Object.cpp:4122-4123).
+                    target: None,
+                    target2: None,
                     callbacks_dispatched: false,
                 };
                 let object = &mut self.objects[idx];
