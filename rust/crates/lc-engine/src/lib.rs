@@ -2870,6 +2870,10 @@ struct Object {
     /// and later creations exec after them (Add inserts at the block
     /// head; ExecObjects iterates BeginLast, C4Game.cpp:1572).
     exec_seq: u64,
+    /// The DFA_SWIM free-fall exit `return`ed out of ExecAction this
+    /// frame BEFORE any t_attach assignment — the frame's movement runs
+    /// unattached (C4Object.cpp:4692,4956).
+    swim_exit_this_frame: bool,
     material_contents: Vec<i32>,
     shape_template: ObjectShapeTemplate,
     own_shape_vertices: Option<Vec<ObjectVertex>>,
@@ -2976,6 +2980,7 @@ impl Object {
             commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
             exec_seq: 0,
+            swim_exit_this_frame: false,
             material_contents: Vec::new(),
             shape_template,
             own_shape_vertices,
@@ -16259,13 +16264,20 @@ impl Engine {
             shape_rect,
             // Action.t_attach per the ExecAction procedure map
             // (C4Object.cpp:4690-5437; upright-attach OR :4703).
-            attach: procedure_t_attach(
-                action_procedure,
-                action_library.is_idle_action(&action_name),
-                self.objects[idx].state.direction,
-                attach,
-                self.objects[idx].upright_t_attach,
-            ),
+            attach: if self.objects[idx].swim_exit_this_frame {
+                // The free-fall swim exit returned before ExecAction's
+                // t_attach assignments (C4Object.cpp:4692,4956) — this
+                // frame's movement is unattached.
+                CNAT_NONE
+            } else {
+                procedure_t_attach(
+                    action_procedure,
+                    action_library.is_idle_action(&action_name),
+                    self.objects[idx].state.direction,
+                    attach,
+                    self.objects[idx].upright_t_attach,
+                )
+            },
             rotateable,
             action_procedure,
             layer_bounds,
@@ -16531,6 +16543,7 @@ impl Engine {
                 .unwrap_or(0);
             let object = &mut self.objects[idx];
             object.upright_t_attach = 0;
+            object.swim_exit_this_frame = false;
             if !object.state.mobile && upright_attach != 0 {
                 let rotation = object.state.rotation;
                 let signed = if rotation > 180 {
@@ -16958,6 +16971,7 @@ impl Engine {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
+            object.swim_exit_this_frame = true;
             return true;
         }
         false
