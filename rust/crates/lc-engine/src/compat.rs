@@ -8933,14 +8933,16 @@ fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
 /// C4Object.cpp:5728-5752) or bring the first idTarget content to the
 /// front (DirectComContents, :5754-5775). The rotation itself is the C++
 /// cyclic relink (C4ObjectList.cpp:815-833), applied via
-/// ObjectUpdate.contents_front. Documented gaps: CanConcatPictureWith
+/// ObjectUpdate.contents_front; with fDoCalls the container's
+/// ~ControlContents(id) may veto and the new front gets
+/// ~Selection(container) with the Grab sound on a falsy return
+/// (C4Object.cpp:5760-5767); the menu Refill (:5769-5772) is
+/// presentation-only and unmodeled. Documented gaps: CanConcatPictureWith
 /// (id/color/graphics/name/overlay stack check, C4Object.cpp) is
-/// approximated by DEFINITION ID equality; the fDoCalls path
-/// (~ControlContents veto, ~Selection, the Grab sound) is not dispatched;
-/// foreign pObj targets are not dispatchable through the scope seam and
-/// report false; contents read the frame-start world view (mid-call
-/// CreateContents spawns are not visible — the FindContents staleness
-/// seam).
+/// approximated by DEFINITION ID equality; contents read the frame-start
+/// world view (mid-call CreateContents spawns are not visible — the
+/// FindContents staleness seam), so ~Selection also fires against the
+/// pre-relink view.
 fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_object = match args.first() {
         None | Some(Value::Nil | Value::Int(0)) => None,
@@ -8962,23 +8964,42 @@ fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .unwrap_or(false);
 
-    HOST_CONTEXT.with(|cell| {
+    // FnShiftContents' pObj may name ANOTHER container (C4Script.cpp:1786
+    // only defaults nil to cthr->Obj) — re-enter through the nested seam so
+    // the target's own scope runs the shift (the ObjectSetAction pattern).
+    let active = active_object_id();
+    if let Some(target) = target_object {
+        if Some(target) != active {
+            let forwarded = vec![
+                Value::Nil,
+                Value::Bool(shift_back),
+                id_target.map(Value::C4Id).unwrap_or(Value::Nil),
+                Value::Bool(do_calls),
+            ];
+            return match call_world_object_function(target, "ShiftContents", &forwarded) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    // Phase 1 (borrowed): resolve the frame-start contents view and pick
+    // the new front — released before the DirectComContents calls re-enter.
+    enum Picked {
+        Done(Value),
+        Shift {
+            container: ObjectId,
+            new_front: ObjectId,
+            new_front_id: String,
+        },
+    }
+    let picked = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
+            return Picked::Done(Value::Bool(false));
         };
         let Some(self_id) = context.object_context().map(|object| object.id()) else {
-            return Ok(Value::Bool(false));
+            return Picked::Done(Value::Bool(false));
         };
-        if let Some(target) = target_object {
-            if target != self_id {
-                tracing::warn!(
-                    ?target,
-                    "ShiftContents on a FOREIGN object is not dispatchable yet; ignoring"
-                );
-                return Ok(Value::Bool(false));
-            }
-        }
         let contents: Vec<(ObjectId, String)> = match context.get_world_object(self_id) {
             Some(container) => container
                 .contents()
@@ -8990,10 +9011,10 @@ fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                         .map(|child| (*child_id, child.definition_id().to_string()))
                 })
                 .collect(),
-            None => return Ok(Value::Bool(false)),
+            None => return Picked::Done(Value::Bool(false)),
         };
         let Some((front_id, front_definition)) = contents.first().cloned() else {
-            return Ok(Value::Bool(false));
+            return Picked::Done(Value::Bool(false));
         };
         let new_front = if let Some(id_target) = id_target {
             // Check if the ID is present within the container
@@ -9002,11 +9023,11 @@ fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 .iter()
                 .find(|(_, definition)| *definition == id_target)
             else {
-                return Ok(Value::Bool(false));
+                return Picked::Done(Value::Bool(false));
             };
             // Desired object already at front? (DirectComContents :5759.)
             if *found == front_id {
-                return Ok(Value::Bool(true));
+                return Picked::Done(Value::Bool(true));
             }
             *found
         } else {
@@ -9026,20 +9047,92 @@ fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             };
             match candidate {
                 Some((id, _)) => *id,
-                None => return Ok(Value::Bool(false)),
+                None => return Picked::Done(Value::Bool(false)),
             }
         };
-        if do_calls {
-            tracing::warn!(
-                "ShiftContents: ~ControlContents/~Selection dispatch is not modeled yet"
-            );
+        let new_front_id = contents
+            .iter()
+            .find(|(id, _)| *id == new_front)
+            .map(|(_, definition)| definition.clone())
+            .unwrap_or_default();
+        Picked::Shift {
+            container: self_id,
+            new_front,
+            new_front_id,
         }
-        let Some(object) = context.object_context_mut() else {
-            return Ok(Value::Bool(false));
+    });
+    let (container, new_front, new_front_id) = match picked {
+        Picked::Done(value) => return Ok(value),
+        Picked::Shift {
+            container,
+            new_front,
+            new_front_id,
+        } => (container, new_front, new_front_id),
+    };
+    // DirectComContents (C4Object.cpp:5760-5763): with fDoCalls the
+    // container's ~ControlContents(idNewFront) runs first — a truthy
+    // return takes over the selection (fail-safe exec, errors read false).
+    if do_calls {
+        let veto = match call_world_object_own_function(
+            container,
+            "ControlContents",
+            &[Value::C4Id(new_front_id)],
+        ) {
+            Some(Ok(value)) => value.as_bool(),
+            Some(Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    "script error in ControlContents; continuing like the C++ fail-safe exec"
+                );
+                false
+            }
+            None => false,
         };
-        object.shift_contents_front(new_front);
-        Ok(Value::Bool(true))
-    })
+        if veto {
+            return Ok(Value::Bool(true));
+        }
+    }
+    // The cyclic relink (C4ObjectList::ShiftContents, C4ObjectList.cpp:
+    // 815-833) via ObjectUpdate.contents_front.
+    let shifted = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|context| context.object_context_mut())
+            .map(|object| object.shift_contents_front(new_front))
+            .is_some()
+    });
+    if !shifted {
+        return Ok(Value::Bool(false));
+    }
+    // ~Selection(container) on the new front; a falsy return plays the
+    // Grab sound at the container (C4Object.cpp:5767).
+    if do_calls {
+        let selected = match call_world_object_own_function(
+            new_front,
+            "Selection",
+            &[object_reference_value(container)],
+        ) {
+            Some(Ok(value)) => value.as_bool(),
+            Some(Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    "script error in Selection; continuing like the C++ fail-safe exec"
+                );
+                false
+            }
+            None => false,
+        };
+        if !selected {
+            HOST_CONTEXT.with(|cell| {
+                if let Some(context) = cell.borrow_mut().as_mut() {
+                    context
+                        .audio_mut()
+                        .play_sound("Grab", Some(container), 100, false, false, None);
+                }
+            });
+        }
+    }
+    Ok(Value::Bool(true))
 }
 
 /// FnGetCommand (C4Script.cpp:918-945): walk the command stack to entry

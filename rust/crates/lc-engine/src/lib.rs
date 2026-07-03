@@ -37607,6 +37607,219 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         );
     }
 
+    // FnShiftContents' pObj parameter (C4Script.cpp:1786) targets ANOTHER
+    // object: `if (!pObj) pObj = cthr->Obj` is only the local-call default
+    // — a foreign container's contents rotate just the same.
+    #[test]
+    fn shift_contents_operates_on_a_foreign_container_like_cpp() {
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func Poke() { return ShiftContents(FindObject(CHES)); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("CHES"))
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("SWRD"))
+            .expect("sword registers");
+        engine
+            .register_definition(simple_definition("REVR"))
+            .expect("revolver registers");
+
+        let actor = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let sword = engine
+            .spawn_object(
+                SpawnConfig::new("SWRD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("sword spawns");
+        let revolver = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver spawns");
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        let result = engine
+            .call_object_function(actor_idx, "Poke", Vec::new())
+            .expect("poke runs");
+        assert_eq!(result, Value::Bool(true));
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![revolver, sword],
+            "the foreign chest rotated (C4Object.cpp:5730-5752)"
+        );
+    }
+
+    // DirectComContents with fDoCalls (C4Object.cpp:5760-5763): the
+    // container's ~ControlContents(idNewFront) runs FIRST and a truthy
+    // return takes over — the default rotation is skipped, yet
+    // C4Object::ShiftContents still reports true.
+    #[test]
+    fn shift_contents_do_calls_control_contents_veto_like_cpp() {
+        let script = r#"#strict
+local iSeen;
+func Cycle() { return ShiftContents(0, 0, 0, 1); }
+func ControlContents(id) { iSeen = id; return 1; }
+"#;
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(
+                Definition::from_script("CHES", "Chest", script).expect("script compiles"),
+            )
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("SWRD"))
+            .expect("sword registers");
+        engine
+            .register_definition(simple_definition("REVR"))
+            .expect("revolver registers");
+
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let sword = engine
+            .spawn_object(
+                SpawnConfig::new("SWRD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("sword spawns");
+        let revolver = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver spawns");
+
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        let result = engine
+            .call_object_function(chest_idx, "Cycle", Vec::new())
+            .expect("cycle runs");
+        assert_eq!(
+            result,
+            Value::Bool(true),
+            "the veto path still reports true (C4Object.cpp:5745-5746)"
+        );
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![sword, revolver],
+            "a truthy ~ControlContents vetoes the rotation (C4Object.cpp:5762)"
+        );
+        assert_eq!(
+            engine.objects[chest_idx].state.local_vars.get("iSeen"),
+            Some(&Value::C4Id("REVR".into())),
+            "~ControlContents receives the new front's id (C4VID(pTarget->id))"
+        );
+    }
+
+    // DirectComContents' selection tail (C4Object.cpp:5765-5767): after the
+    // relink the NEW front gets ~Selection(container); only a falsy return
+    // plays the Grab sound on the container.
+    #[test]
+    fn shift_contents_do_calls_selection_and_grab_sound_like_cpp() {
+        let chest_script = r#"#strict
+func Cycle() { return ShiftContents(0, 0, 0, 1); }
+"#;
+        let sword_script = r#"#strict
+local iSel;
+func Selection(pFrom) { iSel = 1; return 1; }
+"#;
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(
+                Definition::from_script("CHES", "Chest", chest_script).expect("script compiles"),
+            )
+            .expect("chest registers");
+        engine
+            .register_definition(
+                Definition::from_script("SWRD", "Sword", sword_script).expect("script compiles"),
+            )
+            .expect("sword registers");
+        engine
+            .register_definition(simple_definition("REVR"))
+            .expect("revolver registers");
+
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let revolver = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver spawns");
+        let sword = engine
+            .spawn_object(
+                SpawnConfig::new("SWRD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("sword spawns");
+
+        // First shift: SWRD comes to the front, its Selection returns 1 —
+        // no Grab sound (C4Object.cpp:5767).
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        let result = engine
+            .call_object_function(chest_idx, "Cycle", Vec::new())
+            .expect("cycle runs");
+        assert_eq!(result, Value::Bool(true));
+        let sword_idx = engine.find_object_index(sword).expect("sword exists");
+        assert_eq!(
+            engine.objects[sword_idx].state.local_vars.get("iSel"),
+            Some(&Value::Int(1)),
+            "the new front got ~Selection (C4Object.cpp:5767)"
+        );
+        assert!(
+            !engine
+                .pending_audio
+                .iter()
+                .any(|command| matches!(command, AudioCommand::PlaySound { name, .. } if name == "Grab")),
+            "a truthy Selection suppresses the Grab sound"
+        );
+
+        // Second shift: REVR (no Selection handler -> falsy) comes to the
+        // front — the Grab sound plays on the container.
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        let result = engine
+            .call_object_function(chest_idx, "Cycle", Vec::new())
+            .expect("cycle runs");
+        assert_eq!(result, Value::Bool(true));
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![revolver, sword],
+            "the second shift rotated back to the revolver"
+        );
+        assert!(
+            engine.pending_audio.iter().any(|command| matches!(
+                command,
+                AudioCommand::PlaySound { name, target, looped: false, .. }
+                    if name == "Grab" && *target == Some(chest)
+            )),
+            "a falsy Selection plays Grab on the container (StartSoundEffect, C4Object.cpp:5767)"
+        );
+    }
+
     // FnGetCommand (C4Script.cpp:918-945): element 0 returns the C++
     // CommandName string of the requested stack entry; without commands
     // the call yields nil (never an error).
