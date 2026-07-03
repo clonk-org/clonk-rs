@@ -12887,6 +12887,15 @@ impl Engine {
             .and_then(|definition| definition.shape_rect())
     }
 
+    /// DefCore `StretchGrowth` → C4Def::GrowthType (src/C4Def.cpp:387):
+    /// selects the DrawFace/UpdateShape con-scaling mode (C4Shape::Stretch
+    /// vs ::Jolt, src/C4Object.cpp:329-333).
+    pub fn definition_stretch_growth(&self, definition_id: &str) -> bool {
+        self.definitions
+            .get(definition_id)
+            .is_some_and(|definition| definition.stretch_growth())
+    }
+
     pub fn definition_action_graphics(
         &self,
         definition_id: &str,
@@ -37909,6 +37918,23 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         assert_eq!(object.vertices[0].x, 4);
         assert_eq!(object.vertices[0].y, 2);
         assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
+        Ok(())
+    }
+
+    #[test]
+    fn definition_stretch_growth_exposes_growth_type() -> Result<(), EngineError> {
+        // DefCore `StretchGrowth` compiles into C4Def::GrowthType
+        // (src/C4Def.cpp:387); the frontend needs it to pick the DrawFace
+        // con-scaling mode (Stretch vs Jolt, src/C4Object.cpp:329-333 and
+        // the growth-type target stretch at src/C4Object.cpp:442-460).
+        let mut stretch = simple_definition("STRG");
+        stretch.set_stretch_growth(true);
+        let mut engine = Engine::with_seed(1);
+        engine.register_definition(stretch)?;
+        engine.register_definition(simple_definition("JOLT"))?;
+        assert!(engine.definition_stretch_growth("STRG"));
+        assert!(!engine.definition_stretch_growth("JOLT"));
+        assert!(!engine.definition_stretch_growth("NONE"));
         Ok(())
     }
 
