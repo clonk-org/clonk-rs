@@ -15301,12 +15301,14 @@ impl Engine {
                 (object.state.owner, object.state.crew_member)
             };
             let mut nested_change_def = None;
+            let mut energy_died = false;
             {
                 let object = &mut self.objects[index];
                 if let Some(update) = outcome.update {
                     nested_change_def = update.change_def.clone();
                     let delta: ObjectDelta = update.into();
                     let apply_outcome = object.apply_delta(&delta, &action_library);
+                    energy_died = apply_outcome.energy_died;
                     if let Some(change) = apply_outcome.action_change {
                         object.record_action_event(change.previous, ActionTransitionKind::Forced);
                     }
@@ -15333,6 +15335,12 @@ impl Engine {
                 self.change_object_def(index, &new_def);
             }
             self.update_sector_for_index(index);
+            if energy_died {
+                // C4Object::DoEnergy kills synchronously when a nonzero
+                // energy reaches 0 (C4Object.cpp:1363) — foreign writes
+                // (Punch, DoEnergy on a named target) included.
+                self.assign_death(index, false)?;
+            }
 
             let (new_owner, new_crew_member) = {
                 let object = &self.objects[index];
@@ -37946,6 +37954,48 @@ func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
             engine.objects[victim_idx].state.energy,
             40_000,
             "-10% of C4MaxPhysical lands on the foreign target (C4Object.cpp:1347,1361)"
+        );
+    }
+
+    // C4Object::DoEnergy kills when a nonzero energy reaches zero
+    // (C4Object.cpp:1363) — on FOREIGN targets too: the nested-outcome
+    // fold must fire AssignDeath like the local fold does.
+    #[test]
+    fn do_energy_kills_a_foreign_target_at_zero_like_cpp() {
+        let script = r#"#strict
+func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
+"#;
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("victim spawns");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 10_000;
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(engine.objects[victim_idx].state.energy, 0);
+        assert!(
+            !engine.objects[victim_idx].state.alive,
+            "a nonzero energy reaching 0 assigns death (C4Object.cpp:1363)"
         );
     }
 
