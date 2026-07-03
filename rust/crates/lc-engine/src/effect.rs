@@ -125,6 +125,11 @@ impl Default for EffectState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectCommand {
     Add(EffectState),
+    /// Number-keyed in-place update (EffectVar writes). Folding an
+    /// Update whose number no longer exists is a NO-OP — a var write
+    /// must never resurrect an effect the timer killed in the same
+    /// frame (C4Effect vars live inside the effect; death is final).
+    Update(EffectState),
     Remove { name: String, no_callbacks: bool },
     Clear,
 }
@@ -132,6 +137,10 @@ pub enum EffectCommand {
 impl EffectCommand {
     pub fn add(effect: EffectState) -> Self {
         Self::Add(effect)
+    }
+
+    pub fn update(effect: EffectState) -> Self {
+        Self::Update(effect)
     }
 
     pub fn remove(name: impl Into<String>) -> Self {

@@ -1542,6 +1542,7 @@ fn runtime_snapshot_mismatch(
                         .iter()
                         .cloned()
                         .map(|mut effect| {
+                            effect.number = 0;
                             effect.start_dispatched = false;
                             effect.vars.clear();
                             effect.command_target = None;

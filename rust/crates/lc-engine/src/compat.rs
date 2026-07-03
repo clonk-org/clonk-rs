@@ -108,6 +108,8 @@ pub(crate) struct HostWorldObject {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DefinitionMetadata {
+    /// DefCore `Name` (FnGetName's def form, C4Script.cpp:992-1005).
+    pub name: String,
     pub category: i32,
     pub ocf_base: u32,
     pub crew_member: bool,
@@ -3824,6 +3826,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("TrainPhysical", train_physical);
     script.register_host_function("ResetPhysical", reset_physical);
     script.register_host_function("GetBreath", get_breath);
+    script.register_host_function("GetName", get_name);
     script.register_host_function("GetCon", get_con);
     script.register_host_function("DoCon", do_con);
     script.register_host_function("DoDamage", do_damage);
@@ -7361,6 +7364,40 @@ fn get_breath(args: &[Value]) -> Result<Value, RuntimeError> {
             )),
             None => Ok(Value::Nil),
         }
+    })
+}
+
+/// FnGetName (C4Script.cpp:992-1005): the definition Name for an id
+/// argument; the object's name otherwise (custom object names are
+/// unmodeled — the definition name stands in, matching fresh objects).
+fn get_name(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "GetName", "target")?;
+    let def_id = match args.get(index) {
+        Some(Value::C4Id(id)) => Some(id.clone()),
+        Some(Value::String(id)) if !id.is_empty() => Some(id.clone()),
+        _ => None,
+    };
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let definition = if let Some(def_id) = def_id {
+            Some(def_id)
+        } else {
+            let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
+            target.and_then(|target| {
+                context
+                    .get_world_object(target)
+                    .map(|object| object.definition_id().to_string())
+            })
+        };
+        Ok(definition
+            .and_then(|id| context.definition_metadata(&id))
+            .map(|metadata| Value::String(metadata.name.clone()))
+            .unwrap_or(Value::Nil))
     })
 }
 
@@ -11867,6 +11904,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .definition_metadata(&definition)
             .cloned()
             .unwrap_or_else(|| DefinitionMetadata {
+                name: String::new(),
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
@@ -12105,6 +12143,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             .definition_metadata(&definition)
             .cloned()
             .unwrap_or_else(|| DefinitionMetadata {
+                name: String::new(),
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
@@ -13490,6 +13529,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             .definition_metadata(&definition)
             .cloned()
             .unwrap_or_else(|| DefinitionMetadata {
+                name: String::new(),
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
@@ -15701,7 +15741,7 @@ impl EffectScopeContext {
         if let Some(value) = new_value {
             effect.set_var(var_index, value);
             let updated = effect.clone();
-            self.commands.push(EffectCommand::add(updated));
+            self.commands.push(EffectCommand::update(updated));
         }
         Some(effect.var(var_index))
     }
@@ -16757,6 +16797,7 @@ mod tests {
         "GetMass",
         "GetMaterial",
         "GetMaterialVal",
+        "GetName",
         "GetOCF",
         "GetObjectStatus",
         "GetObjectVal",
@@ -18038,6 +18079,7 @@ mod tests {
         let definitions = HashMap::from([(
             "BRIK".to_string(),
             DefinitionMetadata {
+                name: String::new(),
                 category: 0x1,
                 ocf_base: 0,
                 crew_member: false,
@@ -18082,6 +18124,7 @@ mod tests {
             (
                 "BRIK".to_string(),
                 DefinitionMetadata {
+                    name: String::new(),
                     category: 0x1,
                     ocf_base: 0,
                     crew_member: false,
@@ -18104,6 +18147,7 @@ mod tests {
             (
                 "STON".to_string(),
                 DefinitionMetadata {
+                    name: String::new(),
                     category: 0x2,
                     ocf_base: 0,
                     crew_member: false,
@@ -18150,6 +18194,7 @@ mod tests {
         let definitions = HashMap::from([(
             "BRIK".to_string(),
             DefinitionMetadata {
+                name: String::new(),
                 category: 0x1,
                 ocf_base: 0,
                 crew_member: false,
@@ -18209,6 +18254,7 @@ mod tests {
         let definitions = HashMap::from([(
             "BRIK".to_string(),
             DefinitionMetadata {
+                name: String::new(),
                 category: 0x1,
                 ocf_base: 0,
                 crew_member: false,
@@ -18277,6 +18323,7 @@ mod tests {
         // component list answers; idComponent selects the count form,
         // otherwise the index form returns the id (C4VID).
         let mut metadata = DefinitionMetadata {
+            name: String::new(),
             category: 0,
             ocf_base: 0,
             crew_member: false,
@@ -18699,6 +18746,7 @@ mod tests {
         let definitions = HashMap::from([(
             "Brick".to_string(),
             DefinitionMetadata {
+                name: String::new(),
                 category: 1,
                 ocf_base: 0,
                 crew_member: false,
@@ -18742,6 +18790,7 @@ mod tests {
         let definitions = HashMap::from([(
             "Brick".to_string(),
             DefinitionMetadata {
+                name: String::new(),
                 category: 1,
                 ocf_base: 0,
                 crew_member: false,
@@ -18801,6 +18850,7 @@ mod tests {
         let definitions = HashMap::from([(
             "Brick".to_string(),
             DefinitionMetadata {
+                name: String::new(),
                 category: 1,
                 ocf_base: 0,
                 crew_member: false,
@@ -21300,7 +21350,9 @@ mod tests {
         result.expect("EffectVar interactions succeed");
         assert_eq!(outcome.object.len(), 2);
         match &outcome.object[1] {
-            EffectCommand::Add(effect) => {
+            // EffectVar writes fold as number-keyed UPDATEs — an Add
+            // would resurrect an effect killed earlier the same frame.
+            EffectCommand::Update(effect) => {
                 assert_eq!(effect.vars().len(), 3);
                 assert_eq!(effect.vars()[0], EffectVarValue::Int(3));
                 assert_eq!(effect.vars()[1], EffectVarValue::Object(44));
@@ -22014,6 +22066,7 @@ mod tests {
         let definitions = HashMap::from([(
             "Workshop".to_string(),
             DefinitionMetadata {
+                name: String::new(),
                 category: crate::CATEGORY_STRUCTURE,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
@@ -22070,6 +22123,7 @@ mod tests {
     fn create_construction_returns_nil_when_site_blocked() {
         let landscape = Landscape::flat(64, 50);
         let workshop_metadata = DefinitionMetadata {
+            name: String::new(),
             category: crate::CATEGORY_STRUCTURE,
             ocf_base: ocf::NORMAL,
             crew_member: false,

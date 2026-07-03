@@ -3823,6 +3823,16 @@ impl Object {
                         events.push(EffectEvent::started(inserted));
                     }
                 }
+                EffectCommand::Update(effect) => {
+                    if let Some(existing) = self
+                        .state
+                        .effects
+                        .iter_mut()
+                        .find(|existing| existing.number == effect.number)
+                    {
+                        *existing = effect.clone();
+                    }
+                }
                 EffectCommand::Remove { name, no_callbacks } => {
                     if let Some(removed) = self.remove_effect(name) {
                         if !no_callbacks {
@@ -11077,6 +11087,7 @@ impl Engine {
                     (
                         id.clone(),
                         DefinitionMetadata {
+                            name: definition.name().to_string(),
                             category: definition.category(),
                             ocf_base: definition.ocf_base(),
                             crew_member: definition.is_crew(),
@@ -15677,6 +15688,11 @@ impl Engine {
                         } else {
                             true
                         };
+                        if std::env::var("LC_DEBUG_SCHED").is_ok()
+                            && event.effect.name == "IntScheduleCall"
+                        {
+                            tracing::warn!(?timer_result, timer_kill, number = event.effect.number, "SCHEDKILL");
+                        }
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Stopped(reason) => dispatch_definition.call_effect_stop(
@@ -23612,6 +23628,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             (
                 id.clone(),
                 DefinitionMetadata {
+                    name: String::new(),
                     category: *category,
                     ocf_base: OCF_NORMAL,
                     crew_member: false,
@@ -23873,6 +23890,14 @@ fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[Eff
     for command in commands {
         match command {
             EffectCommand::Add(effect) => insert_effect_into_stack(target, effect.clone()),
+            EffectCommand::Update(effect) => {
+                if let Some(existing) = target
+                    .iter_mut()
+                    .find(|existing| existing.number == effect.number)
+                {
+                    *existing = effect.clone();
+                }
+            }
             EffectCommand::Remove { name, .. } => {
                 if let Some(index) = target.iter().position(|existing| &existing.name == name) {
                     target.remove(index);
@@ -23891,11 +23916,26 @@ fn insert_effect_into_stack(stack: &mut Vec<EffectState>, mut effect: EffectStat
         effect.timer = 0;
     }
 
-    if let Some(index) = stack
-        .iter()
-        .position(|existing| existing.name == effect.name)
-    {
-        stack.remove(index);
+    // C4Effect::New: same-name effects coexist; numbers are per-list
+    // monotonic (C4Effect.cpp:76-78). A carried number matching an
+    // existing effect is an in-place update.
+    if effect.number > 0 {
+        if let Some(existing) = stack
+            .iter_mut()
+            .find(|existing| existing.number == effect.number)
+        {
+            *existing = effect;
+            return;
+        }
+    }
+    if effect.number == 0 {
+        effect.number = stack
+            .iter()
+            .map(|existing| existing.number)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
     }
 
     let mut insert_pos = 0;
