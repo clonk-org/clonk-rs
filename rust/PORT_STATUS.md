@@ -143,7 +143,7 @@
 | commands | Tick2/5/35 throttling; MoveTo flight/swim control; Scale/Hangle let-go thresholds |
 | material | meeMassMove script reactions (mass-mover loop lacks VM access); mass-move Convert→PXS.Create handoff; full Extract/InsertMaterial semantics (Insert is direct-settle, no PXS velocity) |
 | objects-core | OCF computes a subset of the ~30 C++ checks; C4ObjectInfo permanent training/experience unmodeled; DFA_CONNECT uses direct endpoint assignment (the LineConnect wrapping walker is unported) |
-| findobject-ocf | Controller compares owner; Layer never matches; sector-bounds FindMany traversal order; cached sort keys i64 vs C++ i32 wrap |
+| findobject-ocf | Layer never matches — C4FindObjectLayer::Check is `pObj->pLayer == pLayer` (C4FindObject.cpp:671-674), so `Find_Layer(nil)` must match every unlayered object; today System.c4g BlastObjects (Explode.c:93-97) finds nothing and explosions neither damage nor fling objects. Fixing it requires the BlastObject host fn (FnBlastObject, C4Script.cpp:2281-2289 -> C4Object::Blast, C4Object.cpp:1389-1399) + DefCore BlastIncinerate ingest first, or the zero-warning gate regresses. Also: sector-bounds FindMany traversal order; cached sort keys i64 vs C++ i32 wrap |
 | game-control-record | control-packet payload serialization; lc-network DoInput/host sync-check broadcast wiring |
 | players-crew-teams | team home-base production sync (C4RULE_TeamHombase); CheckElimination; asset value stub; crew infos not persisted in snapshots |
 | definitions-id | runtime dispatches on procedure strings not numeric ActMap indices; GetComponents override; CalcDefValue; some DefCore flags unparsed |
@@ -152,7 +152,7 @@
 | config-info | GetAName file-based names partial; PromotionUpdate; locale/control-pref defaults |
 | resources-groups | no group write/create/gzip-out/CRC32-at-open; directory iteration order may differ from C++ |
 | network | password auth, voting, league, NCS_* client status, join-data save/restore, protocol negotiation |
-| host-fn backlog | ShiftContents/GrabObjectInfo semantics partial; HORS action-start target-zero |
+| host-fn backlog | ShiftContents/GrabObjectInfo semantics partial; HORS action-start target-zero; BlastObject unported (see findobject-ocf); DoDamage/DoEnergy silently no-op on foreign targets (C++ damages them — BlastObjects' living-target hits); nil-target AddEffect never ran Fx*Start/Timer for System.c4g ShakeEffect in the Goldrush headless probe (Distance/SetViewOffset were unreachable until 2026-07-03) |
 
 ## Presentation-layer gaps (non-sync)
 
