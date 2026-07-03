@@ -13300,17 +13300,6 @@ impl Engine {
         let frame = self.frame;
         // C4GameControl::Ticks runs with the frame advance (C4Game.cpp:801)
         self.control_ticks();
-        self.tick_pxs();
-        self.tick_particles();
-        self.tick_mass_movers();
-        self.weather_events.clear();
-        self.environment.advance_frame(&mut self.rng, frame);
-        self.tick_weather_events(frame)?;
-        if let Some(sky) = &mut self.sky {
-            sky.advance(&self.environment);
-        }
-        self.apply_landscape_temperature_conversions();
-        self.tick_player_systems();
         // The per-tick scenario Step (and its `random` argument DRAW) is a
         // JSON-fixture convention: C++ never calls Step on scenario
         // scripts, and the draw would shift the synced stream every frame.
@@ -13352,7 +13341,6 @@ impl Engine {
             self.apply_scenario_batch(batch)?;
         }
         let mut spawn_requests = Vec::new();
-        self.tick_global_effects();
         let mut selected_objects = HashSet::new();
         for selection in self.crew_selection.values() {
             for id in selection.selected() {
@@ -14343,6 +14331,23 @@ impl Engine {
         self.note_objects_changed();
         self.rebuild_sectors();
         let alive: HashSet<_> = self.objects.iter().map(|object| object.id).collect();
+        // C4Game::Execute phase order (C4Game.cpp:810-822): ExecObjects
+        // runs FIRST; then GlobalEffects, PXS, Particles, MassMover,
+        // Weather, Landscape, Players, Messages, Script. Objects observe
+        // the PREVIOUS frame's weather/PXS state and their RNG draws
+        // precede every world-system draw within the frame.
+        self.tick_global_effects();
+        self.tick_pxs();
+        self.tick_particles();
+        self.tick_mass_movers();
+        self.weather_events.clear();
+        self.environment.advance_frame(&mut self.rng, frame);
+        self.tick_weather_events(frame)?;
+        if let Some(sky) = &mut self.sky {
+            sky.advance(&self.environment);
+        }
+        self.apply_landscape_temperature_conversions();
+        self.tick_player_systems();
         self.messages.tick(&alive);
         // C4GameScriptHost::Execute (C4ScriptHost.cpp:222-232): while
         // Game.Script.Go, every 10th frame calls Script%d with the counter
