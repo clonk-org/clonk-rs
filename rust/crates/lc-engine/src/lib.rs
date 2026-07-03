@@ -7157,17 +7157,9 @@ impl Definition {
             update.local_vars = Some(updated_local_vars);
             host_effects.object_update = Some(update);
         }
-        let handled = match value {
-            Value::Nil => false,
-            Value::Bool(flag) => flag,
-            other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: self.id.clone(),
-                    function: "MenuCommand".to_string(),
-                    detail: format!("expected bool or nil (got {})", other.type_name()),
-                })
-            }
-        };
+        // Same bool cast as C4Object::MenuCommand (C4Object.cpp:3736):
+        // script results coerce by raw truthiness, never a type error.
+        let handled = compat::value_raw_truthy(&value);
 
         if !environment_delta.is_empty() {
             host_effects.environment = Some(environment_delta);
@@ -7284,20 +7276,11 @@ impl Definition {
             update.local_vars = Some(updated_local_vars);
             host_effects.object_update = Some(update);
         }
-        let handled = match value {
-            Value::Nil => false,
-            Value::Bool(flag) => flag,
-            other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: self.id.clone(),
-                    function: "Control".to_string(),
-                    detail: format!(
-                        "control function `{function}` must return bool or nil (got {})",
-                        other.type_name()
-                    ),
-                })
-            }
-        };
+        // C4Object::CallControl (C4Object.cpp:3300) evaluates the script
+        // result with `static_cast<bool>(...)` — C4Value raw-data truthiness
+        // (C4Value.h:76,183-185): only nil, 0 and false are unhandled. Real
+        // control scripts return ints (`return(1)`), never bools.
+        let handled = compat::value_raw_truthy(&value);
 
         if !environment_delta.is_empty() {
             host_effects.environment = Some(environment_delta);
@@ -7542,21 +7525,10 @@ impl Definition {
             update.local_vars = Some(updated_local_vars);
             host_effects.object_update = Some(update);
         }
-        let handled = match value {
-            Value::Nil => false,
-            Value::Bool(flag) => flag,
-            other => {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: self.id.clone(),
-                    function: "MenuCallback".to_string(),
-                    detail: format!(
-                        "callback `{}` must return bool or nil (got {})",
-                        function_name,
-                        other.type_name()
-                    ),
-                })
-            }
-        };
+        // C4Object::MenuCommand (C4Object.cpp:3732-3736): the executed menu
+        // function's result is `static_cast<bool>(DirectExec(...))` — raw
+        // C4Value truthiness; real context functions return ints.
+        let handled = compat::value_raw_truthy(&value);
 
         if !environment_delta.is_empty() {
             host_effects.environment = Some(environment_delta);
@@ -30875,6 +30847,89 @@ func ControlDig() { SetAction("Dig"); return true; }
         let snapshot = engine.snapshot();
         let object = snapshot.object(object_id).expect("object present");
         assert_eq!(object.action.name, "Dig");
+        Ok(())
+    }
+
+    #[test]
+    fn control_command_coerces_int_returns_like_cpp_bool_cast() -> Result<(), EngineError> {
+        // C4Object::CallControl (C4Object.cpp:3300): the Control<Com> result
+        // goes through `static_cast<bool>(Call(...))` — C4Value raw-data
+        // truthiness (C4Value.h:76,183-185). Real content returns ints
+        // (Clonk.c4d/Script.c:195-203 `return(1)` / `return(0)`); C++ never
+        // rejects them.
+        let script = r#"
+global func Initialize(state, random) { return nil; }
+func ControlDig() { SetAction("Dig"); return 1; }
+func ControlThrow() { return 0; }
+"#;
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("control script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "Dig".to_string(),
+            ActionSpec::default().with_procedure("dig"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+        definition.set_movement_profile(MovementProfile::default());
+
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        engine.register_player(PlayerConfig::new(1, "Test"))?;
+
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_action(ActionState::new("Idle")),
+            )
+            .expect("spawn succeeds");
+
+        engine.set_crew_cursor(1, Some(object_id))?;
+        let handled = engine.handle_control_command(1, ControlCommand::Dig, CommandKind::Press)?;
+        assert!(handled, "return(1) is truthy like C++'s bool cast");
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.object(object_id).expect("object present").action.name,
+            "Dig"
+        );
+
+        let handled =
+            engine.handle_control_command(1, ControlCommand::Throw, CommandKind::Press)?;
+        assert!(!handled, "return(0) is falsy like C++'s bool cast");
+        Ok(())
+    }
+
+    #[test]
+    fn context_menu_callback_coerces_int_returns_like_cpp_bool_cast() -> Result<(), EngineError> {
+        // C4Object::MenuCommand (C4Object.cpp:3732-3736): the executed menu
+        // function's result goes through `static_cast<bool>(DirectExec(...))`
+        // — raw truthiness. Context functions in real content return ints
+        // (Waterskin.c4d/Script.c:110 `return(1)`).
+        let script = r#"
+global func Initialize(state, random) { return nil; }
+func EmptyContainer() { SetOwner(7); return 1; }
+"#;
+        let mut definition =
+            Definition::from_script("WSKI", "Waterskin", script).expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(definition)?;
+        let id = engine
+            .spawn_object(SpawnConfig::new("WSKI").with_owner(1))
+            .expect("spawn succeeds");
+
+        let handled = engine.execute_context_menu(id, "EmptyContainer")?;
+        assert!(handled, "return(1) is truthy like C++'s bool cast");
+        let snapshot = engine.object_snapshot(id).expect("object snapshot");
+        assert_eq!(snapshot.owner, 7, "the context function ran");
         Ok(())
     }
 
