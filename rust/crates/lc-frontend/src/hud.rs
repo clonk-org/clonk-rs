@@ -66,7 +66,7 @@ impl HudFont<'_> {
     }
 
     /// `CStdFont::GetTextWidth`.
-    fn text_width(&self, text: &str) -> i32 {
+    pub fn text_width(&self, text: &str) -> i32 {
         match self {
             HudFont::Clonk(font) => font.measure(text, false).0,
             HudFont::Fallback(font) => {
@@ -76,7 +76,15 @@ impl HudFont<'_> {
     }
 
     /// `CStdDDraw::TextOut` — `x` is the anchor for `align`.
-    fn draw(&self, surface: &mut Surface, x: i32, y: i32, text: &str, color: Color, align: TextAlign) {
+    pub fn draw(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Color,
+        align: TextAlign,
+    ) {
         match self {
             HudFont::Clonk(font) => font.draw(
                 surface,
