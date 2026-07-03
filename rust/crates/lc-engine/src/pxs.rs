@@ -173,6 +173,36 @@ impl PxsSystem {
             .flat_map(|slots| slots.iter().flatten())
     }
 
+    /// Live PXS with their SAVED slot coordinates: `C4PXSSystem::Save`
+    /// writes every allocated chunk consecutively — gaps included
+    /// (C4PXS.cpp:346-349) — so the saved chunk index is the chunk's rank
+    /// among allocated chunks and slots keep their in-chunk position.
+    pub fn iter_slots(&self) -> impl Iterator<Item = (usize, usize, &Pxs)> {
+        self.chunks
+            .iter()
+            .filter_map(|chunk| chunk.as_ref())
+            .enumerate()
+            .flat_map(|(chunk_rank, slots)| {
+                slots.iter().enumerate().filter_map(move |(slot, entry)| {
+                    entry.as_ref().map(|pxs| (chunk_rank, slot, pxs))
+                })
+            })
+    }
+
+    /// Place a loaded PXS at its saved slot (`C4PXSSystem::Load` reads
+    /// chunks verbatim and counts pixels in place, C4PXS.cpp:383-397).
+    pub fn create_at(&mut self, chunk: usize, slot: usize, pxs: Pxs) -> bool {
+        if chunk >= PXS_MAX_CHUNK || slot >= PXS_CHUNK_SIZE {
+            return false;
+        }
+        self.ensure_layout();
+        let slots = self.chunks[chunk].get_or_insert_with(|| vec![None; PXS_CHUNK_SIZE]);
+        if slots[slot].replace(pxs).is_none() {
+            self.chunk_counts[chunk] += 1;
+        }
+        true
+    }
+
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.chunk_counts.clear();

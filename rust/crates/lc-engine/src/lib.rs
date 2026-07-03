@@ -808,6 +808,12 @@ pub struct ParticleSnapshot {
     /// sync-relevant state; the float fields above are lossy projections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pxs_fixed: Option<[i32; 4]>,
+    /// Saved chunk/slot position (`chunk * PXS_CHUNK_SIZE + slot`) of a
+    /// C4PXS pixel sprite: C4PXSSystem::Save/Load keep the whole chunk
+    /// layout, MNone gaps included (C4PXS.cpp:346-349, 383-397), so
+    /// restore must place each pixel back in its slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pxs_slot: Option<u32>,
 }
 
 impl PartialEq for ParticleSnapshot {
@@ -820,6 +826,7 @@ impl PartialEq for ParticleSnapshot {
             && self.parameter_b == other.parameter_b
             && self.layer == other.layer
             && self.pxs_fixed == other.pxs_fixed
+            && self.pxs_slot == other.pxs_slot
     }
 }
 
@@ -915,6 +922,7 @@ impl ActiveParticle {
             parameter_b,
             layer,
             pxs_fixed: None,
+            pxs_slot: None,
         };
         Self {
             snapshot,
@@ -960,13 +968,16 @@ fn system_particle_snapshot(particle: &particles::Particle) -> ParticleSnapshot 
         parameter_b: particle.b,
         layer: particle.layer.clone(),
         pxs_fixed: None,
+        pxs_slot: None,
     }
 }
 
 /// Snapshot form of a C4PXS pixel sprite. The float position/velocity are
 /// `fixtof` projections for display; `pxs_fixed` carries the raw sync-relevant
-/// `C4Fixed` state for lossless save/load.
-fn pxs_snapshot(pxs: &pxs::Pxs, materials: &MaterialSet) -> ParticleSnapshot {
+/// `C4Fixed` state for lossless save/load. `slot` is the saved chunk-major
+/// slot position (C4PXSSystem::Save keeps the chunk layout verbatim,
+/// C4PXS.cpp:346-349); presentation snapshots pass `None`.
+fn pxs_snapshot(pxs: &pxs::Pxs, materials: &MaterialSet, slot: Option<u32>) -> ParticleSnapshot {
     let definition_id = materials
         .get_by_id(pxs.mat)
         .map(|material| format!("material/pxs/{}", material.normalized_name()))
@@ -980,6 +991,7 @@ fn pxs_snapshot(pxs: &pxs::Pxs, materials: &MaterialSet) -> ParticleSnapshot {
         parameter_b: pxs.mat.index() as i32,
         layer: ParticleLayer::Global,
         pxs_fixed: Some([pxs.x.val(), pxs.y.val(), pxs.xdir.val(), pxs.ydir.val()]),
+        pxs_slot: slot,
     }
 }
 
@@ -15478,7 +15490,7 @@ impl Engine {
         particles.extend(
             self.pxs_system
                 .iter()
-                .map(|pixel| pxs_snapshot(pixel, &self.materials)),
+                .map(|pixel| pxs_snapshot(pixel, &self.materials, None)),
         );
         particles.extend(
             self.particle_system
@@ -15778,11 +15790,13 @@ impl Engine {
             .iter()
             .map(ActiveParticle::snapshot)
             .collect();
-        particles.extend(
-            self.pxs_system
-                .iter()
-                .map(|pixel| pxs_snapshot(pixel, &self.materials)),
-        );
+        particles.extend(self.pxs_system.iter_slots().map(|(chunk, slot, pixel)| {
+            pxs_snapshot(
+                pixel,
+                &self.materials,
+                Some((chunk * pxs::PXS_CHUNK_SIZE + slot) as u32),
+            )
+        }));
         let mut players: Vec<_> = self.players.values().map(Player::to_state).collect();
         players.sort_unstable_by_key(|player| player.id);
 
@@ -15856,13 +15870,35 @@ impl Engine {
                         math::ftofix(snapshot.velocity.x).val(),
                         math::ftofix(snapshot.velocity.y).val(),
                     ]);
-                    self.pxs_system.create(
-                        material,
-                        C4Fixed::from_raw(x),
-                        C4Fixed::from_raw(y),
-                        C4Fixed::from_raw(xdir),
-                        C4Fixed::from_raw(ydir),
-                    );
+                    let pixel = pxs::Pxs {
+                        mat: material,
+                        x: C4Fixed::from_raw(x),
+                        y: C4Fixed::from_raw(y),
+                        xdir: C4Fixed::from_raw(xdir),
+                        ydir: C4Fixed::from_raw(ydir),
+                    };
+                    // Saved slot position: C4PXSSystem::Load keeps the
+                    // chunk layout verbatim (C4PXS.cpp:383-397). Legacy
+                    // snapshots without one fall back to New()-style fill.
+                    match snapshot.pxs_slot {
+                        Some(index) => {
+                            let index = index as usize;
+                            self.pxs_system.create_at(
+                                index / pxs::PXS_CHUNK_SIZE,
+                                index % pxs::PXS_CHUNK_SIZE,
+                                pixel,
+                            );
+                        }
+                        None => {
+                            self.pxs_system.create(
+                                material,
+                                pixel.x,
+                                pixel.y,
+                                pixel.xdir,
+                                pixel.ydir,
+                            );
+                        }
+                    }
                 }
                 continue;
             }
@@ -28060,6 +28096,56 @@ mod tests {
             "slot 0 was free during the droplet's creation only in C++ terms — \
              the droplet must sit in slot 1"
         );
+    }
+
+    #[test]
+    fn snapshot_restore_preserves_pxs_slot_layout_verbatim() {
+        // C4PXSSystem::Save writes whole chunks including their MNone gaps
+        // (C4PXS.cpp:346-349) and Load re-counts them in place
+        // (C4PXS.cpp:383-397): slot POSITIONS survive save/load, so slot
+        // reuse — and with it the deterministic execution order — stays
+        // lockstep across a save/load boundary. Compacting the layout on
+        // restore hands later creates different slots than C++.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let mut engine = Engine::with_seed(5);
+        engine.set_materials(materials);
+
+        for x in 0..3 {
+            assert!(engine.pxs_system.create(
+                water,
+                math::itofix(x),
+                math::itofix(0),
+                math::C4Fixed::ZERO,
+                math::C4Fixed::ZERO,
+            ));
+        }
+        // Kill the middle pixel: slot 1 becomes an MNone gap.
+        engine.pxs_system.clear_slot(0, 1);
+
+        let state = engine.capture_state();
+        engine.restore_state(&state).expect("state restores");
+
+        // The gap must survive: the next create reuses slot 1, keeping
+        // chunk-major order [slot0, slot1, slot2] = [0, 9, 2].
+        assert!(engine.pxs_system.create(
+            water,
+            math::itofix(9),
+            math::itofix(0),
+            math::C4Fixed::ZERO,
+            math::C4Fixed::ZERO,
+        ));
+        let order: Vec<i32> = engine.pxs_system.iter().map(|pxs| fixtoi(pxs.x)).collect();
+        assert_eq!(order, [0, 9, 2], "restore keeps the MNone gap at slot 1");
     }
 
     #[test]
