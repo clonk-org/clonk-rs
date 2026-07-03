@@ -37,6 +37,24 @@ inline void FixedRandom(uint32_t dwSeed)
 	RandomCount = 0;
 }
 
+inline FILE *LcRngTraceFile()
+{
+	static FILE *rngTrace = []() -> FILE * {
+		const char *p = getenv("LC_RNG_TRACE");
+		return (p && *p) ? fopen(p, "w") : nullptr;
+	}();
+	return rngTrace;
+}
+
+inline void LcRngTraceMarker(int frame)
+{
+	if (FILE *f = LcRngTraceFile())
+	{
+		fprintf(f, "FRAME %d\n", frame);
+		fflush(f);
+	}
+}
+
 inline int Random(int iRange)
 {
 	// next pseudorandom value
@@ -58,10 +76,7 @@ inline int Random(int iRange)
 	if (iRange == 0) return 0;
 	RandomHold = RandomHold * 214013L + 2531011L;
 	{
-		static FILE *rngTrace = []() -> FILE * {
-			const char *p = getenv("LC_RNG_TRACE");
-			return (p && *p) ? fopen(p, "w") : nullptr;
-		}();
+		FILE *rngTrace = LcRngTraceFile();
 		if (rngTrace)
 			fprintf(rngTrace, "%d %d %u\n", RandomCount, iRange, (RandomHold >> 16) % iRange);
 	}

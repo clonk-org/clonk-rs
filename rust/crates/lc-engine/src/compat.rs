@@ -6894,7 +6894,7 @@ fn random(args: &[Value]) -> Result<Value, RuntimeError> {
         let frame = ENVIRONMENT_CONTEXT.with(|cell| {
             cell.borrow().as_ref().map(|context| context.frame).unwrap_or(0)
         });
-        if (16..=18).contains(&frame) {
+        if (19..=21).contains(&frame) {
             tracing::warn!(?args, ?context, frame, "RNDCALL");
         }
     }

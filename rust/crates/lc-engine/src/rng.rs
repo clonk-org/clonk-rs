@@ -156,19 +156,34 @@ impl rand_core::RngCore for LcgRng {
 
 /// Temp forensics: append draws to LC_RUST_RNG_TRACE (mirrors the C++
 /// C4Random.h probe; alignment by count/range/value).
-fn rng_trace(count: i32, range: i32, value: i32) {
-    use std::io::Write;
+fn trace_file() -> &'static Option<std::sync::Mutex<std::fs::File>> {
     use std::sync::OnceLock;
     static TRACE: OnceLock<Option<std::sync::Mutex<std::fs::File>>> = OnceLock::new();
-    let trace = TRACE.get_or_init(|| {
+    TRACE.get_or_init(|| {
         std::env::var("LC_RUST_RNG_TRACE")
             .ok()
             .and_then(|path| std::fs::File::create(path).ok())
             .map(std::sync::Mutex::new)
-    });
-    if let Some(file) = trace {
+    })
+}
+
+fn rng_trace(count: i32, range: i32, value: i32) {
+    use std::io::Write;
+    if let Some(file) = trace_file() {
         if let Ok(mut file) = file.lock() {
             let _ = writeln!(file, "{count} {range} {value}");
+        }
+    }
+}
+
+/// Ledger-forensics frame marker: mirrors the C++ probe's `FRAME n`
+/// lines so per-frame draw censuses align (env-gated, diagnostic only).
+pub fn rng_trace_frame_marker(frame: u64) {
+    use std::io::Write;
+    if let Some(file) = trace_file() {
+        if let Ok(mut file) = file.lock() {
+            let _ = writeln!(file, "FRAME {frame}");
+            let _ = file.flush();
         }
     }
 }

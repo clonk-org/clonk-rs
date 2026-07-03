@@ -13369,6 +13369,9 @@ impl Engine {
         let frame = self.frame;
         // C4GameControl::Ticks runs with the frame advance (C4Game.cpp:801)
         self.control_ticks();
+        if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
+            crate::rng::rng_trace_frame_marker(frame);
+        }
         // The per-tick scenario Step (and its `random` argument DRAW) is a
         // JSON-fixture convention: C++ never calls Step on scenario
         // scripts, and the draw would shift the synced stream every frame.

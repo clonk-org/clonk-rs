@@ -807,6 +807,7 @@ bool C4Game::Execute() // Returns true if the game is over
 
 	// Game
 
+	if (getenv("LC_RNG_TRACE")) LcRngTraceMarker(FrameCounter);
 	EXEC_S(ExecObjects();, ExecObjectsStat)
 	if (pGlobalEffects)
 		EXEC_S_DR(pGlobalEffects->Execute(nullptr);, GEStats, "GEEx\0");
