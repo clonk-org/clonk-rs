@@ -75,10 +75,18 @@ pub enum ControlMessage {
     },
 }
 
+/// Length of the frame header: prefix byte plus little-endian u32 size.
+const FRAME_HEADER_LEN: usize = 5;
+
 /// Tokio-powered transport that understands LegacyClonk TCP framing and control packets.
 #[derive(Debug)]
 pub struct ControlTransport<S> {
     stream: S,
+    /// Accumulated inbound bytes; a partial frame stays buffered here so a
+    /// dropped `read_message` future never loses stream position. Mirrors
+    /// `C4NetIOTCP::Peer::IBuf` (src/C4NetIO.cpp:1415): incomplete frames are
+    /// retained until more bytes arrive.
+    read_buf: Vec<u8>,
 }
 
 impl<S> ControlTransport<S>
@@ -86,60 +94,93 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     pub fn new(stream: S) -> Self {
-        Self { stream }
+        Self {
+            stream,
+            read_buf: Vec::new(),
+        }
     }
 
+    /// Returns the underlying stream, discarding any buffered partial frame.
     pub fn into_inner(self) -> S {
         self.stream
     }
 
+    /// Reads the next complete frame.
+    ///
+    /// Cancel-safe: this future may be dropped mid-frame (e.g. by
+    /// `tokio::select!`) without corrupting the stream — partial frames are
+    /// kept in the transport's buffer and completed by the next call.
     pub async fn read_message(&mut self) -> Result<ControlMessage, TransportError> {
-        let mut header = [0u8; 5];
-        self.stream.read_exact(&mut header).await?;
-        if header[0] != TCP_FRAME_PREFIX {
+        loop {
+            if let Some(message) = self.extract_frame()? {
+                return Ok(message);
+            }
+            let mut chunk = [0u8; 4096];
+            let read = self.stream.read(&mut chunk).await?;
+            if read == 0 {
+                return Err(TransportError::Io(io::ErrorKind::UnexpectedEof.into()));
+            }
+            self.read_buf.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    /// Extracts one complete frame from the accumulated buffer, mirroring
+    /// `C4NetIOTCP::UnpackPacket` (src/C4NetIO.cpp:1304). Returns `Ok(None)`
+    /// while the frame is still incomplete.
+    fn extract_frame(&mut self) -> Result<Option<ControlMessage>, TransportError> {
+        if self.read_buf.len() < FRAME_HEADER_LEN {
+            return Ok(None);
+        }
+        if self.read_buf[0] != TCP_FRAME_PREFIX {
             return Err(TransportError::Malformed("invalid TCP frame prefix"));
         }
-        let size = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
+        let size = u32::from_le_bytes([
+            self.read_buf[1],
+            self.read_buf[2],
+            self.read_buf[3],
+            self.read_buf[4],
+        ]) as usize;
         if size > MAX_PACKET_SIZE {
             return Err(TransportError::Malformed("packet exceeds allowed size"));
         }
-        let mut body = vec![0u8; size];
-        if size > 0 {
-            self.stream.read_exact(&mut body).await?;
+        if self.read_buf.len() < FRAME_HEADER_LEN + size {
+            return Ok(None);
         }
-        parse_body(&body)
+        let message = parse_body(&self.read_buf[FRAME_HEADER_LEN..FRAME_HEADER_LEN + size])?;
+        self.read_buf.drain(..FRAME_HEADER_LEN + size);
+        Ok(Some(message))
     }
 
+    /// Sends one message as a single contiguous frame, mirroring
+    /// `C4NetIOTCP::PackPacket` (src/C4NetIO.cpp:1286) which writes prefix,
+    /// size and payload into one output buffer.
     pub async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
-        let mut payload = Vec::new();
+        let mut frame = vec![TCP_FRAME_PREFIX, 0, 0, 0, 0];
         match message {
             ControlMessage::Control(packet) => {
-                payload.push(PID_CONTROL);
-                encode_varint(packet.client_id(), &mut payload);
-                encode_varint(packet.tick(), &mut payload);
-                payload.extend_from_slice(packet.payload());
+                frame.push(PID_CONTROL);
+                encode_varint(packet.client_id(), &mut frame);
+                encode_varint(packet.tick(), &mut frame);
+                frame.extend_from_slice(packet.payload());
             }
             ControlMessage::Request { from_tick } => {
-                payload.push(PID_CONTROL_REQ);
-                encode_varint(from_tick, &mut payload);
+                frame.push(PID_CONTROL_REQ);
+                encode_varint(from_tick, &mut frame);
             }
             ControlMessage::Packet { delivery, data } => {
-                payload.push(PID_CONTROL_PKT);
-                payload.push(u8::from(delivery));
-                payload.extend_from_slice(&data);
+                frame.push(PID_CONTROL_PKT);
+                frame.push(u8::from(delivery));
+                frame.extend_from_slice(&data);
             }
             ControlMessage::ExecSync { control_tick } => {
-                payload.push(PID_EXEC_SYNC_CTRL);
-                encode_varint(control_tick, &mut payload);
+                frame.push(PID_EXEC_SYNC_CTRL);
+                encode_varint(control_tick, &mut frame);
             }
         }
 
-        let size = payload.len() as u32;
-        self.stream.write_all(&[TCP_FRAME_PREFIX]).await?;
-        self.stream.write_all(&size.to_le_bytes()).await?;
-        if !payload.is_empty() {
-            self.stream.write_all(&payload).await?;
-        }
+        let size = (frame.len() - FRAME_HEADER_LEN) as u32;
+        frame[1..FRAME_HEADER_LEN].copy_from_slice(&size.to_le_bytes());
+        self.stream.write_all(&frame).await?;
         self.stream.flush().await?;
         Ok(())
     }
@@ -366,6 +407,40 @@ mod tests {
         server.read_to_end(&mut buf).await.unwrap();
         let expected = expect_frame(&[PID_CONTROL_PKT, 0x02, 0x80, 0x01, 0x02, 0x03]);
         assert_eq!(buf, expected);
+    }
+
+    // `read_message` is polled inside `tokio::select!` loops (session.rs), so a
+    // partially received frame must survive the read future being dropped.
+    // Mirrors C4NetIOTCP::Peer::OnRecv / UnpackPacket (src/C4NetIO.cpp:1415,
+    // :1304): incomplete frames stay in the peer's IBuf until more bytes arrive.
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_message_survives_cancellation_mid_frame() {
+        let frame = expect_frame(&[PID_CONTROL, 0x0C, 0x22, 0xAB]);
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+
+        // Deliver only part of the frame header, then poll `read_message` and
+        // drop it mid-frame, exactly as `tokio::select!` does when another
+        // branch wins.
+        server.write_all(&frame[..3]).await.unwrap();
+        tokio::select! {
+            biased;
+            result = transport.read_message() => {
+                panic!("read completed on a partial frame: {result:?}")
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+
+        // The rest of the frame arrives; the retried read must still parse it.
+        server.write_all(&frame[3..]).await.unwrap();
+        match transport.read_message().await.unwrap() {
+            ControlMessage::Control(packet) => {
+                assert_eq!(packet.client_id(), 12);
+                assert_eq!(packet.tick(), 34);
+                assert_eq!(packet.payload(), &[0xAB]);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
