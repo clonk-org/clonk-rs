@@ -4713,6 +4713,70 @@ mod tests {
     }
 
     #[test]
+    fn base_graphics_variant_selects_the_named_sprite() {
+        // SetGraphics swaps GetGraphics() to a named C4AdditionalDefGraphics
+        // (src/C4DefGraphics.cpp, C4Object::SetGraphics); the snapshot
+        // carries the variant on ObjectBaseGraphics and the renderer must
+        // blit that sheet, not the default one.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].definition_id = "FocusDummy".to_string();
+        let mut subject = snapshot.objects[0].clone();
+        subject.id = ObjectId::new(2);
+        subject.definition_id = "TestObject".to_string();
+        subject.position = Vector2::new(64, 40);
+        subject.crew_member = false;
+        subject.base_graphics = Some(lc_engine::ObjectBaseGraphics {
+            definition: "TestObject".to_string(),
+            graphics_name: Some("2".to_string()),
+            blit_mode: 0,
+        });
+        snapshot.objects.push(subject);
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+
+        let red = Color::opaque(200, 0, 0);
+        let green = Color::opaque(0, 200, 0);
+        let shape = Some(DefinitionRect::new(-4, -4, 8, 8));
+        let mut sprites = HashMap::new();
+        sprites.extend(
+            solid_sprite("TestObject", 8, 8, red, shape, false)
+                .as_ref()
+                .clone(),
+        );
+        sprites.insert(
+            sprite_map_key("TestObject", Some("2")),
+            solid_sprite("TestObject", 8, 8, green, shape, false)
+                .as_ref()
+                .clone()
+                .remove(&sprite_map_key("TestObject", None))
+                .expect("variant sprite"),
+        );
+
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Variant",
+            test_font(),
+            Arc::new(sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let sx = 64 - viewport_x;
+        let sy = 40 - viewport_y;
+        assert_eq!(
+            graphics.surface().get_pixel((sx + 1) as u32, (sy + 1) as u32),
+            Some(green),
+            "expected the '2' graphics variant, not the default sheet"
+        );
+    }
+
+    #[test]
     fn action_facet_is_anchored_at_shape_plus_facet_target() {
         // Regular action facet at full con: drawn facet-sized at
         // cox + Action.FacetX / coy + Action.FacetY (src/C4Object.cpp:
