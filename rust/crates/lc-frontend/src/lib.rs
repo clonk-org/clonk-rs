@@ -7,6 +7,7 @@
 )]
 
 pub mod clonk_fonts;
+pub mod hud;
 pub mod startup_about_dlg;
 pub mod startup_netdlg;
 pub mod startup_options_dlg;
@@ -130,6 +131,12 @@ pub struct HudGraphics {
     pub build: Option<ImageData>,
     pub energy_bars: Option<ImageData>,
     pub select_mark: Option<ImageData>,
+    /// Control.png — `sfcControl` with the `fctKeyboard` cell at (0,0,80,36)
+    /// (src/C4GraphicsResource.cpp:200-205).
+    pub control: Option<ImageData>,
+    /// Background.png — `fctBackground`, the message board backdrop tile
+    /// (src/C4GraphicsResource.cpp:209, src/C4MessageBoard.cpp:258).
+    pub background: Option<ImageData>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
