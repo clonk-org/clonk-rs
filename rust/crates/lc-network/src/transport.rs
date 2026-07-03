@@ -151,36 +151,36 @@ where
         Ok(Some(message))
     }
 
+    /// Sends one message as a single contiguous frame, mirroring
+    /// `C4NetIOTCP::PackPacket` (src/C4NetIO.cpp:1286) which writes prefix,
+    /// size and payload into one output buffer.
     pub async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
-        let mut payload = Vec::new();
+        let mut frame = vec![TCP_FRAME_PREFIX, 0, 0, 0, 0];
         match message {
             ControlMessage::Control(packet) => {
-                payload.push(PID_CONTROL);
-                encode_varint(packet.client_id(), &mut payload);
-                encode_varint(packet.tick(), &mut payload);
-                payload.extend_from_slice(packet.payload());
+                frame.push(PID_CONTROL);
+                encode_varint(packet.client_id(), &mut frame);
+                encode_varint(packet.tick(), &mut frame);
+                frame.extend_from_slice(packet.payload());
             }
             ControlMessage::Request { from_tick } => {
-                payload.push(PID_CONTROL_REQ);
-                encode_varint(from_tick, &mut payload);
+                frame.push(PID_CONTROL_REQ);
+                encode_varint(from_tick, &mut frame);
             }
             ControlMessage::Packet { delivery, data } => {
-                payload.push(PID_CONTROL_PKT);
-                payload.push(u8::from(delivery));
-                payload.extend_from_slice(&data);
+                frame.push(PID_CONTROL_PKT);
+                frame.push(u8::from(delivery));
+                frame.extend_from_slice(&data);
             }
             ControlMessage::ExecSync { control_tick } => {
-                payload.push(PID_EXEC_SYNC_CTRL);
-                encode_varint(control_tick, &mut payload);
+                frame.push(PID_EXEC_SYNC_CTRL);
+                encode_varint(control_tick, &mut frame);
             }
         }
 
-        let size = payload.len() as u32;
-        self.stream.write_all(&[TCP_FRAME_PREFIX]).await?;
-        self.stream.write_all(&size.to_le_bytes()).await?;
-        if !payload.is_empty() {
-            self.stream.write_all(&payload).await?;
-        }
+        let size = (frame.len() - FRAME_HEADER_LEN) as u32;
+        frame[1..FRAME_HEADER_LEN].copy_from_slice(&size.to_le_bytes());
+        self.stream.write_all(&frame).await?;
         self.stream.flush().await?;
         Ok(())
     }
