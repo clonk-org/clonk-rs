@@ -3358,6 +3358,9 @@ struct LegacyObjectRecord {
     number: Option<u64>,
     status: Option<ObjectStatus>,
     owner: Option<i32>,
+    /// C4Object::Controller, compiled verbatim with default NO_OWNER
+    /// (C4Object.cpp:2739).
+    controller: Option<i32>,
     x: Option<i32>,
     y: Option<i32>,
     /// Saved velocity is C4Fixed (C4Object.cpp:2765-2766), float-encoded
@@ -3463,6 +3466,15 @@ impl LegacyObjectRecord {
                     ))
                 })?;
                 self.owner = Some(owner);
+            }
+            "controller" => {
+                let controller = parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Controller `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                self.controller = Some(controller);
             }
             "x" => {
                 self.x = Some(parse_i32(trimmed_value).map_err(|err| {
@@ -3773,6 +3785,7 @@ impl LegacyObjectRecord {
             number,
             status,
             owner,
+            controller,
             x,
             y,
             xdir,
@@ -3918,6 +3931,9 @@ impl LegacyObjectRecord {
         }
         if let Some(owner) = owner {
             config = config.with_owner(owner);
+        }
+        if let Some(controller) = controller {
+            config = config.with_controller(controller);
         }
         if let Some(energy) = energy {
             config = config.with_energy(energy);
@@ -8185,7 +8201,7 @@ global func Step(state, frame, random)
             scenario_dir.join("Objects.txt"),
             // XDir/YDir are float-bit C4Fixed like real saves write them
             // (Fixed.h:247-266): f-1063256064 = -5.0, f1077936128 = 3.0.
-            "[Object]\nid=BOX1\nNumber=100\nStatus=1\nCategory=0\nOwner=1\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nStatus=1\nCategory=0\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
+            "[Object]\nid=BOX1\nNumber=100\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nStatus=1\nCategory=0\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
         )
         .expect("write objects");
 
@@ -8202,6 +8218,8 @@ global func Step(state, frame, random)
         assert!(first.container_handle.is_none());
         assert_eq!(first.config.definition_id, "BOX1");
         assert_eq!(first.config.owner, 1);
+        // Controller compiles verbatim (C4Object.cpp:2739).
+        assert_eq!(first.config.controller, Some(2));
         assert_eq!(first.config.position, Vector2::new(10, 20));
         assert_eq!(first.config.id, Some(ObjectId::new(100)));
 
@@ -8236,6 +8254,7 @@ global func Step(state, frame, random)
             .expect("box object");
         assert_eq!(box_snapshot.definition_id, "BOX1");
         assert_eq!(box_snapshot.owner, 1);
+        assert_eq!(box_snapshot.controller, 2, "loaded Controller= sticks");
         assert_eq!(box_snapshot.position, Vector2::new(10, 20));
 
         let gem_snapshot = engine
@@ -8243,6 +8262,9 @@ global func Step(state, frame, random)
             .expect("gem object");
         assert_eq!(gem_snapshot.definition_id, "GEM1");
         assert_eq!(gem_snapshot.position, Vector2::new(30, 40));
+        // Loads denumerate Contained without the Enter transfer
+        // (C4Object.cpp:1582 never runs): compile default NO_OWNER.
+        assert_eq!(gem_snapshot.controller, crate::OWNER_NONE);
         assert_eq!(gem_snapshot.velocity, Vector2::new(-5, 3));
         assert_eq!(gem_snapshot.energy, 77);
         assert!(!gem_snapshot.alive);
