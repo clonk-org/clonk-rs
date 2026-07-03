@@ -2761,6 +2761,30 @@ impl MapPixelClassifier {
         }
     }
 
+    /// Test constructor with a material library and texture inventory so
+    /// `mat=`/`tex=` validation and `GetIndex` adds behave like a real
+    /// scenario load.
+    #[cfg(test)]
+    pub(crate) fn from_slots_with_library(
+        densities: [i32; 128],
+        names: Vec<Option<String>>,
+        textures: Vec<Option<String>>,
+        shapes: Vec<Option<crate::chunky::ChunkShape>>,
+        library: lc_resources::MaterialLibrary,
+        texture_inventory: Vec<String>,
+    ) -> Self {
+        Self {
+            densities,
+            names,
+            match_textures: textures.clone(),
+            textures,
+            shapes,
+            local_library: None,
+            global_library: Some(library),
+            texture_inventory,
+        }
+    }
+
     /// DensitySolid: density >= C4M_Solid=50 (C4Wrappers.h:68-71).
     fn is_solid(&self, pixel: u8) -> bool {
         self.density(pixel) >= 50
@@ -3292,20 +3316,35 @@ fn load_legacy_landscape_body(
         return Ok(None);
     }
 
-    // Dynamic map (C4Landscape::Init, C4Landscape.cpp:606-614): the basic
-    // C4MapCreator builds the 8-bit map from the [Landscape] keys; its
-    // draws come from the FixRandom(RandomSeed) bracket
-    // (C4Landscape.cpp:578,734), so they never shift the post-init synced
-    // ledger. Requires a texture map for the material bytes.
+    // Dynamic map (C4Landscape::Init, C4Landscape.cpp:606-614): a
+    // Landscape.txt map description renders through C4MapCreatorS2
+    // (CreateMapS2, C4Landscape.cpp:530-546); otherwise the basic
+    // C4MapCreator builds the 8-bit map from the [Landscape] keys. Both
+    // draw from the FixRandom(RandomSeed) bracket (C4Landscape.cpp:
+    // 578,734), so they never shift the post-init synced ledger.
+    // Requires a texture map for the material bytes.
     if let Some(classifier) = classifier.take() {
         let mut map_rng = legacy_map_creation_rng();
-        let params = basic_map_params(&manifest.core.landscape);
-        let bitmap = crate::map_creator::create_basic_map(
-            &params,
-            classifier,
-            legacy_startup_player_count(),
-            &mut map_rng,
-        );
+        let players = legacy_startup_player_count();
+        let landscape_core = &manifest.core.landscape;
+        let bitmap = read_optional("Landscape.txt")?
+            .and_then(|bytes| {
+                crate::map_creator_s2::create_s2_map(
+                    &String::from_utf8_lossy(&bytes),
+                    classifier,
+                    landscape_core.map_width,
+                    landscape_core.map_height,
+                    landscape_core.map_player_extend,
+                    players,
+                    &mut map_rng,
+                )
+            })
+            .unwrap_or_else(|| {
+                // Dynamic map by scenario (C4Landscape.cpp:612-614) —
+                // also the fallback when the exmap yields no map node.
+                let params = basic_map_params(landscape_core);
+                crate::map_creator::create_basic_map(&params, classifier, players, &mut map_rng)
+            });
         return classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, legacy_map_seed())
             .map(Some);
     }
