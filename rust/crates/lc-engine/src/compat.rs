@@ -2065,13 +2065,13 @@ fn get_menu(args: &[Value]) -> Result<Value, RuntimeError> {
 /// 735-767): a zero punch derives from the Fight physicals
 /// (BoundBy(5*attacker/target, 0, 10)); QueryCatchBlow on the target
 /// halves punch > 1 and stops the blow; the target loses punch% energy
-/// and its ComDir stops either way; a stopped blow returns false without
-/// a fling; punch >= 10 tries the Tumble action (xdir FIXED100(150)*tdir,
-/// ydir -2), the regular path GetPunched (xdir FIXED100(250)*tdir,
-/// ydir 0) — each firing CatchBlow(punch, attacker) on success.
-/// (LastEnergyLossCausePlayer kill tracing rides the engine's DoEnergy
-/// caused-by, which the scope energy write does not carry yet — the same
-/// gap as the DoEnergy host function.)
+/// (DoEnergy with the ATTACKER's controller as caused-by, kill-trace
+/// marked) and its ComDir stops either way; a stopped blow returns false
+/// without a fling; punch >= 10 tries the Tumble action (xdir
+/// FIXED100(150)*tdir, ydir -2), the regular path GetPunched (xdir
+/// FIXED100(250)*tdir, ydir 0) — each re-writing
+/// LastEnergyLossCausePlayer unguarded and firing
+/// CatchBlow(punch, attacker) on success.
 fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "Punch", "target")?
@@ -2087,6 +2087,9 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
         let scope = context.object_context()?;
         let attacker = scope.id();
         let attacker_fight = scope.resolved_physical(false).fight;
+        // cObj->Controller — the puncher's kill credit
+        // (C4ObjectCom.cpp:749,755,762).
+        let attacker_controller = scope.controller();
         // tdir = +1, DIR_Left -> -1 (C4ObjectCom.cpp:745).
         let tdir = match scope.direction() {
             Direction::Left => -1,
@@ -2099,9 +2102,9 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
             .object_scope(target)
             .map(|scope| scope.resolved_physical(false).fight)
             .unwrap_or(0);
-        Some((attacker, attacker_fight, tdir, target_fight))
+        Some((attacker, attacker_fight, attacker_controller, tdir, target_fight))
     });
-    let Some((attacker, attacker_fight, tdir, target_fight)) = read else {
+    let Some((attacker, attacker_fight, attacker_controller, tdir, target_fight)) = read else {
         return Ok(Value::Bool(false)); // !cthr->Obj / unknown target
     };
 
@@ -2130,12 +2133,20 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
         punch /= 2; // caught blow halves damage (C4ObjectCom.cpp:743)
     }
 
-    // DoEnergy(-punch, false) + ComDir stop happen even for stopped blows.
+    // DoEnergy(-punch, false, C4FxCall_EngGetPunched, cObj->Controller)
+    // + ComDir stop happen even for stopped blows (C4ObjectCom.cpp:749-752).
     let written = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return false;
         };
+        stage_energy_loss_cause(
+            context,
+            target,
+            -punch,
+            crate::C4FX_CALL_ENG_GET_PUNCHED,
+            attacker_controller,
+        );
         context
             .object_scope_mut(target)
             .map(|scope| {
@@ -2176,6 +2187,16 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
     if !flung {
         return Ok(Value::Bool(false));
     }
+    // A successful fling writes the kill trace DIRECTLY — no
+    // UpdatLastEnergyLossCause guard ("for kill tracing when pushing
+    // enemies off a cliff", C4ObjectCom.cpp:755,762).
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.pending_update.energy_loss_cause = Some(attacker_controller);
+            }
+        }
+    });
     // PSF_CatchBlow after a successful fling (C4ObjectCom.cpp:754,762).
     if let Some(Err(error)) = call_world_object_own_function(
         target,

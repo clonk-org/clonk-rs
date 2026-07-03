@@ -38135,6 +38135,54 @@ func Damage(iChange, iCausedBy) { iSaw = iChange; iBy = iCausedBy; return 1; }
         );
     }
 
+    // ObjectComPunch routes the energy loss through DoEnergy with the
+    // ATTACKER's controller (C4ObjectCom.cpp:749: DoEnergy(-punch, false,
+    // C4FxCall_EngGetPunched, cObj->Controller)) — punching an enemy off
+    // a cliff must credit the puncher's kill.
+    #[test]
+    fn punch_marks_the_attackers_controller_on_the_kill_trace_like_cpp() {
+        let script = r#"#strict
+func Hit() { return Punch(FindObject(VCTM), 5); }
+"#;
+        let mut engine = Engine::with_seed(37);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("victim spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_idx].state.controller = 4;
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 50_000;
+
+        engine
+            .call_object_function(actor_idx, "Hit", Vec::new())
+            .expect("hit runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.energy,
+            45_000,
+            "the victim loses punch% energy (C4ObjectCom.cpp:749)"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].last_energy_loss_cause, 4,
+            "the punch energy loss carries the attacker's controller (C4ObjectCom.cpp:749)"
+        );
+    }
+
     // C4Object::UpdatLastEnergyLossCause (C4Object.cpp:1369-1378):
     // self-administered damage (cause == own Controller) does not steal an
     // already-tracked killer — "stop-stop-throw while falling into teh
