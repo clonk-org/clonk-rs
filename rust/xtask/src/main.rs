@@ -615,8 +615,9 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
                 if !obj_dump.is_empty() {
                     for id in &obj_dump {
                         println!(
-                            "OBJDUMP f{frame} {id} {:?}",
-                            engine.debug_object_by_id(*id)
+                            "OBJDUMP f{frame} {id} {:?} motion {:?}",
+                            engine.debug_object_by_id(*id),
+                            engine.debug_object_motion(*id)
                         );
                         if let Some(object) = snapshot
                             .objects

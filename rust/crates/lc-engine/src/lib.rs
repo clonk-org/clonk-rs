@@ -21224,6 +21224,23 @@ impl Engine {
             })
     }
 
+    /// Debug/test helper: raw fixed-point motion state of an object —
+    /// (xdir, ydir as 16.16 raw ints, mobile flag). Headless forensics for
+    /// C4Fixed-resolution velocity questions (the snapshot only carries
+    /// fixtoi pixels).
+    pub fn debug_object_motion(&self, id: u64) -> Option<(i32, i32, bool)> {
+        self.objects
+            .iter()
+            .find(|object| object.id.as_u64() == id)
+            .map(|object| {
+                (
+                    object.fixed_velocity.x.val(),
+                    object.fixed_velocity.y.val(),
+                    object.state.mobile,
+                )
+            })
+    }
+
     /// Debug/test helper: the action names + default of a definition's
     /// library.
     pub fn debug_action_library(&self, id: &str) -> Option<(String, Vec<String>)> {
@@ -43004,6 +43021,253 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
             !mobile_of(&engine, tilted),
             "a 340-degree tilt is outside ±StableRange (C4Object.cpp:4701)"
         );
+    }
+
+    // Builds the GoldRush coach as a movement fixture: shape/vertices/
+    // frictions from Coach.c4d DefCore (wheels y=+15 friction 10,
+    // body vertices friction 100/80/80), UprightAttach=8, Mass=150.
+    fn coach_fixture_definition() -> Definition {
+        let mut coach = Definition::from_script("Wagn", "Wagon", "#strict\n").expect("compiles");
+        coach.set_shape_rect(Some(DefinitionRect::new(-27, -20, 55, 40)));
+        coach.set_shape_vertices(vec![
+            ObjectVertex {
+                x: 0,
+                y: 1,
+                cnat: 0,
+                friction: 100,
+            },
+            ObjectVertex {
+                x: -15,
+                y: -6,
+                cnat: 5,
+                friction: 80,
+            },
+            ObjectVertex {
+                x: 15,
+                y: -6,
+                cnat: 6,
+                friction: 80,
+            },
+            ObjectVertex {
+                x: -16,
+                y: 15,
+                cnat: 9,
+                friction: 10,
+            },
+            ObjectVertex {
+                x: 16,
+                y: 15,
+                cnat: 10,
+                friction: 10,
+            },
+        ]);
+        coach.set_upright_attach(CNAT_BOTTOM);
+        coach.set_mass(150);
+        coach.set_grab(1);
+        coach
+    }
+
+    // Spawns the coach fixture resting on ground at (100, 260) — wheels
+    // (y+15) one pixel above the solid line — and settles it through the
+    // spawn-frame transients so fix_x/fix_y are pixel-snapped, dirs zero
+    // and Mobile off (the state C4Object::Push finds a parked wagon in).
+    fn settled_coach_engine(landscape: Landscape) -> (Engine, ObjectId) {
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(landscape);
+        // Gravity 100 => GravAccel = FIXED100(100)/5 = raw 13107
+        // (C4Landscape.cpp:66).
+        engine.set_physics(PhysicsSettings::new(100, 100, -100));
+        engine
+            .register_definition(coach_fixture_definition())
+            .expect("registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Wagn")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(100, 260)),
+            )
+            .expect("spawns");
+        for _ in 0..3 {
+            engine.tick().expect("tick");
+        }
+        let idx = engine.find_object_index(id).expect("exists");
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.position, Vector2::new(100, 260), "settled");
+        assert_eq!(object.fixed_velocity.x, C4Fixed::ZERO);
+        assert_eq!(object.fixed_velocity.y, C4Fixed::ZERO);
+        assert!(!object.state.mobile, "parked wagon is demobilized");
+        (engine, id)
+    }
+
+    // The horse's Pull3 push against wheel friction: a pushed 150-mass
+    // wagon with VertexFriction=10 wheels loses xdir in exact
+    // ApplyFriction quanta — ffric = FFriction * 10 / 100 = FIXED100(30)
+    // * 10 / 100 = raw 1966 — once per vertical ground contact
+    // (C4Movement.cpp:297-317 vertical loop, :50-56 ApplyFriction, :89-96
+    // ContactVtxFriction takes the FIRST contacted vertex). With gravity
+    // 0.2/frame the wheels touch down every second frame (fix_y crosses
+    // the .5 rounding boundary on accumulated 0.6), and the touch-down
+    // zeroes ydir because both Left|Bottom and Right|Bottom wheels contact
+    // (C4Movement.cpp:304-317). Horizontal rolling on flat ground is
+    // contact-free and keeps the remaining xdir.
+    #[test]
+    fn pushed_wagon_loses_xdir_by_wheel_friction_quanta_on_ground_contacts() {
+        let (mut engine, id) = settled_coach_engine(Landscape::flat(400, 276));
+        let idx = engine.find_object_index(id).expect("exists");
+        // The horse's first Pull3 push on a parked wagon:
+        // dforce = ValByPhysical(250, 100000) * 100 / 150 = raw 109226,
+        // Towards(0, txdir=119276) adds the full dforce (C4Object.cpp:1770,
+        // 1775-1783). Direct dir writes must arm Mobile like Push does.
+        engine.objects[idx].fixed_velocity.x = C4Fixed::from_raw(109226);
+        engine.objects[idx].state.mobile = true;
+
+        // Frame A: gravity 0.2 only — no vertical step (fixtoi rounds
+        // 260.2 to 260), free horizontal roll, xdir untouched.
+        engine.tick().expect("tick");
+        let object = &engine.objects[engine.find_object_index(id).expect("exists")];
+        assert_eq!(object.fixed_velocity.x.val(), 109226, "no contact yet");
+        assert_eq!(object.fixed_velocity.y.val(), 13107, "one gravity quantum");
+        assert_eq!(object.state.position, Vector2::new(102, 260));
+
+        // Frame B: accumulated fix_y = 260.6 rounds to 261 — the wheels
+        // hit the ground: ONE wheel-friction quantum off xdir, ydir zeroed
+        // (both wheels contact -> C4Movement.cpp:308-317 else-branch).
+        engine.tick().expect("tick");
+        let object = &engine.objects[engine.find_object_index(id).expect("exists")];
+        assert_eq!(
+            object.fixed_velocity.x.val(),
+            109226 - 1966,
+            "ApplyFriction(xdir, 10) = FIXED100(30)*10/100 = 1966"
+        );
+        assert_eq!(object.fixed_velocity.y, C4Fixed::ZERO, "touch-down zeroes ydir");
+        assert_eq!(object.state.position, Vector2::new(103, 260));
+
+        // Frame C: airborne accumulation again — xdir keeps its value.
+        engine.tick().expect("tick");
+        let object = &engine.objects[engine.find_object_index(id).expect("exists")];
+        assert_eq!(object.fixed_velocity.x.val(), 107260);
+        assert_eq!(object.fixed_velocity.y.val(), 13107);
+
+        // Frame D: second touch-down, second quantum.
+        engine.tick().expect("tick");
+        let object = &engine.objects[engine.find_object_index(id).expect("exists")];
+        assert_eq!(object.fixed_velocity.x.val(), 107260 - 1966);
+        assert_eq!(object.fixed_velocity.y, C4Fixed::ZERO);
+    }
+
+    // Horizontal contact: the rolling wagon's leading wheel meets a step —
+    // the horizontal move aborts (ctcox = x, fix_x snapped), RedirectForce
+    // moves FIXED100(50) = raw 32768 from xdir into UPWARD ydir, then
+    // ApplyFriction(ydir, friction of the first contacted vertex — the
+    // wheel, 10) bleeds raw 1966 back off (C4Movement.cpp:266-282).
+    #[test]
+    fn wagon_hitting_a_step_redirects_half_pixel_of_xdir_upward_and_aborts() {
+        // Flat road at 276 with a raised solid ledge (surface 240) from
+        // x=120: stepping to x=104 puts the right wheel (x+16, y+15) into
+        // the ledge column while the body vertices stay clear.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut surface = vec![276; 400];
+        for column in surface.iter_mut().skip(120) {
+            *column = 240;
+        }
+        let landscape =
+            Landscape::with_default_material(400, surface, Some(earth)).expect("landscape builds");
+        let (mut engine, id) = {
+            let mut engine = Engine::with_seed(0);
+            engine.set_materials(materials);
+            engine.set_landscape(landscape);
+            engine.set_physics(PhysicsSettings::new(100, 100, -100));
+            engine
+                .register_definition(coach_fixture_definition())
+                .expect("registers");
+            let id = engine
+                .spawn_object(
+                    SpawnConfig::new("Wagn")
+                        .with_category(CATEGORY_VEHICLE)
+                        .with_position(Vector2::new(100, 260)),
+                )
+                .expect("spawns");
+            for _ in 0..3 {
+                engine.tick().expect("tick");
+            }
+            (engine, id)
+        };
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(
+            engine.objects[idx].state.position,
+            Vector2::new(100, 260),
+            "settled"
+        );
+        engine.objects[idx].fixed_velocity.x = C4Fixed::from_raw(109226);
+        engine.objects[idx].state.mobile = true;
+
+        // fix_x = 101.667 -> ctcox 102: steps to 101 free, 102 free.
+        engine.tick().expect("tick");
+        let object = &engine.objects[engine.find_object_index(id).expect("exists")];
+        assert_eq!(object.state.position, Vector2::new(102, 260));
+        assert_eq!(object.fixed_velocity.x.val(), 109226);
+
+        // fix_x = 103.33 -> ctcox 103: the step to 103 is free; the
+        // touch-down (fix_y = 260.6) costs one wheel quantum.
+        engine.tick().expect("tick");
+        let object = &engine.objects[engine.find_object_index(id).expect("exists")];
+        assert_eq!(object.state.position, Vector2::new(103, 260));
+        assert_eq!(object.fixed_velocity.x.val(), 109226 - 1966, "wheel touch-down");
+
+        // ctcox 105; the step to 104 contacts (right wheel at 120,275 in
+        // the ledge): abort + fix_x snap + RedirectForce + ydir friction
+        // of the first contacted vertex (the wheel, friction 10).
+        engine.tick().expect("tick");
+        let object = &engine.objects[engine.find_object_index(id).expect("exists")];
+        assert_eq!(object.state.position.x, 103, "horizontal move aborted");
+        assert_eq!(
+            object.fixed_velocity.x.val(),
+            109226 - 1966 - 32768,
+            "RedirectForce takes min(|xdir|, FIXED100(50)) out of xdir"
+        );
+        assert_eq!(
+            object.fixed_velocity.y.val(),
+            13107 - 32768 + 1966,
+            "redirected upward, then ApplyFriction(ydir, wheel friction 10)"
+        );
+        assert_eq!(
+            object.fixed_position.x.val(),
+            itofix(103).val(),
+            "horizontal abort snaps fix_x to the integer pixel"
+        );
+    }
+
+    // Pins the Pull3 arithmetic the GoldRush horse feeds C4Object::Push
+    // (C4Object.cpp:5110-5131): Pulling3 sets the temp Walk physical to
+    // 130000 (Horse.c4d Script.c), fWalk = ValByPhysical(280, 130000) =
+    // itofix(130000*56, 2000000) = raw 238551; with the wagon 5px past the
+    // pull position (BoundBy(iPullX - target.x) = -5, COMD_Right) the
+    // target force is fWalk + fWalk*(-5)/10 = 238551 - 119275 = raw 119276
+    // — the C4Fixed integer division truncates toward zero on the negative
+    // product. The push force on the 150-mass wagon is
+    // ValByPhysical(250, 100000)*100/150 = raw 109226.
+    #[test]
+    fn pull3_walk_physical_yields_the_goldrush_pull_forces() {
+        let walk = math::val_by_physical(280, 130_000);
+        assert_eq!(walk.val(), 238551);
+        let txdir = walk + walk * (-5) / 10;
+        assert_eq!(txdir.val(), 119276, "negative product truncates toward zero");
+        let dforce = math::val_by_physical(250, 100_000) * 100 / 150;
+        assert_eq!(dforce.val(), 109226);
+        // First push on a parked wagon: Towards(0, 119276, 109226) adds the
+        // full dforce (C4Object.cpp:1775-1783).
+        let mut xdir = C4Fixed::ZERO;
+        math::towards(&mut xdir, txdir, dforce);
+        assert_eq!(xdir.val(), 109226);
     }
 
     // Mirrors the Def TimerCall (C4Object::Execute, C4Object.cpp:1085-1091):

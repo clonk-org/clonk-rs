@@ -32,6 +32,37 @@
   `LC_XTASK_DUMP_LANDSCAPE` (xtask). RNG ledger traces:
   `LC_RNG_TRACE=<file>` (C++ temp probe in C4Random.h, re-add when
   needed) + `LC_RUST_RNG_TRACE=<file>` (committed, ledger-gated).
+- **Frame-21 rider-xdir wall forensics (2026-07-03).** The coach movement
+  friction chain is now PINNED bit-exact against C4Movement.cpp and cannot
+  be the wall: `pushed_wagon_loses_xdir_by_wheel_friction_quanta_*`,
+  `wagon_hitting_a_step_redirects_half_pixel_*` and
+  `pull3_walk_physical_yields_the_goldrush_pull_forces` (lib.rs tests)
+  verify ApplyFriction (`FFriction*percent/100`, :50-56), first-contacted-
+  vertex friction (:89-96), the vertical-contact chain (:297-317), the
+  horizontal abort + RedirectForce(FIXED100(50)) + fix_x snap (:266-282),
+  and the Pull3 forces (Pulling3 sets Walk=130000 → fWalk=238551, txdir
+  = fWalk + fWalk*(-5)/10 = 119276 raw at BoundBy=-5, dforce =
+  ValByPhysical(250,100000)*100/150 = 109226 raw). Rider CopyMotion
+  timing also matches C++: contents (C4D_Object) exec AFTER the vehicles
+  region in both engines (C4ObjectList stMain id-cluster inserts keep new
+  contents inside the items region; C4Game::ExecObjects BeginLast ⇒
+  ascending category), so at the riders' exec the coach xdir is its
+  END-OF-FRAME value. NOTE for the next probe round: the reported cpp
+  values (riders 21933 at end-f21, COACH-POST f21=0 → push 0→109226 →
+  COACH-POST f22=19967) are mutually inconsistent with C4Object.cpp —
+  towards(0,119276,109226)=109226 stands until frame end, and one
+  DoMovement can cut at most 32768+19660+32768 (raw) so 109226→19967 is
+  unreachable; but the values close into an exact per-frame cycle
+  21933 −1966(wheel quantum)= 19967 −109226(push toward a txdir<−89259)=
+  −89259 +1966 = −87293 +109226(push toward +119276) = 21933 — i.e. the
+  cpp coach oscillated ±1.3px/f under a SIGN-ALTERNATING push txdir,
+  which is impossible under a steady COMD_Right (txdir ≥ 0 with the
+  BoundBy clamp) and impossible for COMD_Left at the rig's geometry
+  (b clamps to +10 → txdir=0). Suspects to probe on the C++ side: (a) the horse's ComDir/Action.Dir timeline at
+  f19-f23 (ContactRight→TurnLeft flip?), (b) whether cpp #1455-1497 are
+  really coach-1450 contents (numbering skew), (c) the coach's xdir
+  logged INSIDE the first content's CopyMotion at f21, (d) cpp Push
+  post-value (CPPPULL logged args only).
 - The two original foundational breaks (C4Fixed positions, ChaCha RNG) are
   long fixed: positions/velocities are 16.16 `C4Fixed`, `Random()` is the C++
   LCG with a shared ledger, and the join/init draw sequences are
@@ -146,7 +177,7 @@
 
 | Subsystem | Open items |
 |---|---|
-| movement-physics | SetSolidMask update lifetime; attached-object pushback (its DensityProvider reads the put BUFFER for rotated masks, C4SolidMask.cpp:218-227 — the rotated bake buffer already models this); rotated masks stay off in the non-grid mask-rect overlay (fixture worlds only, no C++ counterpart) |
+| movement-physics | SetSolidMask update lifetime; attached-object pushback (its DensityProvider reads the put BUFFER for rotated masks, C4SolidMask.cpp:218-227 — the rotated bake buffer already models this); rotated masks stay off in the non-grid mask-rect overlay (fixture worlds only, no C++ counterpart); three DORMANT non-C++ paths flagged 2026-07-03 (inert on pixel landscapes/GoldRush speeds, but no oracle counterpart): `apply_material_interaction` multiplicative xdir damping + vertex-friction overwrite (lib.rs, heightmap resolve_collision only), the engine-wide 12px `clamp_fixed_velocity` horizontal clamp (C++ DFA_PULL/updates never clamp), and `apply_landscape_at_index`'s post-movement resolve_collision |
 | landscape | incremental ExecuteScan/DoScan (batch temperature conversion desyncs scan order) — including DoScan's per-converted-pixel CheckInstabilityRange (C4Landscape.cpp:225): the column conversion has no pixel coordinates to probe; PRETTY_TEMP_CONV; map creation beyond ChunkOZoom; pixel-exact DigFree/BlastFree accounting; blast/shake instability probes run as a post-pass in the C++ scan order (no per-pixel clear/probe interleave until blast/shake are per-pixel); segment- vs pixel-liquid model |
 | effects | Annul/AnnulCalls + FxAdd add-to-other-effect; TempRemove/TempReadd; Fx*Damage DoEnergy modification; builtin fire/helper effects (Splash/Smoke/Explosion/BubbleOut) |
 | commands | Tick2/5/35 throttling; MoveTo flight/swim control; Scale/Hangle let-go thresholds |
