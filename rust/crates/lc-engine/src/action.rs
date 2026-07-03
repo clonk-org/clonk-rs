@@ -626,6 +626,11 @@ pub struct ActionUpdate {
     pub target: Option<Option<ObjectId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target2: Option<Option<ObjectId>>,
+    /// The script SetAction seam already ran AbortCall/StartCall
+    /// synchronously (C4Object::SetAction fires them inside the call) —
+    /// the fold must not queue duplicate transition callbacks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub callbacks_dispatched: bool,
 }
 
 impl ActionUpdate {
@@ -731,6 +736,7 @@ impl Default for ActionUpdate {
             data: None,
             target: None,
             target2: None,
+            callbacks_dispatched: false,
         }
     }
 }

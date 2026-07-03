@@ -619,6 +619,26 @@ full-scenario shadow-diff (see Parity harnesses).
   vertex spans - DFA_CONNECT vertex tracking unimplemented), owner
   1428, effects 597 NoDmg singleton.
 
+- **2026-07-02 the SetAction-callback hang (fixed) + the nested-scope
+  staleness defect (contained, OPEN):** the synchronous SetAction
+  callback dispatch initially fired only for CHANGED names, leaving
+  same-name script SetActions to the deferred event queue - the coach's
+  Driving StartCall read a STALE GetAction()=="Turn" from the queue's
+  callback context, re-staged Drive0 every drain iteration, and the
+  drain ran forever (551k GetAction calls per tick; Goldrush tick 2
+  never returned). C++ has NO queue: SetAction fires AbortCall+
+  StartCall inline with no same-name gate (C4Object.cpp:4146-4183) and
+  guards work because Action.Name updates BEFORE StartCall. Now ALL
+  script SetActions dispatch synchronously and mark the staged update
+  callbacks_dispatched so the fold never queues duplicates. TWO
+  BACKSTOPS turn residual defects into log lines instead of freezes:
+  sync recursion depth >16 (C++ content chains are <=3) and a 32-event
+  drain cap. KNOWN REMAINING: rider 1425's Riding recurses to the
+  backstop (~33 warnings/120 ticks) - somewhere in the nested-scope
+  machinery a recursion level reads a stale action view (rider guard
+  vs coach IsStill). Root-causing the scope staleness is the open
+  task; the game runs (120 ticks in ~19s).
+
 ## Gates
 
 - **`cargo test --workspace`: GREEN** (~1240 pass, cargo exit 0). The old

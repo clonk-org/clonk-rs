@@ -3980,8 +3980,15 @@ impl Object {
             let command = self.command_queue.pop_front().expect("front exists");
             let delta: ObjectDelta = command.update.into();
             let delta_outcome = self.apply_delta(&delta, action_library);
+            let callbacks_dispatched = delta
+                .action
+                .as_ref()
+                .map(|action| action.callbacks_dispatched)
+                .unwrap_or(false);
             if let Some(change) = delta_outcome.action_change {
-                self.record_action_event(change.previous, ActionTransitionKind::Forced);
+                if !callbacks_dispatched {
+                    self.record_action_event(change.previous, ActionTransitionKind::Forced);
+                }
             }
             if let Some((previous, new)) = delta_outcome.container_change {
                 outcome.container_updates.push(ContainerUpdateRecord {
@@ -13578,9 +13585,17 @@ impl Engine {
                 let object = &mut self.objects[idx];
                 let previous_owner = object.state.owner;
                 let mut container_change = None;
+                let callbacks_dispatched = delta
+                    .action
+                    .as_ref()
+                    .map(|action| action.callbacks_dispatched)
+                    .unwrap_or(false);
                 let delta_outcome = object.apply_delta(&delta, &action_library);
                 if let Some(change) = delta_outcome.action_change {
-                    object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                    if !callbacks_dispatched {
+                        object
+                            .record_action_event(change.previous, ActionTransitionKind::Forced);
+                    }
                 }
                 if let Some(change) = delta_outcome.container_change {
                     container_change = Some(change);
@@ -13954,6 +13969,7 @@ impl Engine {
                 }
                 if matches!(result, ActionUpdateResult::Applied)
                     && (requested_name_change || object.state.action.name != previous_action.name)
+                    && !action.callbacks_dispatched
                 {
                     object.record_action_event(previous_action, ActionTransitionKind::Forced);
                 }
@@ -14076,7 +14092,20 @@ impl Engine {
 
         let mut needs_start = previous_action.is_none();
 
+        // C++ has NO deferred callback queue (SetAction runs its calls
+        // inline) — an unbounded drain here is always a rust-side artifact
+        // (the coach Driving loop drained forever against stale state).
+        let mut drained = 0u32;
         while let Some(event) = self.objects[index].pending_action_events.pop_front() {
+            drained += 1;
+            if drained > 32 {
+                tracing::warn!(
+                    object = self.objects[index].id.as_u64(),
+                    "action-callback drain backstop hit; dropping queued transitions"
+                );
+                self.objects[index].pending_action_events.clear();
+                break;
+            }
             let callback_kind = match event.kind {
                 ActionTransitionKind::Natural => ActionCallbackKind::End,
                 ActionTransitionKind::Forced => ActionCallbackKind::Abort,
@@ -14128,6 +14157,11 @@ impl Engine {
         function_override: Option<&str>,
         state_override: Option<ObjectState>,
     ) -> Result<(), EngineError> {
+        if std::env::var("LC_DEBUG_WAGON").is_ok()
+            && self.objects.get(index).map(|o| o.id.as_u64()) == Some(1450)
+        {
+            eprintln!("WAGON callback {:?} action={}", kind, action_name);
+        }
         let definition_id = self.objects[index].definition_id.clone();
         let action_library = {
             let definition = self
@@ -17165,6 +17199,9 @@ impl Engine {
         definition_id: &DefinitionId,
         clear_targets: bool,
     ) {
+        if std::env::var("LC_DEBUG_WAGON").is_ok() && self.objects.get(idx).map(|o| o.id.as_u64()) == Some(1450) {
+            eprintln!("WAGON reset_action_to_default");
+        }
         let library = self
             .definitions
             .get(definition_id)
@@ -17181,6 +17218,7 @@ impl Engine {
             data: None,
             target: if clear_targets { Some(None) } else { None },
             target2: if clear_targets { Some(None) } else { None },
+            callbacks_dispatched: false,
         };
 
         let object = &mut self.objects[idx];
@@ -17334,6 +17372,9 @@ impl Engine {
     }
 
     fn apply_no_attach_action(&mut self, idx: usize, library: &ActionLibrary) {
+        if std::env::var("LC_DEBUG_WAGON").is_ok() && self.objects[idx].id.as_u64() == 1450 {
+            eprintln!("WAGON no_attach_action fires");
+        }
         if idx >= self.objects.len() {
             return;
         }
@@ -17367,6 +17408,7 @@ impl Engine {
             data: None,
             target: Some(None),
             target2: Some(None),
+            callbacks_dispatched: false,
         };
 
         let object = &mut self.objects[idx];
@@ -18547,6 +18589,7 @@ impl Engine {
             data: None,
             target: Some(Some(target_id)),
             target2: Some(None),
+            callbacks_dispatched: false,
         };
         let object = &mut self.objects[idx];
         let result = object            .state
@@ -19353,6 +19396,7 @@ impl Engine {
             data: None,
             target: Some(None),
             target2: Some(None),
+            callbacks_dispatched: false,
         };
         let object = &mut self.objects[idx];
         let result = object            .state
@@ -19396,6 +19440,7 @@ impl Engine {
                     data: None,
                     target: Some(None),
                     target2: Some(None),
+                    callbacks_dispatched: false,
                 };
                 let object = &mut self.objects[idx];
                 let result = object                    .state

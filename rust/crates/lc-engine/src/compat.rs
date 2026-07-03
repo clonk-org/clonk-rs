@@ -37,6 +37,7 @@ use std::mem;
 use tracing::{debug, info};
 
 thread_local! {
+    static SETACTION_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static HOST_CONTEXT: RefCell<Option<EffectHostContext>> = const { RefCell::new(None) };
     static RANDOM_CONTEXT: RefCell<Option<Rc<RandomContext>>> = const { RefCell::new(None) };
     static ENVIRONMENT_CONTEXT: RefCell<Option<Rc<EnvironmentContext>>> = const {
@@ -7846,7 +7847,8 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         None => return Ok(Value::Bool(false)),
     };
 
-    HOST_CONTEXT.with(|cell| {
+    let mut sync_callbacks: Option<(ObjectId, Option<String>, Option<String>)> = None;
+    let staged = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
@@ -7886,9 +7888,63 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         if procedure_changed {
             object.reset_action_data();
         }
+        // C4Object::SetAction fires the calls with NO same-action gate
+        // (C4Object.cpp:4146-4183) — a same-name SetAction re-runs the
+        // StartCall once. Marking the update dispatched keeps the fold
+        // from ALSO queueing deferred Abort/Start events (C++ has no
+        // such queue; leaving same-name staging to the queue made the
+        // coach's Driving guard loop forever against stale state).
+        if let Some(update) = object.pending_update.action.as_mut() {
+            update.callbacks_dispatched = true;
+        }
+        sync_callbacks = Some((
+            object.id(),
+            object
+                .action_library
+                .abort_call_for_action(&current_action)
+                .map(str::to_string),
+            object
+                .action_library
+                .start_call_for_action(&name)
+                .map(str::to_string),
+        ));
 
         Ok(Value::Bool(true))
-    })
+    })?;
+    // C4Object::SetAction runs the AbortCall for the OLD action and the
+    // StartCall for the NEW one SYNCHRONOUSLY inside the call
+    // (SetActionByName defaults SAC_StartCall|SAC_AbortCall) — the
+    // coach's Drive0 StartCall reads the PRE-SetDir facing for its seat
+    // vertex, so deferral changes the result.
+    if let Some((id, abort_call, start_call)) = sync_callbacks {
+        let depth = SETACTION_DEPTH.with(|d| {
+            d.set(d.get() + 1);
+            d.get()
+        });
+        // C++ has no recursion guard here — content terminates because its
+        // guards read the LIVE Action.Name (set before StartCall,
+        // C4Object.cpp:4116-4152). The rust nested-scope view can go stale
+        // across recursion levels (rider Riding vs coach IsStill —
+        // PORT_STATUS), so the backstop turns that defect into a log line
+        // instead of a freeze. Legitimate content chains are depth <= 3
+        // (mount -> RideStill -> Ride).
+        if depth > 16 {
+            tracing::warn!(?id, "SetAction callback recursion backstop hit");
+            SETACTION_DEPTH.with(|d| d.set(d.get() - 1));
+            return Ok(staged);
+        }
+        for callback in [abort_call, start_call].into_iter().flatten() {
+            if let Some(Err(error)) = call_world_object_own_function(id, &callback, &[]) {
+                tracing::warn!(
+                    %error,
+                    callback,
+                    "SetAction callback error; continuing like the C++ fail-safe exec"
+                );
+            }
+        }
+        SETACTION_DEPTH.with(|d| d.set(d.get() - 1));
+    }
+    Ok(staged)
 }
 
 fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -8271,6 +8327,7 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
+
     let mut index = 0;
     let target_id =
         consume_optional_object_reference_argument(args, &mut index, "GetAction", "target")?;
