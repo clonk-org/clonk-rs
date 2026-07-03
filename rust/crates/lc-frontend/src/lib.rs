@@ -1351,9 +1351,44 @@ impl GraphicsSystem {
         let gamma = environment.settings.season_gamma();
         let top_gamma = gamma.map(|(_, _, high)| high);
         let bottom_gamma = gamma.map(|(low, _, _)| low);
-        let top = Self::mix_color_with_gamma(settings.fade_top, top_gamma);
-        let bottom = Self::mix_color_with_gamma(settings.fade_bottom, bottom_gamma);
+        // C4Sky::Draw without a surface fades from GetSkyFadeClr(TargetY)
+        // to GetSkyFadeClr(TargetY+Hgt) (C4Sky.cpp:219-225): the fade spans
+        // the landscape height in world coordinates, offset by the
+        // viewport origin — not merely the visible window.
+        let zoom = if self.viewport_zoom > 0.0 {
+            self.viewport_zoom
+        } else {
+            1.0
+        };
+        let view_top = self.viewport_y.round() as i32;
+        let view_bottom = (self.viewport_y + self.surface_height as f32 / zoom).round() as i32;
+        let top = Self::mix_color_with_gamma(
+            Self::sky_fade_color(settings, view_top, self.world_height),
+            top_gamma,
+        );
+        let bottom = Self::mix_color_with_gamma(
+            Self::sky_fade_color(settings, view_bottom, self.world_height),
+            bottom_gamma,
+        );
         self.fill_vertical_gradient(top, bottom, lighting);
+    }
+
+    /// C4Sky::GetSkyFadeClr (C4Sky.cpp:230-236): integer fade between
+    /// FadeClr1 (world top) and FadeClr2 across the landscape height —
+    /// iPos2 = iY*256/GBackHgt, channel = (c1*iPos1 + c2*iPos2) >> 8.
+    /// C++ never sees out-of-landscape Y (the viewport is clamped); the
+    /// clamp here keeps stray coordinates from wrapping the fixed-point mix.
+    fn sky_fade_color(settings: &SkySettings, world_y: i32, world_height: i32) -> RgbColor {
+        let height = world_height.max(1);
+        let pos2 = (world_y * 256 / height).clamp(0, 256);
+        let pos1 = 256 - pos2;
+        let channel =
+            |c1: u8, c2: u8| ((i32::from(c1) * pos1 + i32::from(c2) * pos2) >> 8).clamp(0, 255) as u8;
+        RgbColor::new(
+            channel(settings.fade_top.r, settings.fade_bottom.r),
+            channel(settings.fade_top.g, settings.fade_bottom.g),
+            channel(settings.fade_top.b, settings.fade_bottom.b),
+        )
     }
 
     fn fill_vertical_gradient(&mut self, top: Color, bottom: Color, lighting: f32) {
@@ -1362,12 +1397,8 @@ impl GraphicsSystem {
         }
         let height = self.surface_height.saturating_sub(1).max(1);
         for y in 0..self.surface_height {
-            let t = if height == 0 {
-                0.0
-            } else {
-                y as f32 / height as f32
-            };
-            let blended = Self::lerp_color(bottom, top, t);
+            let t = y as f32 / height as f32;
+            let blended = Self::lerp_color(top, bottom, t);
             let tinted = Self::apply_lighting(blended, lighting);
             for x in 0..self.surface_width {
                 let _ = self.surface.set_pixel(x, y, tinted);
@@ -4315,6 +4346,72 @@ mod tests {
         assert!(
             found,
             "expected to find player cursor color in surface pixels"
+        );
+    }
+
+    #[test]
+    fn sky_fade_color_matches_c4sky_get_sky_fade_clr() {
+        // C4Sky::GetSkyFadeClr (C4Sky.cpp:230-236): integer fade between
+        // FadeClr1 (world top) and FadeClr2 across the landscape height:
+        // iPos2 = iY*256/GBackHgt, channel = (c1*iPos1 + c2*iPos2) >> 8.
+        let settings = SkySettings {
+            fade_top: RgbColor::new(28, 64, 152),
+            fade_bottom: RgbColor::new(192, 196, 252),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            GraphicsSystem::sky_fade_color(&settings, 0, 400),
+            RgbColor::new(28, 64, 152),
+            "world top shows FadeClr1"
+        );
+        assert_eq!(
+            GraphicsSystem::sky_fade_color(&settings, 400, 400),
+            RgbColor::new(192, 196, 252),
+            "world bottom shows FadeClr2"
+        );
+        // iY=100, GBackHgt=400: iPos2 = 64, iPos1 = 192;
+        // r = (28*192 + 192*64) >> 8 = 69, g = (64*192 + 196*64) >> 8 = 97,
+        // b = (152*192 + 252*64) >> 8 = 177.
+        assert_eq!(
+            GraphicsSystem::sky_fade_color(&settings, 100, 400),
+            RgbColor::new(69, 97, 177),
+        );
+    }
+
+    #[test]
+    fn sky_gradient_shows_fade_top_at_the_top_of_the_view() {
+        // C4Sky::Draw without a surface fades FadeClr1 -> FadeClr2 top to
+        // bottom (C4Sky.cpp:219-225 via GetSkyFadeClr, C4Sky.cpp:230-236).
+        let mut snapshot = make_snapshot();
+        snapshot.environment.settings.time_of_day = 0; // full daylight
+        snapshot.landscape = None;
+
+        let settings = lc_engine::SkySettings {
+            fade_top: RgbColor::new(200, 16, 16),
+            fade_bottom: RgbColor::new(16, 16, 200),
+            ..Default::default()
+        };
+
+        let focus = &snapshot.objects[0];
+        let mut graphics = GraphicsSystem::new(
+            120,
+            80,
+            60,
+            "Sky Fade",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_sky(Some(SkyRenderState::new(settings, None)));
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let top = graphics.surface().get_pixel(0, 0).unwrap();
+        assert!(
+            top.r > top.b,
+            "expected the red fade_top at the top of the view, got {top:?}"
         );
     }
 
