@@ -23604,7 +23604,6 @@ impl Engine {
         let old_mat = self.landscape_material(tx, ty);
         if let Some(landscape) = self.landscape.as_mut() {
             landscape.insert_material_pix(tx, ty, mat);
-            landscape.mark_mass_mover_dirty();
         }
         if let Some(old_mat) = old_mat {
             self.insert_material(old_mat, tx, ty - 1, 0, 0);
