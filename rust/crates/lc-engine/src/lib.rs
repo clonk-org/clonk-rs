@@ -32685,6 +32685,99 @@ func Trigger() {
     }
 
     #[test]
+    fn select_menu_item_moves_selection_and_fires_on_menu_selection_like_cpp() {
+        // FnSelectMenuItem (C4Script.cpp:1736-1741) -> C4Menu::SetSelection
+        // (C4Menu.cpp:557-594): only SELECTABLE items move the selection,
+        // but the call returns true whenever a menu is active, and
+        // fDoCalls fires OnMenuSelection(Selection, ParentObject) on the
+        // command object EITHER way (C4ObjectMenu::OnSelectionChanged,
+        // C4ObjectMenu.cpp:93-104) — with the (possibly unchanged) final
+        // selection.
+        let script = r#"
+        local lastSel;
+        func OnMenuSelection(sel, menuObj) { lastSel = sel; }
+        func NoMenu() { return SelectMenuItem(0, this()); }
+        func OpenMenu() {
+            CreateMenu(WIPF, this(), this(), 0, "Choose");
+            AddMenuItem("A", "CmdA", WIPF, this());
+            AddMenuItem("B", "CmdB", WIPF, this());
+            AddMenuItem("C", "", WIPF, this());
+            return 1;
+        }
+        func Sel(i) { return SelectMenuItem(i, this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+        let last_sel = |engine: &Engine| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine.objects[idx]
+                .state
+                .local_vars
+                .get("lastSel")
+                .cloned()
+                .unwrap_or(Value::Nil)
+        };
+
+        assert_eq!(
+            call(&mut engine, "NoMenu", Vec::new()),
+            Value::Bool(false),
+            "no menu -> false (C4Script.cpp:1739)"
+        );
+        assert_eq!(call(&mut engine, "OpenMenu", Vec::new()), Value::Int(1));
+
+        // Selectable item: selection moves, callback sees the new index.
+        assert_eq!(
+            call(&mut engine, "Sel", vec![Value::Int(1)]),
+            Value::Bool(true)
+        );
+        assert_eq!(last_sel(&engine), Value::Int(1));
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu is open");
+        assert_eq!(menu.selection, 1);
+
+        // Non-selectable item: selection stays, call still true, callback
+        // fires with the OLD selection.
+        assert_eq!(
+            call(&mut engine, "Sel", vec![Value::Int(2)]),
+            Value::Bool(true)
+        );
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu is open");
+        assert_eq!(menu.selection, 1, "item without command is not selectable");
+        assert_eq!(last_sel(&engine), Value::Int(1));
+
+        // Out of range behaves the same.
+        assert_eq!(
+            call(&mut engine, "Sel", vec![Value::Int(9)]),
+            Value::Bool(true)
+        );
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu is open");
+        assert_eq!(menu.selection, 1);
+    }
+
+    #[test]
     fn do_damage_asks_effects_for_non_living_and_fires_callback() {
         // C4Object::DoDamage (C4Object.cpp:1330-1343): NON-living things ask
         // their effects first (the inverse of DoEnergy's Alive gate), the

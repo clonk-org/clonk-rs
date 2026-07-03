@@ -2218,6 +2218,82 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(stored))
 }
 
+/// C4ObjectMenu::OnSelectionChanged (C4ObjectMenu.cpp:93-104): user menus
+/// fire OnMenuSelection(iNewSelection, ParentObject) on the command object
+/// (CB_Object) or the scenario script (CB_Scenario); the result is
+/// discarded, a missing function is a silent miss (PSF_MenuSelection is
+/// "~"-prefixed), and callee errors log-and-continue (fPassErrors=false).
+fn menu_selection_changed(menu_object: ObjectId, menu: &crate::ObjectMenuState) {
+    if !menu.user_menu {
+        return;
+    }
+    let pars = [
+        Value::Int(menu.selection),
+        object_reference_value(menu_object),
+    ];
+    let result = match menu.command_object {
+        Some(command_object) => {
+            call_world_object_own_function(command_object, "OnMenuSelection", &pars)
+        }
+        None => HOST_CONTEXT
+            .with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.world.scenario_script().cloned())
+            })
+            .and_then(|script| call_scoped_script_function(script, "OnMenuSelection", &pars)),
+    };
+    if let Some(Err(error)) = result {
+        tracing::warn!(
+            %error,
+            "script error in OnMenuSelection; continuing like the C++ fail-safe exec"
+        );
+    }
+}
+
+/// FnSelectMenuItem (C4Script.cpp:1736-1741) → C4Menu::SetSelection
+/// (C4Menu.cpp:557-594): moves the selection only onto SELECTABLE items
+/// (or clears it on -1 in an empty menu), returns true whenever a menu is
+/// active, and always runs the selection callback with the FINAL selection
+/// (fDoCalls=true).
+fn select_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
+    let item = parse_optional_i32(args.first(), "SelectMenuItem", "item")?.unwrap_or(0);
+    let target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SelectMenuItem",
+        "menu object",
+    )?;
+    let Some(target) = target.or(active_object_id()) else {
+        return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1738)
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1739)
+    };
+    let selectable = usize::try_from(item)
+        .ok()
+        .and_then(|index| menu.items.get(index))
+        .map(|entry| entry.selectable)
+        .unwrap_or(false);
+    if (item == -1 && menu.items.is_empty()) || selectable {
+        menu.selection = item;
+    }
+    let stored = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu.clone())))
+            .unwrap_or(false)
+    });
+    if stored {
+        menu_selection_changed(target, &menu);
+    }
+    Ok(Value::Bool(true))
+}
+
 /// FnCloseMenu (C4Script.cpp:4309-4314): pObj->CloseMenu(true) — the
 /// forced close never asks MenuQueryCancel and always reports success.
 fn close_menu(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -4106,6 +4182,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CloseMenu", close_menu);
     script.register_host_function("CreateMenu", create_menu);
     script.register_host_function("GetMenu", get_menu);
+    script.register_host_function("SelectMenuItem", select_menu_item);
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("SetSolidMask", set_solid_mask);
@@ -18131,6 +18208,7 @@ mod tests {
         "RemoveObject",
         "ResetPhysical",
         "ScriptGo",
+        "SelectMenuItem",
         "SetAction",
         "SetActionData",
         "SetActionTargets",
