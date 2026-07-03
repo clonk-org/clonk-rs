@@ -4342,6 +4342,15 @@ fn convert_action_definition(
     if action.no_other_action {
         spec = spec.with_no_other_action(true);
     }
+    if let Some(dig_free) = action.dig_free {
+        spec = spec.with_dig_free(dig_free);
+    }
+    // ActMap Attach: the ExecAction default case zeroes dirs and
+    // mobilizes instead of applying gravity (C4Object.cpp:5426-5437) —
+    // dropping it made every NONE-procedure aimer/rider free-fall.
+    if action.attach != 0 {
+        spec = spec.with_attach(action.attach);
+    }
     let mut graphics = DefinitionActionGraphics::default();
     graphics.length = action.length;
     graphics.directions = action.directions.unwrap_or(1).max(1);

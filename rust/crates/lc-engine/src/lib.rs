@@ -19884,6 +19884,13 @@ impl Engine {
         self.objects.iter().position(|object| object.id.as_u64() == id)
     }
 
+    /// Debug helper: an action's ActMap Attach bits.
+    pub fn debug_action_attach(&self, id: &str, action: &str) -> Option<u32> {
+        self.definitions
+            .get(&DefinitionId::from(id))
+            .map(|def| def.action_library().attach_for_action(action))
+    }
+
     pub fn debug_landscape_is_solid(&self, x: i32, y: i32) -> bool {
         self.landscape
             .as_ref()
