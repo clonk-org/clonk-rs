@@ -16532,12 +16532,37 @@ impl Engine {
                 .as_ref()
                 .map(|landscape| landscape.is_liquid_at(probe.x, probe.y))
                 .unwrap_or(false);
-            let state = &mut self.objects[idx].state;
+            let state = &self.objects[idx].state;
             if wet && !state.in_liquid {
+                // Entry splash (C4Movement.cpp:450-453): fast + heavy
+                // objects splash — synced RNG draws + FXU1 bubbles.
+                let object_mass = self
+                    .definitions
+                    .get(&self.objects[idx].definition_id)
+                    .map(|definition| definition.mass())
+                    .unwrap_or(0);
+                let state = &self.objects[idx].state;
+                let should_splash =
+                    state.ocf & crate::ocf::HIT_SPEED2 != 0 && object_mass > 3;
+                let (splash_x, splash_y, splash_amt) = {
+                    let shape = self
+                        .definitions
+                        .get(&self.objects[idx].definition_id)
+                        .and_then(|definition| definition.shape_rect());
+                    let area = shape
+                        .map(|rect| rect.width * rect.height / 10)
+                        .unwrap_or(0)
+                        .min(20);
+                    (state.position.x, state.position.y + 1, area)
+                };
+                if should_splash {
+                    self.splash(splash_x, splash_y, splash_amt)?;
+                }
+                let state = &mut self.objects[idx].state;
                 state.in_liquid = true;
                 movement_outcome.no_attach = false;
-            } else if !wet && state.in_liquid {
-                state.in_liquid = false;
+            } else if !wet && self.objects[idx].state.in_liquid {
+                self.objects[idx].state.in_liquid = false;
             }
         }
         // Contact Action, then Attachment Loss Action, then the Hit
@@ -19891,9 +19916,22 @@ impl Engine {
                 let cause = self.objects[idx].last_energy_loss_cause;
                 self.change_object_energy(idx, -1, C4FX_CALL_ENG_ASPHYXIATION, cause);
             }
-            // The BubbleOut x argument draws Random(5) before the call
-            // (C4Object.cpp:905); the bubble object itself is open.
-            let _ = self.rng.random(5);
+            // BubbleOut(x + Random(5) - 2, y + Shape.y/2)
+            // (C4Object.cpp:906).
+            let bubble_dx = self.rng.random(5) - 2;
+            let (bubble_x, bubble_y) = {
+                let state = &self.objects[idx].state;
+                let shape_top = self
+                    .definitions
+                    .get(&self.objects[idx].definition_id)
+                    .and_then(|definition| definition.shape_rect())
+                    .map(|rect| rect.y)
+                    .unwrap_or(0);
+                (state.position.x + bubble_dx, state.position.y + shape_top / 2)
+            };
+            if let Err(error) = self.bubble_out(bubble_x, bubble_y) {
+                tracing::warn!(%error, "BubbleOut failed; continuing");
+            }
             // Physical training (C4Object.cpp:908).
             self.train_physical(idx, "Breath", 2, C4_MAX_PHYSICAL);
         } else {
@@ -23321,6 +23359,92 @@ impl Engine {
         }
         self.update_sector_for_index(index);
         Ok((id, additional_spawns))
+    }
+
+    /// BubbleOut (C4Effect.cpp:847-857): a bubble only from semi-solid
+    /// (submerged) spots, capped at the sync-mode smoke level 150
+    /// (GetSmokeLevel, C4Effect.cpp:838-844).
+    fn bubble_out(&mut self, tx: i32, ty: i32) -> Result<(), EngineError> {
+        let semi_solid = self
+            .landscape
+            .as_ref()
+            .map(|landscape| landscape.is_semi_solid_at(tx, ty))
+            .unwrap_or(false);
+        if !semi_solid {
+            return Ok(());
+        }
+        let bubble_count = self
+            .objects
+            .iter()
+            .filter(|object| {
+                object.definition_id.as_str() == "FXU1"
+                    && object.state.status.is_active()
+                    && !object.destroyed
+            })
+            .count();
+        if bubble_count >= 150 {
+            return Ok(());
+        }
+        let config = SpawnConfig::new("FXU1")
+            .with_position(Vector2::new(tx, ty))
+            .with_owner(-1);
+        let _ = self.process_spawn_queue(vec![config])?;
+        Ok(())
+    }
+
+    /// Splash (C4Effect.cpp:800-835): bubbles + liquid PXS on entering
+    /// water fast. The Random draws are synced — order matters.
+    fn splash(&mut self, tx: i32, ty: i32, amt: i32) -> Result<(), EngineError> {
+        let Some(landscape) = self.landscape.as_ref() else {
+            return Ok(());
+        };
+        // Splash only if there is free space above.
+        if landscape.is_semi_solid_at(tx, ty - 15) {
+            return Ok(());
+        }
+        // Liquid + instable check on the back material
+        // (DensityLiquid: 25 <= density < 50, C4Material.h).
+        let liquid_ok = landscape
+            .material_at(tx, ty)
+            .and_then(|id| self.materials.get_by_id(id))
+            .map(|material| {
+                let density = material.density();
+                (25..50).contains(&density) && material.instable()
+            })
+            .unwrap_or(false);
+        if !liquid_ok {
+            return Ok(());
+        }
+        let mut sy = ty;
+        while landscape.is_liquid_at(tx, sy) && sy > ty - 20 && sy >= 0 {
+            sy -= 1;
+        }
+        for _ in 0..amt {
+            // force argument evaluation order (C4Effect.cpp:815-817)
+            let r2 = self.rng.random(16);
+            let r1 = self.rng.random(16);
+            self.bubble_out(tx + r1 - 8, ty + r2 - 6)?;
+            let landscape = self.landscape.as_ref().expect("landscape checked above");
+            if landscape.is_liquid_at(tx, ty) && !landscape.is_semi_solid_at(tx, sy) {
+                let r2 = -self.rng.random(200);
+                let r1 = self.rng.random(151) - 75;
+                let extracted = self
+                    .landscape
+                    .as_mut()
+                    .and_then(|landscape| landscape.extract_material_at(tx, ty));
+                if let Some(material) = extracted {
+                    self.pxs_system.create(
+                        material,
+                        itofix(tx),
+                        itofix(sy),
+                        math::fixed100(r1),
+                        math::fixed100(r2),
+                    );
+                }
+            }
+        }
+        // Splash sounds are presentation-only.
+        Ok(())
     }
 
     fn process_spawn_queue(
