@@ -2863,6 +2863,11 @@ struct Object {
     command_queue: VecDeque<QueuedCommand>,
     commands: CommandStack,
     pending_action_events: VecDeque<ActionTransitionEvent>,
+    /// Monotonic creation sequence for the C4ObjectList exec order:
+    /// within a sort-category block, loaded objects exec in file order
+    /// and later creations exec after them (Add inserts at the block
+    /// head; ExecObjects iterates BeginLast, C4Game.cpp:1572).
+    exec_seq: u64,
     material_contents: Vec<i32>,
     shape_template: ObjectShapeTemplate,
     own_shape_vertices: Option<Vec<ObjectVertex>>,
@@ -2968,6 +2973,7 @@ impl Object {
             command_queue: VecDeque::new(),
             commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
+            exec_seq: 0,
             material_contents: Vec::new(),
             shape_template,
             own_shape_vertices,
@@ -8208,6 +8214,7 @@ pub struct Engine {
     /// Game.Parameters.RandomSeed - kept for the game-start re-fix
     /// (C4Game::Synchronize, C4Game.cpp:3695).
     random_seed: u64,
+    exec_seq_counter: u64,
     frame: u64,
     landscape: Option<Landscape>,
     sectors: Option<SectorMap>,
@@ -9541,6 +9548,7 @@ impl Engine {
             scenario_script_go: false,
             scenario_script_counter: 0,
             random_seed: seed,
+            exec_seq_counter: 0,
             frame: 0,
             landscape: None,
             sectors: None,
@@ -13138,7 +13146,33 @@ impl Engine {
         // Random calls); swapped in only around step_command_stack so the
         // effect-callback paths below keep using self.rng directly.
         let command_rng = std::cell::RefCell::new(LcgRng::default());
-        for idx in 0..self.objects.len() {
+        // C4Game::ExecObjects iterates the main list from the BACK
+        // (BeginLast, C4Game.cpp:1572); the list is category-DESCENDING
+        // with insert-at-block-head (C4ObjectList::Add:165-180), so the
+        // effective exec order is ASCENDING sort-category, file order
+        // within a loaded block, later creations after them. Unsorted
+        // objects (Line defs) sit at the list end -> exec first. The
+        // GoldRush wagon (a script-created vehicle) must exec BEFORE the
+        // joined crew it contains: CopyMotion reads its post-move state.
+        let mut exec_order: Vec<usize> = (0..self.objects.len()).collect();
+        exec_order.sort_by_key(|&idx| {
+            let object = &self.objects[idx];
+            let unsorted = self
+                .definitions
+                .get(&object.definition_id)
+                .map(|definition| definition.line() != 0)
+                .unwrap_or(false);
+            if unsorted {
+                (-1, std::cmp::Reverse(object.exec_seq))
+            } else {
+                (
+                    object.state.category & CATEGORY_SORT_LIMIT,
+                    std::cmp::Reverse(u64::MAX - object.exec_seq),
+                )
+            }
+        });
+        for idx in exec_order {
+
             // UpdateOCF runs first in C4Object::Execute (C4Object.cpp:1058).
             self.refresh_object_ocf(idx);
             let definition_id = self.objects[idx].definition_id.clone();
@@ -19839,6 +19873,11 @@ impl Engine {
     }
 
     /// Debug helper: landscape solidity probe.
+    /// Debug helper: an object's position in the exec vector.
+    pub fn debug_object_vector_index(&self, id: u64) -> Option<usize> {
+        self.objects.iter().position(|object| object.id.as_u64() == id)
+    }
+
     pub fn debug_landscape_is_solid(&self, x: i32, y: i32) -> bool {
         self.landscape
             .as_ref()
@@ -22408,6 +22447,8 @@ impl Engine {
         // GoldRush wagon (CreateObject(COAC,28,270) -> center 250, 20px
         // above the road) FLOATS at first; snapping it to the surface
         // displaced it and its 30+ contents (the (0,-20) live class).
+        object.exec_seq = self.exec_seq_counter;
+        self.exec_seq_counter += 1;
         self.objects.push(object);
         self.note_objects_changed();
         let index = self.objects.len() - 1;
