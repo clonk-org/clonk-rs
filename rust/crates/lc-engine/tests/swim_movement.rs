@@ -36,6 +36,11 @@ fn swim_procedure_handles_direction_and_drift() -> Result<(), Box<dyn std::error
             .with_command_direction(CommandDirection::UpRight),
     )?;
 
+    // C4Object InLiquid: this fixture has no water — arm the flag so the
+    // DFA_SWIM out-of-liquid exit (C4Object.cpp:4946-4956) does not
+    // convert the swimmer to Walk.
+    engine.debug_set_in_liquid(object_id, true);
+
     let snapshot = engine.tick()?;
     let object = snapshot
         .object(object_id)

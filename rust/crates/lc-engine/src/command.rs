@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
-use crate::transfer::{TransferZone, TransferZoneTable};
 use crate::math::{self, FixedVec2};
+use crate::transfer::{TransferZone, TransferZoneTable};
 use crate::{
     ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction, ObjectId,
     ObjectStatus, ObjectUpdate, PlayerStatus, Vector2, CATEGORY_OBJECT, CATEGORY_STATIC_BACK,
@@ -380,10 +380,7 @@ mod tests {
             "side-move lands on top of the jump (AddCommand pushes front twice)"
         );
         match (&result.operations[0], &result.operations[1]) {
-            (
-                CommandOperation::PushFront(jump),
-                CommandOperation::PushFront(side_move),
-            ) => {
+            (CommandOperation::PushFront(jump), CommandOperation::PushFront(side_move)) => {
                 assert_eq!(jump.id, CommandId::Jump);
                 assert_eq!(side_move.id, CommandId::MoveTo);
                 assert_eq!(side_move.update_interval, 50);
@@ -1474,7 +1471,7 @@ mod tests {
 
         for frame in 0..2 {
             let ctx = CommandRuntimeContext {
-            landscape: None,
+                landscape: None,
                 frame,
                 position: actor.position,
                 object: objects.get(&actor_id).expect("actor present"),
@@ -4635,7 +4632,7 @@ mod tests {
         let initial_len = stack.len();
         loop {
             let step_ctx = CommandRuntimeContext {
-            landscape: None,
+                landscape: None,
                 frame,
                 position: ctx.position,
                 object: ctx.object,
@@ -4735,7 +4732,7 @@ mod tests {
         let initial_len = stack.len();
         loop {
             let step_ctx = CommandRuntimeContext {
-            landscape: None,
+                landscape: None,
                 frame,
                 position: ctx.position,
                 object: ctx.object,
@@ -4833,7 +4830,7 @@ mod tests {
         let mut frame = ctx.frame + 1;
         loop {
             let step_ctx = CommandRuntimeContext {
-            landscape: None,
+                landscape: None,
                 frame,
                 position: ctx.position,
                 object: ctx.object,
@@ -6399,7 +6396,10 @@ pub enum CommandOperation {
     PushBack(CommandRequest),
     /// FnFinishCommand (C4Script.cpp:947-957): mark the index-th stack
     /// entry finished (success) or bump its failure counter.
-    Finish { index: i32, success: bool },
+    Finish {
+        index: i32,
+        success: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7126,8 +7126,7 @@ impl MoveToState {
             && c4_distance(cx, cy, tx, ty) > 30
         {
             let mut top_free = 0;
-            while top_free < 50
-                && !landscape.is_solid_at(cx, cy + ctx.object.shape_top - top_free)
+            while top_free < 50 && !landscape.is_solid_at(cx, cy + ctx.object.shape_top - top_free)
             {
                 top_free += 1;
             }
@@ -9784,13 +9783,15 @@ impl GetState {
         let above = ctx.position.y - ty;
         if (-10..=10).contains(&(ctx.position.x - tx)) && (30..=50).contains(&above) {
             if let Some(rng) = ctx.rng {
-                let side = if rng.borrow_mut().random(2) != 0 { -1 } else { 1 };
+                let side = if rng.borrow_mut().random(2) != 0 {
+                    -1
+                } else {
+                    1
+                };
                 let side_x = ctx.position.x + side * above;
                 let path_clear = ctx.landscape.is_none_or(|landscape| {
-                    landscape.path_is_clear(
-                        Vector2::new(side_x, ctx.position.y),
-                        Vector2::new(tx, ty),
-                    )
+                    landscape
+                        .path_is_clear(Vector2::new(side_x, ctx.position.y), Vector2::new(tx, ty))
                 });
                 if path_clear {
                     result.operations.push(CommandOperation::PushFront(

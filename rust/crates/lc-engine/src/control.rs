@@ -352,11 +352,7 @@ impl RawPacket {
 
         if id == CID_JOIN_PLR {
             // C4ControlJoinPlayer::CompileFunc (C4Control.cpp:852-863).
-            let filename = self
-                .fields
-                .get("Filename")
-                .cloned()
-                .unwrap_or_default();
+            let filename = self.fields.get("Filename").cloned().unwrap_or_default();
             let at_client = parse_int_field(&self.fields, "AtClient").unwrap_or(-1);
             let info_id = parse_int_field(&self.fields, "InfoID").unwrap_or(-1);
             let by_res = self
@@ -382,9 +378,7 @@ impl RawPacket {
             // C4ClientPlayerInfos (C4PlayerInfo.cpp:601-633): client ID and
             // flags in the packet body, one [Player] section per info
             // (C4PlayerInfo CompileFunc keys, C4PlayerInfo.cpp:177-268).
-            let body = self
-                .section_fields("Player Info")
-                .unwrap_or(&[]);
+            let body = self.section_fields("Player Info").unwrap_or(&[]);
             let field = |fields: &[(String, String)], key: &str| -> Option<String> {
                 fields
                     .iter()
@@ -936,4 +930,3 @@ mod tests {
         assert!(interpret_player_control_command(41).is_none());
     }
 }
-

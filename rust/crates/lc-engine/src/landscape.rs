@@ -1319,13 +1319,7 @@ impl Landscape {
     /// by `hrange` or more, and aborts a side whose column has no surface.
     /// The first checked columns are `x - 1` and `x + 1` (the C++ for-init
     /// decrement/increment).
-    pub fn find_level_ground(
-        &self,
-        x: i32,
-        y: i32,
-        width: i32,
-        hrange: i32,
-    ) -> Option<(i32, i32)> {
+    pub fn find_level_ground(&self, x: i32, y: i32, width: i32, hrange: i32) -> Option<(i32, i32)> {
         let back_width = self.width as i32;
         let (mut cx1, mut cx2) = (x, x);
         let (mut cy1, mut cy2) = (y, y);
@@ -2580,9 +2574,8 @@ mod tests {
         assert_eq!((fx, fy), (2, 10));
 
         // Slide target two columns out: found with mslide = 2, not with 1.
-        let landscape =
-            Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth))
-                .expect("landscape builds");
+        let landscape = Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth))
+            .expect("landscape builds");
         let (mut fx, mut fy) = (2, 9);
         assert!(!landscape.find_mat_slide(&mut fx, &mut fy, 1, mdens, 1, &materials));
         assert_eq!((fx, fy), (2, 9), "no move on failure");

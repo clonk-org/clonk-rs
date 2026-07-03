@@ -187,9 +187,7 @@ fn parse_leading_i32(value: &str) -> Option<i32> {
     let trimmed = value.trim();
     let end = trimmed
         .char_indices()
-        .take_while(|&(index, ch)| {
-            ch.is_ascii_digit() || (index == 0 && (ch == '-' || ch == '+'))
-        })
+        .take_while(|&(index, ch)| ch.is_ascii_digit() || (index == 0 && (ch == '-' || ch == '+')))
         .map(|(index, ch)| index + ch.len_utf8())
         .last()?;
     trimmed[..end].parse::<i64>().ok().map(|v| v as i32)
@@ -276,4 +274,3 @@ mod tests {
         assert!(player.crew.is_empty());
     }
 }
-

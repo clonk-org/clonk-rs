@@ -371,7 +371,11 @@ fn chunk_o_zoom(
                 // Slope smoothers per matching left/right neighbor
                 // (C4Landscape.cpp:377-398), IFT from that neighbor.
                 if map_x > 0 && map.get_pix(map_x - 1, map_y) & 127 == texture {
-                    let ift = if map.get_pix(map_x - 1, map_y) >= 128 { IFT } else { 0 };
+                    let ift = if map.get_pix(map_x - 1, map_y) >= 128 {
+                        IFT
+                    } else {
+                        0
+                    };
                     draw_smooth_o_chunk(
                         world,
                         to_x,
@@ -385,7 +389,11 @@ fn chunk_o_zoom(
                     );
                 }
                 if map_x < map_width - 1 && map.get_pix(map_x + 1, map_y) & 127 == texture {
-                    let ift = if map.get_pix(map_x + 1, map_y) >= 128 { IFT } else { 0 };
+                    let ift = if map.get_pix(map_x + 1, map_y) >= 128 {
+                        IFT
+                    } else {
+                        0
+                    };
                     draw_smooth_o_chunk(
                         world,
                         to_x,
@@ -676,8 +684,7 @@ mod tests {
         // (5,0), and a flip=1 quad colored 2 filling (7,0) — both pixels
         // are out of reach of every main chunk (hand-stepped octagons).
         let shapes = shapes_with(&[(2, ChunkShape::Smooth)]);
-        let world =
-            synthesize_landscape(&[2 | 0x80, 0, 2, 2, 2, 2], 3, 2, 4, 0, &shapes);
+        let world = synthesize_landscape(&[2 | 0x80, 0, 2, 2, 2, 2], 3, 2, 4, 0, &shapes);
         assert_eq!(world.get_pix(5, 0), 130, "left smoother carries left IFT");
         assert_eq!(world.get_pix(7, 0), 2, "right smoother carries right IFT");
     }

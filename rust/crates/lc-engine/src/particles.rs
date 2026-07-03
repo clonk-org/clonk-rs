@@ -286,8 +286,9 @@ impl ParticleSystem {
             .ok_or_else(|| ParticleDefError::UnknownExecProc(core.exec_fn.clone()))?;
         let collision_proc = (!core.collision_fn.is_empty())
             .then(|| {
-                ParticleProc::from_name(&core.collision_fn)
-                    .ok_or_else(|| ParticleDefError::UnknownCollisionProc(core.collision_fn.clone()))
+                ParticleProc::from_name(&core.collision_fn).ok_or_else(|| {
+                    ParticleDefError::UnknownCollisionProc(core.collision_fn.clone())
+                })
             })
             .transpose()?;
         let name = core.name.clone();
@@ -387,9 +388,7 @@ impl ParticleSystem {
             return false;
         }
         // reduce creation if limit is nearly reached
-        if room < (max_count >> 1)
-            && self.safe_rng.random(room) < self.safe_rng.random(max_count)
-        {
+        if room < (max_count >> 1) && self.safe_rng.random(room) < self.safe_rng.random(max_count) {
             return false;
         }
         let mut particle = Particle {
@@ -609,9 +608,9 @@ impl ParticleSystem {
         }
         // apply gravity (C4Particles.cpp:647)
         if def.core.gravity_acc != 0 {
-            particle.ydir +=
-                fixtof(C4Fixed::from_raw(env.gravity.val().wrapping_mul(def.core.gravity_acc)))
-                    / 100.0;
+            particle.ydir += fixtof(C4Fixed::from_raw(
+                env.gravity.val().wrapping_mul(def.core.gravity_acc),
+            )) / 100.0;
         }
         // apply WindDrift (C4Particles.cpp:649-660)
         if def.core.wind_drift != 0 && !(env.solid)(dx as i32, dy as i32) {
@@ -693,12 +692,10 @@ impl ParticleSystem {
         // color change (C4Particles.cpp:553-555): lighten RGB by 1, alpha+1
         let clr = particle.b as u32;
         let lightened = lighten_clr_by(clr, 1);
-        particle.b =
-            ((lightened & 0xffffff) | (((clr >> 24) + 1).min(255) << 24)) as i32;
+        particle.b = ((lightened & 0xffffff) | (((clr >> 24) + 1).min(255) << 24)) as i32;
         // wind to float (C4Particles.cpp:556-562)
         if particle.b % 12 == 0 || building {
-            particle.xdir = (0.025f32
-                * (env.wind)(particle.x as i32, particle.y as i32) as f32)
+            particle.xdir = (0.025f32 * (env.wind)(particle.x as i32, particle.y as i32) as f32)
                 .clamp(-2.0, 2.0);
             particle.xdir += 0.1 * self.safe_rng.random(41) as f32 - 2.0;
         }
@@ -753,8 +750,8 @@ impl ParticleSystem {
                 particle.life |= (particle.life / 17) << 16;
                 // set kind in ydir — int division: only SafeRandom(300)==299
                 // contributes the +1 ("set last kind reeeaaally seldom")
-                particle.ydir = self.safe_rng.random(15) as f32
-                    + (self.safe_rng.random(300) / 299) as f32;
+                particle.ydir =
+                    self.safe_rng.random(15) as f32 + (self.safe_rng.random(300) / 299) as f32;
                 if particle.b == 0 {
                     particle.b = 0xff4b4b4b_u32 as i32;
                 } else {
@@ -973,9 +970,7 @@ mod tests {
             None,
         ));
         assert_eq!(system.particles().len(), 2);
-        for (particle, (xdir, ydir, a, b, life)) in
-            system.particles().iter().zip(expected.iter())
-        {
+        for (particle, (xdir, ydir, a, b, life)) in system.particles().iter().zip(expected.iter()) {
             assert_eq!(particle.x.to_bits(), 5.0f32.to_bits());
             assert_eq!(particle.y.to_bits(), 6.0f32.to_bits());
             assert_eq!(particle.xdir.to_bits(), xdir.to_bits());
@@ -1217,7 +1212,11 @@ mod tests {
         assert!(bouncing.create("Drop", 50.0, 59.0, 0.0, 2.0, 0.0, 1, layer.clone(), None));
         bouncing.exec_layer(&layer, None, &solid_env);
         let particle = &bouncing.particles()[0];
-        assert_eq!(particle.y.to_bits(), 59.0f32.to_bits(), "collision blocks move");
+        assert_eq!(
+            particle.y.to_bits(),
+            59.0f32.to_bits(),
+            "collision blocks move"
+        );
         assert_eq!(particle.xdir.to_bits(), (-0.0f32).to_bits());
         assert_eq!(particle.ydir.to_bits(), (-2.0f32).to_bits());
 
@@ -1301,8 +1300,7 @@ mod tests {
         system.register_def(core, 4, 1.0).expect("registers");
         system.safe_rng = SafeRng::new(7);
         let mut mirror = SafeRng::new(7);
-        let expected_kind =
-            mirror.random(15) as f32 + (mirror.random(300) / 299) as f32;
+        let expected_kind = mirror.random(15) as f32 + (mirror.random(300) / 299) as f32;
 
         let layer = crate::ParticleLayer::Global;
         assert!(system.create("Smoke", 50.0, 100.0, 0.0, 0.0, 4.0, 0, layer.clone(), None));
@@ -1399,7 +1397,10 @@ mod tests {
             ParticleProc::from_name("StdExec"),
             Some(ParticleProc::StdExec)
         );
-        assert_eq!(ParticleProc::from_name("Bounce"), Some(ParticleProc::Bounce));
+        assert_eq!(
+            ParticleProc::from_name("Bounce"),
+            Some(ParticleProc::Bounce)
+        );
         assert_eq!(
             ParticleProc::from_name("BounceY"),
             Some(ParticleProc::BounceY)

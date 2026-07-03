@@ -3,8 +3,7 @@ use crate::rng::LcgRng;
 use crate::{
     control::{
         interpret_player_control_command, parse_control_ini, ControlEvent, ControlPacket,
-        ControlPlayerInfoEntry, JoinPlayerControlData,
-        PlayerControlData,
+        ControlPlayerInfoEntry, JoinPlayerControlData, PlayerControlData,
     },
     ActionState, CommandDirection, CommandStackSnapshot, CrewCommandTarget, CrewRole,
     CrewSelectionState, Direction, DrawTransform, EffectState, Engine, EngineError, EngineState,
@@ -596,7 +595,12 @@ impl RuntimeHandle {
 
     fn advance_to_frame(&mut self, frame: u64) -> Result<(), String> {
         let current = self.engine.frame();
-        tracing::debug!(frame, current, pending = self.control_packets.len(), "advance_to_frame");
+        tracing::debug!(
+            frame,
+            current,
+            pending = self.control_packets.len(),
+            "advance_to_frame"
+        );
         if frame < current {
             return Err(format!(
                 "target frame {} precedes current engine frame {}",
@@ -1756,7 +1760,11 @@ fn load_scenario_into_runtime(
     seed: u64,
 ) -> Result<(), String> {
     let resolver = RuntimeDefinitionResolver {
-        roots: path.ancestors().skip(1).map(std::path::Path::to_path_buf).collect(),
+        roots: path
+            .ancestors()
+            .skip(1)
+            .map(std::path::Path::to_path_buf)
+            .collect(),
     };
     let scenario = Scenario::load_from_path_with(path, &resolver)
         .map_err(|error| format!("failed to load scenario: {error}"))?;
@@ -2231,7 +2239,6 @@ pub extern "C" fn lc_engine_runtime_path_free(buffer: *mut LcEngineRuntimePathRe
     }
 }
 
-
 #[no_mangle]
 pub extern "C" fn lc_engine_runtime_compare_snapshot(
     handle: *mut RuntimeHandle,
@@ -2314,23 +2321,25 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             expected.controls = entries.clone();
         } else {
             expected.controls.clear();
-    // The synced-RNG registers must match once both engines completed the
-    // frame (C4Random.h:29-30) — report the FIRST divergence; a ledger slip
-    // precedes and explains most downstream state diffs.
-    {
-        let rng = runtime.engine.debug_rng_clone();
-        if (rng.hold != rng_hold || rng.count != rng_count) && !runtime.rng_mismatch_reported {
-            runtime.rng_mismatch_reported = true;
-            tracing::error!(
-                frame,
-                rust_hold = rng.hold,
-                rust_count = rng.count,
-                cpp_hold = rng_hold,
-                cpp_count = rng_count,
-                "synced RNG ledger diverged"
-            );
-        }
-    }
+            // The synced-RNG registers must match once both engines completed the
+            // frame (C4Random.h:29-30) — report the FIRST divergence; a ledger slip
+            // precedes and explains most downstream state diffs.
+            {
+                let rng = runtime.engine.debug_rng_clone();
+                if (rng.hold != rng_hold || rng.count != rng_count)
+                    && !runtime.rng_mismatch_reported
+                {
+                    runtime.rng_mismatch_reported = true;
+                    tracing::error!(
+                        frame,
+                        rust_hold = rng.hold,
+                        rust_count = rng.count,
+                        cpp_hold = rng_hold,
+                        cpp_count = rng_count,
+                        "synced RNG ledger diverged"
+                    );
+                }
+            }
         }
         if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
             let detail = format!("frame {frame}: {detail}");
@@ -2368,7 +2377,7 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     }
 
     if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
-            let detail = format!("frame {frame}: {detail}");
+        let detail = format!("frame {frame}: {detail}");
         set_error(error_out, detail);
         return false;
     }

@@ -415,7 +415,12 @@ impl ActionLibrary {
     }
 
     /// Returns true when the NextAction transition ran (false for Hold).
-    fn transition(state: &mut ActionState, spec: &ActionSpec, library: &ActionLibrary, length: i32) -> bool {
+    fn transition(
+        state: &mut ActionState,
+        spec: &ActionSpec,
+        library: &ActionLibrary,
+        length: i32,
+    ) -> bool {
         // NextAction=Hold clamps at the last phase and keeps the action
         // (ActHold, C4Def.cpp:786-787; C4Object.cpp:5457-5459).
         if spec

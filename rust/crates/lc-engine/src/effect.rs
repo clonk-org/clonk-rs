@@ -159,7 +159,9 @@ pub enum EffectEventKind {
     Stopped(EffectStopReason),
     /// `C4Effect::Check` (C4Effect.cpp:167-189): the carried effect is the
     /// CHECKER asked about a pending new effect by name.
-    Check { pending: String },
+    Check {
+        pending: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

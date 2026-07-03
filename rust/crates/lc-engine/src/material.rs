@@ -124,7 +124,9 @@ pub enum MaterialReactionKind {
     Insert,
     /// mrfScript (C4Material.cpp:800-835): `func` indexes the set's
     /// `script_reactions` name table (kept `Copy` for the flattened table).
-    Script { func: u16 },
+    Script {
+        func: u16,
+    },
 }
 
 /// One resolved reaction-table entry — the `C4MaterialReaction` essentials
@@ -744,8 +746,7 @@ impl MaterialSet {
     }
 
     fn rebuild_custom_reactions(&mut self) {
-        let (entries, script_reactions) =
-            build_custom_reactions(&self.materials, &self.by_name);
+        let (entries, script_reactions) = build_custom_reactions(&self.materials, &self.by_name);
         self.custom_reactions_by_event = entries;
         self.script_reactions = script_reactions;
     }
@@ -1667,7 +1668,8 @@ mod tests {
             "mass-move-only reaction should not affect PXSMove lookups",
         );
         assert_eq!(
-            set.reaction_for_event(Some(mist), None, MaterialInteractionEvent::MassMove).kind,
+            set.reaction_for_event(Some(mist), None, MaterialInteractionEvent::MassMove)
+                .kind,
             MaterialReactionKind::Poof,
             "mass-move exec mask should be available to mass movers",
         );

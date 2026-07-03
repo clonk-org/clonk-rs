@@ -336,7 +336,6 @@ impl SectorMap {
             self.ranks.insert(id, rank);
         }
     }
-
 }
 
 #[derive(Debug, Clone)]

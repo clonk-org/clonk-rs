@@ -16,7 +16,6 @@
 
 mod action;
 mod chunky;
-mod script_constants;
 mod command;
 mod compat;
 mod control;
@@ -35,12 +34,13 @@ pub mod ocf;
 mod parity_differential;
 pub mod particles;
 mod pathfinder;
-pub mod pxs;
 mod player;
 pub mod player_file;
+pub mod pxs;
 mod record;
 mod rng;
 pub mod scenario;
+mod script_constants;
 mod sector;
 mod sky;
 #[cfg(test)]
@@ -122,7 +122,9 @@ use compat::{
     PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
-use material::{evaluate_corrosion, MaterialInteractionEvent, MaterialReaction, MaterialReactionKind};
+use material::{
+    evaluate_corrosion, MaterialInteractionEvent, MaterialReaction, MaterialReactionKind,
+};
 use message::{MessageCommand, MessageManager, MessageSpec, PersistedMessage};
 use ocf::NORMAL as OCF_NORMAL;
 use sector::{SectorMap, SectorObject};
@@ -3477,11 +3479,7 @@ impl Object {
             return Ok(());
         }
         let shape_x = movement.shape_rect.map(|shape| shape.x).unwrap_or(0);
-        if let Some(bound) = target_bounds(
-            target_x,
-            -shape_x,
-            landscape.width() as i32 + shape_x,
-        ) {
+        if let Some(bound) = target_bounds(target_x, -shape_x, landscape.width() as i32 + shape_x) {
             self.fixed_velocity.x = C4Fixed::ZERO;
             self.state.velocity = self.velocity_pixels();
             let cnat = if bound < 0 { CNAT_LEFT } else { CNAT_RIGHT };
@@ -6034,7 +6032,8 @@ impl Definition {
                     self.crew_member,
                     state.draw_transform,
                     state.base_graphics.clone(),
-                ).with_definition_id(self.id.as_str())
+                )
+                .with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
@@ -6209,7 +6208,8 @@ impl Definition {
                     self.crew_member,
                     state.draw_transform,
                     state.base_graphics.clone(),
-                ).with_definition_id(self.id.as_str())
+                )
+                .with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
@@ -6376,7 +6376,8 @@ impl Definition {
                     self.crew_member,
                     state.draw_transform,
                     state.base_graphics.clone(),
-                ).with_definition_id(self.id.as_str())
+                )
+                .with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
@@ -6567,7 +6568,8 @@ impl Definition {
                     self.crew_member,
                     state.draw_transform,
                     state.base_graphics.clone(),
-                ).with_definition_id(self.id.as_str())
+                )
+                .with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
@@ -6685,10 +6687,11 @@ impl Definition {
             self.crew_member,
             state.draw_transform,
             state.base_graphics.clone(),
-        ).with_definition_id(self.id.as_str())
+        )
+        .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
-                .with_in_liquid(state.in_liquid)
-                .with_own_mass(state.own_mass)
+        .with_in_liquid(state.in_liquid)
+        .with_own_mass(state.own_mass)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -6818,10 +6821,11 @@ impl Definition {
             self.crew_member,
             state.draw_transform,
             state.base_graphics.clone(),
-        ).with_definition_id(self.id.as_str())
+        )
+        .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
-                .with_in_liquid(state.in_liquid)
-                .with_own_mass(state.own_mass)
+        .with_in_liquid(state.in_liquid)
+        .with_own_mass(state.own_mass)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -6942,12 +6946,13 @@ impl Definition {
             self.crew_member,
             state.draw_transform,
             state.base_graphics.clone(),
-        ).with_definition_id(self.id.as_str())
+        )
+        .with_definition_id(self.id.as_str())
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
-                .with_in_liquid(state.in_liquid)
-                .with_own_mass(state.own_mass)
+        .with_in_liquid(state.in_liquid)
+        .with_own_mass(state.own_mass)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -7071,12 +7076,13 @@ impl Definition {
             self.crew_member,
             state.draw_transform,
             state.base_graphics.clone(),
-        ).with_definition_id(self.id.as_str())
+        )
+        .with_definition_id(self.id.as_str())
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
-                .with_in_liquid(state.in_liquid)
-                .with_own_mass(state.own_mass)
+        .with_in_liquid(state.in_liquid)
+        .with_own_mass(state.own_mass)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -7197,10 +7203,11 @@ impl Definition {
             self.crew_member,
             state.draw_transform,
             state.base_graphics.clone(),
-        ).with_definition_id(self.id.as_str())
+        )
+        .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
-                .with_in_liquid(state.in_liquid)
-                .with_own_mass(state.own_mass)
+        .with_in_liquid(state.in_liquid)
+        .with_own_mass(state.own_mass)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -7455,11 +7462,7 @@ impl Definition {
             effect,
             "Damage",
             "FxDamage",
-            vec![
-                Value::Int(change),
-                Value::Int(cause),
-                Value::Int(caused_by),
-            ],
+            vec![Value::Int(change), Value::Int(cause), Value::Int(caused_by)],
             rng,
             global_effects,
             physics,
@@ -7665,7 +7668,8 @@ impl Definition {
                     self.crew_member,
                     state.draw_transform,
                     state.base_graphics.clone(),
-                ).with_definition_id(self.id.as_str())
+                )
+                .with_definition_id(self.id.as_str())
                 .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
@@ -8008,7 +8012,13 @@ impl ScenarioScript {
         environment: EnvironmentSettings,
         audio: AudioRegistry,
         game_over_triggered: bool,
-    ) -> (Option<Value>, Vec<Value>, ScenarioBatch, AudioRegistry, LcgRng) {
+    ) -> (
+        Option<Value>,
+        Vec<Value>,
+        ScenarioBatch,
+        AudioRegistry,
+        LcgRng,
+    ) {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
@@ -8192,7 +8202,8 @@ pub struct Engine {
     /// only change while loading, so this is built once and dropped on any
     /// definition mutation (host contexts are built per script callback and
     /// re-cloning every ActionLibrary there dominated tick time).
-    definition_metadata_cache: std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>>>,
+    definition_metadata_cache:
+        std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>>>,
     materials: MaterialSet,
     /// Shared view of `materials` for host contexts (FnMaterial);
     /// invalidated when the library is (re)configured.
@@ -8629,13 +8640,8 @@ pub(crate) fn docon_initial_center_y(
         return given_y;
     }
     let zero = transformed_shape_rect(shape, 0, stretch_growth, 0, 0);
-    let grown = transformed_shape_rect(
-        shape,
-        construction.clamp(0, FULL_CON),
-        stretch_growth,
-        0,
-        0,
-    );
+    let grown =
+        transformed_shape_rect(shape, construction.clamp(0, FULL_CON), stretch_growth, 0, 0);
     match (zero, grown) {
         (Some(zero), Some(grown)) if zero.height != grown.height || zero.y != grown.y => {
             given_y + zero.y + zero.height - grown.height - grown.y
@@ -9573,10 +9579,7 @@ impl Engine {
             players: HashMap::new(),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
-            player_starts: vec![
-                scenario::PlayerStart::default();
-                scenario::MAX_PLAYER_STARTS
-            ],
+            player_starts: vec![scenario::PlayerStart::default(); scenario::MAX_PLAYER_STARTS],
             standard_names: None,
             map_zoom: scenario::LegacyC4SVal::new(10, 0, 5, 15),
             crew_rosters: HashMap::new(),
@@ -9807,7 +9810,10 @@ impl Engine {
         let valid_counts = |entries: &[(String, i32)]| -> HashMap<DefinitionId, u32> {
             entries
                 .iter()
-                .filter(|(id, _)| self.definitions.contains_key(&DefinitionId::from(id.as_str())))
+                .filter(|(id, _)| {
+                    self.definitions
+                        .contains_key(&DefinitionId::from(id.as_str()))
+                })
                 .map(|(id, count)| (DefinitionId::from(id.as_str()), (*count).max(0) as u32))
                 .collect()
         };
@@ -9816,7 +9822,10 @@ impl Engine {
         let knowledge: Vec<DefinitionId> = start
             .build_knowledge
             .iter()
-            .filter(|(id, _)| self.definitions.contains_key(&DefinitionId::from(id.as_str())))
+            .filter(|(id, _)| {
+                self.definitions
+                    .contains_key(&DefinitionId::from(id.as_str()))
+            })
             .map(|(id, _)| DefinitionId::from(id.as_str()))
             .collect();
         {
@@ -9906,9 +9915,7 @@ impl Engine {
 
         // Scenario script init broadcast (C4Player.cpp:769-775): fail-safe
         // exec, the join never aborts on script errors.
-        let base_value = first_base
-            .map(object_reference_value)
-            .unwrap_or(Value::Nil);
+        let base_value = first_base.map(object_reference_value).unwrap_or(Value::Nil);
         tolerate_script_error(self.broadcast_scenario_function(
             "InitializePlayer",
             vec![
@@ -10341,11 +10348,7 @@ impl Engine {
     /// The `while (!(pInfo = GetIdle)) if (!New) break;` recruit loop
     /// (C4Player.cpp:502-504/541-543). Returns the recruited info (marked
     /// InAction) or None when no info could be created.
-    fn recruit_crew_info(
-        &mut self,
-        number: i32,
-        id_token: &str,
-    ) -> Option<player_file::CrewInfo> {
+    fn recruit_crew_info(&mut self, number: i32, id_token: &str) -> Option<player_file::CrewInfo> {
         loop {
             if let Some(index) = self.idle_crew_info_index(number, id_token) {
                 let roster = self.crew_rosters.entry(number).or_default();
@@ -10394,7 +10397,11 @@ impl Engine {
     /// by MakeValidName (C4ObjectInfoList.cpp:93-101).
     fn create_crew_info(&mut self, number: i32, id_token: &str) -> bool {
         // Default type clonk if none specified (C4ObjectInfoList.cpp:150).
-        let id = if id_token.is_empty() { "CLNK" } else { id_token };
+        let id = if id_token.is_empty() {
+            "CLNK"
+        } else {
+            id_token
+        };
         let Some(definition) = self.definitions.get(&DefinitionId::from(id)) else {
             return false;
         };
@@ -10877,7 +10884,8 @@ impl Engine {
 
     fn object_shape_rect(&self, object: &Object) -> DefinitionRect {
         let position = object.state.position;
-        object            .current_shape_rect()
+        object
+            .current_shape_rect()
             .map(|rect| {
                 DefinitionRect::new(
                     position.x.saturating_add(rect.x),
@@ -11207,7 +11215,6 @@ impl Engine {
             self.audio_registry.clone(),
             self.particle_system.def_names(),
             self.definition_script_table(),
-        
             definition_metadata_table,
         );
         // Initialize is a game call: a script error logs and the scenario
@@ -11363,7 +11370,6 @@ impl Engine {
             audio_state,
             particle_defs,
             definition_scripts,
-        
             definition_metadata_for_call,
         )?;
         self.rng = new_rng;
@@ -11371,7 +11377,6 @@ impl Engine {
         let _ = self.apply_scenario_batch(batch)?;
         Ok(())
     }
-
 
     fn check_game_over(&mut self) -> Result<(), EngineError> {
         if self.game_over_triggered || !self.players_registered {
@@ -11817,7 +11822,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
+        let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
@@ -11855,7 +11860,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
+        let definitions_ref = &self.definitions;
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
@@ -11902,7 +11907,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
+        let definitions_ref = &self.definitions;
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
@@ -11953,7 +11958,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
+        let definitions_ref = &self.definitions;
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
@@ -12003,7 +12008,7 @@ impl Engine {
             .definitions
             .get(definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.to_string()))?;
-            let definitions_ref = &self.definitions;
+        let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
@@ -12103,7 +12108,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
+        let definitions_ref = &self.definitions;
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
@@ -12336,7 +12341,8 @@ impl Engine {
             script.set_global_variables(self.script_globals.clone());
             script.adopt_statics_into_globals();
         }
-        self.definition_load_order.push(DefinitionId::from(id.as_str()));
+        self.definition_load_order
+            .push(DefinitionId::from(id.as_str()));
         self.definitions.insert(id, definition);
         self.definition_metadata_cache.borrow_mut().take();
         Ok(())
@@ -12380,9 +12386,7 @@ impl Engine {
                             self.script_globals
                                 .borrow_mut()
                                 .entry(var_decl.name.clone())
-                                .or_insert_with(|| {
-                                    lc_script::value_cell(lc_script::Value::Nil)
-                                });
+                                .or_insert_with(|| lc_script::value_cell(lc_script::Value::Nil));
                         }
                     }
                     for (function_name, function) in script.functions() {
@@ -12488,8 +12492,7 @@ impl Engine {
                 };
                 for target_id in resolved {
                     if let Some(definition) = self.definitions.get_mut(&target_id) {
-                        Arc::make_mut(&mut definition.script)
-                            .append_overrides_from(&source_script);
+                        Arc::make_mut(&mut definition.script).append_overrides_from(&source_script);
                         definition.refresh_script_flags();
                     }
                 }
@@ -12881,8 +12884,7 @@ impl Engine {
         if !self.definitions.contains_key(METEOR_DEFINITION) {
             return Ok(false);
         }
-        let config =
-            SpawnConfig::new(METEOR_DEFINITION).with_position(Vector2::new(x.max(0), -20));
+        let config = SpawnConfig::new(METEOR_DEFINITION).with_position(Vector2::new(x.max(0), -20));
         let meteor_id = match self.spawn_object(config) {
             Ok(id) => id,
             Err(EngineError::UnknownDefinition(_)) => return Ok(false),
@@ -12892,10 +12894,8 @@ impl Engine {
             return Ok(false);
         };
         let object = &mut self.objects[index];
-        object.fixed_velocity = FixedVec2::new(
-            C4Fixed::from_raw(itofix(r2 - 50).val() / 10),
-            C4Fixed::ZERO,
-        );
+        object.fixed_velocity =
+            FixedVec2::new(C4Fixed::from_raw(itofix(r2 - 50).val() / 10), C4Fixed::ZERO);
         object.rotation_velocity = C4Fixed::from_raw(itofix(1).val() / 5);
         Ok(true)
     }
@@ -12906,8 +12906,8 @@ impl Engine {
         if !self.definitions.contains_key(EARTHQUAKE_DEFINITION) {
             return Ok(false);
         }
-        let config = SpawnConfig::new(EARTHQUAKE_DEFINITION)
-            .with_position(Vector2::new(x.max(0), y.max(0)));
+        let config =
+            SpawnConfig::new(EARTHQUAKE_DEFINITION).with_position(Vector2::new(x.max(0), y.max(0)));
         let quake_id = match self.spawn_object(config) {
             Ok(id) => id,
             Err(EngineError::UnknownDefinition(_)) => return Ok(false),
@@ -12927,8 +12927,8 @@ impl Engine {
         if !self.definitions.contains_key(VOLCANO_DEFINITION) {
             return Ok(false);
         }
-        let config = SpawnConfig::new(VOLCANO_DEFINITION)
-            .with_position(Vector2::new(x.max(0), y.max(0)));
+        let config =
+            SpawnConfig::new(VOLCANO_DEFINITION).with_position(Vector2::new(x.max(0), y.max(0)));
         let volcano_id = match self.spawn_object(config) {
             Ok(id) => id,
             Err(EngineError::UnknownDefinition(_)) => return Ok(false),
@@ -13011,9 +13011,8 @@ impl Engine {
                     self.audio_registry.clone(),
                     particle_defs,
                     definition_scripts,
-                
-                        definition_metadata_table.clone(),
-                    )?
+                    definition_metadata_table.clone(),
+                )?
             };
             self.rng = new_rng;
             self.audio_registry = audio_state;
@@ -13091,7 +13090,11 @@ impl Engine {
                         .state
                         .temporary_physical
                         .or(object.state.info_physical)
-                        .or_else(|| self.definitions.get(&object.definition_id).map(|definition| *definition.physical()))
+                        .or_else(|| {
+                            self.definitions
+                                .get(&object.definition_id)
+                                .map(|definition| *definition.physical())
+                        })
                         .unwrap_or_default(),
                     owner: object.state.owner,
                     crew_member: object.state.crew_member,
@@ -13204,7 +13207,6 @@ impl Engine {
             }
         });
         for idx in exec_order {
-
             // UpdateOCF runs first in C4Object::Execute (C4Object.cpp:1058).
             self.refresh_object_ocf(idx);
             let definition_id = self.objects[idx].definition_id.clone();
@@ -13215,7 +13217,7 @@ impl Engine {
                     .definitions
                     .get(&definition_id)
                     .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
+                let definitions_ref = &self.definitions;
                 definition.action_library().clone()
             };
             let mut landscape_slot = self.landscape.take();
@@ -13466,90 +13468,92 @@ impl Engine {
             if !self.exec_connect_line(idx)? {
                 continue;
             }
-            self.apply_physics_at_index(idx);
+            let exec_action_returned_early = self.apply_physics_at_index(idx);
 
             // Phase advance runs at the END of ExecAction
             // (C4Object.cpp:5440-5465) — AFTER the procedure steering
             // updated xdir/ydir, so WALK/SCALE/HANGLE advances read THIS
             // frame's velocity (the old pre-steer order lagged BISO's
             // walk phase one step behind on every acceleration frame).
-            let mut pre_phase_state = None;
-            if action_library
-                .phase_call_for_action(&self.objects[idx].state.action.name)
-                .is_some()
-            {
-                pre_phase_state = Some(self.objects[idx].state.clone());
-            }
-
-            let physical_for_advance = self.object_physical(idx);
-            let advance_outcome = {
-                let object = &mut self.objects[idx];
-                // iPhaseAdvance (C4Object.cpp:4696): WALK fixtoi(|xdir|*10)
-                // (:4787-4789), SCALE fixtoi(|ydir|*14) (:4830-4832),
-                // HANGLE fixtoi(|xdir|*10) (:4867-4869), SWIM
-                // fixtoi(swimlimit*10) with the PHYSICAL limit, not the
-                // velocity (:5010-ish "iPhaseAdvance = fixtoi(lLimit*10)"),
-                // DIG fixtoi(diglimit*40) (:4894-4895); everything else 1.
-                let phase_advance = match action_library
-                    .procedure_for_action(&object.state.action.name)
+            // An early `return` inside ExecAction (the free-fall swim
+            // exit) skips it entirely; movement below still runs.
+            if !exec_action_returned_early {
+                let mut pre_phase_state = None;
+                if action_library
+                    .phase_call_for_action(&self.objects[idx].state.action.name)
+                    .is_some()
                 {
-                    ActionProcedure::Walk | ActionProcedure::Hang => {
-                        math::fixtoi(object.fixed_velocity.x.abs() * 10)
-                    }
-                    ActionProcedure::Scale => {
-                        math::fixtoi(object.fixed_velocity.y.abs() * 14)
-                    }
-                    ActionProcedure::Swim => math::fixtoi(
-                        math::val_by_physical(160, physical_for_advance.swim) * 10,
-                    ),
-                    ActionProcedure::Dig => math::fixtoi(
-                        math::val_by_physical(125, physical_for_advance.dig) * 40,
-                    ),
-                    _ => 1,
-                };
-                object
-                    .state
-                    .action
-                    .advance_with_library_by(&action_library, phase_advance)
-            };
+                    pre_phase_state = Some(self.objects[idx].state.clone());
+                }
 
-            // A same-name NextAction chain still owes its EndCall+StartCall
-            // pair (SetAction with SAC_StartCall|SAC_EndCall,
-            // C4Object.cpp:5462); name-changing wraps are recorded by the
-            // block below.
-            if advance_outcome.wrapped
-                && self.objects[idx].state.action.name == previous_action_state.name
-            {
-                self.objects[idx].record_action_event(
-                    previous_action_state.clone(),
-                    ActionTransitionKind::Natural,
-                );
-            }
-            if self.objects[idx].state.action.name != previous_action_state.name {
-                self.objects[idx]
-                    .record_action_event(previous_action_state, ActionTransitionKind::Natural);
-            }
-
-            if let Some(event) = advance_outcome.phase_event {
-                if let Some(function_name) = action_library.phase_call_for_action(&event.action) {
-                    let state_snapshot = pre_phase_state
-                        .take()
-                        .unwrap_or_else(|| self.objects[idx].state.clone());
-                    self.invoke_action_callback(
-                        idx,
-                        ActionCallbackKind::Phase,
-                        &event.action,
-                        Some(function_name),
-                        Some(state_snapshot),
-                    )?;
-                    if self.objects[idx].destroyed
-                        || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
+                let physical_for_advance = self.object_physical(idx);
+                let advance_outcome = {
+                    let object = &mut self.objects[idx];
+                    // iPhaseAdvance (C4Object.cpp:4696): WALK fixtoi(|xdir|*10)
+                    // (:4787-4789), SCALE fixtoi(|ydir|*14) (:4830-4832),
+                    // HANGLE fixtoi(|xdir|*10) (:4867-4869), SWIM
+                    // fixtoi(swimlimit*10) with the PHYSICAL limit, not the
+                    // velocity (:5010-ish "iPhaseAdvance = fixtoi(lLimit*10)"),
+                    // DIG fixtoi(diglimit*40) (:4894-4895); everything else 1.
+                    let phase_advance = match action_library
+                        .procedure_for_action(&object.state.action.name)
                     {
-                        continue;
+                        ActionProcedure::Walk | ActionProcedure::Hang => {
+                            math::fixtoi(object.fixed_velocity.x.abs() * 10)
+                        }
+                        ActionProcedure::Scale => math::fixtoi(object.fixed_velocity.y.abs() * 14),
+                        ActionProcedure::Swim => {
+                            math::fixtoi(math::val_by_physical(160, physical_for_advance.swim) * 10)
+                        }
+                        ActionProcedure::Dig => {
+                            math::fixtoi(math::val_by_physical(125, physical_for_advance.dig) * 40)
+                        }
+                        _ => 1,
+                    };
+                    object
+                        .state
+                        .action
+                        .advance_with_library_by(&action_library, phase_advance)
+                };
+
+                // A same-name NextAction chain still owes its EndCall+StartCall
+                // pair (SetAction with SAC_StartCall|SAC_EndCall,
+                // C4Object.cpp:5462); name-changing wraps are recorded by the
+                // block below.
+                if advance_outcome.wrapped
+                    && self.objects[idx].state.action.name == previous_action_state.name
+                {
+                    self.objects[idx].record_action_event(
+                        previous_action_state.clone(),
+                        ActionTransitionKind::Natural,
+                    );
+                }
+                if self.objects[idx].state.action.name != previous_action_state.name {
+                    self.objects[idx]
+                        .record_action_event(previous_action_state, ActionTransitionKind::Natural);
+                }
+
+                if let Some(event) = advance_outcome.phase_event {
+                    if let Some(function_name) = action_library.phase_call_for_action(&event.action)
+                    {
+                        let state_snapshot = pre_phase_state
+                            .take()
+                            .unwrap_or_else(|| self.objects[idx].state.clone());
+                        self.invoke_action_callback(
+                            idx,
+                            ActionCallbackKind::Phase,
+                            &event.action,
+                            Some(function_name),
+                            Some(state_snapshot),
+                        )?;
+                        if self.objects[idx].destroyed
+                            || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
+                        {
+                            continue;
+                        }
                     }
                 }
             }
-
 
             // C4Object::ExecMovement (C4Movement.cpp:553-616): contained
             // objects copy the container's motion (:556-561), C4D_StaticBack
@@ -13607,7 +13611,6 @@ impl Engine {
                 }
             }
 
-
             self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
             // effects (fire) run after movement (C4Object.cpp:1073-1077)
@@ -13624,21 +13627,18 @@ impl Engine {
                     let interval = definition.timer().max(1);
                     let object_timer = &mut self.objects[idx].state.timer;
                     *object_timer += 1;
-                    (*object_timer >= interval).then(|| {
-                        *object_timer = 0;
-                        definition
-                            .timer_call()
-                            .filter(|function| definition.has_function(function))
-                            .map(str::to_string)
-                    })
-                    .flatten()
+                    (*object_timer >= interval)
+                        .then(|| {
+                            *object_timer = 0;
+                            definition
+                                .timer_call()
+                                .filter(|function| definition.has_function(function))
+                                .map(str::to_string)
+                        })
+                        .flatten()
                 });
                 if let Some(function) = timer_call {
-                    tolerate_script_error(self.call_object_function(
-                        idx,
-                        &function,
-                        Vec::new(),
-                    ))?;
+                    tolerate_script_error(self.call_object_function(idx, &function, Vec::new()))?;
                 }
                 if self.objects[idx].destroyed
                     || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
@@ -13707,7 +13707,7 @@ impl Engine {
                 messages,
                 player_commands,
                 trigger_game_over,
-            script_go,
+                script_go,
             } = command;
 
             if let Some(go) = script_go {
@@ -13750,8 +13750,7 @@ impl Engine {
                 let delta_outcome = object.apply_delta(&delta, &action_library);
                 if let Some(change) = delta_outcome.action_change {
                     if !callbacks_dispatched {
-                        object
-                            .record_action_event(change.previous, ActionTransitionKind::Forced);
+                        object.record_action_event(change.previous, ActionTransitionKind::Forced);
                     }
                 }
                 if let Some(change) = delta_outcome.container_change {
@@ -13879,7 +13878,6 @@ impl Engine {
 
             self.apply_nested_object_outcomes(other_objects)?;
 
-
             self.trigger_action_callbacks(idx, Some(previous_action_name))?;
             self.update_sector_for_index(idx);
 
@@ -13924,14 +13922,18 @@ impl Engine {
                     position: self.objects[idx].state.position,
                     contact: {
                         let landscape = self.landscape.as_ref();
-                        self.objects[idx].state.vertices.iter().fold(0u32, |bits, vertex| {
-                            bits | compat::compute_vertex_contact(
-                                landscape,
-                                self.objects[idx].state.position,
-                                vertex,
-                                0,
-                            )
-                        })
+                        self.objects[idx]
+                            .state
+                            .vertices
+                            .iter()
+                            .fold(0u32, |bits, vertex| {
+                                bits | compat::compute_vertex_contact(
+                                    landscape,
+                                    self.objects[idx].state.position,
+                                    vertex,
+                                    0,
+                                )
+                            })
                     },
                     shape_top: self.objects[idx]
                         .current_shape_rect()
@@ -13959,7 +13961,6 @@ impl Engine {
             );
             spawn_requests.extend(spawns.into_iter());
         }
-
 
         // C4GameObjects::CrossCheck runs once per frame after object        // execution (C4Game.cpp ExecObjects → Objects.CrossCheck()).
         self.cross_check(frame)?;
@@ -14047,7 +14048,7 @@ impl Engine {
                 .definitions
                 .get(&definition_id)
                 .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
+            let definitions_ref = &self.definitions;
             definition.action_library().clone()
         };
 
@@ -14113,17 +14114,16 @@ impl Engine {
             if let Some(action) = action {
                 let previous_action = object.state.action.clone();
                 let requested_name_change = action.name.is_some();
-                let result = object                    .state
+                let result = object
+                    .state
                     .action
                     .apply_update_with_library(&action, &action_library);
                 // C4Object::SetAction resyncs the fixed coords to the
                 // integer position once past its early returns
                 // (C4Object.cpp:4144).
                 if action.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
-                    object.fixed_position = FixedVec2::from_ints(
-                        object.state.position.x,
-                        object.state.position.y,
-                    );
+                    object.fixed_position =
+                        FixedVec2::from_ints(object.state.position.x, object.state.position.y);
                 }
                 if matches!(result, ActionUpdateResult::Applied)
                     && (requested_name_change || object.state.action.name != previous_action.name)
@@ -14321,7 +14321,7 @@ impl Engine {
                 .definitions
                 .get(&definition_id)
                 .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
+            let definitions_ref = &self.definitions;
             definition.action_library().clone()
         };
 
@@ -14348,7 +14348,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
+        let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
@@ -14619,9 +14619,9 @@ impl Engine {
                 }
             }
             if let Some(go) = effect_script_go {
-                    self.scenario_script_go = go;
-                }
-                if triggered_game_over {
+                self.scenario_script_go = go;
+            }
+            if triggered_game_over {
                 self.request_game_over()?;
             }
             if !physics_delta.is_empty() {
@@ -14686,8 +14686,7 @@ impl Engine {
                     let delta: ObjectDelta = update.into();
                     let apply_outcome = object.apply_delta(&delta, &action_library);
                     if let Some(change) = apply_outcome.action_change {
-                        object
-                            .record_action_event(change.previous, ActionTransitionKind::Forced);
+                        object.record_action_event(change.previous, ActionTransitionKind::Forced);
                     }
                     if let Some(change) = apply_outcome.container_change {
                         container_changes.push(change);
@@ -15358,7 +15357,8 @@ impl Engine {
             }
             object.last_energy_loss_cause = snapshot.last_energy_loss_cause;
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
-            object                .commands
+            object
+                .commands
                 .restore_from_snapshot(&persisted.command_stack);
             self.objects.push(object);
             self.note_objects_changed();
@@ -15715,7 +15715,7 @@ impl Engine {
                 player_commands: effect_player_commands,
                 audio: outcome_audio,
                 trigger_game_over,
-            script_go,
+                script_go,
                 context_locals,
                 spawns,
                 next_object_id,
@@ -16126,7 +16126,11 @@ impl Engine {
     /// script dispatch for ContactCalls=1 defs is not modeled here.
     fn stabilize_object(&mut self, idx: usize, solid_mask_indices: &[usize]) {
         let rotation = self.objects[idx].state.rotation;
-        let signed = if rotation > 180 { rotation - 360 } else { rotation };
+        let signed = if rotation > 180 {
+            rotation - 360
+        } else {
+            rotation
+        };
         if signed == 0 || !(-math::STABLE_RANGE..=math::STABLE_RANGE).contains(&signed) {
             return;
         }
@@ -16294,86 +16298,83 @@ impl Engine {
         let contact_function_calls_enabled = movement.contact_function_calls;
         let mut movement_outcome = {
             let definition_for_contact = definition_for_contact.as_ref();
-            let mut run_contact_callback =
-                |object: &mut Object, contact_cnat: u32| -> Result<(), EngineError> {
-                    if !contact_function_calls_enabled {
-                        return Ok(());
-                    }
-                    let Some(definition) = definition_for_contact else {
-                        return Ok(());
-                    };
-                    for cnat in [CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM] {
-                        if contact_cnat & cnat == 0 {
-                            continue;
-                        }
-                        let Some(function_name) = contact_callback_name(cnat) else {
-                            continue;
-                        };
-                        let state_snapshot = object.state.clone();
-                        let world = contact_world
-                            .clone()
-                            .with_next_object_id(contact_next_object_id);
-                        let (value, mut outcome, audio_state, new_rng) = definition
-                            .call_object_function(
-                                &state_snapshot,
-                                object.id,
-                                function_name,
-                                &[],
-                                contact_rng.clone(),
-                                &contact_global_effects,
-                                contact_physics,
-                                contact_environment,
-                                contact_frame,
-                                world,
-                                contact_game_over_triggered,
-                                contact_audio.clone(),
-                            )?;
-                        contact_rng = new_rng;
-                        contact_audio = audio_state;
-                        contact_next_object_id = outcome.next_object_id;
-
-                        if let Some(update) = outcome.object_update.take() {
-                            let previous_owner = object.state.owner;
-                            let previous_crew_member = object.state.crew_member;
-                            let previous_position = object.state.position;
-                            let preserves_position = update.position.is_none();
-                            let delta: ObjectDelta = update.into();
-                            let apply_outcome = object.apply_delta(&delta, action_library);
-                            if preserves_position {
-                                object.state.position = previous_position;
-                            }
-                            if let Some(change) = apply_outcome.action_change {
-                                object.record_action_event(
-                                    change.previous,
-                                    ActionTransitionKind::Forced,
-                                );
-                            }
-                            if let Some((previous, new)) = apply_outcome.container_change {
-                                contact_container_changes.push((object.id, previous, new));
-                            }
-                            let new_owner = object.state.owner;
-                            let new_crew_member = object.state.crew_member;
-                            if previous_owner != new_owner
-                                || previous_crew_member != new_crew_member
-                            {
-                                contact_selection_changes.push((
-                                    object.id,
-                                    previous_owner,
-                                    new_owner,
-                                    new_crew_member,
-                                ));
-                            }
-                        } else {
-                            object.state.action.reconcile_with_library(action_library);
-                        }
-
-                        contact_outcomes.push(outcome);
-                        if value.as_bool() {
-                            break;
-                        }
-                    }
-                    Ok(())
+            let mut run_contact_callback = |object: &mut Object,
+                                            contact_cnat: u32|
+             -> Result<(), EngineError> {
+                if !contact_function_calls_enabled {
+                    return Ok(());
+                }
+                let Some(definition) = definition_for_contact else {
+                    return Ok(());
                 };
+                for cnat in [CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM] {
+                    if contact_cnat & cnat == 0 {
+                        continue;
+                    }
+                    let Some(function_name) = contact_callback_name(cnat) else {
+                        continue;
+                    };
+                    let state_snapshot = object.state.clone();
+                    let world = contact_world
+                        .clone()
+                        .with_next_object_id(contact_next_object_id);
+                    let (value, mut outcome, audio_state, new_rng) = definition
+                        .call_object_function(
+                            &state_snapshot,
+                            object.id,
+                            function_name,
+                            &[],
+                            contact_rng.clone(),
+                            &contact_global_effects,
+                            contact_physics,
+                            contact_environment,
+                            contact_frame,
+                            world,
+                            contact_game_over_triggered,
+                            contact_audio.clone(),
+                        )?;
+                    contact_rng = new_rng;
+                    contact_audio = audio_state;
+                    contact_next_object_id = outcome.next_object_id;
+
+                    if let Some(update) = outcome.object_update.take() {
+                        let previous_owner = object.state.owner;
+                        let previous_crew_member = object.state.crew_member;
+                        let previous_position = object.state.position;
+                        let preserves_position = update.position.is_none();
+                        let delta: ObjectDelta = update.into();
+                        let apply_outcome = object.apply_delta(&delta, action_library);
+                        if preserves_position {
+                            object.state.position = previous_position;
+                        }
+                        if let Some(change) = apply_outcome.action_change {
+                            object
+                                .record_action_event(change.previous, ActionTransitionKind::Forced);
+                        }
+                        if let Some((previous, new)) = apply_outcome.container_change {
+                            contact_container_changes.push((object.id, previous, new));
+                        }
+                        let new_owner = object.state.owner;
+                        let new_crew_member = object.state.crew_member;
+                        if previous_owner != new_owner || previous_crew_member != new_crew_member {
+                            contact_selection_changes.push((
+                                object.id,
+                                previous_owner,
+                                new_owner,
+                                new_crew_member,
+                            ));
+                        }
+                    } else {
+                        object.state.action.reconcile_with_library(action_library);
+                    }
+
+                    contact_outcomes.push(outcome);
+                    if value.as_bool() {
+                        break;
+                    }
+                }
+                Ok(())
+            };
             let landscape = self.landscape.as_ref();
             let materials = &self.materials;
             let object = &mut self.objects[idx];
@@ -16485,10 +16486,11 @@ impl Engine {
         Ok(true)
     }
 
-    fn apply_physics_at_index(&mut self, idx: usize) {
+    fn apply_physics_at_index(&mut self, idx: usize) -> bool {
         if idx >= self.objects.len() {
-            return;
+            return false;
         }
+        let mut swim_walk_transition = false;
 
         let definition_id = self.objects[idx].definition_id.clone();
         let command_direction = self.objects[idx].state.command_direction;
@@ -16550,32 +16552,32 @@ impl Engine {
         if matches!(procedure, ActionProcedure::Bridge)
             && !self.apply_bridge_procedure(idx, command_direction, &definition_id)
         {
-            return;
+            return false;
         }
 
         if matches!(procedure, ActionProcedure::Build)
             && !self.apply_build_procedure(idx, &definition_id)
         {
-            return;
+            return false;
         }
 
         if matches!(procedure, ActionProcedure::Fight)
             && !self.apply_fight_procedure(idx, &definition_id)
         {
-            return;
+            return false;
         }
 
         if matches!(procedure, ActionProcedure::Attach)
             && !self.apply_attach_procedure(idx, &definition_id)
         {
-            return;
+            return false;
         }
 
         let mut push_handled = false;
         if matches!(procedure, ActionProcedure::Push) {
             if !self.apply_push_procedure(idx, command_direction, movement_profile, &definition_id)
             {
-                return;
+                return false;
             }
             push_handled = true;
         }
@@ -16584,7 +16586,7 @@ impl Engine {
         if matches!(procedure, ActionProcedure::Pull) {
             if !self.apply_pull_procedure(idx, command_direction, movement_profile, &definition_id)
             {
-                return;
+                return false;
             }
             pull_handled = true;
         }
@@ -16615,6 +16617,35 @@ impl Engine {
                 }
                 _ => {}
             }
+            // DFA_SWIM liquid probes (C4Object.cpp:4946-4960): below =
+            // GBackLiquid(x, y + 1 + Float*Con/FullCon - 1), surface =
+            // GBackLiquid(x, y - 1 + Float*Con/FullCon - 1); position is
+            // stable through the steering, so probe before the borrow.
+            // Fixture worlds have no landscape at all — skip the liquid
+            // checks entirely there (a real game always has one).
+            let swim_probes_available = self.landscape.is_some();
+            let (swim_below_wet, swim_surface_wet) = {
+                let state = &self.objects[idx].state;
+                let float_line = self
+                    .definitions
+                    .get(&self.objects[idx].definition_id)
+                    .map(|definition| definition.float_line)
+                    .unwrap_or(0);
+                let offset = float_line
+                    .saturating_mul(state.construction)
+                    .checked_div(FULL_CON)
+                    .unwrap_or(0);
+                let probe = |y: i32| {
+                    self.landscape
+                        .as_ref()
+                        .map(|landscape| landscape.is_liquid_at(state.position.x, y))
+                        .unwrap_or(false)
+                };
+                (
+                    probe(state.position.y + offset),
+                    probe(state.position.y + offset - 2),
+                )
+            };
             let object = &mut self.objects[idx];
             // DFA_SWIM and DFA_FLOAT never apply gravity (no DoGravity call,
             // C4Object.cpp:4920-4970/:5268-5287); the legacy halved-gravity
@@ -16754,6 +16785,28 @@ impl Engine {
                             movement_profile,
                             gravity_component,
                         );
+                    }
+                    // Out-of-liquid checks (C4Object.cpp:4946-4960): a
+                    // swimmer whose InLiquid dropped either paddles back
+                    // down (liquid just below the float line) or free-falls
+                    // into Walk (ObjectActionWalk, C4ObjectCom.cpp:34-39 —
+                    // the early `return` skips the rest of ExecAction).
+                    // The surface bound zeroes upward ydir once the float
+                    // line clears the liquid.
+                    if swim_probes_available {
+                        if !object.state.in_liquid {
+                            if swim_below_wet {
+                                object.fixed_velocity.y = math::SWIM_ACCEL;
+                            } else {
+                                swim_walk_transition = true;
+                            }
+                        }
+                        if !swim_walk_transition
+                            && !swim_surface_wet
+                            && object.fixed_velocity.y < C4Fixed::ZERO
+                        {
+                            object.fixed_velocity.y = C4Fixed::ZERO;
+                        }
                     }
                 }
                 ActionProcedure::Walk => {
@@ -16896,6 +16949,18 @@ impl Engine {
         {
             self.reset_lift_action(idx, &definition_id);
         }
+        // Free-fall swim exit: ObjectActionWalk (SetActionByName("Walk"),
+        // xdir = ydir = 0, C4ObjectCom.cpp:34-39); the DFA_SWIM case
+        // `return`s so the phase advance is skipped this frame
+        // (C4Object.cpp:4956).
+        if swim_walk_transition {
+            self.force_action_with_calls(idx, &definition_id, "Walk");
+            let object = &mut self.objects[idx];
+            object.fixed_velocity = FixedVec2::ZERO;
+            object.state.velocity = Vector2::ZERO;
+            return true;
+        }
+        false
     }
 
     fn apply_lift_to_target(
@@ -17374,16 +17439,15 @@ impl Engine {
         };
 
         let object = &mut self.objects[idx];
-        let result = object            .state
+        let result = object
+            .state
             .action
             .apply_update_with_library(&update, &library);
         // SetAction fix resync (C4Object.cpp:4144) — only past the
         // NoOtherAction early returns.
         if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
-            object.fixed_position = FixedVec2::from_ints(
-                object.state.position.x,
-                object.state.position.y,
-            );
+            object.fixed_position =
+                FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
         if clear_targets {
             object.state.action.target = None;
@@ -17419,7 +17483,9 @@ impl Engine {
             return Ok(true);
         }
         let action_name = self.objects[idx].state.action.name.clone();
-        if definition.action_library().procedure_for_action(&action_name)
+        if definition
+            .action_library()
+            .procedure_for_action(&action_name)
             != ActionProcedure::Connect
         {
             return Ok(true);
@@ -17433,14 +17499,15 @@ impl Engine {
             (0usize, self.objects[idx].state.action.target),
             (1usize, self.objects[idx].state.action.target2),
         ] {
-            let resolved = target_id
-                .and_then(|id| self.find_object_index(id))
-                .filter(|&target_idx| {
-                    let target = &self.objects[target_idx];
-                    !target.destroyed
-                        && target.state.status.is_active()
-                        && target.state.construction >= FULL_CON
-                });
+            let resolved =
+                target_id
+                    .and_then(|id| self.find_object_index(id))
+                    .filter(|&target_idx| {
+                        let target = &self.objects[target_idx];
+                        !target.destroyed
+                            && target.state.status.is_active()
+                            && target.state.construction >= FULL_CON
+                    });
             match resolved {
                 None => broke = true,
                 Some(target_idx) => {
@@ -17448,9 +17515,18 @@ impl Engine {
                     let point = if line_vertex {
                         // Local[2]/Local[3] vertex indices are numbered
                         // script locals; content (CHBM) leaves them 0.
-                        let vertex = target.state.vertices.first().copied().unwrap_or(
-                            ObjectVertex { x: 0, y: 0, cnat: 0, friction: 0 },
-                        );
+                        let vertex =
+                            target
+                                .state
+                                .vertices
+                                .first()
+                                .copied()
+                                .unwrap_or(ObjectVertex {
+                                    x: 0,
+                                    y: 0,
+                                    cnat: 0,
+                                    friction: 0,
+                                });
                         Vector2::new(
                             target.state.position.x + vertex.x,
                             target.state.position.y + vertex.y,
@@ -17523,6 +17599,47 @@ impl Engine {
         Ok(true)
     }
 
+    /// SetActionByName-style forced transition from an engine path
+    /// (ObjectActionWalk et al., C4ObjectCom.cpp:34-39): applies the named
+    /// action when the def has it, resyncs the fixed coords
+    /// (C4Object.cpp:4144) and records the transition event so the
+    /// StartCall/AbortCall pair fires from the drain.
+    fn force_action_with_calls(&mut self, idx: usize, definition_id: &DefinitionId, name: &str) {
+        let Some(library) = self
+            .definitions
+            .get(definition_id)
+            .map(|definition| definition.action_library().clone())
+        else {
+            return;
+        };
+        if !library.contains(name) {
+            return;
+        }
+        let previous = self.objects[idx].state.action.clone();
+        let update = ActionUpdate {
+            name: Some(name.to_string()),
+            phase: Some(0),
+            ticks: Some(0),
+            force: true,
+            data: None,
+            target: None,
+            target2: None,
+            callbacks_dispatched: false,
+        };
+        let object = &mut self.objects[idx];
+        let result = object
+            .state
+            .action
+            .apply_update_with_library(&update, &library);
+        if matches!(result, ActionUpdateResult::Applied) {
+            object.fixed_position =
+                FixedVec2::from_ints(object.state.position.x, object.state.position.y);
+            if previous.name != object.state.action.name {
+                object.record_action_event(previous, ActionTransitionKind::Forced);
+            }
+        }
+    }
+
     fn apply_no_attach_action(&mut self, idx: usize, library: &ActionLibrary) {
         if idx >= self.objects.len() {
             return;
@@ -17564,16 +17681,15 @@ impl Engine {
         };
 
         let object = &mut self.objects[idx];
-        let result = object            .state
+        let result = object
+            .state
             .action
             .apply_update_with_library(&update, library);
         // SetAction fix resync (C4Object.cpp:4144) — only past the
         // NoOtherAction early returns.
         if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
-            object.fixed_position = FixedVec2::from_ints(
-                object.state.position.x,
-                object.state.position.y,
-            );
+            object.fixed_position =
+                FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
         object.state.action.target = None;
         object.state.action.target2 = None;
@@ -17715,8 +17831,7 @@ impl Engine {
             CommandDirection::Left => -walk,
             _ => C4Fixed::ZERO,
         };
-        let txdir =
-            movement + walk * (pull_x - target_position.x).clamp(-10, 10) / 10;
+        let txdir = movement + walk * (pull_x - target_position.x).clamp(-10, 10) / 10;
         // Push object (C4Object.cpp:5129-5132).
         if !self.push_object(
             target_idx,
@@ -18744,16 +18859,15 @@ impl Engine {
             callbacks_dispatched: false,
         };
         let object = &mut self.objects[idx];
-        let result = object            .state
+        let result = object
+            .state
             .action
             .apply_update_with_library(&update, &library);
         // SetAction fix resync (C4Object.cpp:4144) — only past the
         // NoOtherAction early returns.
         if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
-            object.fixed_position = FixedVec2::from_ints(
-                object.state.position.x,
-                object.state.position.y,
-            );
+            object.fixed_position =
+                FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
         if matches!(result, ActionUpdateResult::Applied)
             && previous.name != object.state.action.name
@@ -18882,11 +18996,8 @@ impl Engine {
                     && self.objects[candidate_idx].state.category & CATEGORY_OBJECT != 0
                 {
                     let by_value = object_reference_value(candidate_id);
-                    let query = self.call_object_function(
-                        idx,
-                        "QueryCatchBlow",
-                        vec![by_value.clone()],
-                    )?;
+                    let query =
+                        self.call_object_function(idx, "QueryCatchBlow", vec![by_value.clone()])?;
                     if !query.as_bool() {
                         // "realistic" hit energy (C4GameObjects.cpp:171-173)
                         let v1 = self.objects[idx].fixed_velocity;
@@ -18902,7 +19013,12 @@ impl Engine {
                             fixtoi((dx_dir * dx_dir + dy_dir * dy_dir) * candidate_mass / 5);
                         // reduced to 1/3rd, but never dropped to zero by it
                         let hit_energy = (hit_energy / 3).max(i32::from(hit_energy != 0));
-                        self.change_object_energy(idx, -(hit_energy / 5), C4FX_CALL_ENG_OBJ_HIT, self.objects[candidate_idx].state.owner);
+                        self.change_object_energy(
+                            idx,
+                            -(hit_energy / 5),
+                            C4FX_CALL_ENG_OBJ_HIT,
+                            self.objects[candidate_idx].state.owner,
+                        );
                         let tmass = obj1_mass.max(50);
                         let candidate_velocity = self.objects[candidate_idx].fixed_velocity;
                         // fling unless airborne off-Tick3 (C4GameObjects.cpp:176)
@@ -18947,8 +19063,7 @@ impl Engine {
                 }
                 // Collection (C4GameObjects.cpp:185-194)
                 if ocf1 & crate::ocf::COLLECTION != 0 && ocf2 & crate::ocf::CARRYABLE != 0 {
-                    let Some(collection_rect) =
-                        collection_rect.filter(|rect| rect.is_positive())
+                    let Some(collection_rect) = collection_rect.filter(|rect| rect.is_positive())
                     else {
                         continue;
                     };
@@ -19067,11 +19182,8 @@ impl Engine {
         if !fire_caused {
             // blasted but not incinerated: IncinerationEx (C4Effect.cpp:602-607)
             if blasted {
-                let _ = self.call_object_function(
-                    idx,
-                    "IncinerationEx",
-                    vec![Value::Int(caused_by)],
-                )?;
+                let _ =
+                    self.call_object_function(idx, "IncinerationEx", vec![Value::Int(caused_by)])?;
             }
             return Ok(false);
         }
@@ -19082,7 +19194,7 @@ impl Engine {
             object.state.fire_caused_by = caused_by;
         }
         self.objects[idx].state.fire_phase = self.rng.random(15); // Random(MaxFirePhase)
-        // Engine script call (C4Effect.cpp:638)
+                                                                  // Engine script call (C4Effect.cpp:638)
         let _ = self.call_object_function(idx, "Incineration", vec![Value::Int(caused_by)])?;
         Ok(true)
     }
@@ -19122,7 +19234,12 @@ impl Engine {
         }
         // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:782)
         if frame % 5 == 0 {
-            self.change_object_energy(idx, -1, C4FX_CALL_ENG_FIRE, self.objects[idx].state.fire_caused_by);
+            self.change_object_energy(
+                idx,
+                -1,
+                C4FX_CALL_ENG_FIRE,
+                self.objects[idx].state.fire_caused_by,
+            );
         }
         // Background effects: Tick5 over valid landscape material
         // (C4Object.cpp:791-806) — extinguish in extinguisher material, then
@@ -19285,7 +19402,10 @@ impl Engine {
             trained = true;
         }
         if object.state.crew_member {
-            let info = object.state.info_physical.get_or_insert(definition_physical);
+            let info = object
+                .state
+                .info_physical
+                .get_or_insert(definition_physical);
             if let Some(value) = info.value_mut_by_name(name) {
                 PhysicalInfo::train_value(value, train_by, max_train);
             }
@@ -19382,17 +19502,16 @@ impl Engine {
     /// their effects first, the damage stat clamps at zero, and the Damage
     /// script callback fires with (change, causedBy).
     fn change_object_damage(&mut self, idx: usize, change: i32, cause: i32, caused_by: i32) {
-        let change = if !self.objects[idx].state.alive
-            && !self.objects[idx].state.effects.is_empty()
-        {
-            let modified = self.call_effects_do_damage(idx, change, cause, caused_by);
-            if modified == 0 {
-                return;
-            }
-            modified
-        } else {
-            change
-        };
+        let change =
+            if !self.objects[idx].state.alive && !self.objects[idx].state.effects.is_empty() {
+                let modified = self.call_effects_do_damage(idx, change, cause, caused_by);
+                if modified == 0 {
+                    return;
+                }
+                modified
+            } else {
+                change
+            };
         {
             let object = &mut self.objects[idx];
             object.state.damage = object.state.damage.saturating_add(change).max(0);
@@ -19426,8 +19545,7 @@ impl Engine {
             self.objects[idx].last_energy_loss_cause = caused_by;
         }
         // Living things: ask effects for change first (C4Object.cpp:1355-1359).
-        let change = if self.objects[idx].state.alive
-            && !self.objects[idx].state.effects.is_empty()
+        let change = if self.objects[idx].state.alive && !self.objects[idx].state.effects.is_empty()
         {
             let modified = self.call_effects_do_damage(idx, change, cause, caused_by);
             if modified == 0 {
@@ -19480,11 +19598,8 @@ impl Engine {
         }
         // Engine script call (C4Object.cpp:1173)
         if let Some(idx) = self.find_object_index(object_id) {
-            let _ = self.call_object_function(
-                idx,
-                "Death",
-                vec![Value::Int(death_causing_player)],
-            )?;
+            let _ =
+                self.call_object_function(idx, "Death", vec![Value::Int(death_causing_player)])?;
         }
         Ok(())
     }
@@ -19551,16 +19666,15 @@ impl Engine {
             callbacks_dispatched: false,
         };
         let object = &mut self.objects[idx];
-        let result = object            .state
+        let result = object
+            .state
             .action
             .apply_update_with_library(&update, &library);
         // SetAction fix resync (C4Object.cpp:4144) — only past the
         // NoOtherAction early returns.
         if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
-            object.fixed_position = FixedVec2::from_ints(
-                object.state.position.x,
-                object.state.position.y,
-            );
+            object.fixed_position =
+                FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
         if matches!(result, ActionUpdateResult::Applied)
             && previous.name != object.state.action.name
@@ -19595,7 +19709,8 @@ impl Engine {
                     callbacks_dispatched: false,
                 };
                 let object = &mut self.objects[idx];
-                let result = object                    .state
+                let result = object
+                    .state
                     .action
                     .apply_update_with_library(&update, &library);
                 if matches!(result, ActionUpdateResult::Applied) {
@@ -19867,9 +19982,7 @@ impl Engine {
         for (&number, roster) in &self.crew_rosters {
             for info in roster {
                 if !info.in_action {
-                    *counts
-                        .entry((number, info.id.clone()))
-                        .or_insert(0u32) += 1;
+                    *counts.entry((number, info.id.clone())).or_insert(0u32) += 1;
                 }
             }
         }
@@ -19889,7 +20002,8 @@ impl Engine {
                 let mut names = None;
                 let mut found = false;
                 for include in definition.includes() {
-                    if let Some(source) = self.definitions.get(&DefinitionId::from(include.as_str()))
+                    if let Some(source) =
+                        self.definitions.get(&DefinitionId::from(include.as_str()))
                     {
                         names = source.clonk_names().map(str::to_owned);
                         found = true;
@@ -19915,7 +20029,9 @@ impl Engine {
     /// Debug helper: landscape solidity probe.
     /// Debug helper: an object's position in the exec vector.
     pub fn debug_object_vector_index(&self, id: u64) -> Option<usize> {
-        self.objects.iter().position(|object| object.id.as_u64() == id)
+        self.objects
+            .iter()
+            .position(|object| object.id.as_u64() == id)
     }
 
     /// Debug helper: an action's ActMap Attach bits.
@@ -19923,6 +20039,15 @@ impl Engine {
         self.definitions
             .get(&DefinitionId::from(id))
             .map(|def| def.action_library().attach_for_action(action))
+    }
+
+    /// Test helper: arm/disarm an object's InLiquid flag (fixtures
+    /// without water need it so the DFA_SWIM out-of-liquid exit stays
+    /// quiet).
+    pub fn debug_set_in_liquid(&mut self, id: ObjectId, in_liquid: bool) {
+        if let Some(idx) = self.find_object_index(id) {
+            self.objects[idx].state.in_liquid = in_liquid;
+        }
     }
 
     pub fn debug_landscape_is_solid(&self, x: i32, y: i32) -> bool {
@@ -19933,7 +20058,11 @@ impl Engine {
     }
 
     /// Debug helper: a definition's physical + an action's procedure.
-    pub fn debug_definition_physical(&self, id: &str, action: &str) -> Option<(i32, Option<String>)> {
+    pub fn debug_definition_physical(
+        &self,
+        id: &str,
+        action: &str,
+    ) -> Option<(i32, Option<String>)> {
         self.definitions.get(&DefinitionId::from(id)).map(|def| {
             (
                 def.physical().float,
@@ -20015,9 +20144,12 @@ impl Engine {
         let mut cache = self.object_index_cache.borrow_mut();
         cache.0 = generation;
         cache.1.clear();
-        cache
-            .1
-            .extend(self.objects.iter().enumerate().map(|(i, object)| (object.id, i)));
+        cache.1.extend(
+            self.objects
+                .iter()
+                .enumerate()
+                .map(|(i, object)| (object.id, i)),
+        );
         cache.1.get(&id).copied()
     }
 
@@ -20661,7 +20793,6 @@ impl Engine {
     }
 
     fn apply_dig_removal_counts(
-
         &mut self,
         removal_counts: HashMap<MaterialId, i32>,
         requested: bool,
@@ -20929,10 +21060,7 @@ impl Engine {
             ParticleLayer::ObjectFront(id) | ParticleLayer::ObjectBack(id) => {
                 self.find_object_index(*id).map(|index| {
                     let object = &self.objects[index];
-                    (
-                        object.fixed_position.int_x(),
-                        object.fixed_position.int_y(),
-                    )
+                    (object.fixed_position.int_x(), object.fixed_position.int_y())
                 })
             }
         }
@@ -20947,7 +21075,11 @@ impl Engine {
                 ParticleCommand::Create(config) => {
                     // Def-based path: full C4ParticleSystem::Create semantics.
                     // Def-less names keep the legacy fixture particle.
-                    if self.particle_system.get_def(&config.definition_id).is_some() {
+                    if self
+                        .particle_system
+                        .get_def(&config.definition_id)
+                        .is_some()
+                    {
                         let attach_origin = self.particle_attach_origin(&config.layer);
                         self.particle_system.create(
                             &config.definition_id.clone(),
@@ -20978,7 +21110,16 @@ impl Engine {
                 } => {
                     let attach_origin = self.particle_attach_origin(&layer);
                     self.particle_system.cast(
-                        &definition_id, amount, x, y, level, a0, b0, a1, b1, layer,
+                        &definition_id,
+                        amount,
+                        x,
+                        y,
+                        level,
+                        a0,
+                        b0,
+                        a1,
+                        b1,
+                        layer,
                         attach_origin,
                     );
                 }
@@ -21083,9 +21224,11 @@ impl Engine {
         let mut ix = fixtoi(pixel.x);
         let mut iy = fixtoi(pixel.y);
         let inmat = self.landscape_material(ix, iy);
-        let reaction =
-            self.materials
-                .reaction_for_event(Some(pixel.mat), inmat, MaterialInteractionEvent::PxsPos);
+        let reaction = self.materials.reaction_for_event(
+            Some(pixel.mat),
+            inmat,
+            MaterialInteractionEvent::PxsPos,
+        );
         if !matches!(reaction.kind, MaterialReactionKind::None) {
             // C++ passes nullptr for pfPosChanged at the PXSPos event; the
             // landscape position equals the PXS position here (C4PXS.cpp:55).
@@ -21392,8 +21535,7 @@ impl Engine {
                     ),
                     Value::Int(event.index() as i32),
                 ];
-                let Some((value, finals)) =
-                    self.call_material_reaction_script(&function, &args)
+                let Some((value, finals)) = self.call_material_reaction_script(&function, &args)
                 else {
                     return false;
                 };
@@ -21403,12 +21545,8 @@ impl Engine {
                     return true;
                 }
                 // Write back parameters (C4Material.cpp:822-832).
-                let final_int = |index: usize| {
-                    finals
-                        .get(index)
-                        .and_then(Value::as_c4_int)
-                        .unwrap_or(0)
-                };
+                let final_int =
+                    |index: usize| finals.get(index).and_then(Value::as_c4_int).unwrap_or(0);
                 // iPxsMat writes back UNCONDITIONALLY. C++ keeps even an
                 // invalid index (the PXS dies on its next Execute via the
                 // MatValid check); MaterialId cannot hold one, so the
@@ -21528,9 +21666,7 @@ impl Engine {
                 Value::Int(0),
                 Value::Int(pxs_material.index() as i32),
                 Value::Int(
-                    landscape_material
-                        .map(|id| id.index() as i32)
-                        .unwrap_or(-1), // MNone
+                    landscape_material.map(|id| id.index() as i32).unwrap_or(-1), // MNone
                 ),
                 Value::Int(MaterialInteractionEvent::MassMove.index() as i32),
             ];
@@ -21643,10 +21779,7 @@ impl Engine {
         let max_slide = material.max_slide();
 
         // Rough contact? May splash (C4Material.cpp:572-579)
-        if *ydir > itofix(1)
-            && splash_rate != 0
-            && self.rng.random(splash_rate) == 0
-        {
+        if *ydir > itofix(1) && splash_rate != 0 && self.rng.random(splash_rate) == 0 {
             *ydir = -*ydir / 8;
             *xdir = *xdir / 8 + fixed100(self.rng.random(200) - 100);
             if ydir.is_nonzero() {
@@ -21930,7 +22063,6 @@ impl Engine {
         initial_action.reconcile_with_library(&action_library);
         let initial_crew_member = crew_member.unwrap_or(default_crew_member);
 
-
         let id = match explicit_id {
             Some(explicit) => {
                 if self.objects.iter().any(|object| object.id == explicit) {
@@ -21986,8 +22118,7 @@ impl Engine {
                 ),
             )
         };
-        let docon_split_fixed = (!loaded && !position_adjusted
-            && position.y != given_position.y)
+        let docon_split_fixed = (!loaded && !position_adjusted && position.y != given_position.y)
             .then(|| FixedVec2::from_ints(given_position.x, given_position.y));
         // Objects.txt vertices are the CURRENT effective shape serialized
         // by C4Shape::CompileFunc (C4Shape.cpp:495-515) — already Con/
@@ -22182,7 +22313,7 @@ impl Engine {
                     messages,
                     player_commands,
                     trigger_game_over,
-            script_go,
+                    script_go,
                 },
                 audio_state,
                 new_rng,
@@ -22316,7 +22447,7 @@ impl Engine {
                     messages,
                     player_commands,
                     trigger_game_over,
-            script_go,
+                    script_go,
                 },
                 audio_state,
                 new_rng,
@@ -22470,9 +22601,9 @@ impl Engine {
                 }
             }
             if let Some(go) = effect_script_go {
-                    self.scenario_script_go = go;
-                }
-                if triggered_game_over {
+                self.scenario_script_go = go;
+            }
+            if triggered_game_over {
                 self.request_game_over()?;
             }
             if !physics_delta.is_empty() {
@@ -22531,7 +22662,10 @@ impl Engine {
             let (id, additional) = match self.spawn_single(config) {
                 Ok(result) => result,
                 Err(EngineError::UnknownDefinition(definition)) => {
-                    tracing::warn!(definition, "skipping spawn of unknown definition like C++ CreateObject");
+                    tracing::warn!(
+                        definition,
+                        "skipping spawn of unknown definition like C++ CreateObject"
+                    );
                     continue;
                 }
                 Err(other) => return Err(other),
@@ -23316,11 +23450,7 @@ fn parse_action_update(
     Ok(update)
 }
 
-fn value_to_vector(
-    definition: &str,
-    function: &str,
-    value: Value,
-) -> Result<Vector2, EngineError> {
+fn value_to_vector(definition: &str, function: &str, value: Value) -> Result<Vector2, EngineError> {
     match value {
         Value::Array(values) if values.len() == 2 => {
             let x = match &values[0] {
@@ -23400,11 +23530,7 @@ fn value_to_physics_delta(
     }
 }
 
-fn value_to_int(
-    definition: &str,
-    function: &str,
-    value: Value,
-) -> Result<i32, EngineError> {
+fn value_to_int(definition: &str, function: &str, value: Value) -> Result<i32, EngineError> {
     match value {
         Value::Int(v) => Ok(v),
         other => Err(EngineError::InvalidScriptOutput {
@@ -23487,11 +23613,7 @@ fn value_to_object_reference(
     }
 }
 
-fn value_to_bool(
-    definition: &str,
-    function: &str,
-    value: Value,
-) -> Result<bool, EngineError> {
+fn value_to_bool(definition: &str, function: &str, value: Value) -> Result<bool, EngineError> {
     match value {
         Value::Bool(v) => Ok(v),
         other => Err(EngineError::InvalidScriptOutput {
@@ -24308,8 +24430,7 @@ mod tests {
         names[20] = Some("Water".into());
         names[30] = Some("Earth".into());
         // 2x2 world: water in the left column, earth in the right.
-        let grid =
-            landscape::PixelGrid::new(2, 2, vec![20, 30, 20, 30], densities, names);
+        let grid = landscape::PixelGrid::new(2, 2, vec![20, 30, 20, 30], densities, names);
         let mut landscape = Landscape::new(2, vec![0, 0]).expect("landscape builds");
         landscape.set_pixel_grid(grid);
         engine.set_landscape(landscape);
@@ -24656,9 +24777,8 @@ mod tests {
         engine.register_definition(simple_definition("Ruin"))?;
         engine.register_definition(simple_definition("Gem"))?;
 
-        let hut = engine.spawn_object(
-            SpawnConfig::new("Hut").with_position(Vector2::new(30, 30)),
-        )?;
+        let hut =
+            engine.spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(30, 30)))?;
         let gem = engine.spawn_object(
             SpawnConfig::new("Gem")
                 .with_position(Vector2::new(30, 30))
@@ -24682,9 +24802,8 @@ mod tests {
         let mut keeper_def = simple_definition("Chest");
         keeper_def.set_fire_properties(0, true, false);
         engine.register_definition(keeper_def)?;
-        let chest = engine.spawn_object(
-            SpawnConfig::new("Chest").with_position(Vector2::new(50, 30)),
-        )?;
+        let chest =
+            engine.spawn_object(SpawnConfig::new("Chest").with_position(Vector2::new(50, 30)))?;
         let coin = engine.spawn_object(
             SpawnConfig::new("Gem")
                 .with_position(Vector2::new(50, 30))
@@ -24728,9 +24847,8 @@ mod tests {
         engine.set_materials(materials);
         engine.set_landscape(Landscape::flat_with_material(40, 30, Some(earth)));
         engine.register_definition(simple_definition("Tree"))?;
-        let tree = engine.spawn_object(
-            SpawnConfig::new("Tree").with_position(Vector2::new(10, 10)),
-        )?;
+        let tree =
+            engine.spawn_object(SpawnConfig::new("Tree").with_position(Vector2::new(10, 10)))?;
         let idx = engine.find_object_index(tree).expect("tree exists");
 
         let mut mirror = engine.rng.clone();
@@ -24765,9 +24883,8 @@ mod tests {
         if let Some(landscape) = engine.landscape.as_mut() {
             landscape.set_liquid_column(30, vec![LiquidSegment::with_material(5, 12, Some(water))]);
         }
-        let soaked = engine.spawn_object(
-            SpawnConfig::new("Tree").with_position(Vector2::new(30, 8)),
-        )?;
+        let soaked =
+            engine.spawn_object(SpawnConfig::new("Tree").with_position(Vector2::new(30, 8)))?;
         let soaked_idx = engine.find_object_index(soaked).expect("soaked exists");
         let mirror = engine.rng.clone();
         assert!(!engine.incinerate_object(soaked_idx, 1, false, None)?);
@@ -24845,7 +24962,10 @@ mod tests {
         engine.exec_object_fire(buried_idx, 15);
         mirror.random(3);
         assert_eq!(engine.rng, mirror, "Tick5 inflame draw over material");
-        assert!(engine.objects[buried_idx].state.on_fire, "earth does not extinguish");
+        assert!(
+            engine.objects[buried_idx].state.on_fire,
+            "earth does not extinguish"
+        );
         Ok(())
     }
 
@@ -24880,14 +25000,12 @@ mod tests {
         tree_def.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 16)));
         engine.register_definition(tree_def)?;
 
-        let torch = engine.spawn_object(
-            SpawnConfig::new("Torch").with_position(Vector2::new(40, 20)),
-        )?;
+        let torch =
+            engine.spawn_object(SpawnConfig::new("Torch").with_position(Vector2::new(40, 20)))?;
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 28 - (16 - 8)
         // keeps the tree center at (41,20), on top of the shapeless torch.
-        let tree = engine.spawn_object(
-            SpawnConfig::new("Tree").with_position(Vector2::new(41, 28)),
-        )?;
+        let tree =
+            engine.spawn_object(SpawnConfig::new("Tree").with_position(Vector2::new(41, 28)))?;
         let torch_idx = engine.find_object_index(torch).expect("torch exists");
         assert!(engine.incinerate_object(torch_idx, 7, false, None)?);
 
@@ -25055,8 +25173,8 @@ mod tests {
         engine.register_player(PlayerConfig::new(2, "P2"))?;
         engine.set_hostility(1, 2, true)?;
 
-        let hut = engine
-            .spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(50, 50)))?;
+        let hut =
+            engine.spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(50, 50)))?;
         let knight_a = engine.spawn_object(
             SpawnConfig::new("KnightA")
                 .with_owner(1)
@@ -25125,8 +25243,7 @@ mod tests {
         engine.cross_check(1)?;
         let victim_idx = engine.find_object_index(victim).expect("victim exists");
         assert_eq!(
-            engine.objects[victim_idx].state.energy,
-            100,
+            engine.objects[victim_idx].state.energy, 100,
             "QueryCatchBlow rejected the blow"
         );
         assert_eq!(
@@ -25266,8 +25383,7 @@ mod tests {
 
         let mut mirror = engine.rng.clone();
         assert_eq!(mirror.random(1), 0, "SplashRate=1 always splashes");
-        let expected_xdir =
-            math::itofix(8) / 8 + math::fixed100(mirror.random(200) - 100);
+        let expected_xdir = math::itofix(8) / 8 + math::fixed100(mirror.random(200) - 100);
 
         let (mut x, mut y) = (4, 9);
         let mut xdir = math::itofix(8);
@@ -25410,9 +25526,9 @@ mod tests {
                 .expect("landscape builds"),
         );
         let mut mirror = engine.rng.clone();
-        let expected_xdir = math::C4Fixed::from_raw(
-            (math::itofix(1).val() * 10 + math::itofix(-1).val()) / 11,
-        ) + math::fixed10(mirror.random(5) - 2);
+        let expected_xdir =
+            math::C4Fixed::from_raw((math::itofix(1).val() * 10 + math::itofix(-1).val()) / 11)
+                + math::fixed10(mirror.random(5) - 2);
 
         let (mut x, mut y) = (2, 9);
         let mut xdir = math::itofix(1);
@@ -25741,7 +25857,10 @@ mod tests {
         engine.tick_pxs();
         let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
         assert_eq!(survivors.len(), 1, "falsy return keeps the pixel");
-        assert_eq!(survivors[0].mat, water, "PxsMat writes back unconditionally");
+        assert_eq!(
+            survivors[0].mat, water,
+            "PxsMat writes back unconditionally"
+        );
         assert_eq!(
             survivors[0].xdir,
             math::fixed100(150),
@@ -25841,7 +25960,11 @@ mod tests {
             math::itofix(1),
         ));
         engine.tick_pxs();
-        assert_eq!(engine.pxs_system.count(), 0, "enclosed PXS inserts and dies");
+        assert_eq!(
+            engine.pxs_system.count(),
+            0,
+            "enclosed PXS inserts and dies"
+        );
         assert_eq!(engine.rng, mirror, "no synced draws while enclosed");
     }
 
@@ -26898,7 +27021,10 @@ global func MenuCommand(state, kind, selection)
         {
             let call_log = Arc::clone(&call_log);
             hooks.set_on_call(move |name, args| {
-                call_log.lock().unwrap().push((name.to_string(), args.to_vec()));
+                call_log
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.to_vec()));
             });
         }
 
@@ -26936,7 +27062,9 @@ global func MenuCommand(state, kind, selection)
             .map(|(_, args)| args.clone())
             .expect("start callback ran");
         assert!(
-            start_args.iter().all(|arg| matches!(arg, lc_script::Value::Nil)),
+            start_args
+                .iter()
+                .all(|arg| matches!(arg, lc_script::Value::Nil)),
             "StartCall passes no parameters, got {start_args:?}"
         );
         let abort_args = calls
@@ -27438,7 +27566,8 @@ global func MenuCommand(state, kind, selection)
         assert_eq!(object.velocity.y, 0);
         assert_eq!(object.velocity.x, 0);
         assert_eq!(
-            object                .fixed_velocity
+            object
+                .fixed_velocity
                 .expect("gravity should remain sub-pixel")
                 .y
                 .val(),
@@ -27470,7 +27599,9 @@ global func MenuCommand(state, kind, selection)
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Glider").with_category(CATEGORY_OBJECT).with_command_direction(CommandDirection::DownRight),
+                SpawnConfig::new("Glider")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_command_direction(CommandDirection::DownRight),
             )
             .expect("spawn succeeds");
 
@@ -27556,7 +27687,9 @@ global func MenuCommand(state, kind, selection)
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Balloon").with_category(CATEGORY_OBJECT).with_command_direction(CommandDirection::UpRight),
+                SpawnConfig::new("Balloon")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_command_direction(CommandDirection::UpRight),
             )
             .expect("spawn succeeds");
 
@@ -27652,6 +27785,13 @@ global func MenuCommand(state, kind, selection)
             )
             .expect("spawn succeeds");
 
+        // C4Object InLiquid: these fixtures have no water — arm the flag
+        // so the DFA_SWIM out-of-liquid exit (C4Object.cpp:4946-4956)
+        // does not convert the swimmer to Walk.
+        {
+            let idx = engine.find_object_index(id).expect("swimmer exists");
+            engine.objects[idx].state.in_liquid = true;
+        }
         let snapshot = engine.tick().expect("first tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::new(2, 2));
@@ -27704,7 +27844,8 @@ global func MenuCommand(state, kind, selection)
 
         let lifter_id = engine
             .spawn_object(
-                SpawnConfig::new("Lifter").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Lifter")
+                    .with_category(CATEGORY_OBJECT)
                     .with_action(lift_action)
                     .with_command_direction(CommandDirection::Up),
             )
@@ -28867,7 +29008,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Test").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Test")
+                    .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_velocity(Vector2::new(1, 0))
                     .with_energy(50),
@@ -28980,7 +29122,11 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         );
 
         let target_id = engine
-            .spawn_object(SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT).with_position(Vector2::new(10, 0)))
+            .spawn_object(
+                SpawnConfig::new("Crate")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 0)),
+            )
             .expect("target spawns");
         let target_initial_position = engine
             .object_snapshot(target_id)
@@ -28992,7 +29138,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let pusher_id = engine
             .spawn_object(
-                SpawnConfig::new("Pusher").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Pusher")
+                    .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_action(push_state)
                     .with_command_direction(CommandDirection::Right),
@@ -29135,7 +29282,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let target_id = engine
             .spawn_object(
-                SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Crate")
+                    .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_vertices(vertices.clone()),
             )
@@ -29150,7 +29298,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let puller_id = engine
             .spawn_object(
-                SpawnConfig::new("Puller").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Puller")
+                    .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(20, 0))
                     .with_vertices(vertices)
                     .with_action(pull_state)
@@ -29303,7 +29452,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let opponent_id = engine
             .spawn_object(
-                SpawnConfig::new("Opponent").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Opponent")
+                    .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(12, 0))
                     .with_vertices(vertices.clone())
                     .with_action(ActionState::new("Fight")),
@@ -29314,7 +29464,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         fight_state.target = Some(opponent_id);
         let fighter_id = engine
             .spawn_object(
-                SpawnConfig::new("Fighter").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Fighter")
+                    .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_vertices(vertices.clone())
                     .with_action(fight_state),
@@ -29564,8 +29715,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script)
-                    .expect("finder compiles"),
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
             )
             .expect("finder registers");
         engine
@@ -29624,8 +29774,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script)
-                    .expect("finder compiles"),
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
             )
             .expect("finder registers");
         engine
@@ -29680,8 +29829,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script)
-                    .expect("finder compiles"),
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
             )
             .expect("finder registers");
         engine
@@ -29719,8 +29867,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script)
-                    .expect("finder compiles"),
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
             )
             .expect("finder registers");
         let finder = engine
@@ -29754,8 +29901,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script)
-                    .expect("finder compiles"),
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
             )
             .expect("finder registers");
         engine
@@ -29800,8 +29946,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script)
-                    .expect("finder compiles"),
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
             )
             .expect("finder registers");
         let finder = engine
@@ -29813,7 +29958,11 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let result = engine
             .call_object_function(finder_idx, "HuntSelf", Vec::new())
             .expect("HuntSelf runs");
-        assert_eq!(result, Value::Int(1), "the caller matches its own predicate");
+        assert_eq!(
+            result,
+            Value::Int(1),
+            "the caller matches its own predicate"
+        );
     }
 
     #[test]
@@ -29839,8 +29988,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script)
-                    .expect("finder compiles"),
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
             )
             .expect("finder registers");
         engine
@@ -29914,8 +30062,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script)
-                    .expect("finder compiles"),
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
             )
             .expect("finder registers");
         engine
@@ -29984,8 +30131,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script)
-                    .expect("finder compiles"),
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
             )
             .expect("finder registers");
         engine
@@ -30052,8 +30198,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("FNDR", "Finder", finder_script)
-                    .expect("finder compiles"),
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
             )
             .expect("finder registers");
         engine
@@ -30218,8 +30363,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("CLLR", "Caller", caller_script)
-                    .expect("caller compiles"),
+                Definition::from_script("CLLR", "Caller", caller_script).expect("caller compiles"),
             )
             .expect("caller registers");
         engine
@@ -30304,8 +30448,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("CLLR", "Caller", caller_script)
-                    .expect("caller compiles"),
+                Definition::from_script("CLLR", "Caller", caller_script).expect("caller compiles"),
             )
             .expect("caller registers");
         engine
@@ -30371,8 +30514,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("CLLR", "Caller", caller_script)
-                    .expect("caller compiles"),
+                Definition::from_script("CLLR", "Caller", caller_script).expect("caller compiles"),
             )
             .expect("caller registers");
         engine
@@ -30421,8 +30563,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("CLLR", "Caller", caller_script)
-                    .expect("caller compiles"),
+                Definition::from_script("CLLR", "Caller", caller_script).expect("caller compiles"),
             )
             .expect("caller registers");
         engine
@@ -30479,22 +30620,24 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(
-                Definition::from_script("CLLR", "Caller", caller_script)
-                    .expect("caller compiles"),
+                Definition::from_script("CLLR", "Caller", caller_script).expect("caller compiles"),
             )
             .expect("caller registers");
         let mut goal_def =
             Definition::from_script("GOAL", "Goal", listener_script).expect("goal compiles");
         goal_def.set_category(1 << 5); // C4D_Goal
-        engine.register_definition(goal_def).expect("goal registers");
+        engine
+            .register_definition(goal_def)
+            .expect("goal registers");
         let mut rule_def =
             Definition::from_script("RULE", "Rule", listener_script).expect("rule compiles");
         rule_def.set_category(1 << 19); // C4D_Rule
-        engine.register_definition(rule_def).expect("rule registers");
+        engine
+            .register_definition(rule_def)
+            .expect("rule registers");
         engine
             .register_definition(
-                Definition::from_script("PLAI", "Plain", listener_script)
-                    .expect("plain compiles"),
+                Definition::from_script("PLAI", "Plain", listener_script).expect("plain compiles"),
             )
             .expect("plain registers");
         engine
@@ -30647,7 +30790,11 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .register_definition(definition)
             .expect("definition registers");
         let id = engine
-            .spawn_object(SpawnConfig::new("Actor").with_alive(true).with_energy(50_000))
+            .spawn_object(
+                SpawnConfig::new("Actor")
+                    .with_alive(true)
+                    .with_energy(50_000),
+            )
             .expect("spawn succeeds");
         engine.tick().expect("tick succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
@@ -30922,6 +31069,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
                     .with_action(ActionState::new("Turn")),
             )
             .expect("spawns");
+        // C4Object InLiquid: these fixtures have no water — arm the flag
+        // so the DFA_SWIM out-of-liquid exit (C4Object.cpp:4946-4956)
+        // does not convert the swimmer to Walk.
+        {
+            let idx = engine.find_object_index(id).expect("swimmer exists");
+            engine.objects[idx].state.in_liquid = true;
+        }
         engine.tick().expect("tick");
         let idx = engine.find_object_index(id).expect("exists");
         assert_eq!(
@@ -30976,6 +31130,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         // (C4Movement.cpp:34) = raw 13107, clamped to
         // lLimit = ValByPhysical(160, 50000) = itofix(50000*32, 2000000)
         // = raw 52428 — reached exactly on the fourth frame.
+        // C4Object InLiquid: these fixtures have no water — arm the flag
+        // so the DFA_SWIM out-of-liquid exit (C4Object.cpp:4946-4956)
+        // does not convert the swimmer to Walk.
+        {
+            let idx = engine.find_object_index(id).expect("swimmer exists");
+            engine.objects[idx].state.in_liquid = true;
+        }
         engine.tick().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 13107);
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
@@ -31488,9 +31649,11 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.objects[idx].state.on_fire = true;
         engine.objects[idx].state.fire_phase = 0;
         engine.tick().expect("tick succeeds");
-        assert_eq!(engine.objects[idx].state.fire_phase, 1, "ExecFire once per frame");
+        assert_eq!(
+            engine.objects[idx].state.fire_phase, 1,
+            "ExecFire once per frame"
+        );
     }
-
 
     #[test]
     fn exec_life_breath_depletes_then_asphyxiates_in_semisolid() {
@@ -31568,7 +31731,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             engine.objects[idx].state.breath,
             50_000 - 2 * C4_MAX_PHYSICAL / 100
         );
-        assert_eq!(engine.objects[idx].state.energy, 50_000, "breath before energy");
+        assert_eq!(
+            engine.objects[idx].state.energy, 50_000,
+            "breath before energy"
+        );
         let _ = mirror.random(5); // the BubbleOut x argument (C4Object.cpp:905)
         let _ = mirror.random(i32::MAX); // the per-object Step draw
         assert_eq!(engine.rng, mirror, "exactly one extra synced draw");
@@ -32346,7 +32512,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let first = engine
             .spawn_object(
-                SpawnConfig::new("Crew").with_alive(true)
+                SpawnConfig::new("Crew")
+                    .with_alive(true)
                     .with_owner(1)
                     .with_crew_member(true)
                     .with_id(ObjectId::new(200)),
@@ -32354,7 +32521,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("first spawn succeeds");
         let second = engine
             .spawn_object(
-                SpawnConfig::new("Crew").with_alive(true)
+                SpawnConfig::new("Crew")
+                    .with_alive(true)
                     .with_owner(1)
                     .with_crew_member(true)
                     .with_id(ObjectId::new(100)),
@@ -33052,7 +33220,9 @@ protected func HudCount() { return(ObjectCount(GetID(),0,0,0,0,0,0,0,0,GetOwner(
             "#strict\nfunc Trigger() { CreateObject(AHUD, 0, 0, -1); return(1); }\n",
         )
         .expect("caller compiles");
-        engine.register_definition(caller).expect("caller registers");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
         let id = engine
             .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
             .expect("caller spawns");
@@ -33065,7 +33235,10 @@ protected func HudCount() { return(ObjectCount(GetID(),0,0,0,0,0,0,0,0,GetOwner(
             .iter()
             .filter(|object| object.definition_id == "AHUD")
             .count();
-        assert_eq!(count, 2, "one spawn yields the pair, no more (AmmoHud.c4d:17)");
+        assert_eq!(
+            count, 2,
+            "one spawn yields the pair, no more (AmmoHud.c4d:17)"
+        );
     }
 
     // C4Object::Init: `if (Category & C4D_Living) Alive = 1; if (Alive)
@@ -33081,15 +33254,15 @@ protected func HudCount() { return(ObjectCount(GetID(),0,0,0,0,0,0,0,0,GetOwner(
             energy: 50_000,
             ..PhysicalInfo::default()
         });
-        engine.register_definition(living).expect("living registers");
+        engine
+            .register_definition(living)
+            .expect("living registers");
         engine
             .register_definition(simple_definition("ROCK"))
             .expect("rock registers");
 
         let clonk = engine
-            .spawn_object(
-                SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING),
-            )
+            .spawn_object(SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING))
             .expect("clonk spawns");
         let idx = engine.find_object_index(clonk).expect("clonk exists");
         assert_eq!(
@@ -33101,7 +33274,10 @@ protected func HudCount() { return(ObjectCount(GetID(),0,0,0,0,0,0,0,0,GetOwner(
             .spawn_object(SpawnConfig::new("ROCK").with_category(CATEGORY_OBJECT))
             .expect("rock spawns");
         let idx = engine.find_object_index(rock).expect("rock exists");
-        assert_eq!(engine.objects[idx].state.energy, 0, "non-living: Energy stays 0");
+        assert_eq!(
+            engine.objects[idx].state.energy, 0,
+            "non-living: Energy stays 0"
+        );
 
         // Loaded objects compile Energy= verbatim (C4Object.cpp:2754).
         let loaded = engine
@@ -33147,9 +33323,7 @@ func Overheal() {
         });
         engine.register_definition(living).expect("registers");
         let id = engine
-            .spawn_object(
-                SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING),
-            )
+            .spawn_object(SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING))
             .expect("spawns");
         let idx = engine.find_object_index(id).expect("exists");
 
@@ -33202,9 +33376,7 @@ func Slay() { DoEnergy(-100); return(1); }
         });
         engine.register_definition(living).expect("registers");
         let id = engine
-            .spawn_object(
-                SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING),
-            )
+            .spawn_object(SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING))
             .expect("spawns");
         let idx = engine.find_object_index(id).expect("exists");
         engine
@@ -33239,9 +33411,10 @@ func Sweep() {
         let mut npc = Definition::from_script("NPCX", "Npc", "#strict\n").expect("npc compiles");
         npc.set_crew_member(true);
         engine.register_definition(npc).expect("npc registers");
-        let caller =
-            Definition::from_script("CALL", "Caller", script).expect("caller compiles");
-        engine.register_definition(caller).expect("caller registers");
+        let caller = Definition::from_script("CALL", "Caller", script).expect("caller compiles");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
 
         for x in [10, 40] {
             engine
@@ -33301,10 +33474,14 @@ func Trigger() {
         let mut engine = Engine::with_seed(0);
         let bandit =
             Definition::from_script("BNDT", "Bandit", bandit_script).expect("bandit compiles");
-        engine.register_definition(bandit).expect("bandit registers");
+        engine
+            .register_definition(bandit)
+            .expect("bandit registers");
         let caller =
             Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles");
-        engine.register_definition(caller).expect("caller registers");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
 
         let id = engine
             .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
@@ -33352,7 +33529,12 @@ func Trigger() {
         engine.register_definition(old_def).expect("old registers");
         let mut new_def = simple_definition("NEWD");
         new_def.set_shape_rect(Some(DefinitionRect::new(-8, -2, 16, 4)));
-        new_def.set_shape_vertices(vec![ObjectVertex { x: 0, y: 3, cnat: 0, friction: 77 }]);
+        new_def.set_shape_vertices(vec![ObjectVertex {
+            x: 0,
+            y: 3,
+            cnat: 0,
+            friction: 77,
+        }]);
         engine.register_definition(new_def).expect("new registers");
         let caller = Definition::from_script(
             "CALL",
@@ -33360,7 +33542,9 @@ func Trigger() {
             "#strict\nfunc Swap(pObj) { return(ChangeDef(NEWD, pObj)); }\n",
         )
         .expect("caller compiles");
-        engine.register_definition(caller).expect("caller registers");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
 
         let target = engine
             .spawn_object(
@@ -33411,8 +33595,18 @@ func Trigger() {
         beam.set_line(8); // C4D_Line_Vertex
         beam.set_line_intersect(1);
         beam.set_shape_vertices(vec![
-            ObjectVertex { x: 0, y: 0, cnat: 0, friction: 0 },
-            ObjectVertex { x: 0, y: 0, cnat: 0, friction: 0 },
+            ObjectVertex {
+                x: 0,
+                y: 0,
+                cnat: 0,
+                friction: 0,
+            },
+            ObjectVertex {
+                x: 0,
+                y: 0,
+                cnat: 0,
+                friction: 0,
+            },
         ]);
         beam.configure_actions(
             None,
@@ -33428,7 +33622,12 @@ func Trigger() {
         engine.register_definition(beam).expect("registers");
         let mut anchor_def =
             Definition::from_script("ANCR", "Anchor", "#strict\n").expect("compiles");
-        anchor_def.set_shape_vertices(vec![ObjectVertex { x: -3, y: -5, cnat: 0, friction: 50 }]);
+        anchor_def.set_shape_vertices(vec![ObjectVertex {
+            x: -3,
+            y: -5,
+            cnat: 0,
+            friction: 50,
+        }]);
         engine.register_definition(anchor_def).expect("registers");
 
         let horse = engine
@@ -33539,8 +33738,7 @@ func Trigger() {
         engine.tick().expect("tick");
         let idx = engine.find_object_index(id).expect("exists");
         assert_eq!(
-            engine.objects[idx].state.position.y,
-            91,
+            engine.objects[idx].state.position.y, 91,
             "walk attach snaps the stander up one pixel (C4Shape::Attach)"
         );
     }
@@ -33605,7 +33803,9 @@ func Trigger() {
         let mut barrel = simple_definition("BARL");
         barrel.set_shape_rect(Some(DefinitionRect::new(-3, -3, 6, 6)));
         barrel.set_float_line(4);
-        engine.register_definition(barrel).expect("barrel registers");
+        engine
+            .register_definition(barrel)
+            .expect("barrel registers");
         let mut landscape = Landscape::flat(40, 60);
         for x in 0..40 {
             landscape.set_liquid_column(x, vec![LiquidSegment::new(20, 50)]);
@@ -33699,12 +33899,9 @@ func Recruitment(iPlr) {
 }
 "#;
         let mut engine = Engine::with_seed(0);
-        let base = Definition::from_script(
-            "BASE",
-            "Base",
-            "#strict\nfunc IsBase() { return(1); }\n",
-        )
-        .expect("base compiles");
+        let base =
+            Definition::from_script("BASE", "Base", "#strict\nfunc IsBase() { return(1); }\n")
+                .expect("base compiles");
         engine.register_definition(base).expect("base registers");
         let mut crew = Definition::from_script("CREW", "Crew", script).expect("compiles");
         crew.set_crew_member(true);
@@ -33763,10 +33960,12 @@ func Recruit() {
 "#;
 
         let mut engine = Engine::with_seed(0);
-        let mut trapper = Definition::from_script("TRAP", "Trapper", script)
-            .expect("script compiles");
+        let mut trapper =
+            Definition::from_script("TRAP", "Trapper", script).expect("script compiles");
         trapper.set_crew_member(true);
-        engine.register_definition(trapper).expect("trapper registers");
+        engine
+            .register_definition(trapper)
+            .expect("trapper registers");
         let mut hand = simple_definition("HAND");
         hand.set_crew_member(true);
         engine.register_definition(hand).expect("hand registers");
@@ -34808,7 +35007,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Test").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Test")
+                    .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_velocity(Vector2::new(0, 0)),
             )
@@ -34824,14 +35024,16 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         assert_eq!(object.velocity.y, 0);
         assert_eq!(object.position.y, 0);
         assert_eq!(
-            object                .fixed_velocity
+            object
+                .fixed_velocity
                 .expect("custom gravity should remain sub-pixel")
                 .y
                 .val(),
             262
         );
         assert_eq!(
-            object                .fixed_position
+            object
+                .fixed_position
                 .expect("custom gravity movement should remain sub-pixel")
                 .y
                 .val(),
@@ -34848,7 +35050,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Test").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(0, 0)),
+            )
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx]
@@ -34881,7 +35087,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.set_environment(EnvironmentSettings::new(0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Test").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(0, 0)),
+            )
             .expect("spawn succeeds");
         // Arm Mobile like a prior SetXDir(0) would (C4Script.cpp:705): the
         // golden pins the mobile-object gravity math, not the Tick10 pulse.
@@ -34992,7 +35202,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.set_landscape(Landscape::new(12, surface).expect("landscape constructs"));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 10)))
+            .spawn_object(
+                SpawnConfig::new("Crate")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(4, 10)),
+            )
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(4), C4Fixed::ZERO));
@@ -35197,7 +35411,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 30 - (20 - 10)
         // keeps the crew center at (70,20) beside the shapeless Gem.
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew").with_alive(true)
+            SpawnConfig::new("Crew")
+                .with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(70, 30)),
@@ -35245,7 +35460,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .expect("definition registers");
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 8)))
+            .spawn_object(
+                SpawnConfig::new("Crate")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 8)),
+            )
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(4)));
@@ -35295,7 +35514,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .expect("definition registers");
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 10)))
+            .spawn_object(
+                SpawnConfig::new("Crate")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(4, 10)),
+            )
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(4), C4Fixed::ZERO));
@@ -35381,7 +35604,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .expect("definition registers");
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Bounded").with_category(CATEGORY_OBJECT).with_position(Vector2::new(8, 5)))
+            .spawn_object(
+                SpawnConfig::new("Bounded")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(8, 5)),
+            )
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(5), C4Fixed::ZERO));
@@ -35433,11 +35660,16 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .expect("mover definition registers");
 
         let layer_id = engine
-            .spawn_object(SpawnConfig::new("Layer").with_category(CATEGORY_OBJECT).with_position(Vector2::new(20, 10)))
+            .spawn_object(
+                SpawnConfig::new("Layer")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(20, 10)),
+            )
             .expect("layer spawns");
         let mover_id = engine
             .spawn_object(
-                SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Mover")
+                    .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(28, 10))
                     .with_layer(layer_id),
             )
@@ -35495,12 +35727,20 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .expect("mover definition registers");
 
         let mover_id = engine
-            .spawn_object(SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 5)))
+            .spawn_object(
+                SpawnConfig::new("Mover")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(4, 5)),
+            )
             .expect("mover spawns");
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 6 - (1 + 0)
         // keeps the blocker center — and its solid mask — at (5,5).
         engine
-            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 6)))
+            .spawn_object(
+                SpawnConfig::new("Blocker")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 6)),
+            )
             .expect("blocker spawns");
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
@@ -35563,11 +35803,18 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.register_definition(blocker_definition)?;
         engine.register_definition(mover_definition)?;
 
-        let mover_id =
-            engine.spawn_object(SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 5)))?;
+        let mover_id = engine.spawn_object(
+            SpawnConfig::new("Mover")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(4, 5)),
+        )?;
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 6 - (1 + 0)
         // keeps the blocker center — and its mask origin — at (5,5).
-        engine.spawn_object(SpawnConfig::new("BLCK").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 6)))?;
+        engine.spawn_object(
+            SpawnConfig::new("BLCK")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(5, 6)),
+        )?;
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
         // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
@@ -35636,12 +35883,20 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .expect("mover definition registers");
 
         let mover_id = engine
-            .spawn_object(SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 5)))
+            .spawn_object(
+                SpawnConfig::new("Mover")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(4, 5)),
+            )
             .expect("mover spawns");
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 6 - (1 + 0)
         // keeps the blocker center — and its solid mask — at (5,5).
         engine
-            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 6)))
+            .spawn_object(
+                SpawnConfig::new("Blocker")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 6)),
+            )
             .expect("blocker spawns");
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
@@ -35655,10 +35910,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
         let idx = engine.find_object_index(mover_id).expect("object exists");
         assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
-        assert_eq!(
-            engine.objects[idx].fixed_velocity.x,
-            itofix(1)
-        );
+        assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
     }
 
@@ -35729,7 +35981,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
         let mover_id = engine
             .spawn_object(
-                SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Mover")
+                    .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(4, 5))
                     .with_energy(1000000),
             )
@@ -35737,7 +35990,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 6 - (1 + 0)
         // keeps the blocker center — and its solid mask — at (5,5).
         engine
-            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 6)))
+            .spawn_object(
+                SpawnConfig::new("Blocker")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 6)),
+            )
             .expect("blocker spawns");
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO));
@@ -35751,10 +36008,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
         let idx = engine.find_object_index(mover_id).expect("object exists");
         assert_eq!(engine.objects[idx].fixed_position.x, itofix(6));
-        assert_eq!(
-            engine.objects[idx].fixed_velocity.x,
-            itofix(2)
-        );
+        assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(2));
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
     }
 
@@ -35896,7 +36150,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .expect("definition registers");
 
         let top_id = engine
-            .spawn_object(SpawnConfig::new("Bounded").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 2)))
+            .spawn_object(
+                SpawnConfig::new("Bounded")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 2)),
+            )
             .expect("spawn succeeds");
         let top_idx = engine.find_object_index(top_id).expect("object exists");
         engine.objects[top_idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, -itofix(5)));
@@ -35904,7 +36162,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.objects[top_idx].state.mobile = true;
 
         let bottom_id = engine
-            .spawn_object(SpawnConfig::new("Bounded").with_category(CATEGORY_OBJECT).with_position(Vector2::new(6, 18)))
+            .spawn_object(
+                SpawnConfig::new("Bounded")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(6, 18)),
+            )
             .expect("spawn succeeds");
         let bottom_idx = engine.find_object_index(bottom_id).expect("object exists");
         engine.objects[bottom_idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(5)));
@@ -35976,7 +36238,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Climber").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Climber")
+                    .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(5, 5))
                     .with_action(ActionState::new("Slide")),
             )
@@ -36071,7 +36334,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .expect("definition registers");
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Wheel").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 10)))
+            .spawn_object(
+                SpawnConfig::new("Wheel")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(4, 10)),
+            )
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx].rotation_velocity = itofix(1);
@@ -36109,7 +36376,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
+            .spawn_object(
+                SpawnConfig::new("Mover")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(0, 0)),
+            )
             .expect("spawn succeeds");
 
         // Initialize ran at spawn: the live object holds true sub-pixel velocity.
@@ -36150,7 +36421,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Spinner").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
+            .spawn_object(
+                SpawnConfig::new("Spinner")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(0, 0)),
+            )
             .expect("spawn succeeds");
 
         // Initialize ran at spawn: rdir = itofix(10, 10) = 1.0 deg/frame (raw 65536).
@@ -36181,7 +36456,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Fixed").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
+            .spawn_object(
+                SpawnConfig::new("Fixed")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(0, 0)),
+            )
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         assert_eq!(engine.objects[idx].rotation_velocity.val(), 65536);
@@ -36217,7 +36496,11 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Limited").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
+            .spawn_object(
+                SpawnConfig::new("Limited")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(0, 0)),
+            )
             .expect("spawn succeeds");
 
         let snapshot = engine.tick().expect("tick succeeds");
@@ -36357,7 +36640,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Actor").with_category(CATEGORY_OBJECT)
+                SpawnConfig::new("Actor")
+                    .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_velocity(Vector2::new(0, 0)),
             )
@@ -36596,7 +36880,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.register_definition(flag_def)?;
 
         let _crew_id = engine.spawn_object(
-            SpawnConfig::new("Crew").with_alive(true)
+            SpawnConfig::new("Crew")
+                .with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(100, 200)),
@@ -36646,8 +36931,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
     }
 
     #[test]
-    fn scenario_cast_particles_creates_and_executes_system_particles(
-    ) -> Result<(), EngineError> {
+    fn scenario_cast_particles_creates_and_executes_system_particles() -> Result<(), EngineError> {
         // End-to-end FnCastParticles → C4ParticleSystem::Cast → fxStdExec:
         // (C4Script.cpp:4881-4903, C4Particles.cpp:421-443,614-697).
         // level = 0 makes the cast velocity spread deterministic (zero), so
@@ -36761,7 +37045,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let mut engine = Engine::with_seed(7);
         engine.register_definition(simple_definition("Crew"))?;
         engine.spawn_object(
-            SpawnConfig::new("Crew").with_alive(true)
+            SpawnConfig::new("Crew")
+                .with_alive(true)
                 .with_owner(0)
                 .with_crew_member(true)
                 .with_position(Vector2::new(50, 50)),
@@ -36798,7 +37083,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.register_player(PlayerConfig::new(0, "Player"))?;
 
         engine.spawn_object(
-            SpawnConfig::new("Crew").with_alive(true)
+            SpawnConfig::new("Crew")
+                .with_alive(true)
                 .with_owner(0)
                 .with_crew_member(true)
                 .with_position(Vector2::new(10, 10)),
@@ -36843,12 +37129,14 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.register_player(PlayerConfig::new(0, "Player"))?;
 
         engine.spawn_object(
-            SpawnConfig::new("Crew").with_alive(true)
+            SpawnConfig::new("Crew")
+                .with_alive(true)
                 .with_owner(0)
                 .with_crew_member(true)
                 .with_position(Vector2::new(15, 20)),
         )?;
-        let rock_id = engine.spawn_object(SpawnConfig::new("ROCK").with_alive(true).with_owner(0))?;
+        let rock_id =
+            engine.spawn_object(SpawnConfig::new("ROCK").with_alive(true).with_owner(0))?;
 
         for _ in 0..5 {
             let snapshot = engine.tick()?;
@@ -37270,9 +37558,24 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let mut coach = Definition::from_script("Coch", "Coach", "#strict\n").expect("compiles");
         coach.set_shape_rect(Some(DefinitionRect::new(-27, -20, 55, 40)));
         coach.set_shape_vertices(vec![
-            ObjectVertex { x: 0, y: 1, cnat: 0, friction: 100 },
-            ObjectVertex { x: -16, y: 15, cnat: 9, friction: 10 },
-            ObjectVertex { x: 16, y: 15, cnat: 10, friction: 10 },
+            ObjectVertex {
+                x: 0,
+                y: 1,
+                cnat: 0,
+                friction: 100,
+            },
+            ObjectVertex {
+                x: -16,
+                y: 15,
+                cnat: 9,
+                friction: 10,
+            },
+            ObjectVertex {
+                x: 16,
+                y: 15,
+                cnat: 10,
+                friction: 10,
+            },
         ]);
         coach.set_upright_attach(CNAT_BOTTOM);
         coach.configure_actions(
@@ -37331,8 +37634,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         // three frames of accumulation stay under two integer pixels.
         let idx = engine.find_object_index(coach_id).expect("exists");
         assert_eq!(
-            engine.objects[idx].state.position.x,
-            100,
+            engine.objects[idx].state.position.x, 100,
             "no horizontal drift"
         );
         assert!(
@@ -37795,7 +38097,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 16 - (32 - 16)
         // keeps the crew center at (0,0) with the Gems in its collection area.
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew").with_alive(true)
+            SpawnConfig::new("Crew")
+                .with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(0, 16)),
@@ -37826,7 +38129,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 16 - (32 - 16)
         // keeps the crew center at (0,0) with the Gems in its collection area.
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew").with_alive(true)
+            SpawnConfig::new("Crew")
+                .with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(0, 16)),
@@ -37867,7 +38171,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 16 - (32 - 16)
         // keeps the crew center at (0,0) with the Gems in its collection area.
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew").with_alive(true)
+            SpawnConfig::new("Crew")
+                .with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(0, 16)),
@@ -37902,7 +38207,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 16 - (32 - 16)
         // keeps the crew center at (0,0) with the Gems in its collection area.
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew").with_alive(true)
+            SpawnConfig::new("Crew")
+                .with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(0, 16)),
@@ -37947,7 +38253,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 16 - (32 - 16)
         // keeps the crew center at (0,0) with the Gems in its collection area.
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew").with_alive(true)
+            SpawnConfig::new("Crew")
+                .with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(0, 16)),

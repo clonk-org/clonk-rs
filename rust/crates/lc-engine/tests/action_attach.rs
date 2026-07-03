@@ -86,8 +86,8 @@ fn attach_procedure_synchronizes_position_and_container() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn attach_procedure_positions_by_vertices_when_uncontained() -> Result<(), Box<dyn std::error::Error>>
-{
+fn attach_procedure_positions_by_vertices_when_uncontained(
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = Engine::new();
 
     let mut anchor_definition = Definition::from_script("Anchor", "Anchor", BASIC_SCRIPT)?;

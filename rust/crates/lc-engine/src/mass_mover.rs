@@ -127,7 +127,13 @@ impl MassMoverSet {
     }
 
     #[allow(dead_code)]
-    pub fn create(&mut self, engine: &mut Engine, x: i32, y: i32, execute_immediately: bool) -> bool {
+    pub fn create(
+        &mut self,
+        engine: &mut Engine,
+        x: i32,
+        y: i32,
+        execute_immediately: bool,
+    ) -> bool {
         self.spawn_queue.push(MassMoverSpawn {
             x,
             y,

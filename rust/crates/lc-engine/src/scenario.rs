@@ -186,7 +186,8 @@ pub struct Scenario {
     standard_names: Option<String>,
     /// `[Landscape] MapZoom` kept as a C4SVal: ScenarioInit evaluates it
     /// per configured start coordinate (C4Player.cpp:713-714).
-    map_zoom: LegacyC4SVal,    /// The C4Weather::Init scenario evaluates (C4Weather.cpp:36-70):
+    map_zoom: LegacyC4SVal,
+    /// The C4Weather::Init scenario evaluates (C4Weather.cpp:36-70):
     /// present only for legacy scenario loads — `apply` replays the
     /// synced-RNG init draws so the ledger matches C++ from frame 0.
     pub(crate) weather_init: Option<LegacyWeatherInit>,
@@ -367,11 +368,11 @@ impl Scenario {
                     }
                     let child = folder_group.open_child(&entry.relative_path)?;
                     collect_definitions_from_group(
-                &child,
-                &mut seen_ids,
-                &mut collected,
-                &mut pack_system_scripts,
-            )?;
+                        &child,
+                        &mut seen_ids,
+                        &mut collected,
+                        &mut pack_system_scripts,
+                    )?;
                 }
             }
             ancestor = folder.parent();
@@ -568,18 +569,18 @@ impl Scenario {
             // C4Def::Load ignores Script.Load failures (C4Def.cpp:632): a
             // definition with a broken script still loads, script-less; the
             // error only shows in the log.
-            let mut compiled = match Definition::from_script(&definition.id, name, &definition.script)
-            {
-                Ok(compiled) => compiled,
-                Err(error) => {
-                    tracing::warn!(
-                        definition = %definition.id,
-                        %error,
-                        "definition script failed to load; registering script-less like C++"
-                    );
-                    Definition::from_script(&definition.id, name, "")?
-                }
-            };
+            let mut compiled =
+                match Definition::from_script(&definition.id, name, &definition.script) {
+                    Ok(compiled) => compiled,
+                    Err(error) => {
+                        tracing::warn!(
+                            definition = %definition.id,
+                            %error,
+                            "definition script failed to load; registering script-less like C++"
+                        );
+                        Definition::from_script(&definition.id, name, "")?
+                    }
+                };
             // Real content gets the C++ callback arguments (no parameters;
             // AbortCall gets the last phase — C4Object.cpp:4154-4182).
             compiled.set_c4_callback_convention(true);
@@ -2681,8 +2682,7 @@ pub(crate) fn build_map_pixel_classifier(
         .into_iter()
         .flatten()
         .find_map(|group| group.read_file("TexMap.txt").ok())?;
-    let texmap =
-        lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&texmap_source));
+    let texmap = lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&texmap_source));
 
     let local_library = local
         .as_ref()
@@ -2944,8 +2944,7 @@ fn load_legacy_landscape(
 
     let fallback_map_width = map_width_hint.unwrap_or(96);
     let fallback_map_height = map_height_hint.unwrap_or(50);
-    let width_product =
-        i64::from(fallback_map_width).saturating_mul(i64::from(map_zoom_u32));
+    let width_product = i64::from(fallback_map_width).saturating_mul(i64::from(map_zoom_u32));
     let width_u32 = width_product
         .clamp(1, i64::from(u32::MAX))
         .try_into()
@@ -3365,8 +3364,7 @@ impl LegacyObjectRecord {
             "solidmask" => {
                 // C4Object::CompileFunc SolidMask (default Def->SolidMask,
                 // C4Object.cpp:2770): six ints; 0,0,0,0,0,0 = mask OFF.
-                self.solid_mask =
-                    Some(parse_i32_list(trimmed_value, self.line, "SolidMask")?);
+                self.solid_mask = Some(parse_i32_list(trimmed_value, self.line, "SolidMask")?);
             }
             "rotation" => {
                 self.rotation = Some(parse_i32(trimmed_value).map_err(|err| {
@@ -3487,9 +3485,7 @@ impl LegacyObjectRecord {
                     ))
                 })?;
                 match CommandDirection::from_script_value(raw) {
-                    Some(command_direction) => {
-                        self.command_direction = Some(command_direction)
-                    }
+                    Some(command_direction) => self.command_direction = Some(command_direction),
                     None => tracing::warn!(
                         line = self.line,
                         value = raw,
@@ -3997,10 +3993,7 @@ fn split_outside_brackets(text: &str) -> Vec<&str> {
 /// `a[size;elems]`=array with trailing nils omitted on write. `I` (C4ID),
 /// `S` (string-table id) and `m` (map) are not modeled yet — they read as
 /// nil with a warning.
-fn parse_serialized_c4value(
-    encoded: &str,
-    line: usize,
-) -> Result<lc_script::Value, ScenarioError> {
+fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Value, ScenarioError> {
     use lc_script::Value;
     let parse_error = |detail: String| {
         ScenarioError::LegacyObjectsParse(format!("Objects.txt line {}: {}", line, detail))
@@ -4030,7 +4023,10 @@ fn parse_serialized_c4value(
                 .strip_prefix('[')
                 .and_then(|rest| rest.strip_suffix(']'))
                 .ok_or_else(|| {
-                    parse_error(format!("invalid C4Value array `{}` (expected a[...])", encoded))
+                    parse_error(format!(
+                        "invalid C4Value array `{}` (expected a[...])",
+                        encoded
+                    ))
                 })?;
             let (size_text, elements_text) = inner.split_once(';').unwrap_or((inner, ""));
             let size = parse_i32(size_text.trim())
@@ -5198,7 +5194,10 @@ global func Step(state, frame, random)
         let expected = (10 + reference.random(2 * 3 + 1) - 3).clamp(0, 250);
 
         let mut rng = crate::rng::LcgRng::new(42);
-        assert_eq!(LegacyC4SVal::new(10, 3, 0, 250).evaluate(&mut rng), expected);
+        assert_eq!(
+            LegacyC4SVal::new(10, 3, 0, 250).evaluate(&mut rng),
+            expected
+        );
         assert_eq!(rng, reference);
 
         // Rnd == 0 still draws: Random(1) returns 0 but advances hold/count.
@@ -7408,9 +7407,7 @@ global func Step(state, frame, random)
         .expect("write objects");
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert!(
-            engine
-                .object_snapshot(ObjectId::new(10))
-                .is_some(),
+            engine.object_snapshot(ObjectId::new(10)).is_some(),
             "the Dir=8 object loaded"
         );
     }
@@ -7602,7 +7599,6 @@ global func Step(state, frame, random)
         );
     }
 
-
     #[test]
     fn initialize_may_remove_its_own_object_like_cpp() {
         // Placer objects legitimately self-remove in Initialize (the
@@ -7708,7 +7704,9 @@ global func Step(state, frame, random)
         let dir = tempdir().expect("tempdir");
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
         let mut objects = Vec::new();
-        objects.extend_from_slice(b"# M\xe4dchen\n[Object]\nid=GOOD\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\n");
+        objects.extend_from_slice(
+            b"# M\xe4dchen\n[Object]\nid=GOOD\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\n",
+        );
         std::fs::write(scenario_dir.join("Objects.txt"), objects).expect("write objects");
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert!(engine.object_snapshot(ObjectId::new(10)).is_some());
@@ -7805,8 +7803,7 @@ global func Step(state, frame, random)
         // A scenario Script.c that fails to compile logs the parse error and
         // the scenario runs without a script (C4ScriptHost load behavior).
         let dir = tempdir().expect("tempdir");
-        let scenario_dir =
-            write_resilience_fixture(dir.path(), None, "global func {{{ broken\n");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "global func {{{ broken\n");
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert!(
             engine.scenario_script.is_none(),
@@ -8129,7 +8126,9 @@ global func Step(state, frame, random)
         let scenario =
             Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("legacy scenario applies");
+        scenario
+            .apply(&mut engine)
+            .expect("legacy scenario applies");
         join_test_player(&mut engine);
 
         // AssignRemoval clears Status immediately (C4Object.cpp); the
@@ -8201,7 +8200,9 @@ global func Step(state, frame, random)
         let scenario =
             Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("legacy scenario applies");
+        scenario
+            .apply(&mut engine)
+            .expect("legacy scenario applies");
 
         let snapshot = engine.snapshot();
         let placed = snapshot
@@ -8671,8 +8672,7 @@ global func Step(state, frame, random)
         .expect("write map");
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
@@ -8886,7 +8886,10 @@ global func Step(state, frame, random)
         // Map column 1 (world x 10..20): earth roof row 0, water rows 1-2
         // (world y 10..30), earth bed row 3 (world y 30..40).
         assert!(landscape.is_liquid_at(15, 15), "river interior is liquid");
-        assert!(landscape.is_liquid_at(15, 29), "river bottom edge is liquid");
+        assert!(
+            landscape.is_liquid_at(15, 29),
+            "river bottom edge is liquid"
+        );
         assert!(!landscape.is_liquid_at(15, 5), "roof above the river");
         assert!(!landscape.is_liquid_at(15, 35), "earth bed is not liquid");
         assert!(landscape.is_solid_at(15, 35), "earth bed is solid");
@@ -8941,7 +8944,9 @@ global func Step(state, frame, random)
         let landscape =
             classified_landscape(&bitmap, &classifier, 10, 0).expect("landscape builds");
 
-        let grid = landscape.pixel_grid().expect("classified maps build Surface8");
+        let grid = landscape
+            .pixel_grid()
+            .expect("classified maps build Surface8");
         assert_eq!(
             grid.byte_at(15, 15),
             Some(20),
@@ -8994,8 +8999,7 @@ global func Step(state, frame, random)
             shapes,
         };
 
-        let landscape =
-            classified_landscape(&bitmap, &classifier, 4, 0).expect("landscape builds");
+        let landscape = classified_landscape(&bitmap, &classifier, 4, 0).expect("landscape builds");
 
         assert!(landscape.is_solid_at(6, 3), "chunk bulges above its block");
         assert!(!landscape.is_solid_at(4, 3), "bulge is jitter-shaped");
@@ -9307,7 +9311,6 @@ global func Step(state, frame, random)
     }
 }
 
-
 #[cfg(test)]
 mod game_start_sync {
     use super::*;
@@ -9411,7 +9414,11 @@ mod game_start_sync {
 
         let (_, action, _phase, position, fix_y, ..) =
             engine.debug_object_by_id(3).expect("tree exists");
-        assert_eq!(action, crate::action::DEFAULT_ACTION_NAME, "no Action= -> ActIdle");
+        assert_eq!(
+            action,
+            crate::action::DEFAULT_ACTION_NAME,
+            "no Action= -> ActIdle"
+        );
         assert_eq!(position, Vector2::new(204, 258), "saved center kept");
         assert_eq!(
             fix_y, 258,

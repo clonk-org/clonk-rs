@@ -7,13 +7,13 @@ use crate::command::{
     CommandData, CommandId, CommandMode, CommandOperation, CommandRequest, MAX_COMMAND_STACK,
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
+use crate::material::MaterialSet;
 use crate::math::{fixtoi_prec, integer_distance, itofix_prec, C4Fixed, FixedVec2};
 use crate::message::{
     MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_MULTIPLE,
     HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
 };
 use crate::ocf;
-use crate::material::MaterialSet;
 use crate::rng::LcgRng;
 use crate::sector::{SectorMap, SectorObject};
 #[cfg(test)]
@@ -30,10 +30,10 @@ use crate::{
     TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER,
     CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
-use std::sync::Arc;
 use lc_resources::PhysicalInfo;
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use std::mem;
+use std::sync::Arc;
 use tracing::{debug, info};
 
 thread_local! {
@@ -172,10 +172,7 @@ pub(crate) enum PlayerCommand {
         definition_id: DefinitionId,
     },
     /// `FnSetWealth` (C4Script.cpp:2761-2766), already clamped.
-    SetWealth {
-        player_id: i32,
-        value: i32,
-    },
+    SetWealth { player_id: i32, value: i32 },
 }
 
 impl HostWorldObject {
@@ -627,10 +624,7 @@ impl HostWorldContext {
     }
 
     /// Attach the scenario script for GameCall/GameCallEx resolution.
-    pub(crate) fn with_scenario_script(
-        mut self,
-        script: Option<Arc<ScriptEngine>>,
-    ) -> Self {
+    pub(crate) fn with_scenario_script(mut self, script: Option<Arc<ScriptEngine>>) -> Self {
         self.scenario_script = script;
         self
     }
@@ -674,10 +668,7 @@ impl HostWorldContext {
 
     /// Attach the engine's particle def registry (names from
     /// `C4ParticleSystem` defs). See the `particle_defs` field docs.
-    pub(crate) fn with_particle_defs(
-        mut self,
-        defs: std::collections::HashSet<String>,
-    ) -> Self {
+    pub(crate) fn with_particle_defs(mut self, defs: std::collections::HashSet<String>) -> Self {
         self.particle_defs = Some(Rc::new(defs));
         self
     }
@@ -1534,7 +1525,9 @@ fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
                 .unwrap_or(Value::Nil)
         };
         if let Some(def_id) = definition {
-            let Some(metadata) = context.world.definition_metadata(&DefinitionId::from(def_id.as_str()))
+            let Some(metadata) = context
+                .world
+                .definition_metadata(&DefinitionId::from(def_id.as_str()))
             else {
                 return Ok(Value::Nil);
             };
@@ -1639,8 +1632,7 @@ fn get_material_val(args: &[Value]) -> Result<Value, RuntimeError> {
     let entry = parse_optional_string(args.first(), "GetMaterialVal", "entry")?;
     let section = parse_optional_string(args.get(1), "GetMaterialVal", "section")?;
     let material = parse_optional_i32(args.get(2), "GetMaterialVal", "material")?.unwrap_or(0);
-    let entry_index =
-        parse_optional_i32(args.get(3), "GetMaterialVal", "entry_nr")?.unwrap_or(0);
+    let entry_index = parse_optional_i32(args.get(3), "GetMaterialVal", "entry_nr")?.unwrap_or(0);
     // The material core implies section "Material" (C4Script.cpp:4296).
     if section.as_deref() != Some("Material") {
         return Ok(Value::Nil);
@@ -1657,9 +1649,7 @@ fn get_material_val(args: &[Value]) -> Result<Value, RuntimeError> {
                 let id = crate::material::MaterialId::new(index)?;
                 materials.get_by_id(id)
             })
-            .and_then(|material| {
-                material.core_entry(&entry, entry_index.max(0) as usize)
-            })
+            .and_then(|material| material.core_entry(&entry, entry_index.max(0) as usize))
             .map(|value| match value.parse::<i32>() {
                 Ok(number) => Value::Int(number),
                 Err(_) => Value::String(value.to_string()),
@@ -1672,8 +1662,11 @@ fn get_material_val(args: &[Value]) -> Result<Value, RuntimeError> {
 /// object (with start/abort calls). Routed through the reentrancy seam so
 /// the target's SetAction host fn runs in the target's scope.
 fn object_set_action(args: &[Value]) -> Result<Value, RuntimeError> {
-    let Some(target) =
-        parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "ObjectSetAction", "obj")?
+    let Some(target) = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "ObjectSetAction",
+        "obj",
+    )?
     else {
         return Ok(Value::Bool(false));
     };
@@ -1802,7 +1795,11 @@ fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
             .or_else(|| {
                 context
                     .get_world_object(target)
-                    .and_then(|object| object.full_state().map(|state| state.portrait_source.clone()))
+                    .and_then(|object| {
+                        object
+                            .full_state()
+                            .map(|state| state.portrait_source.clone())
+                    })
                     .flatten()
             })
             .or_else(|| {
@@ -1819,7 +1816,10 @@ fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
 fn frame_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
     ENVIRONMENT_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
-        let frame = borrow.as_ref().map(|context| context.frame as i32).unwrap_or(0);
+        let frame = borrow
+            .as_ref()
+            .map(|context| context.frame as i32)
+            .unwrap_or(0);
         Ok(Value::Int(frame))
     })
 }
@@ -1863,11 +1863,8 @@ fn set_solid_mask(args: &[Value]) -> Result<Value, RuntimeError> {
     for (i, slot) in values.iter_mut().enumerate() {
         *slot = parse_optional_i32(args.get(i), "SetSolidMask", "rect")?.unwrap_or(0);
     }
-    let target = parse_object_reference_argument(
-        args.get(6).unwrap_or(&Value::Nil),
-        "SetSolidMask",
-        "obj",
-    )?;
+    let target =
+        parse_object_reference_argument(args.get(6).unwrap_or(&Value::Nil), "SetSolidMask", "obj")?;
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
@@ -1907,11 +1904,8 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(Value::String(id)) | Some(Value::C4Id(id)) if !id.is_empty() => id.clone(),
         _ => return Ok(Value::Bool(false)),
     };
-    let target = parse_object_reference_argument(
-        args.get(1).unwrap_or(&Value::Nil),
-        "ChangeDef",
-        "obj",
-    )?;
+    let target =
+        parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "ChangeDef", "obj")?;
     let active = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
@@ -1919,8 +1913,7 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
     });
     if let Some(target) = target {
         if Some(target) != active {
-            return match call_world_object_function(target, "ChangeDef", &[Value::C4Id(new_id)])
-            {
+            return match call_world_object_function(target, "ChangeDef", &[Value::C4Id(new_id)]) {
                 Some(result) => result,
                 None => Ok(Value::Bool(false)),
             };
@@ -1931,10 +1924,7 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_mut() else {
             return Ok(Value::Bool(false));
         };
-        let known = context
-            .world
-            .definition_metadata(&new_id)
-            .is_some();
+        let known = context.world.definition_metadata(&new_id).is_some();
         if !known {
             return Ok(Value::Bool(false)); // C4Id2Def miss
         }
@@ -1958,14 +1948,22 @@ fn get_plr_down_double(args: &[Value]) -> Result<Value, RuntimeError> {
 /// (pObj->Visibility), not modeled in the simulation yet — acknowledged
 /// (PORT_STATUS).
 fn set_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetVisibility", "visibility")?;
+    let _ = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetVisibility",
+        "visibility",
+    )?;
     Ok(Value::Bool(true))
 }
 
 /// FnSetClrModulation (C4Script.cpp:3879-3896): graphics color modulation
 /// — presentation-only; acknowledged (PORT_STATUS).
 fn set_clr_modulation(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetClrModulation", "clr")?;
+    let _ = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetClrModulation",
+        "clr",
+    )?;
     Ok(Value::Bool(true))
 }
 
@@ -2069,7 +2067,11 @@ fn set_component(args: &[Value]) -> Result<Value, RuntimeError> {
     });
     if let Some(target) = target {
         if Some(target) != active {
-            return match call_world_object_function(target, "SetComponent", &args[..2.min(args.len())]) {
+            return match call_world_object_function(
+                target,
+                "SetComponent",
+                &args[..2.min(args.len())],
+            ) {
                 Some(result) => result,
                 None => Ok(Value::Bool(false)),
             };
@@ -2114,8 +2116,7 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     let _section = parse_optional_string(args.get(1), "GetDefCoreVal", "section")?;
     let requested = parse_definition_argument(args.get(2), "GetDefCoreVal")?;
-    let entry_index =
-        parse_optional_i32(args.get(3), "GetDefCoreVal", "entry_nr")?.unwrap_or(0);
+    let entry_index = parse_optional_i32(args.get(3), "GetDefCoreVal", "entry_nr")?.unwrap_or(0);
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -2156,9 +2157,6 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
-
-
-
     // FnGetHiRank (C4Script.cpp:2792-2796) ->
     // C4Player::GetHiRankActiveCrew(false) (C4Player.cpp:1003-1020): walk
     // the crew in order, rank from the linked Info (no info = -1); only a
@@ -3419,7 +3417,13 @@ fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     };
     let failsafe = args.get(2).map(Value::as_bool).unwrap_or(false);
-    let pars: Vec<Value> = args.iter().skip(3).collect::<Vec<_>>().into_iter().cloned().collect();
+    let pars: Vec<Value> = args
+        .iter()
+        .skip(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .cloned()
+        .collect();
 
     if let Value::C4Id(def_id) = &target_value {
         // Definition call (C4AulExec.cpp:1235-1245): the definition must be
@@ -3630,9 +3634,7 @@ fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
             .and_then(|context| context.world.scenario_script().cloned())
     });
     match script {
-        Some(script) => {
-            call_scoped_script_function(script, &name, &pars).unwrap_or(Ok(Value::Nil))
-        }
+        Some(script) => call_scoped_script_function(script, &name, &pars).unwrap_or(Ok(Value::Nil)),
         None => Ok(Value::Nil),
     }
 }
@@ -5693,7 +5695,6 @@ fn redirect_foreign_effect_target(
 }
 
 fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
-
     if args.len() < 2 {
         return Err(RuntimeError::new(
             "AddEffect expects at least 2 arguments: name and state",
@@ -6723,8 +6724,7 @@ fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
                     .or_else(|| state.map(|state| state.own_mass))
                     .unwrap_or(0);
                 Some(Value::Int(
-                    ((metadata.mass.saturating_add(own_mass))
-                        .saturating_mul(construction)
+                    ((metadata.mass.saturating_add(own_mass)).saturating_mul(construction)
                         / crate::FULL_CON)
                         .max(1),
                 ))
@@ -6803,7 +6803,11 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
         // (C4Object.cpp:5715 Info transfer; portrait rides the info)
         let donor_portrait = context
             .get_world_object(from)
-            .and_then(|object| object.full_state().map(|state| state.portrait_source.clone()))
+            .and_then(|object| {
+                object
+                    .full_state()
+                    .map(|state| state.portrait_source.clone())
+            })
             .flatten()
             .or_else(|| {
                 context
@@ -6887,12 +6891,7 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         // that must fire INSIDE this call.
         let already_crew = context
             .object_context()
-            .map(|object| {
-                context
-                    .world
-                    .crew_ranks
-                    .contains_key(&object.id().as_u64())
-            })
+            .map(|object| context.world.crew_ranks.contains_key(&object.id().as_u64()))
             .unwrap_or(false);
         if !already_crew {
             let definition_id = context
@@ -6951,11 +6950,7 @@ fn set_mass(args: &[Value]) -> Result<Value, RuntimeError> {
     });
     if let Some(target) = target {
         if Some(target) != active {
-            return match call_world_object_function(
-                target,
-                "SetMass",
-                &[Value::Int(value)],
-            ) {
+            return match call_world_object_function(target, "SetMass", &[Value::Int(value)]) {
                 Some(result) => result,
                 None => Ok(Value::Bool(false)),
             };
@@ -7517,7 +7512,9 @@ fn train_physical(args: &[Value]) -> Result<Value, RuntimeError> {
                 return Ok(Value::Bool(false));
             }
         }
-        Ok(Value::Bool(object.train_physical(&name, train_by, max_train)))
+        Ok(Value::Bool(
+            object.train_physical(&name, train_by, max_train),
+        ))
     })
 }
 
@@ -8340,7 +8337,6 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
-
     let mut index = 0;
     let target_id =
         consume_optional_object_reference_argument(args, &mut index, "GetAction", "target")?;
@@ -9163,7 +9159,11 @@ fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
         None | Some(Value::Nil) => 0u32,
         Some(value) => {
             let raw = value_to_i32(value, "GetContact", "mask")?;
-            if raw > 0 { raw as u32 } else { 0 }
+            if raw > 0 {
+                raw as u32
+            } else {
+                0
+            }
         }
     };
 
@@ -9614,7 +9614,6 @@ fn script_go(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
-
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "FreeRect", "x")?;
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "FreeRect", "y")?;
     let width = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "FreeRect", "wdt")?;
@@ -9637,7 +9636,6 @@ fn free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
-
     if args.len() < 4 {
         return Err(RuntimeError::new(
             "DigFreeRect expects at least 4 arguments: x, y, width, height",
@@ -9692,18 +9690,28 @@ enum FindCondition {
     AtPoint(i32, i32),
     AtRect(DefinitionRect),
     OnLine(i32, i32, i32, i32),
-    Distance { x: i32, y: i32, r2: i64 },
+    Distance {
+        x: i32,
+        y: i32,
+        r2: i64,
+    },
     Ocf(u32),
     Category(i32),
     Action(String),
-    ActionTarget { target: Option<ObjectId>, index: usize },
+    ActionTarget {
+        target: Option<ObjectId>,
+        index: usize,
+    },
     Container(Option<ObjectId>),
     AnyContainer,
     Owner(i32),
     Controller(i32),
     /// C4FindObjectFunc (C4FindObject.cpp:124-136): calls `name` on each
     /// candidate via the nested-call seam.
-    Func { name: String, pars: Vec<Value> },
+    Func {
+        name: String,
+        pars: Vec<Value>,
+    },
     Layer,
 }
 
@@ -9712,14 +9720,20 @@ enum FindCondition {
 enum SortCriterion {
     Reverse(Box<SortCriterion>),
     Multiple(Vec<SortCriterion>),
-    Distance { x: i32, y: i32 },
+    Distance {
+        x: i32,
+        y: i32,
+    },
     Random,
     Speed,
     Mass,
     Value,
     /// C4SortObjectFunc (C4FindObject.h:521-533). Cached evaluation lands
     /// with the Sort_Func slice; until then all values compare equal.
-    Func { name: String, pars: Vec<Value> },
+    Func {
+        name: String,
+        pars: Vec<Value>,
+    },
 }
 
 enum ParsedCriterion {
@@ -9762,9 +9776,7 @@ impl FindCondition {
         let condition = match kind {
             // C4FO_Not
             1 => match data.get(1).map(Self::parse) {
-                Some(ParsedCriterion::Condition(child)) => {
-                    FindCondition::Not(Box::new(child))
-                }
+                Some(ParsedCriterion::Condition(child)) => FindCondition::Not(Box::new(child)),
                 _ => return ParsedCriterion::None,
             },
             // C4FO_And / C4FO_Or: trivial single-condition unwrap, dropped
@@ -9964,9 +9976,7 @@ impl FindCondition {
     fn is_impossible(&self, world: &impl WorldAccessor) -> bool {
         match self {
             FindCondition::Not(child) => child.is_ensured(world),
-            FindCondition::And(children) => {
-                children.iter().any(|child| child.is_impossible(world))
-            }
+            FindCondition::And(children) => children.iter().any(|child| child.is_impossible(world)),
             FindCondition::Or(children) => {
                 !children.iter().any(|child| !child.is_impossible(world))
             }
@@ -10031,15 +10041,11 @@ impl SortCriterion {
         let arg_i32 = |index: usize| data.get(index).map(value_as_i32).unwrap_or(0);
         Some(match kind {
             // C4SO_Reverse
-            101 => SortCriterion::Reverse(Box::new(
-                data.get(1).and_then(Self::parse)?,
-            )),
+            101 => SortCriterion::Reverse(Box::new(data.get(1).and_then(Self::parse)?)),
             // C4SO_Multiple (trivial single unwrap, C4FindObject.cpp:705-726)
             102 => {
-                let children: Vec<SortCriterion> = data[1..]
-                    .iter()
-                    .filter_map(Self::parse)
-                    .collect();
+                let children: Vec<SortCriterion> =
+                    data[1..].iter().filter_map(Self::parse).collect();
                 if data.len() == 2 {
                     children.into_iter().next()?
                 } else {
@@ -10620,8 +10626,11 @@ fn object_count(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(context) => context,
             None => return Ok(Value::Int(0)),
         };
-        let mut params =
-            FindObjectParams::parse_cpp_call(&args[..args.len().min(9)], "ObjectCount", context.caller_scope())?;
+        let mut params = FindObjectParams::parse_cpp_call(
+            &args[..args.len().min(9)],
+            "ObjectCount",
+            context.caller_scope(),
+        )?;
         let owner = parse_optional_i32(args.get(9), "ObjectCount", "owner")?.unwrap_or(0);
         params.owner = if owner == 0 { OWNER_ANY } else { owner };
         let matches_len = if params.is_closest_query() {
@@ -10936,13 +10945,8 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut leading_target: Option<ObjectId> = None;
     let leads_with_object_slot = matches!(
         (args.first(), args.get(1)),
-        (
-            Some(Value::Object(_) | Value::Proplist(_)),
-            _
-        ) | (
-            Some(Value::Nil | Value::Int(0)),
-            Some(Value::String(_))
-        )
+        (Some(Value::Object(_) | Value::Proplist(_)), _)
+            | (Some(Value::Nil | Value::Int(0)), Some(Value::String(_)))
     );
     if leads_with_object_slot {
         leading_target = parse_object_reference_argument(&args[0], "SetCommand", "target")?;
@@ -11011,13 +11015,8 @@ fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut leading_target: Option<ObjectId> = None;
     let leads_with_object_slot = matches!(
         (args.first(), args.get(1)),
-        (
-            Some(Value::Object(_) | Value::Proplist(_)),
-            _
-        ) | (
-            Some(Value::Nil | Value::Int(0)),
-            Some(Value::String(_))
-        )
+        (Some(Value::Object(_) | Value::Proplist(_)), _)
+            | (Some(Value::Nil | Value::Int(0)), Some(Value::String(_)))
     );
     if leads_with_object_slot {
         leading_target = parse_object_reference_argument(&args[0], "AddCommand", "target")?;
@@ -11898,10 +11897,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         // The DoCon initial adjust moves the INT y only (C++ leaves fix_y
         // at the given center) — carry the raw fixed alongside.
         if position.y != raw_position.y {
-            spawn.fixed_position = Some(FixedVec2::from_ints(
-                raw_position.x,
-                raw_position.y,
-            ));
+            spawn.fixed_position = Some(FixedVec2::from_ints(raw_position.x, raw_position.y));
         }
 
         let preview_ocf = ocf::compute(
@@ -11962,9 +11958,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Ok(value @ Value::Object(_)) = &created {
         if let Some(target) = object_id_from_value(value) {
             for callback in ["Construction", "Initialize"] {
-                if let Some(Err(error)) =
-                    call_world_object_own_function(target, callback, &[])
-                {
+                if let Some(Err(error)) = call_world_object_own_function(target, callback, &[]) {
                     tracing::warn!(
                         id = target.as_u64(),
                         callback,
@@ -12496,9 +12490,9 @@ fn cast_a_particles(args: &[Value], back: bool, fn_name: &str) -> Result<Value, 
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new(format!("{fn_name} requires an active engine context")))?;
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new(format!("{fn_name} requires an active engine context"))
+        })?;
 
         // safety: pObj && !pObj->Status → false (C4Script.cpp:4884)
         let layer = if let Some(target) = target_object {
@@ -12579,9 +12573,9 @@ fn push_particles(args: &[Value]) -> Result<Value, RuntimeError> {
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("PushParticles requires an active engine context")
-        })?;
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("PushParticles requires an active engine context"))?;
         if let Some(name) = &definition {
             if context.particle_def_known(name) == Some(false) {
                 return Ok(Value::Bool(false));
@@ -13522,8 +13516,13 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             )
             .with_ocf(preview_ocf)
             .with_full_state(Rc::new({
-                let mut state =
-                    crate::preview_spawn_state(position, owner, metadata.category, FULL_CON, metadata.vertices.clone());
+                let mut state = crate::preview_spawn_state(
+                    position,
+                    owner,
+                    metadata.category,
+                    FULL_CON,
+                    metadata.vertices.clone(),
+                );
                 state.container = Some(container);
                 state
             }));
@@ -13788,11 +13787,8 @@ fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetVertex requires an active engine context"))?;
         let active = context.object_context().map(|object| object.id());
-        let write = |vertices_base: &[ObjectVertex],
-                     pending: &mut Option<Vec<ObjectVertex>>| {
-            let mut vertices = pending
-                .clone()
-                .unwrap_or_else(|| vertices_base.to_vec());
+        let write = |vertices_base: &[ObjectVertex], pending: &mut Option<Vec<ObjectVertex>>| {
+            let mut vertices = pending.clone().unwrap_or_else(|| vertices_base.to_vec());
             if vertices.len() <= vertex_index {
                 vertices.resize(vertex_index + 1, ObjectVertex::default());
             }
@@ -13816,8 +13812,7 @@ fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
                     let Some(world_object) = context.get_world_object(target) else {
                         return Ok(Value::Bool(false));
                     };
-                    let Some((scope, local_vars)) = context.nested_scope_for(&world_object)
-                    else {
+                    let Some((scope, local_vars)) = context.nested_scope_for(&world_object) else {
                         return Ok(Value::Bool(false));
                     };
                     context
@@ -13905,7 +13900,10 @@ fn on_fire(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         match context.get_world_object(target) {
             Some(other) => Ok(Value::Bool(other.full_state().is_some_and(|state| {
-                state.effects.iter().any(|effect| effect.name.contains("Fire"))
+                state
+                    .effects
+                    .iter()
+                    .any(|effect| effect.name.contains("Fire"))
             }))),
             None => Ok(Value::Nil),
         }
@@ -13925,7 +13923,8 @@ fn any_container(_args: &[Value]) -> Result<Value, RuntimeError> {
 /// nil without an object.
 fn act_idle(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
-    let target_id = consume_optional_object_reference_argument(args, &mut index, "ActIdle", "target")?;
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "ActIdle", "target")?;
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -13954,7 +13953,6 @@ fn act_idle(args: &[Value]) -> Result<Value, RuntimeError> {
             .unwrap_or(Value::Nil))
     })
 }
-
 
 fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
@@ -14831,7 +14829,13 @@ fn call_world_object_function_with(
 ) -> Option<Result<Value, RuntimeError>> {
     let prep = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut().as_mut().and_then(|context| {
-            context.prepare_nested_call(target, function, host_fallback, include_globals, script_override)
+            context.prepare_nested_call(
+                target,
+                function,
+                host_fallback,
+                include_globals,
+                script_override,
+            )
         })
     })?;
     let NestedCallPrep {
@@ -14995,42 +14999,42 @@ impl EffectHostContext {
             } = ctx;
             {
                 let mut scope = ObjectScopeContext::new(
-                id,
-                container,
-                status,
-                energy,
-                damage,
-                construction,
-                alive,
-                in_liquid,
-                own_mass,
-                owner,
-                category,
-                position,
-                velocity,
-                rotation,
-                effects.to_vec(),
-                action_library,
-                action_name,
-                action_ticks,
-                action_data,
-                action_phase,
-                direction,
-                command_direction,
-                command_count,
-                action_target,
-                action_target2,
-                vertices.to_vec(),
-                ocf_base,
-                crew_member,
-                graphics_overlays,
-                base_graphics,
-                draw_transform,
-                info_physical,
-                temporary_physical,
-                physical_changes,
-                definition_physical,
-            );
+                    id,
+                    container,
+                    status,
+                    energy,
+                    damage,
+                    construction,
+                    alive,
+                    in_liquid,
+                    own_mass,
+                    owner,
+                    category,
+                    position,
+                    velocity,
+                    rotation,
+                    effects.to_vec(),
+                    action_library,
+                    action_name,
+                    action_ticks,
+                    action_data,
+                    action_phase,
+                    direction,
+                    command_direction,
+                    command_count,
+                    action_target,
+                    action_target2,
+                    vertices.to_vec(),
+                    ocf_base,
+                    crew_member,
+                    graphics_overlays,
+                    base_graphics,
+                    draw_transform,
+                    info_physical,
+                    temporary_physical,
+                    physical_changes,
+                    definition_physical,
+                );
                 scope.definition_id = definition_id;
                 scope
             }
@@ -15148,8 +15152,7 @@ impl EffectHostContext {
     /// consumed their Number).
     fn cancel_pending_spawn(&mut self, target: ObjectId) -> bool {
         let before = self.pending_spawns.len();
-        self.pending_spawns
-            .retain(|spawn| spawn.id != Some(target));
+        self.pending_spawns.retain(|spawn| spawn.id != Some(target));
         let removed = self.pending_spawns.len() != before;
         if removed {
             self.pending_order.retain(|id| *id != target);
@@ -15476,7 +15479,10 @@ impl EffectHostContext {
         }
         let mut other_objects = Vec::new();
         for id in mem::take(&mut self.nested_order) {
-            let Some(NestedScopeState { scope, mut local_vars }) = self.nested_objects.remove(&id)
+            let Some(NestedScopeState {
+                scope,
+                mut local_vars,
+            }) = self.nested_objects.remove(&id)
             else {
                 continue;
             };
@@ -15626,7 +15632,8 @@ impl EffectScopeContext {
         }
 
         let mut insert_pos = 0;
-        while insert_pos < self.effects.len() && self.effects[insert_pos].priority.abs() < effect.priority.abs()
+        while insert_pos < self.effects.len()
+            && self.effects[insert_pos].priority.abs() < effect.priority.abs()
         {
             insert_pos += 1;
         }
@@ -17052,7 +17059,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn get_keys_rejects_nil() {
         let error = get_keys(&[Value::Nil]).expect_err("GetKeys should fail for nil");
@@ -18047,9 +18053,9 @@ mod tests {
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
                     line_connect: 0,
-                clonk_name_newlines: None,
-                stretch_growth: false,
-                line: 0,
+                    clonk_name_newlines: None,
+                    stretch_growth: false,
+                    line: 0,
                     vertices: Vec::new(),
                 },
             ),
@@ -18069,9 +18075,9 @@ mod tests {
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
                     line_connect: 0,
-                clonk_name_newlines: None,
-                stretch_growth: false,
-                line: 0,
+                    clonk_name_newlines: None,
+                    stretch_growth: false,
+                    line: 0,
                     vertices: Vec::new(),
                 },
             ),
@@ -18242,9 +18248,9 @@ mod tests {
             physical: lc_resources::PhysicalInfo::default(),
             components: Vec::new(),
             line_connect: 0,
-                clonk_name_newlines: None,
-                stretch_growth: false,
-                line: 0,
+            clonk_name_newlines: None,
+            stretch_growth: false,
+            line: 0,
             vertices: Vec::new(),
         };
         metadata.components = vec![("WOOD".to_string(), 3), ("METL".to_string(), 1)];
@@ -18284,10 +18290,9 @@ mod tests {
     fn material_resolves_names_to_numbers_like_cpp() {
         // FnMaterial (C4Script.cpp:2488-2491): Game.Material.Get — the
         // material number, -1 for unknown names.
-        let library = lc_resources::MaterialLibrary::parse(
-            "[Material Earth]\nName=Earth\nDensity=50\n",
-        )
-        .expect("library builds");
+        let library =
+            lc_resources::MaterialLibrary::parse("[Material Earth]\nName=Earth\nDensity=50\n")
+                .expect("library builds");
         let materials = MaterialSet::from_resource_library(&library);
         let expected = materials.get("Earth").expect("earth exists").id().index() as i32;
         let world = HostWorldContext::with_landscape(
@@ -18306,7 +18311,10 @@ mod tests {
             assert_eq!(known, Value::Int(expected));
             material(&[Value::String("Unobtainium".into())])
         });
-        assert_eq!(result.expect("Material succeeds"), Value::Int(MATERIAL_NONE));
+        assert_eq!(
+            result.expect("Material succeeds"),
+            Value::Int(MATERIAL_NONE)
+        );
     }
 
     #[test]
@@ -18359,9 +18367,8 @@ mod tests {
             (22_u64, 3),
             (33_u64, 3),
         ])));
-        let (result, _) = with_effect_context(None, &[], world, 1, || {
-            get_hi_rank(&[Value::Int(1)])
-        });
+        let (result, _) =
+            with_effect_context(None, &[], world, 1, || get_hi_rank(&[Value::Int(1)]));
         assert_eq!(
             result.expect("GetHiRank succeeds"),
             object_reference_value(ObjectId::new(22)),
@@ -19891,7 +19898,10 @@ mod tests {
         assert_eq!(value, Value::Int(7));
         let update = outcome.object_update.expect("action update recorded");
         let action = update.action.expect("action update exists");
-        assert_eq!(action.ticks, None, "no ticks write: the running value stands");
+        assert_eq!(
+            action.ticks, None,
+            "no ticks write: the running value stands"
+        );
     }
 
     #[test]
@@ -21694,10 +21704,7 @@ mod tests {
             // Named reset restores the last stacked value
             // (C4Script.cpp:622-629; C4InfoCore.cpp:339-351) and keeps temp
             // mode because the set still deviates from the reference.
-            assert_eq!(
-                reset_physical(&[Value::Nil, walk()])?,
-                Value::Bool(true)
-            );
+            assert_eq!(reset_physical(&[Value::Nil, walk()])?, Value::Bool(true));
             assert_eq!(get_physical(&[walk(), Value::Int(0)])?, Value::Int(60_005));
             // Full reset drops temp mode (C4Script.cpp:631-635)...
             assert_eq!(reset_physical(&[])?, Value::Bool(true));
@@ -22034,9 +22041,9 @@ mod tests {
             physical: PhysicalInfo::default(),
             components: Vec::new(),
             line_connect: 0,
-                clonk_name_newlines: None,
-                stretch_growth: false,
-                line: 0,
+            clonk_name_newlines: None,
+            stretch_growth: false,
+            line: 0,
             vertices: Vec::new(),
         };
         let definitions = HashMap::from([
@@ -22188,13 +22195,7 @@ mod tests {
         assert!(outcome.particles.is_empty());
     }
 
-    fn find_world_object(
-        id: u64,
-        definition: &str,
-        x: i32,
-        y: i32,
-        owner: i32,
-    ) -> HostWorldObject {
+    fn find_world_object(id: u64, definition: &str, x: i32, y: i32, owner: i32) -> HostWorldObject {
         HostWorldObject::new(
             ObjectId::new(id),
             definition,
@@ -22410,8 +22411,7 @@ mod tests {
         // FnCastParticles (C4Script.cpp:4881-4903): args are
         // (name, amount, level, x, y, a0, a1, b0, b1, obj); a-values are
         // script ints /10; GetDef failure → false.
-        let defs: std::collections::HashSet<String> =
-            ["Mist".to_string()].into_iter().collect();
+        let defs: std::collections::HashSet<String> = ["Mist".to_string()].into_iter().collect();
         let world = HostWorldContext::from_objects(vec![]).with_particle_defs(defs.clone());
         let args = [
             Value::String("Mist".into()),
@@ -22520,7 +22520,10 @@ mod tests {
         ];
         let (result, outcome) =
             with_object_host_context_with_world(world, || cast_back_particles(&args));
-        assert_eq!(result.expect("CastBackParticles succeeds"), Value::Bool(true));
+        assert_eq!(
+            result.expect("CastBackParticles succeeds"),
+            Value::Bool(true)
+        );
         match &outcome.particles[0] {
             ParticleCommand::Cast { layer, .. } => {
                 assert!(matches!(layer, ParticleLayer::ObjectBack(id) if *id == target_id));
@@ -22551,11 +22554,14 @@ mod tests {
             other => panic!("unexpected particle command {other:?}"),
         }
 
-        let defs: std::collections::HashSet<String> =
-            ["Spark".to_string()].into_iter().collect();
+        let defs: std::collections::HashSet<String> = ["Spark".to_string()].into_iter().collect();
         let world = HostWorldContext::from_objects(vec![]).with_particle_defs(defs);
         let (result, outcome) = with_object_host_context_with_world(world, || {
-            push_particles(&[Value::String("Missing".into()), Value::Int(0), Value::Int(0)])
+            push_particles(&[
+                Value::String("Missing".into()),
+                Value::Int(0),
+                Value::Int(0),
+            ])
         });
         assert_eq!(result.expect("PushParticles succeeds"), Value::Bool(false));
         assert!(outcome.particles.is_empty());

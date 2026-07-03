@@ -325,8 +325,16 @@ mod tests {
                 .find(|(entry, _)| *entry == name)
                 .map(|(_, value)| *value)
         };
-        assert_eq!(get("C4D_All"), Some(-1), "~C4D_None over int32 (C4Def.h:42)");
-        assert_eq!(get("OCF_Alive"), Some(i32::MIN), "1<<31 (C4Constants.h:137)");
+        assert_eq!(
+            get("C4D_All"),
+            Some(-1),
+            "~C4D_None over int32 (C4Def.h:42)"
+        );
+        assert_eq!(
+            get("OCF_Alive"),
+            Some(i32::MIN),
+            "1<<31 (C4Constants.h:137)"
+        );
         assert_eq!(get("SkyPar_Keep"), Some(-163764), "C4Script.cpp:4948");
         assert_eq!(get("NO_OWNER"), Some(-1));
         assert_eq!(get("DIR_Right"), Some(1));

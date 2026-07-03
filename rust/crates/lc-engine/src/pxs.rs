@@ -123,11 +123,7 @@ impl PxsSystem {
     }
 
     pub fn put_slot(&mut self, chunk: usize, slot: usize, pxs: Pxs) {
-        if let Some(slots) = self
-            .chunks
-            .get_mut(chunk)
-            .and_then(|chunk| chunk.as_mut())
-        {
+        if let Some(slots) = self.chunks.get_mut(chunk).and_then(|chunk| chunk.as_mut()) {
             slots[slot] = Some(pxs);
         }
     }
