@@ -20765,7 +20765,7 @@ impl Engine {
         let change = change.saturating_mul(C4_MAX_PHYSICAL / 100);
         // Mark the damage-causing player first (C4Object.cpp:1351-1353).
         if change < 0 || cause == C4FX_CALL_ENG_OBJ_HIT {
-            self.objects[idx].last_energy_loss_cause = caused_by;
+            self.update_last_energy_loss_cause(idx, caused_by);
         }
         // Living things: ask effects for change first (C4Object.cpp:1355-1359).
         let change = if self.objects[idx].state.alive && !self.objects[idx].state.effects.is_empty()
@@ -20791,6 +20791,16 @@ impl Engine {
         };
         if self.objects[idx].state.alive && self.objects[idx].state.energy == 0 && !was_zero {
             let _ = self.assign_death(idx, false);
+        }
+    }
+
+    /// `C4Object::UpdatLastEnergyLossCause` (C4Object.cpp:1369-1378):
+    /// self-administered damage does not steal an already-tracked killer —
+    /// only a DIFFERENT player (or an empty slot) updates the kill trace.
+    fn update_last_energy_loss_cause(&mut self, idx: usize, new_cause_player: i32) {
+        let object = &mut self.objects[idx];
+        if new_cause_player != object.state.controller || object.last_energy_loss_cause < 0 {
+            object.last_energy_loss_cause = new_cause_player;
         }
     }
 
@@ -37937,6 +37947,42 @@ func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
             40_000,
             "-10% of C4MaxPhysical lands on the foreign target (C4Object.cpp:1347,1361)"
         );
+    }
+
+    // C4Object::UpdatLastEnergyLossCause (C4Object.cpp:1369-1378):
+    // self-administered damage (cause == own Controller) does not steal an
+    // already-tracked killer — "stop-stop-throw while falling into teh
+    // abyss" keeps the pusher's kill credit.
+    #[test]
+    fn update_last_energy_loss_cause_keeps_the_tracked_killer_like_cpp() {
+        let mut engine = Engine::with_seed(19);
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true)
+                    .with_energy(50_000),
+            )
+            .expect("victim spawns");
+        let idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[idx].state.controller = 3;
+
+        // An enemy (player 5) hits first: tracked.
+        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 5);
+        assert_eq!(engine.objects[idx].last_energy_loss_cause, 5);
+        // Self-administered damage does not steal the kill
+        // (iNewCausePlr == Controller and a tracked player >= 0).
+        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 3);
+        assert_eq!(
+            engine.objects[idx].last_energy_loss_cause, 5,
+            "the tracked killer survives self-damage (C4Object.cpp:1373-1377)"
+        );
+        // A DIFFERENT player always updates.
+        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 6);
+        assert_eq!(engine.objects[idx].last_energy_loss_cause, 6);
     }
 
     // FnGetCommand (C4Script.cpp:918-945): element 0 returns the C++
