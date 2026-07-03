@@ -1148,6 +1148,7 @@ mod tests {
             components: HashMap::new(),
             status: ObjectStatus::Normal,
             owner: 1,
+            controller: 1,
             category: 0,
             crew_member: false,
             alive: true,

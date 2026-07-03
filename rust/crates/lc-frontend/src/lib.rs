@@ -3890,6 +3890,7 @@ mod tests {
                 components: HashMap::new(),
                 status: Default::default(),
                 owner: 0,
+                controller: 0,
                 category: lc_engine::DEFAULT_CATEGORY,
                 crew_member: true,
                 alive: true,

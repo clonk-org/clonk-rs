@@ -12178,18 +12178,10 @@ impl Engine {
                 object_id,
                 definition_id,
             ) {
-                // TEMP PROBE: surface the full source chain.
-                let mut chain = String::new();
-                let mut walker: &dyn std::error::Error = &error;
-                while let Some(source) = walker.source() {
-                    chain.push_str(&format!(" <- {source}"));
-                    walker = source;
-                }
                 tracing::warn!(
                     definition = %definition_id,
                     function,
                     %error,
-                    chain,
                     "script error in engine callback; continuing like the C++ fail-safe exec"
                 );
             }
