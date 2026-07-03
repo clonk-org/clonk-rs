@@ -2854,6 +2854,8 @@ struct Object {
     /// frame (`C4Movement.cpp:376`).
     rotation_velocity: C4Fixed,
     destroyed: bool,
+    /// The baked solid mask (grid worlds only; C4Object::pSolidMaskData).
+    solid_mask_bake: Option<SolidMaskBake>,
     /// This frame's UprightAttach bits (C4Object.cpp:4698-4705): the
     /// per-frame `Action.t_attach |= Def->UprightAttach` OR that feeds the
     /// movement config. Transient — recomputed at every ExecAction, never
@@ -2973,6 +2975,7 @@ impl Object {
             fixed_rotation,
             rotation_velocity: C4Fixed::ZERO,
             destroyed: matches!(state.status, ObjectStatus::Deleted),
+            solid_mask_bake: None,
             state,
             upright_t_attach: 0,
             last_energy_loss_cause: OWNER_NONE,
@@ -8472,6 +8475,46 @@ struct LayerMovementBounds {
     border_bound: i32,
 }
 
+/// A PUT solid mask (C4SolidMask::Put, unrotated, C4SolidMask.cpp:
+/// 24-107): the landscape-clipped MaskPutRect plus the saved background
+/// bytes ("MatBuff"); the vehicle byte marks unused buffer slots.
+#[derive(Debug, Clone)]
+struct SolidMaskBake {
+    /// MaskPutRect (landscape space, clipped).
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    /// Mask-space offset of the clipped rect (MaskPutRect.tx/ty).
+    tx: i32,
+    ty: i32,
+    /// Full mask width (the alpha-pixel row pitch).
+    mask_width: i32,
+    /// Per-pixel alpha mask (1 = solid); None = full rectangle.
+    pixels: Option<Rc<Vec<u8>>>,
+    /// Saved background bytes, row-major width*height.
+    buffer: Vec<u8>,
+}
+
+impl SolidMaskBake {
+    fn overlaps(&self, other: &SolidMaskBake) -> bool {
+        self.x < other.x + other.width
+            && other.x < self.x + self.width
+            && self.y < other.y + other.height
+            && other.y < self.y + self.height
+    }
+
+    fn mask_set(&self, mask_x: i32, mask_y: i32) -> bool {
+        match &self.pixels {
+            None => true,
+            Some(pixels) => pixels
+                .get((mask_y * self.mask_width + mask_x) as usize)
+                .map(|value| *value != 0)
+                .unwrap_or(false),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SolidMaskRect {
     object_id: ObjectId,
@@ -8764,6 +8807,79 @@ fn movement_density_at(
         return C4M_VEHICLE;
     }
     landscape.density_at(x, y, materials)
+}
+
+/// The SCRIPT PathFree (FnPathFree → ::PathFree, C4Landscape.cpp:
+/// 2052-2055): the ForLine per-pixel Bresenham (:1683-1738) where any
+/// GBackSolid pixel blocks. GBackSolid sees the baked C4SolidMask
+/// MCVehic pixels — the rust mask overlay joins via movement_density_at.
+pub(crate) fn path_free_exact(
+    landscape: &Landscape,
+    materials: &MaterialSet,
+    solid_masks: &[SolidMaskRect],
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+) -> bool {
+    let solid = |x: i32, y: i32| {
+        movement_density_at(landscape, materials, solid_masks, None, x, y) >= 50
+    };
+    let (mut x1, mut y1, mut x2, mut y2) = (x1, y1, x2, y2);
+    if (x2 - x1).abs() < (y2 - y1).abs() {
+        if y1 > y2 {
+            std::mem::swap(&mut x1, &mut x2);
+            std::mem::swap(&mut y1, &mut y2);
+        }
+        let xincr = if x2 > x1 { 1 } else { -1 };
+        let dy = y2 - y1;
+        let dx = (x2 - x1).abs();
+        let mut d = 2 * dx - dy;
+        let aincr = 2 * (dx - dy);
+        let bincr = 2 * dx;
+        let mut x = x1;
+        if solid(x, y1) {
+            return false;
+        }
+        for y in (y1 + 1)..=y2 {
+            if d >= 0 {
+                x += xincr;
+                d += aincr;
+            } else {
+                d += bincr;
+            }
+            if solid(x, y) {
+                return false;
+            }
+        }
+    } else {
+        if x1 > x2 {
+            std::mem::swap(&mut x1, &mut x2);
+            std::mem::swap(&mut y1, &mut y2);
+        }
+        let yincr = if y2 > y1 { 1 } else { -1 };
+        let dx = x2 - x1;
+        let dy = (y2 - y1).abs();
+        let mut d = 2 * dy - dx;
+        let aincr = 2 * (dy - dx);
+        let bincr = 2 * dy;
+        let mut y = y1;
+        if solid(x1, y) {
+            return false;
+        }
+        for x in (x1 + 1)..=x2 {
+            if d >= 0 {
+                y += yincr;
+                d += aincr;
+            } else {
+                d += bincr;
+            }
+            if solid(x, y) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn shape_contact_check(
@@ -11209,6 +11325,7 @@ impl Engine {
                 .unwrap_or(0),
             self.idle_crew_counts(),
         )
+    
     }
 
     /// The shared definition-script table host contexts carry (nested
@@ -13642,14 +13759,20 @@ impl Engine {
                 self.copy_motion_from_container(idx);
             } else if !exec_movement_static_back {
                 if self.objects[idx].state.mobile {
+                    // The mover's own mask leaves the plane for its own
+                    // movement (C++ masks vanish/reappear through
+                    // UpdatePos; C4Movement.cpp:440 re-puts after).
+                    self.remove_solid_mask(idx);
                     if !self.exec_object_movement(
                         idx,
                         &action_library,
                         &definition_id,
                         &solid_mask_indices,
                     )? {
+                        self.update_solid_mask(idx);
                         continue;
                     }
+                    self.update_solid_mask(idx);
                     // Demobilization (C4Movement.cpp:572) runs after
                     // DoMovement, so same-frame friction/contact zeroing
                     // demobilizes immediately.
@@ -13685,6 +13808,10 @@ impl Engine {
             }
 
             self.apply_landscape_at_index(idx);
+            // Masks follow every state change this frame
+            // (C4Object::UpdateSolidMask fires from UpdatePos/Enter/
+            // Exit/DoCon; the end-of-exec update covers the net state).
+            self.update_solid_mask(idx);
             self.update_sector_for_index(idx);
             // effects (fire) run after movement (C4Object.cpp:1073-1077)
             self.exec_object_fire(idx, frame);
@@ -14050,6 +14177,12 @@ impl Engine {
         // C4GameObjects::CrossCheck runs once per frame after object        // execution (C4Game.cpp ExecObjects → Objects.CrossCheck()).
         self.cross_check(frame)?;
 
+        for index in 0..self.objects.len() {
+            if self.objects[index].destroyed {
+                // AssignRemoval destroys the mask (C4Object.cpp:5647).
+                self.remove_solid_mask(index);
+            }
+        }
         self.detach_destroyed_objects()?;
         self.objects.retain(|object| !object.destroyed);
         self.note_objects_changed();
@@ -14139,6 +14272,7 @@ impl Engine {
 
         let mut energy_died = false;
         let mut pending_change_def: Option<String> = None;
+        let mut solid_mask_refresh = false;
         let (object_id, previous_owner, new_owner, new_crew, container_change) = {
             let object = &mut self.objects[index];
             let previous_owner = object.state.owner;
@@ -14233,6 +14367,7 @@ impl Engine {
             }
             if let Some(rect) = update_solid_mask {
                 object.state.solid_mask_override = Some(rect);
+                solid_mask_refresh = true;
             }
             if let Some(new_def) = change_def.clone() {
                 pending_change_def = Some(new_def);
@@ -14292,6 +14427,11 @@ impl Engine {
             )
         };
 
+        if solid_mask_refresh {
+            // SetSolidMask reflows the bake immediately
+            // (C4Object.cpp:3792 CheckSolidMaskRect + UpdateSolidMask).
+            self.update_solid_mask(index);
+        }
         self.update_sector_for_index(index);
         if energy_died {
             self.assign_death(index, false)?;
@@ -20856,7 +20996,207 @@ impl Engine {
         })
     }
 
+    /// Whether masks bake into the plane (a pixel grid with a Vehicle
+    /// slot exists). Without it the rect overlay below stays in force.
+    fn solid_mask_grid_mode(&self) -> bool {
+        self.landscape
+            .as_ref()
+            .and_then(|landscape| landscape.grid_vehicle_byte())
+            .is_some()
+    }
+
+    /// The object's effective solid mask spec when eligible
+    /// (C4Object::UpdateSolidMask gates: mask enabled, FullCon, not
+    /// contained, no rotation, C4Object.cpp:5652-5656).
+    fn solid_mask_spec(
+        &self,
+        index: usize,
+    ) -> Option<(DefinitionTargetRect, Option<Rc<Vec<u8>>>, i32, i32)> {
+        let object = self.objects.get(index)?;
+        if object.destroyed
+            || matches!(object.state.status, ObjectStatus::Deleted)
+            || object.state.container.is_some()
+            || object.state.construction < FULL_CON
+            || object.state.rotation != 0
+        {
+            return None;
+        }
+        let definition = self.definitions.get(&object.definition_id)?;
+        let mask = match object.state.solid_mask_override {
+            Some(rect) if rect.width <= 0 || rect.height <= 0 => return None,
+            Some(rect) => rect,
+            None => definition.solid_mask()?,
+        };
+        let pixels = match definition.solid_mask_pixels_for_rect(mask) {
+            SolidMaskPixels::OutOfBounds => return None,
+            SolidMaskPixels::Rectangle => None,
+            SolidMaskPixels::Alpha(pixels) => Some(Rc::clone(&pixels)),
+        };
+        let shape = definition.shape_rect()?;
+        Some((mask, pixels, shape.x, shape.y))
+    }
+
+    /// C4SolidMask::Put (regular, unrotated, C4SolidMask.cpp:24-107):
+    /// clip the mask to the landscape, save the background bytes, write
+    /// MCVehic. No-op when already put or ineligible.
+    fn put_solid_mask(&mut self, index: usize) {
+        if index >= self.objects.len() || self.objects[index].solid_mask_bake.is_some() {
+            return;
+        }
+        let Some(vehicle) = self
+            .landscape
+            .as_ref()
+            .and_then(|landscape| landscape.grid_vehicle_byte())
+        else {
+            return;
+        };
+        let Some((mask, pixels, shape_x, shape_y)) = self.solid_mask_spec(index) else {
+            return;
+        };
+        let Some((grid_width, grid_height)) = self
+            .landscape
+            .as_ref()
+            .and_then(|landscape| landscape.grid_dimensions())
+        else {
+            return;
+        };
+        let position = self.objects[index].state.position;
+        let ox = position.x + shape_x + mask.target_x;
+        let oy = position.y + shape_y + mask.target_y;
+        let mut rect_x = ox;
+        let mut tx = 0;
+        if rect_x < 0 {
+            tx = -rect_x;
+            rect_x = 0;
+        }
+        let mut rect_y = oy;
+        let mut ty = 0;
+        if rect_y < 0 {
+            ty = -rect_y;
+            rect_y = 0;
+        }
+        let width = (ox + mask.width).min(grid_width) - rect_x;
+        let height = (oy + mask.height).min(grid_height) - rect_y;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let mut bake = SolidMaskBake {
+            x: rect_x,
+            y: rect_y,
+            width,
+            height,
+            tx,
+            ty,
+            mask_width: mask.width,
+            pixels,
+            buffer: vec![vehicle; (width * height) as usize],
+        };
+        let landscape = self.landscape.as_mut().expect("grid mode checked");
+        for cy in 0..height {
+            for cx in 0..width {
+                if !bake.mask_set(tx + cx, ty + cy) {
+                    continue;
+                }
+                let lx = rect_x + cx;
+                let ly = rect_y + cy;
+                // Regular put stores the pixel even when it is already
+                // MCVehic (C4SolidMask.cpp:92-96) — it just will not be
+                // used for restore.
+                let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
+                bake.buffer[(cy * width + cx) as usize] = old;
+                landscape.grid_write_byte(lx, ly, vehicle);
+            }
+        }
+        self.objects[index].solid_mask_bake = Some(bake);
+    }
+
+    /// C4SolidMask::Remove (C4SolidMask.cpp:233-283): restore the saved
+    /// bytes (only where the pixel is STILL MCVehic — landscape changes
+    /// under the mask win, _SBackPixIfMask) and RE-PUT every overlapping
+    /// other mask across the freed rect.
+    fn remove_solid_mask(&mut self, index: usize) {
+        if index >= self.objects.len() {
+            return;
+        }
+        let Some(bake) = self.objects[index].solid_mask_bake.take() else {
+            return;
+        };
+        let Some(vehicle) = self
+            .landscape
+            .as_ref()
+            .and_then(|landscape| landscape.grid_vehicle_byte())
+        else {
+            return;
+        };
+        {
+            let landscape = self.landscape.as_mut().expect("grid mode checked");
+            for cy in 0..bake.height {
+                for cx in 0..bake.width {
+                    let saved = bake.buffer[(cy * bake.width + cx) as usize];
+                    if saved == vehicle {
+                        continue;
+                    }
+                    let lx = bake.x + cx;
+                    let ly = bake.y + cy;
+                    if landscape.grid_byte_at(lx, ly) == Some(vehicle) {
+                        landscape.grid_write_byte(lx, ly, saved);
+                    }
+                }
+            }
+        }
+        // Re-put overlapping masks: doubled MCVehic pixels were just
+        // removed inside the freed rect (C4SolidMask.cpp:271-283).
+        for other in 0..self.objects.len() {
+            if other == index {
+                continue;
+            }
+            let Some(other_bake) = self.objects[other].solid_mask_bake.clone() else {
+                continue;
+            };
+            if !other_bake.overlaps(&bake) {
+                continue;
+            }
+            let clip_x0 = bake.x.max(other_bake.x);
+            let clip_y0 = bake.y.max(other_bake.y);
+            let clip_x1 = (bake.x + bake.width).min(other_bake.x + other_bake.width);
+            let clip_y1 = (bake.y + bake.height).min(other_bake.y + other_bake.height);
+            let mut updated = other_bake.clone();
+            let landscape = self.landscape.as_mut().expect("grid mode checked");
+            for ly in clip_y0..clip_y1 {
+                for lx in clip_x0..clip_x1 {
+                    let mx = updated.tx + (lx - updated.x);
+                    let my = updated.ty + (ly - updated.y);
+                    if !updated.mask_set(mx, my) {
+                        continue;
+                    }
+                    let current = landscape.grid_byte_at(lx, ly).unwrap_or(0);
+                    if current != vehicle {
+                        // The re-put refreshes the buffer only for pixels
+                        // not currently masked (C4SolidMask.cpp:92-96).
+                        updated.buffer
+                            [((ly - updated.y) * updated.width + (lx - updated.x)) as usize] =
+                            current;
+                    }
+                    landscape.grid_write_byte(lx, ly, vehicle);
+                }
+            }
+            self.objects[other].solid_mask_bake = Some(updated);
+        }
+    }
+
+    /// C4Object::UpdateSolidMask (C4Object.cpp:5644-5670): remove, then
+    /// re-put when (still) eligible.
+    fn update_solid_mask(&mut self, index: usize) {
+        self.remove_solid_mask(index);
+        self.put_solid_mask(index);
+    }
+
     fn solid_masks_for_movement(&self, candidate_indices: &[usize]) -> Vec<SolidMaskRect> {
+        // Grid worlds bake masks into the plane (put_solid_mask) — the
+        // rect overlay would double-apply.
+        if self.solid_mask_grid_mode() {
+            return Vec::new();
+        }
         let mut masks = Vec::new();
         for &index in candidate_indices {
             let Some(object) = self.objects.get(index) else {
@@ -23382,6 +23722,7 @@ impl Engine {
         self.note_objects_changed();
         let index = self.objects.len() - 1;
         self.update_sector_for_index(index);
+        self.update_solid_mask(index);
         for (previous, new) in container_changes {
             self.apply_container_change(id, previous, new)?;
         }

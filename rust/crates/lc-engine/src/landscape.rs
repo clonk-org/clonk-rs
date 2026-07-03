@@ -129,6 +129,23 @@ impl PixelGrid {
         &self.texture_names
     }
 
+    /// `Mat2PixColDefault(MVehic)` — the first texmap slot carrying the
+    /// Vehicle material (the byte C4SolidMask bakes, `MCVehic`).
+    pub fn vehicle_byte(&self) -> Option<u8> {
+        self.material_names
+            .iter()
+            .position(|name| {
+                name.as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("Vehicle"))
+            })
+            .map(|index| index as u8)
+    }
+
+    /// Raw plane write (C4SolidMask's _SBackPix): bumps the revision.
+    pub fn write_byte(&mut self, x: i32, y: i32, byte: u8) {
+        self.set_byte(x, y, byte);
+    }
+
     pub fn material_names(&self) -> &[Option<String>] {
         &self.material_names
     }
@@ -529,6 +546,29 @@ impl Landscape {
         if self.density_at(x, y, materials) > self.density_at(x + dx, y + dy, materials) {
             let _ = self.dig_free_pix(x, y, materials);
         }
+    }
+
+    /// C4SolidMask plumbing: the plane's Vehicle byte, raw reads and
+    /// writes. None/no-op without a pixel grid (fixture worlds keep the
+    /// mask-rect overlay).
+    pub fn grid_vehicle_byte(&self) -> Option<u8> {
+        self.pixels.as_ref().and_then(|grid| grid.vehicle_byte())
+    }
+
+    pub fn grid_byte_at(&self, x: i32, y: i32) -> Option<u8> {
+        self.pixels.as_ref().and_then(|grid| grid.byte_at(x, y))
+    }
+
+    pub fn grid_write_byte(&mut self, x: i32, y: i32, byte: u8) {
+        if let Some(grid) = self.pixels.as_mut() {
+            grid.write_byte(x, y, byte);
+        }
+    }
+
+    pub fn grid_dimensions(&self) -> Option<(i32, i32)> {
+        self.pixels
+            .as_ref()
+            .map(|grid| (grid.width() as i32, grid.height() as i32))
     }
 
     pub fn resolve_grid_materials(&mut self, lookup: impl FnMut(&str) -> Option<MaterialId>) {

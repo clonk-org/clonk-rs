@@ -1086,6 +1086,8 @@ void C4Object::Execute()
 	{
 		Timer = 0;
 		// TimerCall
+		if (Number == 569 && Game.FrameCounter >= 16 && Game.FrameCounter <= 18 && getenv("LC_RNG_TRACE"))
+			spdlog::info("SNKTIMER f={} act={} phase={}", Game.FrameCounter, +Action.Name, Action.Phase);
 		if (Def->TimerCall) Def->TimerCall->Exec(this);
 	}
 	// Menu

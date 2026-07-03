@@ -57,6 +57,14 @@ inline int Random(int iRange)
 #else
 	if (iRange == 0) return 0;
 	RandomHold = RandomHold * 214013L + 2531011L;
+	{
+		static FILE *rngTrace = []() -> FILE * {
+			const char *p = getenv("LC_RNG_TRACE");
+			return (p && *p) ? fopen(p, "w") : nullptr;
+		}();
+		if (rngTrace)
+			fprintf(rngTrace, "%d %d %u\n", RandomCount, iRange, (RandomHold >> 16) % iRange);
+	}
 	return (RandomHold >> 16) % iRange;
 #endif
 }

@@ -3360,6 +3360,13 @@ static C4ValueInt FnSEqual(C4AulContext *cthr, C4String *szString1, C4String *sz
 
 static C4ValueInt FnRandom(C4AulContext *cthr, C4ValueInt iRange)
 {
+	if (Game.FrameCounter >= 16 && Game.FrameCounter <= 18 && getenv("LC_RNG_TRACE"))
+	{
+		std::string chain;
+		for (C4AulScriptContext *c = cthr->Caller; c; c = c->Caller)
+			if (c->Func) { chain += c->Func->Name; chain += "<"; }
+		spdlog::info("CPPRND f={} n={} range={} act={} chain={}", Game.FrameCounter, cthr->Obj ? cthr->Obj->Number : -1, iRange, cthr->Obj ? +cthr->Obj->Action.Name : "-", chain);
+	}
 	return Random(iRange);
 }
 

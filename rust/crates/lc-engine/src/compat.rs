@@ -8426,6 +8426,25 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
+    if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
+        let frame = ENVIRONMENT_CONTEXT.with(|cell| {
+            cell.borrow().as_ref().map(|context| context.frame).unwrap_or(0)
+        });
+        if (16..=18).contains(&frame) {
+            let info = HOST_CONTEXT.with(|cell| {
+                cell.borrow().as_ref().and_then(|context| {
+                    context.object_context().map(|object| {
+                        (object.id().as_u64(), object.effective_action_name().to_string())
+                    })
+                })
+            });
+            if let Some((id, action)) = info {
+                if matches!(id, 578 | 579) {
+                    tracing::warn!(?args, id, %action, frame, "GETACTION");
+                }
+            }
+        }
+    }
     let mut index = 0;
     let target_id =
         consume_optional_object_reference_argument(args, &mut index, "GetAction", "target")?;
@@ -9314,7 +9333,17 @@ fn path_free(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(true));
         };
 
-        let clear = landscape.path_is_clear(Vector2::new(x1, y1), Vector2::new(x2, y2));
+        // FnPathFree → ::PathFree = the ForLine per-pixel Bresenham with
+        // GBackSolid blocking (C4Landscape.cpp:1683-1738, 2052-2055) —
+        // its exact stepping decides script branches (the Bison's
+        // EnemyNearby flee gate). GBackSolid sees C4SolidMask's baked
+        // MCVehic pixels — the plane carries them (put_solid_mask).
+        let clear = match context.world.materials() {
+            Some(materials) => {
+                crate::path_free_exact(landscape, materials, &[], x1, y1, x2, y2)
+            }
+            None => landscape.path_is_clear(Vector2::new(x1, y1), Vector2::new(x2, y2)),
+        };
         Ok(Value::Bool(clear))
     })
 }
