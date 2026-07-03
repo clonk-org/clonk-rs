@@ -449,6 +449,7 @@ mod tests {
                 components: HashMap::new(),
                 status: ObjectStatus::Normal,
                 owner: OWNER_NONE,
+                controller: OWNER_NONE,
                 category: crate::DEFAULT_CATEGORY,
                 crew_member: false,
                 alive: true,

@@ -343,6 +343,16 @@ impl HostWorldObject {
         self.owner
     }
 
+    /// C4Object::Controller — carried on the full-state snapshot; legacy
+    /// fixture snapshots without one fall back to the owner (the Init
+    /// default, C4Object.cpp:162).
+    pub fn controller(&self) -> i32 {
+        self.state
+            .as_ref()
+            .map(|state| state.controller)
+            .unwrap_or(self.owner)
+    }
+
     pub fn category(&self) -> i32 {
         self.category
     }
@@ -3810,6 +3820,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetAlive", get_alive);
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
+    script.register_host_function("GetController", get_controller);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetOCF", get_ocf);
@@ -4891,6 +4902,8 @@ pub(crate) struct HostObjectContext<'a> {
     /// C4Object::OwnMass (SetMass leftovers).
     pub own_mass: i32,
     pub owner: i32,
+    /// C4Object::Controller (C4Object.h:127) — cause tracing.
+    pub controller: i32,
     pub category: i32,
     pub ocf: u32,
     pub ocf_base: u32,
@@ -5015,6 +5028,9 @@ impl<'a> HostObjectContext<'a> {
             in_liquid: false,
             own_mass: 0,
             owner,
+            // The Init default (C4Object.cpp:162); real controllers ride
+            // in via with_controller.
+            controller: owner,
             category,
             ocf: ocf::NORMAL,
             ocf_base,
@@ -5046,6 +5062,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_alive(mut self, alive: bool) -> Self {
         self.alive = alive;
+        self
+    }
+
+    pub fn with_controller(mut self, controller: i32) -> Self {
+        self.controller = controller;
         self
     }
 
@@ -11980,6 +12001,16 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_owner(owner)
             .with_category(definition_category)
             .with_id(id);
+        // "Set initial controller to creating controller, so more
+        // complicated cause-effect-chains can be traced back to the
+        // causing player" (FnCreateObject, C4Script.cpp:1905-1906).
+        let creator_controller = context
+            .object_context()
+            .map(ObjectScopeContext::controller)
+            .filter(|value| *value > OWNER_NONE);
+        if let Some(controller) = creator_controller {
+            spawn = spawn.with_controller(controller);
+        }
         // Creation callbacks run synchronously below - materialization
         // must not repeat Initialize (C4Game.cpp:1117-1127).
         spawn.initialized = true;
@@ -12030,6 +12061,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         .with_full_state(Rc::new(crate::preview_spawn_state(
             position,
             owner,
+            creator_controller.unwrap_or(owner),
             definition_category,
             FULL_CON,
             metadata.vertices.clone(),
@@ -12206,12 +12238,21 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let id = context.allocate_object_id();
 
-        let spawn = SpawnConfig::new(definition.clone())
+        let mut spawn = SpawnConfig::new(definition.clone())
             .with_position(position)
             .with_owner(owner)
             .with_category(definition_category)
             .with_construction(construction_value)
             .with_id(id);
+        // The creating controller rides onto the site (FnCreateConstruction,
+        // C4Script.cpp:1932-1933).
+        let creator_controller = context
+            .object_context()
+            .map(ObjectScopeContext::controller)
+            .filter(|value| *value > OWNER_NONE);
+        if let Some(controller) = creator_controller {
+            spawn = spawn.with_controller(controller);
+        }
 
         let preview_ocf = ocf::compute(
             metadata.ocf_base,
@@ -12248,6 +12289,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         .with_full_state(Rc::new(crate::preview_spawn_state(
             position,
             owner,
+            creator_controller.unwrap_or(owner),
             definition_category,
             construction_value,
             metadata.vertices.clone(),
@@ -13566,6 +13608,24 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 vertices: Vec::new(),
             });
 
+        // "controller will automatically be set upon entrance"
+        // (FnCreateContents, C4Script.cpp:1944): the preview mirrors the
+        // Enter transfer (C4Object.cpp:1579-1582) — non-living contents
+        // assume the container's controller, the rest keep the Init owner.
+        let preview_controller = if metadata.category & crate::CATEGORY_LIVING != 0 {
+            owner
+        } else {
+            context
+                .object_context()
+                .filter(|object| object.id() == container)
+                .map(ObjectScopeContext::controller)
+                .or_else(|| {
+                    context
+                        .get_world_object(container)
+                        .map(|object| object.controller())
+                })
+                .unwrap_or(owner)
+        };
         let mut last = Value::Nil;
         for _ in 0..count {
             let id = context.allocate_object_id();
@@ -13611,6 +13671,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 let mut state = crate::preview_spawn_state(
                     position,
                     owner,
+                    preview_controller,
                     metadata.category,
                     FULL_CON,
                     metadata.vertices.clone(),
@@ -14231,6 +14292,48 @@ fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         Ok(Value::Int(object.owner()))
+    })
+}
+
+/// FnGetController (C4Script.cpp:1316-1320): the object's Controller,
+/// NO_OWNER without an object.
+fn get_controller(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetController expects at most 1 argument: target",
+        ));
+    }
+
+    let target_id = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "GetController", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Int(OWNER_NONE)),
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    return Ok(Value::Int(object.controller()));
+                }
+            }
+            if let Some(other) = context.get_world_object(target) {
+                return Ok(Value::Int(other.controller()));
+            }
+            return Ok(Value::Int(OWNER_NONE));
+        }
+
+        let controller = context
+            .object_context()
+            .map(|object| object.controller())
+            .unwrap_or(OWNER_NONE);
+        Ok(Value::Int(controller))
     })
 }
 
@@ -15062,6 +15165,7 @@ impl EffectHostContext {
                 in_liquid,
                 own_mass,
                 owner,
+                controller,
                 position,
                 velocity,
                 rotation,
@@ -15101,6 +15205,7 @@ impl EffectHostContext {
                     in_liquid,
                     own_mass,
                     owner,
+                    controller,
                     category,
                     position,
                     velocity,
@@ -15394,6 +15499,7 @@ impl EffectHostContext {
             state.in_liquid,
             state.own_mass,
             state.owner,
+            state.controller,
             state.category,
             state.position,
             state.velocity,
@@ -15842,6 +15948,8 @@ struct ObjectScopeContext {
     current_in_liquid: bool,
     current_own_mass: i32,
     current_owner: i32,
+    /// C4Object::Controller (C4Object.h:127) — cause tracing.
+    current_controller: i32,
     current_category: i32,
     ocf_base: u32,
     crew_member: bool,
@@ -15877,6 +15985,7 @@ impl ObjectScopeContext {
         in_liquid: bool,
         own_mass: i32,
         owner: i32,
+        controller: i32,
         category: i32,
         position: Vector2,
         velocity: Vector2,
@@ -15932,6 +16041,7 @@ impl ObjectScopeContext {
             current_in_liquid: in_liquid,
             current_own_mass: own_mass,
             current_owner: owner,
+            current_controller: controller,
             current_category: category,
             ocf_base,
             crew_member,
@@ -16148,6 +16258,22 @@ impl ObjectScopeContext {
     fn set_owner(&mut self, owner: i32) {
         self.current_owner = owner;
         self.pending_update.owner = Some(owner);
+        // C4Object::SetOwner "automatically updates controller"
+        // (C4Object.cpp:5499-5500).
+        self.set_controller(owner);
+    }
+
+    /// C4Object::Controller (FnGetController, C4Script.cpp:1316-1320).
+    fn controller(&self) -> i32 {
+        self.pending_update
+            .controller
+            .unwrap_or(self.current_controller)
+    }
+
+    /// FnSetController (C4Script.cpp:1322-1331).
+    fn set_controller(&mut self, controller: i32) {
+        self.current_controller = controller;
+        self.pending_update.controller = Some(controller);
     }
 
     /// C4Player::MakeCrewMember adds the object to the crew
@@ -16793,6 +16919,7 @@ mod tests {
         "GetComponent",
         "GetCon",
         "GetContact",
+        "GetController",
         "GetCrew",
         "GetCrewCount",
         "GetCursor",

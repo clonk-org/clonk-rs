@@ -1896,6 +1896,13 @@ pub struct ObjectState {
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
     pub owner: i32,
+    /// C4Object::Controller (C4Object.h:127): the player whose action
+    /// chain caused this object — kill/cause tracing. NO_OWNER before
+    /// Init (C4Object.cpp:86) and as the Objects.txt compile default
+    /// (C4Object.cpp:2739); Init seeds it from the explicit controller or
+    /// the owner (C4Object.cpp:162).
+    #[serde(default = "default_owner")]
+    pub controller: i32,
     #[serde(default = "default_category")]
     pub category: i32,
     #[serde(default)]
@@ -2032,6 +2039,7 @@ struct ApplyDeltaOutcome {
 pub(crate) fn preview_spawn_state(
     position: Vector2,
     owner: i32,
+    controller: i32,
     category: i32,
     construction: i32,
     vertices: Vec<ObjectVertex>,
@@ -2056,6 +2064,7 @@ pub(crate) fn preview_spawn_state(
         components: HashMap::new(),
         status: ObjectStatus::Normal,
         owner,
+        controller,
         category,
         crew_member: false,
         crew_disabled: false,
@@ -2436,6 +2445,10 @@ pub struct ObjectUpdate {
     pub status: Option<ObjectStatus>,
     #[serde(default)]
     pub owner: Option<i32>,
+    /// FnSetController (C4Script.cpp:1322-1331); also recorded by
+    /// SetOwner's automatic controller update (C4Object.cpp:5499-5500).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<i32>,
     #[serde(default)]
     pub category: Option<i32>,
     /// SetMass (C4Script.cpp:3620-3626): OwnMass = value - Def->Mass.
@@ -3778,6 +3791,7 @@ impl Object {
             components: self.state.components.clone(),
             status: self.state.status,
             owner: self.state.owner,
+            controller: self.state.controller,
             category: self.state.category,
             crew_member: self.state.crew_member,
             alive: self.state.alive,
@@ -4215,6 +4229,13 @@ pub struct SpawnConfig {
     #[serde(default)]
     pub vertices: Vec<ObjectVertex>,
     pub owner: i32,
+    /// Explicit C4Object::Controller: Objects.txt `Controller=` on loads
+    /// (compile default NO_OWNER, C4Object.cpp:2739) or the creating
+    /// controller from script CreateObject/CreateConstruction
+    /// (C4Script.cpp:1905-1906, 1932-1933). None/NO_OWNER = the Init rule
+    /// (owner) for fresh spawns (C4Object.cpp:162).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
     #[serde(default)]
@@ -4294,6 +4315,7 @@ impl SpawnConfig {
             effects: Vec::new(),
             vertices: Vec::new(),
             owner: OWNER_NONE,
+            controller: None,
             crew_member: None,
             status: None,
             container: None,
@@ -4429,6 +4451,11 @@ impl SpawnConfig {
         self
     }
 
+    pub fn with_controller(mut self, controller: i32) -> Self {
+        self.controller = Some(controller);
+        self
+    }
+
     pub fn with_category(mut self, category: i32) -> Self {
         self.category = Some(category);
         self
@@ -4506,6 +4533,10 @@ pub struct ObjectSnapshot {
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
     pub owner: i32,
+    /// C4Object::Controller (persisted like the savegame `Controller`
+    /// field, default NO_OWNER, C4Object.cpp:2739).
+    #[serde(default = "default_owner")]
+    pub controller: i32,
     #[serde(default = "default_category")]
     pub category: i32,
     #[serde(default)]
@@ -6081,6 +6112,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
                 .with_physicals(
@@ -6257,6 +6289,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
                 .with_physicals(
@@ -6425,6 +6458,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
                 .with_physicals(
@@ -6617,6 +6651,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
                 .with_physicals(
@@ -6734,6 +6769,7 @@ impl Definition {
         )
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
+        .with_controller(state.controller)
         .with_in_liquid(state.in_liquid)
         .with_own_mass(state.own_mass)
         .with_physicals(
@@ -6868,6 +6904,7 @@ impl Definition {
         )
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
+        .with_controller(state.controller)
         .with_in_liquid(state.in_liquid)
         .with_own_mass(state.own_mass)
         .with_physicals(
@@ -6995,6 +7032,7 @@ impl Definition {
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
+        .with_controller(state.controller)
         .with_in_liquid(state.in_liquid)
         .with_own_mass(state.own_mass)
         .with_physicals(
@@ -7125,6 +7163,7 @@ impl Definition {
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
+        .with_controller(state.controller)
         .with_in_liquid(state.in_liquid)
         .with_own_mass(state.own_mass)
         .with_physicals(
@@ -7250,6 +7289,7 @@ impl Definition {
         )
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
+        .with_controller(state.controller)
         .with_in_liquid(state.in_liquid)
         .with_own_mass(state.own_mass)
         .with_physicals(
@@ -7715,6 +7755,7 @@ impl Definition {
                 )
                 .with_definition_id(self.id.as_str())
                 .with_alive(state.alive)
+                .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
                 .with_physicals(
@@ -12123,10 +12164,18 @@ impl Engine {
                 object_id,
                 definition_id,
             ) {
+                // TEMP PROBE: surface the full source chain.
+                let mut chain = String::new();
+                let mut walker: &dyn std::error::Error = &error;
+                while let Some(source) = walker.source() {
+                    chain.push_str(&format!(" <- {source}"));
+                    walker = source;
+                }
                 tracing::warn!(
                     definition = %definition_id,
                     function,
                     %error,
+                    chain,
                     "script error in engine callback; continuing like the C++ fail-safe exec"
                 );
             }
@@ -14110,6 +14159,7 @@ impl Engine {
             action,
             status,
             owner,
+            controller,
             crew_member,
             crew_disabled,
             portrait_source,
@@ -14221,6 +14271,12 @@ impl Engine {
             }
             if let Some(owner) = owner {
                 object.state.owner = owner;
+                // SetOwner "automatically updates controller"
+                // (C4Object.cpp:5499-5500); an explicit SetController in
+                // the same batch still wins below.
+                object.state.controller = controller.unwrap_or(owner);
+            } else if let Some(controller) = controller {
+                object.state.controller = controller;
             }
             if let Some(crew_member) = crew_member {
                 object.state.crew_member = crew_member;
@@ -15394,6 +15450,7 @@ impl Engine {
                     components: snapshot.components.clone(),
                     status: snapshot.status,
                     owner: snapshot.owner,
+                    controller: snapshot.controller,
                     category: snapshot.category,
                     crew_member: snapshot.crew_member,
                     crew_disabled: false,
@@ -15455,6 +15512,19 @@ impl Engine {
 
         for (object_id, container) in container_assignments {
             self.apply_container_change(object_id, None, Some(container))?;
+            // Restores denumerate Contained without running Enter — the
+            // snapshot controller stays authoritative (no C4Object.cpp:1582
+            // transfer on load).
+            if let (Some(index), Some(snapshot)) = (
+                self.find_object_index(object_id),
+                state
+                    .objects
+                    .iter()
+                    .find(|persisted| persisted.snapshot.id == object_id)
+                    .map(|persisted| &persisted.snapshot),
+            ) {
+                self.objects[index].state.controller = snapshot.controller;
+            }
         }
 
         // C++ recomputes OCF on load rather than persisting it
@@ -21054,6 +21124,14 @@ impl Engine {
                 }
 
                 self.objects[object_index].state.container = Some(container_id);
+                // "Assume that the new container controls this object, if
+                // it cannot control itself (i.e.: Alive)" — projectile kill
+                // tracing (C4Object::Enter, C4Object.cpp:1579-1582).
+                let container_controller = self.objects[container_index].state.controller;
+                let entering = &mut self.objects[object_index].state;
+                if !(entering.alive && entering.category & CATEGORY_LIVING != 0) {
+                    entering.controller = container_controller;
+                }
                 // Enter refreshes the new container too (C4Object.cpp:1518).
                 self.refresh_object_ocf(container_index);
             }
@@ -22761,6 +22839,7 @@ impl Engine {
             effects,
             vertices,
             owner,
+            controller,
             crew_member,
             status,
             container,
@@ -22837,6 +22916,12 @@ impl Engine {
             .map(|definition| definition.physical().energy)
             .unwrap_or(0);
 
+        // Init: an explicit controller wins, else the owner
+        // (C4Object.cpp:162). Loaded objects skip Init and keep the
+        // compiled value (default NO_OWNER, C4Object.cpp:2739).
+        let initial_controller = controller
+            .filter(|value| *value > OWNER_NONE)
+            .unwrap_or(if loaded { OWNER_NONE } else { owner });
         let owns_vertices = !vertices.is_empty();
         let shape_template = ObjectShapeTemplate::new(
             definition_vertices.clone(),
@@ -22927,6 +23012,7 @@ impl Engine {
                 components: HashMap::new(),
                 status: status.unwrap_or_default(),
                 owner,
+                controller: initial_controller,
                 category: initial_category,
                 crew_member: initial_crew_member,
                 crew_disabled: false,
@@ -23385,6 +23471,12 @@ impl Engine {
         for (previous, new) in container_changes {
             self.apply_container_change(id, previous, new)?;
         }
+        if loaded {
+            // Loaded Contained placement is denumeration, not Enter — the
+            // compiled controller stays (C4Object.cpp:2739), no
+            // C4Object.cpp:1582 transfer.
+            self.objects[index].state.controller = initial_controller;
+        }
         if destroy_requested {
             self.objects[index].mark_destroyed();
         }
@@ -23749,6 +23841,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         components: snapshot.components.clone(),
         status: snapshot.status,
         owner: snapshot.owner,
+        controller: snapshot.controller,
         category: snapshot.category,
         crew_member: snapshot.crew_member,
         crew_disabled: false,
@@ -34363,6 +34456,95 @@ func Trigger() {
             "RemoveEffect right after CreateObject killed it - and \
              materialization must NOT re-run Initialize (no second Life)"
         );
+    }
+
+    // FnGetController (C4Script.cpp:1316-1320) reads C4Object::Controller,
+    // which C4Object::Init seeds from the owner when no explicit
+    // controller is handed in (C4Object.cpp:162).
+    #[test]
+    fn get_controller_defaults_to_owner_like_init() {
+        let script = r#"#strict
+local iCtrl;
+func Trigger() {
+    iCtrl = GetController();
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let def = Definition::from_script("CALL", "Caller", script).expect("caller compiles");
+        engine.register_definition(def).expect("caller registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(2),
+            )
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(id).expect("caller exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iCtrl"),
+            Some(&Value::Int(2)),
+            "Controller = Owner at Init (C4Object.cpp:162)"
+        );
+    }
+
+    // FnCreateObject copies the creating object's controller onto the
+    // spawn so cause-effect chains trace back to the causing player
+    // (C4Script.cpp:1905-1906) - even when the new object is ownerless.
+    #[test]
+    fn create_object_inherits_creator_controller() {
+        let bandit_script = "#strict\n";
+        let caller_script = r#"#strict
+local iCtrl;
+func Trigger() {
+    var pObj = CreateObject(BNDT, 0, 0, -1);
+    iCtrl = GetController(pObj);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let bandit =
+            Definition::from_script("BNDT", "Bandit", bandit_script).expect("bandit compiles");
+        engine
+            .register_definition(bandit)
+            .expect("bandit registers");
+        let caller =
+            Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(2),
+            )
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(id).expect("caller exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iCtrl"),
+            Some(&Value::Int(2)),
+            "spawn controller = creator controller (C4Script.cpp:1905-1906)"
+        );
+        let bandit = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "BNDT")
+            .expect("bandit exists");
+        assert_eq!(bandit.state.owner, OWNER_NONE, "owner stays NO_OWNER");
+        assert_eq!(bandit.state.controller, 2, "controller traces the cause");
     }
 
     // FnChangeDef -> C4Object::ChangeDef (C4Object.cpp:1180-1231): the

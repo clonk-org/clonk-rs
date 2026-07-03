@@ -45,6 +45,7 @@
         "components": {},
         "status": "normal",
         "owner": -1,
+        "controller": -1,
         "category": 16,
         "crew_member": false,
         "alive": false,
@@ -55,6 +56,7 @@
             "update": {
               "portrait_source": null,
               "solid_mask_override": null,
+              "change_def": null,
               "position": null,
               "velocity": {
                 "x": 3,
@@ -73,6 +75,7 @@
               "owner": null,
               "category": null,
               "crew_member": null,
+              "crew_disabled": null,
               "alive": null
             },
             "effects": [],
@@ -108,7 +111,9 @@
                 "in_liquid": null,
                 "mobile": null,
                 "loaded": false,
-                "solid_mask": null
+                "solid_mask": null,
+                "initialized": false,
+                "position_adjusted": false
               }
             ],
             "landscape": [],
@@ -140,6 +145,7 @@
             "update": {
               "portrait_source": null,
               "solid_mask_override": null,
+              "change_def": null,
               "position": null,
               "velocity": null,
               "rotation": null,
@@ -155,6 +161,7 @@
               "owner": 2,
               "category": null,
               "crew_member": null,
+              "crew_disabled": null,
               "alive": null
             },
             "effects": [],
@@ -1013,8 +1020,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Helper": 1,
-      "Commander": 1
+      "Commander": 1,
+      "Helper": 1
     },
     "transfer_zones": [],
     "menu_requests": [],
@@ -1066,6 +1073,7 @@
         "components": {},
         "status": "normal",
         "owner": -1,
+        "controller": -1,
         "category": 16,
         "crew_member": false,
         "alive": false,
@@ -1076,6 +1084,7 @@
             "update": {
               "portrait_source": null,
               "solid_mask_override": null,
+              "change_def": null,
               "position": null,
               "velocity": null,
               "rotation": null,
@@ -1091,6 +1100,7 @@
               "owner": 2,
               "category": null,
               "crew_member": null,
+              "crew_disabled": null,
               "alive": null
             },
             "effects": [],
@@ -1169,6 +1179,7 @@
         "components": {},
         "status": "normal",
         "owner": 1,
+        "controller": 1,
         "category": 16,
         "crew_member": false,
         "alive": false,
@@ -2058,6 +2069,7 @@
         "components": {},
         "status": "normal",
         "owner": -1,
+        "controller": -1,
         "category": 16,
         "crew_member": false,
         "alive": false,
@@ -2068,6 +2080,7 @@
             "update": {
               "portrait_source": null,
               "solid_mask_override": null,
+              "change_def": null,
               "position": null,
               "velocity": null,
               "rotation": null,
@@ -2083,6 +2096,7 @@
               "owner": 2,
               "category": null,
               "crew_member": null,
+              "crew_disabled": null,
               "alive": null
             },
             "effects": [],
@@ -2161,6 +2175,7 @@
         "components": {},
         "status": "normal",
         "owner": 1,
+        "controller": 1,
         "category": 16,
         "crew_member": false,
         "alive": false,
@@ -3058,6 +3073,7 @@
         "components": {},
         "status": "normal",
         "owner": -1,
+        "controller": -1,
         "category": 16,
         "crew_member": false,
         "alive": false,
@@ -3068,6 +3084,7 @@
             "update": {
               "portrait_source": null,
               "solid_mask_override": null,
+              "change_def": null,
               "position": null,
               "velocity": null,
               "rotation": null,
@@ -3083,6 +3100,7 @@
               "owner": 2,
               "category": null,
               "crew_member": null,
+              "crew_disabled": null,
               "alive": null
             },
             "effects": [],
@@ -3161,6 +3179,7 @@
         "components": {},
         "status": "normal",
         "owner": 1,
+        "controller": 1,
         "category": 16,
         "crew_member": false,
         "alive": false,
@@ -4058,6 +4077,7 @@
         "components": {},
         "status": "normal",
         "owner": 1,
+        "controller": 1,
         "category": 16,
         "crew_member": false,
         "alive": false,
@@ -4902,8 +4922,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
     "transfer_zones": [],
     "menu_requests": [],
@@ -4955,6 +4975,7 @@
         "components": {},
         "status": "normal",
         "owner": 1,
+        "controller": 1,
         "category": 16,
         "crew_member": false,
         "alive": false,
