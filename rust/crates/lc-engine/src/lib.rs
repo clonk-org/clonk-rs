@@ -8690,6 +8690,12 @@ impl SolidMaskBake {
     /// accumuland is (integer)*itofix(1)-scaled, so `itofix(n) * m`
     /// divides exactly by the 2^16 scale — no truncation anywhere until
     /// the final fixtoi, which both paths share.
+    ///
+    /// NB for a future attached-object backup port: C++'s
+    /// DensityProvider does NOT take this sample for rotated masks — it
+    /// reads the put BUFFER (C4SolidMask.cpp:218-227), so pixels another
+    /// mask claimed first count non-solid there. `buffer[..] != vehicle`
+    /// is the faithful test, not `mask_set`.
     fn mask_set(&self, buff_x: i32, buff_y: i32) -> bool {
         match self.rotated {
             None => self.mask_pixel(buff_x, buff_y),
@@ -21648,6 +21654,9 @@ impl Engine {
             let Some(object) = self.objects.get(index) else {
                 continue;
             };
+            // Rotation blocks the overlay even with RotatedSolidmasks:
+            // this rect model cannot express a rotated mask, and grid
+            // worlds (all real content) take the bake path above.
             if object.destroyed
                 || matches!(object.state.status, ObjectStatus::Deleted)
                 || object.state.container.is_some()
@@ -38244,6 +38253,25 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
         assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        Ok(())
+    }
+
+    #[test]
+    fn definition_from_resource_carries_rotated_solidmasks_like_cpp() -> Result<(), EngineError> {
+        // The C4Def compile threads RotatedSolidmasks (src/C4Def.cpp:414)
+        // through to the UpdateSolidMask gate (src/C4Object.cpp:5655).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Elevator.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=ELEV\nName=Elevator\nCategory=C4D_Object\nShape=0,0,4,4\nSolidMask=0,0,4,4,0,0\nRotatedSolidmasks=1\n",
+        )
+        .expect("write defcore");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource)?;
+        assert!(definition.rotated_solid_masks());
         Ok(())
     }
 

@@ -143,7 +143,7 @@
 
 | Subsystem | Open items |
 |---|---|
-| movement-physics | rotated solid-mask put-buffer semantics; SetSolidMask update lifetime; attached-object pushback |
+| movement-physics | SetSolidMask update lifetime; attached-object pushback (its DensityProvider reads the put BUFFER for rotated masks, C4SolidMask.cpp:218-227 — the rotated bake buffer already models this); rotated masks stay off in the non-grid mask-rect overlay (fixture worlds only, no C++ counterpart) |
 | landscape | incremental ExecuteScan/DoScan (batch temperature conversion desyncs scan order); PRETTY_TEMP_CONV; map creation beyond ChunkOZoom; pixel-exact DigFree/BlastFree accounting; segment- vs pixel-liquid model |
 | effects | Annul/AnnulCalls + FxAdd add-to-other-effect; TempRemove/TempReadd; Fx*Damage DoEnergy modification; builtin fire/helper effects (Splash/Smoke/Explosion/BubbleOut) |
 | commands | Tick2/5/35 throttling; MoveTo flight/swim control; Scale/Hangle let-go thresholds |
