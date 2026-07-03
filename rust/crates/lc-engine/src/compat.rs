@@ -3824,6 +3824,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetController", set_controller);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
+    script.register_host_function("GetObjectLayer", get_object_layer);
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("InsertMaterial", insert_material);
     script.register_host_function("OnFire", on_fire);
@@ -14338,6 +14339,38 @@ fn get_controller(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetObjectLayer (C4Script.cpp:5160-5166): the object's pLayer — nil
+/// unless a layer was assigned (Objects.txt `Layer=`; SetObjectLayer is
+/// unported). Layers cannot change mid-call, so the world snapshot is
+/// authoritative for the context object too.
+fn get_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetObjectLayer expects at most 1 argument: target",
+        ));
+    }
+
+    let target_id = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "GetObjectLayer", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
+        let layer = target
+            .and_then(|target| context.get_world_object(target))
+            .and_then(|object| object.full_state().and_then(|state| state.layer));
+        Ok(layer.map(object_reference_value).unwrap_or(Value::Nil))
+    })
+}
+
 /// FnSetController (C4Script.cpp:1322-1331): NO_OWNER always passes, any
 /// other value must be a valid player; foreign targets are written via the
 /// nested-call seam like RemoveObject.
@@ -17003,6 +17036,7 @@ mod tests {
         "GetMaterialVal",
         "GetName",
         "GetOCF",
+        "GetObjectLayer",
         "GetObjectStatus",
         "GetObjectVal",
         "GetOwner",

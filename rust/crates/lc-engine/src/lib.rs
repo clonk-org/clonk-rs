@@ -34633,6 +34633,53 @@ func Trigger(object pOther) {
         );
     }
 
+    // FnGetObjectLayer (C4Script.cpp:5160-5166): the object's pLayer —
+    // nil for the (default) unlayered world, the layer object when set.
+    // System.c4g Explode.c reads it before removing the exploding object.
+    #[test]
+    fn get_object_layer_returns_nil_or_the_layer_object() {
+        let caller_script = r#"#strict
+local aBare, aLayered;
+func Trigger(object pLayered) {
+    aBare = GetObjectLayer();
+    aLayered = GetObjectLayer(pLayered);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let caller =
+            Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        let other = Definition::from_script("OTHR", "Other", "#strict\n").expect("other compiles");
+        engine.register_definition(other).expect("other registers");
+
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let layered_id = engine
+            .spawn_object(
+                SpawnConfig::new("OTHR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_layer(caller_id),
+            )
+            .expect("layered spawns");
+        let idx = engine.find_object_index(caller_id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", vec![Value::Object(layered_id.as_u64())])
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(caller_id).expect("caller exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(locals.get("aBare"), Some(&Value::Nil), "no layer -> nil");
+        assert_eq!(
+            locals.get("aLayered"),
+            Some(&Value::Object(caller_id.as_u64())),
+            "layer object returned"
+        );
+    }
+
     // FnChangeDef -> C4Object::ChangeDef (C4Object.cpp:1180-1231): the
     // object swaps to the new definition in place - number/position/owner
     // survive, the action resets to ActIdle, dir 0, rotation clears for
