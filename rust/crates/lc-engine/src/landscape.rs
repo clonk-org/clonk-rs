@@ -1827,6 +1827,76 @@ impl Landscape {
     /// point up along same-material pixels (within the material's
     /// MaxSlide) to the column top — extraction always takes the
     /// SURFACE pixel, leaving the probed spot wet.
+    /// Simulates FnExtractMaterialAmount's loop (C4Script.cpp:2264-2273:
+    /// extract while `GBackMat(x,y) == mat`, each via ExtractMaterial's
+    /// FindMatTop-then-clear) WITHOUT mutating, so the host fn can return
+    /// the exact count and stage the real extraction as an operation.
+    /// Valid while no earlier same-batch op touches these pixels.
+    pub fn simulate_extract_material_amount(
+        &self,
+        materials: &MaterialSet,
+        x: i32,
+        y: i32,
+        material: MaterialId,
+        amount: i32,
+    ) -> i32 {
+        let max_slide = materials
+            .get_by_id(material)
+            .map(|entry| entry.max_slide())
+            .unwrap_or(0);
+        let mut cleared: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+        let mat_at = |cleared: &std::collections::HashSet<(i32, i32)>, px: i32, py: i32| {
+            !cleared.contains(&(px, py)) && self.material_at(px, py) == Some(material)
+        };
+        let mut extracted = 0;
+        while extracted < amount {
+            if !mat_at(&cleared, x, y) {
+                break;
+            }
+            // FindMatTop (C4Landscape.cpp:1118-1156) against the overlay
+            let (mut tx, mut ty) = (x, y);
+            loop {
+                let mut left = true;
+                let mut right = true;
+                let mut slide = 0;
+                let mut cslide = 0;
+                while cslide <= max_slide && (left || right) {
+                    if left {
+                        if !mat_at(&cleared, tx - cslide, ty) {
+                            left = false;
+                        } else if mat_at(&cleared, tx - cslide, ty - 1) {
+                            slide = 1;
+                            break;
+                        }
+                    }
+                    if right {
+                        if !mat_at(&cleared, tx + cslide, ty) {
+                            right = false;
+                        } else if mat_at(&cleared, tx + cslide, ty - 1) {
+                            slide = 2;
+                            break;
+                        }
+                    }
+                    cslide += 1;
+                }
+                match slide {
+                    1 => {
+                        tx -= cslide;
+                        ty -= 1;
+                    }
+                    2 => {
+                        tx += cslide;
+                        ty -= 1;
+                    }
+                    _ => break,
+                }
+            }
+            cleared.insert((tx, ty));
+            extracted += 1;
+        }
+        extracted
+    }
+
     fn find_mat_top(
         &self,
         material: MaterialId,

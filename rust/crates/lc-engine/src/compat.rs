@@ -4482,6 +4482,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetObjectLayer", get_object_layer);
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("InsertMaterial", insert_material);
+    script.register_host_function("ExtractMaterialAmount", extract_material_amount);
     script.register_host_function("IncinerateLandscape", incinerate_landscape);
     script.register_host_function("OnFire", on_fire);
     script.register_host_function("SetGraphics", set_graphics);
@@ -6116,6 +6117,13 @@ pub(crate) enum LandscapeOperation {
         material: i32,
         position: Vector2,
         velocity: Vector2,
+    },
+    /// FnExtractMaterialAmount (C4Script.cpp:2264-2273): the count was
+    /// simulated at call time; the apply reruns the REAL loop.
+    ExtractMaterialAmount {
+        material: i32,
+        position: Vector2,
+        amount: i32,
     },
 }
 
@@ -14987,7 +14995,67 @@ fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnOnFire (C4Script.cpp:1870-1877): burning when the fire flag is set or
+/// FnExtractMaterialAmount (C4Script.cpp:2264-2273): extract up to
+/// `amount` pixels while `GBackMat(x,y) == mat`, each through
+/// ExtractMaterial (FindMatTop + clear). The count is computed by an
+/// overlay simulation on the read view and the mutation staged as an
+/// operation applied on the same state.
+fn extract_material_amount(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "ExtractMaterialAmount", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ExtractMaterialAmount", "y")?;
+    let material = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "ExtractMaterialAmount",
+        "mat",
+    )?;
+    let amount = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "ExtractMaterialAmount",
+        "amount",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = match borrow.as_mut() {
+            Some(context) => context,
+            None => return Ok(Value::Int(0)),
+        };
+        let mut position = Vector2::new(x, y);
+        if let Some(object) = context.object_context() {
+            let base = object.current_position;
+            position = Vector2::new(base.x + x, base.y + y);
+        }
+        let Some(material_id) = usize::try_from(material).ok().and_then(crate::material::MaterialId::new)
+        else {
+            return Ok(Value::Int(0));
+        };
+        let Some(materials) = context.world.materials() else {
+            return Ok(Value::Int(0));
+        };
+        let extracted = context
+            .world
+            .landscape_ref()
+            .map(|landscape| {
+                landscape.simulate_extract_material_amount(
+                    materials,
+                    position.x,
+                    position.y,
+                    material_id,
+                    amount,
+                )
+            })
+            .unwrap_or(0);
+        if extracted > 0 {
+            context.register_landscape_operation(LandscapeOperation::ExtractMaterialAmount {
+                material,
+                position,
+                amount: extracted,
+            });
+        }
+        Ok(Value::Int(extracted))
+    })
+}
+
+/// FnOnFire (C4Script.cpp:1870-1877): burning when the fire flag is set or/// FnOnFire (C4Script.cpp:1870-1877): burning when the fire flag is set or
 /// any *Fire* effect (C4Fx_AnyFire) sits on the object; nil without one.
 fn on_fire(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
@@ -18259,6 +18327,7 @@ mod tests {
         "EnergyCheck",
         "Enter",
         "Exit",
+        "ExtractMaterialAmount",
         "FindContents",
         "FindObject",
         "FindObject2",

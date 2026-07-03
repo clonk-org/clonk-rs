@@ -3360,7 +3360,7 @@ static C4ValueInt FnSEqual(C4AulContext *cthr, C4String *szString1, C4String *sz
 
 static C4ValueInt FnRandom(C4AulContext *cthr, C4ValueInt iRange)
 {
-	if (Game.FrameCounter >= 16 && Game.FrameCounter <= 18 && getenv("LC_RNG_TRACE"))
+	if (Game.FrameCounter >= 19 && Game.FrameCounter <= 21 && getenv("LC_RNG_TRACE"))
 	{
 		std::string chain;
 		for (C4AulScriptContext *c = cthr->Caller; c; c = c->Caller)
@@ -5494,6 +5494,11 @@ static bool FnRemoveEffect(C4AulContext *ctx, C4String *psEffectName, C4Object *
 {
 	// evaluate parameters
 	const char *szEffect = FnStringPar(psEffectName);
+	if (getenv("LC_RNG_TRACE") && szEffect && SEqual(szEffect, "Divinity") && Game.FrameCounter >= 19 && Game.FrameCounter <= 22)
+	{
+		if (FILE *f = LcRngTraceFile())
+			fprintf(f, "RMDIV %d obj=%d ctx=%d\n", Game.FrameCounter, pTarget ? pTarget->Number : -1, ctx->Obj ? ctx->Obj->Number : -1);
+	}
 	// get effects
 	C4Effect *pEffect = pTarget ? pTarget->pEffects : Game.pGlobalEffects;
 	if (!pEffect) return false;

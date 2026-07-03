@@ -16265,15 +16265,20 @@ impl Engine {
                         current_audio,
                     )
                     .map(|(outcome, audio_state, new_rng, timer_result)| {
-                        // C4Effect::Execute (C4Effect.cpp:342-357): FxTimer
+                        // C4Effect::Execute (C4Effect.cpp:342-360): FxTimer
                         // returning C4Fx_Execute_Kill (-1, C4Effects.h:40)
-                        // kills the effect. A MISSING timer function does
-                        // nothing — `if (pEffect->pFnTimer)` guards the
-                        // whole arm, so pure marker effects (the intro's
-                        // "Divinity") persist.
-                        timer_kill = dispatch_definition
+                        // kills the effect; an elapsed interval with NO
+                        // timer function kills too ("no timer function:
+                        // mark dead after time elapsed" — the else arm at
+                        // :358-360; the intro's Divinity markers die on
+                        // their first exec in C++ as well).
+                        timer_kill = if dispatch_definition
                             .has_effect_callback(&event.effect.name, "Timer")
-                            && matches!(timer_result, Some(Value::Int(-1)));
+                        {
+                            matches!(timer_result, Some(Value::Int(-1)))
+                        } else {
+                            true
+                        };
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Stopped(reason) => dispatch_definition.call_effect_stop(
@@ -22337,6 +22342,30 @@ impl Engine {
                 } => self.execute_blast_circle_operation(center, radius, controller),
                 LandscapeOperation::ShakeCircle { center, radius } => {
                     self.execute_shake_circle_operation(center, radius)
+                }
+                LandscapeOperation::ExtractMaterialAmount {
+                    material,
+                    position,
+                    amount,
+                } => {
+                    // FnExtractMaterialAmount (C4Script.cpp:2264-2273):
+                    // rerun the REAL loop the host fn simulated.
+                    if let Some(material_id) =
+                        usize::try_from(material).ok().and_then(MaterialId::new)
+                    {
+                        for _ in 0..amount {
+                            if self.landscape_material(position.x, position.y)
+                                != Some(material_id)
+                            {
+                                break;
+                            }
+                            if self.extract_material(position.x, position.y)
+                                != Some(material_id)
+                            {
+                                break;
+                            }
+                        }
+                    }
                 }
                 LandscapeOperation::InsertMaterial {
                     material,
@@ -37782,10 +37811,10 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
     #[test]
     fn effect_timer_kill_semantics_follow_cpp() {
-        // C4Effect::Execute (C4Effect.cpp:342-357): an FxTimer returning
+        // C4Effect::Execute (C4Effect.cpp:342-360): an FxTimer returning
         // C4Fx_Execute_Kill (-1, C4Effects.h:40) kills the effect; an
-        // effect with NO timer function persists (`if (pFnTimer)` guards
-        // the arm — marker effects); a zero interval never reaches it.
+        // effect whose interval elapses with NO timer function is killed
+        // too (the else arm :358-360); a zero interval never reaches it.
         let script = r#"
         global func Initialize(state, random) {
             return { effects = [
@@ -37845,9 +37874,9 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .collect();
         assert_eq!(
             names,
-            vec!["Inert", "Mute"],
-            "Doomed killed by -1 at iTime 4; timerless Mute persists as a \
-             marker; zero-interval Inert survives"
+            vec!["Inert"],
+            "Doomed killed by -1 at iTime 4, Mute killed at its first \
+             timerless gate, zero-interval Inert survives"
         );
         let calls = call_log.lock().unwrap().clone();
         let stop_calls = calls.iter().filter(|name| *name == "FxDoomedStop").count();
