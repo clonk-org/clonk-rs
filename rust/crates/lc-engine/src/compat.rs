@@ -13787,33 +13787,64 @@ fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetVertex requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let active = context.object_context().map(|object| object.id());
+        let write = |vertices_base: &[ObjectVertex],
+                     pending: &mut Option<Vec<ObjectVertex>>| {
+            let mut vertices = pending
+                .clone()
+                .unwrap_or_else(|| vertices_base.to_vec());
+            if vertices.len() <= vertex_index {
+                vertices.resize(vertex_index + 1, ObjectVertex::default());
+            }
+            match kind {
+                0 => vertices[vertex_index].x = value,
+                2 => vertices[vertex_index].cnat = value as u32,
+                3 => vertices[vertex_index].friction = value,
+                // VTX_Y and the old-style fallback for any other attribute.
+                _ => vertices[vertex_index].y = value,
+            }
+            *pending = Some(vertices);
         };
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
+
+        // FnSetVertex works on ANY object (`if (!pObj) pObj = cthr->Obj`,
+        // C4Script.cpp) — the Gatling aims its crosshair with
+        // SetVertex(0, .., pCrosshair). Foreign writes stage into the
+        // target's nested scope like every other cross-object fold.
+        match target_id {
+            Some(target) if Some(target) != active => {
+                if !context.nested_objects.contains_key(&target) {
+                    let Some(world_object) = context.get_world_object(target) else {
+                        return Ok(Value::Bool(false));
+                    };
+                    let Some((scope, local_vars)) = context.nested_scope_for(&world_object)
+                    else {
+                        return Ok(Value::Bool(false));
+                    };
+                    context
+                        .nested_objects
+                        .insert(target, NestedScopeState { scope, local_vars });
+                }
+                if !context.nested_order.contains(&target) {
+                    context.nested_order.push(target);
+                }
+                let state = context
+                    .nested_objects
+                    .get_mut(&target)
+                    .expect("scope just ensured");
+                let base = state.scope.vertices.clone();
+                write(&base, &mut state.scope.pending_update.vertices);
+                Ok(Value::Bool(true))
+            }
+            _ => {
+                let object = match context.object_context_mut() {
+                    Some(object) => object,
+                    None => return Ok(Value::Bool(false)),
+                };
+                let base = object.vertices.clone();
+                write(&base, &mut object.pending_update.vertices);
+                Ok(Value::Bool(true))
             }
         }
-
-        let mut vertices = object
-            .pending_update
-            .vertices
-            .clone()
-            .unwrap_or_else(|| object.vertices.clone());
-        if vertices.len() <= vertex_index {
-            vertices.resize(vertex_index + 1, ObjectVertex::default());
-        }
-        match kind {
-            0 => vertices[vertex_index].x = value,
-            2 => vertices[vertex_index].cnat = value as u32,
-            3 => vertices[vertex_index].friction = value,
-            // VTX_Y and the old-style fallback for any other attribute.
-            _ => vertices[vertex_index].y = value,
-        }
-        object.pending_update.vertices = Some(vertices);
-        Ok(Value::Bool(true))
     })
 }
 
