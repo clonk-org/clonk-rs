@@ -6201,6 +6201,21 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
+    if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
+        let context = HOST_CONTEXT.with(|cell| {
+            cell.borrow().as_ref().and_then(|context| {
+                context.object_context().map(|object| {
+                    format!("{} {}", object.id().as_u64(), object.effective_action_name())
+                })
+            })
+        });
+        let frame = ENVIRONMENT_CONTEXT.with(|cell| {
+            cell.borrow().as_ref().map(|context| context.frame).unwrap_or(0)
+        });
+        if (16..=18).contains(&frame) {
+            tracing::warn!(?args, ?context, frame, "RNDCALL");
+        }
+    }
     if args.len() > 1 {
         return Err(RuntimeError::new(
             "Random expects at most 1 argument: upper exclusive bound",

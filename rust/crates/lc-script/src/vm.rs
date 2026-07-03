@@ -913,17 +913,31 @@ impl<'a> Vm<'a> {
                 // && and || are Lua-style: they return the surviving operand
                 // value unchanged, not a coerced bool (C4AulExec.cpp:999-1021,
                 // AB_JUMPAND/AB_JUMPOR leave the operand on the stack).
+                // Short-circuit && / || exist only at #strict 2
+                // (C4AulParse.cpp:3003 gates AB_JUMPAND/AB_JUMPOR on
+                // STRICT2). NONSTRICT and #strict scripts run the EAGER
+                // AB_And/AB_Or opcodes: both sides always evaluate (their
+                // Random draws land on the synced ledger!) and the result
+                // coerces to bool (C4AulExec.cpp:733-748).
                 if matches!(op, BinaryOp::And) {
-                    if !left.as_bool() {
-                        return Ok(left);
+                    if env.strict_level.unwrap_or(0) >= 2 {
+                        if !left.as_bool() {
+                            return Ok(left);
+                        }
+                        return self.evaluate(rhs, env, depth);
                     }
-                    return self.evaluate(rhs, env, depth);
+                    let right = self.evaluate(rhs, env, depth)?;
+                    return Ok(Value::Bool(left.as_bool() && right.as_bool()));
                 }
                 if matches!(op, BinaryOp::Or) {
-                    if left.as_bool() {
-                        return Ok(left);
+                    if env.strict_level.unwrap_or(0) >= 2 {
+                        if left.as_bool() {
+                            return Ok(left);
+                        }
+                        return self.evaluate(rhs, env, depth);
                     }
-                    return self.evaluate(rhs, env, depth);
+                    let right = self.evaluate(rhs, env, depth)?;
+                    return Ok(Value::Bool(left.as_bool() || right.as_bool()));
                 }
                 // `??` coalesces on NIL only (0 and false are kept), with
                 // the right side skipped for non-nil left operands

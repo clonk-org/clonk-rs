@@ -28,6 +28,10 @@ pub struct ActionSpec {
     pub abort_call: Option<String>,
     #[serde(default)]
     pub no_other_action: bool,
+    /// `InLiquidAction` (C4ActionDef): the ExecAction head switches to
+    /// it while InLiquid with an early return (C4Object.cpp:4749-4753).
+    #[serde(default)]
+    pub in_liquid_action: Option<String>,
     #[serde(default)]
     pub dig_free: Option<i32>,
     #[serde(default)]
@@ -46,6 +50,7 @@ impl ActionSpec {
             start_call: None,
             end_call: None,
             abort_call: None,
+            in_liquid_action: None,
             no_other_action: false,
             dig_free: None,
             attach: 0,
@@ -99,6 +104,11 @@ impl ActionSpec {
 
     pub fn with_no_other_action(mut self, enabled: bool) -> Self {
         self.no_other_action = enabled;
+        self
+    }
+
+    pub fn with_in_liquid_action(mut self, action: impl Into<String>) -> Self {
+        self.in_liquid_action = Some(action.into());
         self
     }
 
@@ -334,6 +344,12 @@ impl ActionLibrary {
         self.specs
             .get(action)
             .and_then(|spec| spec.procedure.as_deref())
+    }
+
+    pub fn in_liquid_action_for(&self, action: &str) -> Option<&str> {
+        self.specs
+            .get(action)
+            .and_then(|spec| spec.in_liquid_action.as_deref())
     }
 
     pub fn dig_free_for_action(&self, action: &str) -> Option<i32> {

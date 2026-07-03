@@ -4500,6 +4500,9 @@ fn convert_action_definition(
     if action.no_other_action {
         spec = spec.with_no_other_action(true);
     }
+    if let Some(in_liquid_action) = &action.in_liquid_action {
+        spec = spec.with_in_liquid_action(in_liquid_action.clone());
+    }
     if let Some(dig_free) = action.dig_free {
         spec = spec.with_dig_free(dig_free);
     }

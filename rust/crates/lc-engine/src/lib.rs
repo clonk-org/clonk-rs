@@ -13687,6 +13687,18 @@ impl Engine {
             // and Execs Def->TimerCall. C++ resolves the name at link time
             // (missing -> nullptr, no call); the Exec itself is fail-safe.
             if self.objects[idx].state.status.is_active() && !self.objects[idx].destroyed {
+                if std::env::var("LC_RUST_RNG_TRACE").is_ok()
+                    && self.objects[idx].id.as_u64() == 569
+                    && (16..=18).contains(&self.frame)
+                {
+                    tracing::warn!(
+                        frame = self.frame,
+                        action = %self.objects[idx].state.action.name,
+                        phase = self.objects[idx].state.action.phase,
+                        in_liquid = self.objects[idx].state.in_liquid,
+                        "RSNKTIMER"
+                    );
+                }
                 let timer_call = self.definitions.get(&definition_id).and_then(|definition| {
                     let interval = definition.timer().max(1);
                     let object_timer = &mut self.objects[idx].state.timer;
@@ -16598,6 +16610,29 @@ impl Engine {
     }
 
     fn apply_physics_at_index(&mut self, idx: usize) -> bool {
+        if idx >= self.objects.len() {
+            return false;
+        }
+        // InLiquidAction check (C4Object.cpp:4749-4753): an InLiquid
+        // object whose action declares one switches THROUGH
+        // SetActionByName (Abort+Start calls, fix resync) and returns
+        // early — steering and the phase advance skip; movement runs.
+        if self.objects[idx].state.in_liquid {
+            let switch = self
+                .definitions
+                .get(&self.objects[idx].definition_id)
+                .and_then(|definition| {
+                    definition
+                        .action_library()
+                        .in_liquid_action_for(&self.objects[idx].state.action.name)
+                        .map(str::to_string)
+                });
+            if let Some(target) = switch {
+                let definition_id = self.objects[idx].definition_id.clone();
+                self.force_action_with_calls(idx, &definition_id, &target);
+                return true;
+            }
+        }
         if idx >= self.objects.len() {
             return false;
         }

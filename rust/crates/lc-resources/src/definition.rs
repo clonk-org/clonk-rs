@@ -333,6 +333,9 @@ pub struct ActionDefinition {
     /// Numeric next action from `CrossMapActMap` (C4Def.cpp:783-792):
     /// `ACT_IDLE`, `ACT_HOLD`, or an index into `ActionMap::actions`.
     pub next_action_index: i32,
+    /// `InLiquidAction` (C4ActionDef; the ExecAction head switches to it
+    /// while InLiquid, C4Object.cpp:4749-4753).
+    pub in_liquid_action: Option<String>,
     pub delay: Option<u32>,
     pub step: Option<u32>,
     pub phase_call: Option<String>,
@@ -359,6 +362,7 @@ impl Default for ActionDefinition {
             // NextAction{ActIdle} (C4Def.h:154).
             procedure_index: DFA_NONE,
             length: None,
+            in_liquid_action: None,
             next_action: None,
             next_action_index: ACT_IDLE,
             delay: None,
@@ -952,6 +956,11 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
             "nextaction" => {
                 if !value.is_empty() {
                     current_definition.next_action = Some(value.to_string());
+                }
+            }
+            "inliquidaction" => {
+                if !value.is_empty() {
+                    current_definition.in_liquid_action = Some(value.to_string());
                 }
             }
             "delay" => {
