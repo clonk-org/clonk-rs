@@ -30905,6 +30905,103 @@ func ControlThrow() { return 0; }
     }
 
     #[test]
+    fn control_dispatch_forwards_to_effects_via_effect_call_like_clnk() -> Result<(), EngineError> {
+        // The verbatim CLNK Control2Effect chain (Clonk.c4d/Script.c:
+        // 195-203, 860-875): ControlDig walks *Control* effects and feeds
+        // each GetEffect number into EffectCall (FnEffectCall,
+        // C4Script.cpp:5589-5601), which runs Fx<Name><CallFn> on the
+        // effect's COMMAND TARGET (C4Effect::DoCall, C4Effect.cpp:439-456)
+        // with (pTarget, iNumber, ...) arguments. TRPR/COWB hit exactly
+        // this path in GoldRush.
+        let clonk_script = r#"
+#strict
+protected func ControlDig()
+{
+  if (Control2Effect("ControlDig")) return(1);
+  return(0);
+}
+private func Control2Effect(string szControl)
+{
+  var i = GetEffectCount(0, this()), iEffect;
+  var res;
+  while (i--)
+  {
+    iEffect = GetEffect("*Control*", this(), i);
+    if ( GetEffect(0, this(), iEffect, 1) )
+      res += EffectCall(this(), iEffect, szControl);
+  }
+  return(res);
+}
+"#;
+        let gun_script = r#"
+#strict
+public func Arm()
+{
+  AddEffect("GunControl", FindObject(CLNK), 100, 0, this());
+  return(1);
+}
+public func FxGunControlControlDig(pTarget, iNumber)
+{
+  // this() is the command target (the gun): mark it and echo the args.
+  SetOwner(9);
+  EffectVar(0, pTarget, iNumber) = 7;
+  return(1);
+}
+"#;
+        let mut clonk =
+            Definition::from_script("CLNK", "Clonk", clonk_script).expect("clonk script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        clonk.configure_actions(Some("Idle".to_string()), actions);
+        clonk.set_movement_profile(MovementProfile::default());
+        let gun = Definition::from_script("GUNX", "Gun", gun_script).expect("gun script compiles");
+
+        let mut engine = Engine::new();
+        engine.register_definition(clonk)?;
+        engine.register_definition(gun)?;
+        engine.register_player(PlayerConfig::new(1, "Test"))?;
+
+        let clonk_id = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_action(ActionState::new("Idle")),
+            )
+            .expect("spawn clonk");
+        let gun_id = engine
+            .spawn_object(SpawnConfig::new("GUNX").with_owner(1))
+            .expect("spawn gun");
+        engine.set_crew_cursor(1, Some(clonk_id))?;
+
+        let armed = engine.execute_context_menu(gun_id, "Arm")?;
+        assert!(armed, "the gun installed its control effect");
+        let snapshot = engine.snapshot();
+        let clonk_effects = &snapshot.object(clonk_id).expect("clonk present").effects;
+        assert_eq!(clonk_effects.len(), 1, "GunControl effect attached");
+
+        let handled = engine.handle_control_command(1, ControlCommand::Dig, CommandKind::Press)?;
+        assert!(handled, "EffectCall's 1 propagates through Control2Effect");
+
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.object(gun_id).expect("gun present").owner,
+            9,
+            "Fx callback ran with the command target as context"
+        );
+        let clonk_effects = &snapshot.object(clonk_id).expect("clonk present").effects;
+        assert_eq!(
+            clonk_effects[0].vars.first(),
+            Some(&crate::effect::EffectVarValue::Int(7)),
+            "the Fx callback received (pTarget, iNumber) and wrote the effect var"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn context_menu_callback_coerces_int_returns_like_cpp_bool_cast() -> Result<(), EngineError> {
         // C4Object::MenuCommand (C4Object.cpp:3732-3736): the executed menu
         // function's result goes through `static_cast<bool>(DirectExec(...))`

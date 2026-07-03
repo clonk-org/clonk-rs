@@ -683,6 +683,10 @@ impl HostWorldContext {
         self.definition_scripts.get(id)
     }
 
+    pub(crate) fn definition_scripts(&self) -> impl Iterator<Item = &Arc<ScriptEngine>> {
+        self.definition_scripts.values()
+    }
+
     /// Whether any definition script, global script, or host function knows
     /// `name` — the global-function-map lookup of `GetFirstFunc`
     /// (C4Aul.cpp:545-552).
@@ -4333,6 +4337,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("RemoveEffect", remove_effect);
     script.register_host_function("GetEffect", get_effect);
     script.register_host_function("GetEffectCount", get_effect_count);
+    script.register_host_function("EffectCall", effect_call);
     script.register_host_function("WildcardMatch", wildcard_match);
     script.register_host_function("EffectVar", effect_var);
     script.register_host_function("GetPlayerCount", get_player_count);
@@ -6860,6 +6865,13 @@ fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
+    // FnEffectVar reads/writes the effect list of the GIVEN object
+    // (C4Script.cpp:5576-5586) — a foreign target re-dispatches into its
+    // own scope like the other effect host functions (Fx callbacks write
+    // vars on the effect carrier, not on their command-target context).
+    if let Some(result) = redirect_foreign_effect_target("EffectVar", args) {
+        return result;
+    }
     if args.len() < 3 {
         return Err(RuntimeError::new(
             "EffectVar expects at least 3 arguments: index, state, and number",
@@ -6924,6 +6936,124 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
         .find(|effect| effect.number == number)
         .map(|effect| effect_var_to_value(&effect.var(var_index)))
         .unwrap_or(Value::Nil))
+}
+
+/// FnEffectCall (C4Script.cpp:5589-5601): `EffectCall(pTarget, iNumber,
+/// szCallFn, vVal1..vVal7)` finds the effect BY NUMBER on the target (dead
+/// included, `C4Effect::Get(iNumber, true)`, C4Effect.cpp:240-256) and runs
+/// `Fx<EffectName><CallFn>` (PSF_FxCustom, C4Script.h:113) through
+/// `C4Effect::DoCall` (C4Effect.cpp:439-456): the effect's command target is
+/// the call context and its def script the resolution scope (global script
+/// functions fall back via GetFuncRecursive); without a live target the
+/// command id's def script is used, else Game.ScriptEngine's globals. The
+/// callback receives `(pTarget, iNumber, vVal1..vVal7)`; passErrors=true —
+/// callback errors abort the calling script like C++.
+fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
+    // Foreign target: run in the target's own scope like the other effect
+    // host functions (the C4Effect list lives on the GIVEN object).
+    let target = args.first().unwrap_or(&Value::Nil);
+    if let Some(foreign) = object_id_from_value(target) {
+        let active = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_context().map(|object| object.id()))
+        });
+        if Some(foreign) != active {
+            // A vanished/dead target is the FnEffectCall status guard
+            // (C4Script.cpp:5593): silent C4VNull.
+            return call_world_object_function(foreign, "EffectCall", args)
+                .unwrap_or(Ok(Value::Nil));
+        }
+    }
+
+    // `if (!szCallFn || !*szCallFn) return C4VNull;` (C4Script.cpp:5594) —
+    // the same falsy-name conversion the effect name filters use.
+    let call_fn = match effect_name_filter("EffectCall", args.get(2).unwrap_or(&Value::Nil))? {
+        Some(name) => name.to_owned(),
+        None => return Ok(Value::Nil),
+    };
+
+    let number = match args.get(1).unwrap_or(&Value::Nil) {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        Value::Bool(flag) => i32::from(*flag),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "EffectCall: expected int for effect number, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let scope = determine_scope_from_state(target)?;
+    let effects = match snapshot_effects_from_context(scope) {
+        Some(effects) => effects,
+        None => match scope {
+            EffectScope::Object => extract_effects_from_state(target)?,
+            EffectScope::Global => Vec::new(),
+        },
+    };
+    let Some(effect) = effects.iter().find(|effect| effect.number == number) else {
+        return Ok(Value::Nil);
+    };
+
+    let function = format!("Fx{}{}", effect.name, call_fn);
+    // DoCall argument layout (C4Effect.cpp:455): pObj, iNumber, then the
+    // seven forwarded values.
+    let mut call_args = Vec::with_capacity(9);
+    call_args.push(match scope {
+        EffectScope::Object => target.clone(),
+        EffectScope::Global => Value::Nil,
+    });
+    call_args.push(Value::Int(number));
+    call_args.extend(args.iter().skip(3).take(7).cloned());
+    call_args.resize(9, Value::Nil);
+
+    if let Some(command_target) = effect.command_target {
+        // pFn->Exec(pCommandTarget, ...) — the command target is `this`
+        // (C4Effect.cpp:443-445,456); a missing function is C4Value()
+        // (:454-455).
+        return call_world_object_script_function(
+            ObjectId::new(command_target as u64),
+            &function,
+            &call_args,
+        )
+        .unwrap_or(Ok(Value::Nil));
+    }
+    let definition_script = effect.command_id.as_ref().and_then(|id| {
+        HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.world.definition_script(id).cloned())
+        })
+    });
+    if let Some(script) = definition_script {
+        // idCommandTarget resolves the def script with Obj=nullptr
+        // (C4Effect.cpp:446-447); GetFuncRecursive reaches globals.
+        return call_scoped_script_function_or_global(script, &function, &call_args)
+            .unwrap_or(Ok(Value::Nil));
+    }
+    // No command target at all: Game.ScriptEngine — GLOBAL script
+    // functions (C4Effect.cpp:448-449). Any loaded script host shares the
+    // engine-global function table.
+    let global_carrier = HOST_CONTEXT.with(|cell| {
+        cell.borrow().as_ref().and_then(|context| {
+            context
+                .world
+                .scenario_script()
+                .filter(|script| script.has_global_function(&function))
+                .or_else(|| {
+                    context
+                        .world
+                        .definition_scripts()
+                        .find(|script| script.has_global_function(&function))
+                })
+                .cloned()
+        })
+    });
+    global_carrier
+        .and_then(|script| call_scoped_script_function_or_global(script, &function, &call_args))
+        .unwrap_or(Ok(Value::Nil))
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -18565,6 +18695,7 @@ mod tests {
         "DoEnergy",
         "DoHomebaseMaterial",
         "DoHomebaseProduction",
+        "EffectCall",
         "EffectVar",
         "EnergyCheck",
         "Enter",
@@ -23130,6 +23261,59 @@ mod tests {
             Value::String("XControl".into()),
             "number 2 resolves the effect even at list position 0"
         );
+    }
+
+    #[test]
+    fn effect_call_returns_nil_for_falsy_call_name_or_unknown_number() {
+        // FnEffectCall safety (C4Script.cpp:5591-5598): an empty/nil call
+        // name and a number that resolves no effect are silent C4VNull,
+        // never errors.
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            let number = add_effect(&[Value::String("Potion".into()), state.clone()])?;
+            assert_eq!(
+                effect_call(&[state.clone(), number.clone(), Value::Nil])?,
+                Value::Nil,
+                "nil call name is a silent nil"
+            );
+            assert_eq!(
+                effect_call(&[state.clone(), number, Value::String(String::new())])?,
+                Value::Nil,
+                "empty call name is a silent nil"
+            );
+            effect_call(&[
+                state.clone(),
+                Value::Int(99),
+                Value::String("Activate".into()),
+            ])
+        });
+        let value = result.expect("EffectCall chain succeeds");
+        assert_eq!(value, Value::Nil, "unknown effect number is a silent nil");
+    }
+
+    #[test]
+    fn effect_call_rejects_truthy_non_string_call_name() {
+        // C4String* conversion: a truthy non-string parameter is a C++
+        // ConvertTo error (C4AulExec.cpp:1364-1396).
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            effect_call(&[state.clone(), Value::Int(1), Value::Int(7)])
+        });
+        result.expect_err("truthy int call name errors like C++ ConvertTo");
+    }
+
+    #[test]
+    fn effect_call_without_command_target_is_nil_when_no_callback_exists() {
+        // C4Effect::DoCall with no command target resolves against
+        // Game.ScriptEngine (C4Effect.cpp:450-452); with no such global
+        // function the call is a silent C4VNull (:454-455).
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            let number = add_effect(&[Value::String("Potion".into()), state.clone()])?;
+            effect_call(&[state.clone(), number, Value::String("Activate".into())])
+        });
+        let value = result.expect("EffectCall succeeds");
+        assert_eq!(value, Value::Nil);
     }
 
     #[test]
