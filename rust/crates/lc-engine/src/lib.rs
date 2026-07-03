@@ -13428,6 +13428,19 @@ impl Engine {
                 self.apply_particle_commands(emitted_particles);
             }
 
+            // DFA_CONNECT line tracking (C4Object.cpp:5341-5420) runs in
+            // ExecAction; broken targets fire LineBreak and remove the
+            // line, skipping the rest of this object's exec.
+            if !self.exec_connect_line(idx)? {
+                continue;
+            }
+            self.apply_physics_at_index(idx);
+
+            // Phase advance runs at the END of ExecAction
+            // (C4Object.cpp:5440-5465) — AFTER the procedure steering
+            // updated xdir/ydir, so WALK/SCALE/HANGLE advances read THIS
+            // frame's velocity (the old pre-steer order lagged BISO's
+            // walk phase one step behind on every acceleration frame).
             let mut pre_phase_state = None;
             if action_library
                 .phase_call_for_action(&self.objects[idx].state.action.name)
@@ -13505,13 +13518,6 @@ impl Engine {
                 }
             }
 
-            // DFA_CONNECT line tracking (C4Object.cpp:5341-5420) runs in
-            // ExecAction; broken targets fire LineBreak and remove the
-            // line, skipping the rest of this object's exec.
-            if !self.exec_connect_line(idx)? {
-                continue;
-            }
-            self.apply_physics_at_index(idx);
 
             // C4Object::ExecMovement (C4Movement.cpp:553-616): contained
             // objects copy the container's motion (:556-561), C4D_StaticBack
