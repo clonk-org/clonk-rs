@@ -15,12 +15,15 @@
   SetDir, the synchronous FnJump (ObjectComJump), the per-ExecAction
   t_attach latch (phase wraps cannot retro-attach), component-only
   SetXDir/SetYDir fixed writes, and the comparator now checking
-  DIRECTION. Current wall: **frame 20**, the intro cutscene machinery
-  (StartMovie→Talker→MovIntroStart): def-script `global func`s,
-  persisting marker effects, the post-object Script%d phase and LIVE
-  in-flight object locals (lc-script LocalCells) are done; the menu
-  subsystem (CreateMenu/AddMenuItem/GetMenu) is the active gap
-  (worktree agent grinding the remaining unknown host fns).
+  DIRECTION. Current wall: **frame 21** — the
+  coach-rider contact-friction class (the horse's DFA_PULL pushes the
+  coach identically both sides; C++'s next coach move applies contact
+  friction 1.667→0.30 and the riders read the damped value). Ledgers
+  are DRAW-EXACT through frame 20 (frame-marked traces; the waterfall
+  WTFL InsertMaterial routing was the f18-20 fork). Menu subsystem,
+  persistent mass movers, PXS blast/border fidelity, rotated masks,
+  the C++-order tick phases, live in-flight locals, crew join with
+  fair-crew physicals and the C4-style HUD are all merged.
   Debug: pin runs with `LC_PIN_SEED=424242` (C4GameParameters.cpp,
   env-gated) so C++ runs are reproducible; get the map seed from
   `LC_DEBUG_MAP=1` (rust prints `RUST MAPSEED n`); replay headless with
