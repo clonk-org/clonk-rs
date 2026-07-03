@@ -32518,6 +32518,81 @@ func Trigger() {
     }
 
     #[test]
+    fn close_menu_and_menu_query_cancel_follow_cpp_close_semantics() {
+        // FnCloseMenu (C4Script.cpp:4309-4314) forces the close —
+        // C4Menu::TryClose(fOK=true) skips IsCloseDenied (C4Menu.cpp:
+        // 317-320). FnCreateMenu's clear of the OLD menu is soft
+        // (CloseMenu(false), C4Script.cpp:1447): a truthy MenuQueryCancel
+        // (C4ObjectMenu::IsCloseDenied, C4ObjectMenu.cpp:56-75) keeps the
+        // old menu and fails the new one.
+        let script = r#"
+        local deny;
+        func SetDeny(flag) { deny = flag; }
+        func MenuQueryCancel() { return deny; }
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func OpenOther() { return CreateMenu(MENU, this(), this(), 0, "Other"); }
+        func Shut() { return CloseMenu(this()); }
+        func ReadMenu() { return GetMenu(this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, Vec::new())
+                .expect("call succeeds")
+        };
+
+        // CloseMenu without a menu still succeeds (C4Object::CloseMenu
+        // returns true when Menu is null, C4Object.cpp:2009-2016).
+        assert_eq!(call(&mut engine, "Shut"), Value::Bool(true));
+
+        // Open, then force-close despite MenuQueryCancel denying.
+        assert_eq!(call(&mut engine, "OpenMenu"), Value::Bool(true));
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        engine
+            .call_object_function(idx, "SetDeny", vec![Value::Int(1)])
+            .expect("SetDeny succeeds");
+        assert_eq!(
+            call(&mut engine, "Shut"),
+            Value::Bool(true),
+            "forced close skips MenuQueryCancel"
+        );
+        assert_eq!(call(&mut engine, "ReadMenu"), Value::Int(0));
+
+        // Open again; the denied SOFT close makes a second CreateMenu fail
+        // and keeps the old menu.
+        assert_eq!(call(&mut engine, "OpenMenu"), Value::Bool(true));
+        assert_eq!(
+            call(&mut engine, "OpenOther"),
+            Value::Bool(false),
+            "MenuQueryCancel denies replacing the menu"
+        );
+        assert_eq!(
+            call(&mut engine, "ReadMenu"),
+            Value::C4Id("WIPF".into()),
+            "the old menu survives the denied replace"
+        );
+
+        // Allow the close: the replace goes through.
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        engine
+            .call_object_function(idx, "SetDeny", vec![Value::Int(0)])
+            .expect("SetDeny succeeds");
+        assert_eq!(call(&mut engine, "OpenOther"), Value::Bool(true));
+        assert_eq!(call(&mut engine, "ReadMenu"), Value::C4Id("MENU".into()));
+    }
+
+    #[test]
     fn do_damage_asks_effects_for_non_living_and_fires_callback() {
         // C4Object::DoDamage (C4Object.cpp:1330-1343): NON-living things ask
         // their effects first (the inverse of DoEnergy's Alive gate), the
