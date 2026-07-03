@@ -533,6 +533,18 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
             println!("SPAWN {id} {definition}");
         }
     }
+    if let Ok(dump) = std::env::var("LC_XTASK_DUMP_LANDSCAPE") {
+        if let Some((width, height, bytes)) = engine.debug_landscape_plane() {
+            let mut out = Vec::with_capacity(8 + bytes.len());
+            out.extend_from_slice(&(width as i32).to_le_bytes());
+            out.extend_from_slice(&(height as i32).to_le_bytes());
+            out.extend_from_slice(&bytes);
+            std::fs::write(&dump, out).expect("landscape dump writes");
+            println!("LANDDUMP wrote {width}x{height} to {dump}");
+        } else {
+            println!("LANDDUMP no pixel grid");
+        }
+    }
     if std::env::var("LC_XTASK_PROBE_SOLID").is_ok() {
         for y in 255..=272 {
             println!(

@@ -103,6 +103,18 @@ impl PixelGrid {
 
     /// The raw pixel byte (in bounds only; callers apply GetPix border
     /// rules themselves).
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     pub fn byte_at(&self, x: i32, y: i32) -> Option<u8> {
         self.slot(x, y).map(|slot| self.bytes[slot])
     }

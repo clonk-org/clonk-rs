@@ -20581,6 +20581,14 @@ impl Engine {
             .and_then(|grid| grid.byte_at(x, y))
     }
 
+    /// Debug helper: the raw pixel plane (width, height, bytes).
+    pub fn debug_landscape_plane(&self) -> Option<(u32, u32, Vec<u8>)> {
+        self.landscape
+            .as_ref()
+            .and_then(|landscape| landscape.pixel_grid())
+            .map(|grid| (grid.width(), grid.height(), grid.bytes().to_vec()))
+    }
+
     pub fn debug_landscape_is_liquid(&self, x: i32, y: i32) -> bool {
         self.landscape
             .as_ref()

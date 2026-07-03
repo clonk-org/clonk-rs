@@ -1844,7 +1844,21 @@ pub extern "C" fn lc_engine_runtime_load_scenario(
     let scenario_path = PathBuf::from(path_str);
 
     match load_scenario_into_runtime(runtime, &scenario_path, seed) {
-        Ok(()) => true,
+        Ok(()) => {
+            // Landscape parity forensics: dump the runtime's pixel plane
+            // (headless xtask has its own dump; this one runs with the
+            // LIVE MapSeed the bridge handed over).
+            if let Ok(dump) = std::env::var("LC_RUST_ENGINE_DUMP_LANDSCAPE") {
+                if let Some((width, height, bytes)) = runtime.engine.debug_landscape_plane() {
+                    let mut out = Vec::with_capacity(8 + bytes.len());
+                    out.extend_from_slice(&(width as i32).to_le_bytes());
+                    out.extend_from_slice(&(height as i32).to_le_bytes());
+                    out.extend_from_slice(&bytes);
+                    let _ = std::fs::write(&dump, out);
+                }
+            }
+            true
+        }
         Err(message) => {
             set_error(error_out, message);
             false

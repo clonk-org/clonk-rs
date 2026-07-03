@@ -1063,6 +1063,21 @@ bool InitialiseRuntime(C4Game &game) {
     }
 
     char *error_message = nullptr;
+    if (const char *dump = getenv("LC_DUMP_LANDSCAPE"); dump && *dump) {
+        FILE *f = fopen(dump, "wb");
+        if (f) {
+            const int32_t w = game.Landscape.Width, h = game.Landscape.Height;
+            fwrite(&w, 4, 1, f);
+            fwrite(&h, 4, 1, f);
+            for (int32_t y = 0; y < h; ++y)
+                for (int32_t x = 0; x < w; ++x) {
+                    uint8_t p = game.Landscape._GetPix(x, y);
+                    fwrite(&p, 1, 1, f);
+                }
+            fclose(f);
+            spdlog::info("LANDDUMP wrote {}x{} to {}", w, h, dump);
+        }
+    }
     const uint64_t seed =
         static_cast<uint64_t>(static_cast<uint32_t>(game.Parameters.RandomSeed));
     // The Rust runtime synthesizes the static-map landscape itself

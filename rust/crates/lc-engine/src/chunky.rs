@@ -283,6 +283,12 @@ pub(crate) fn draw_chunk(
         return;
     }
     let vertices = chunk_vertices(tx, ty, wdt, hgt, shape, cro, map_seed);
+    if std::env::var("LC_DUMP_CHUNKS").is_ok()
+        && (40..=120).contains(&tx)
+        && (250..=300).contains(&ty)
+    {
+        eprintln!("RCHUNK tx={tx} ty={ty} w={wdt} h={hgt} col={col} shape={shape:?} v={vertices:?}");
+    }
     polygon(surface, &vertices, col);
 }
 

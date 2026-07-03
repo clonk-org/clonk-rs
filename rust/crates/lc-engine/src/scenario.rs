@@ -2719,6 +2719,151 @@ pub(crate) fn build_map_pixel_classifier(
             .and_then(|material| material.int("Density"))
             .unwrap_or(0);
     }
+    // Dynamic texmap entries (C4MaterialMap::CrossMapMaterials,
+    // C4Material.cpp:345-484): the DefaultMatTex loop registers
+    // (MaterialName, TextureOverlay-or-"Smooth") for EVERY material with
+    // fAddIfNotExist — an exact (mat, tex) pair miss fills the FIRST FREE
+    // slot (1, 2, 3, …) — then the BlastShiftTo/BelowTempConvertTo/
+    // AboveTempConvertTo specs go through GetIndexMatTex the same way.
+    // Legacy maps rely on the deterministic slots: GoldRush's road pixels
+    // are byte 3 = the third add, Vehicle-Smooth (live-probe-verified
+    // slots: [Ice-Sponge, FlyAshes-Spots, Vehicle-Smooth, Ashes-Spots,
+    // Ore-Structure, Tunnel-Smooth2, Brick-Brick, Rock2-Rough]).
+    // Material order mirrors the C++ material map: GLOBAL materials
+    // first, the scenario's own after.
+    {
+        let mut textures: Vec<Option<String>> = vec![None; 128];
+        for index in 0..128usize {
+            textures[index] = texmap
+                .entry(index as u8)
+                .map(|entry| entry.texture.clone());
+        }
+        // The texture inventory: image basenames in the material groups
+        // (AddEntry validates the texture exists, C4Texture.cpp:116-131).
+        let mut texture_names: Vec<String> = Vec::new();
+        for group in [local.as_ref(), global.as_ref()].into_iter().flatten() {
+            for entry in group.entries().unwrap_or_default() {
+                let lower = entry.relative_path.to_string_lossy().to_ascii_lowercase();
+                if let Some(stem) = lower
+                    .strip_suffix(".png")
+                    .or_else(|| lower.strip_suffix(".bmp"))
+                {
+                    texture_names.push(stem.to_string());
+                }
+            }
+        }
+        let texture_exists =
+            |name: &str| texture_names.iter().any(|t| t.eq_ignore_ascii_case(name));
+
+        let ordered: Vec<&lc_resources::MaterialDefinition> = global_library
+            .iter()
+            .flat_map(|library| library.iter())
+            .chain(local_library.iter().flat_map(|library| library.iter()))
+            .collect();
+
+        let get_index = |mat_name: &str,
+                             tex_name: Option<&str>,
+                             names: &mut Vec<Option<String>>,
+                             textures: &mut Vec<Option<String>>,
+                             shapes: &mut Vec<Option<crate::chunky::ChunkShape>>,
+                             densities: &mut [i32; 128]|
+         -> bool {
+            // Existing entry: material match, texture match when given
+            // (C4Texture.cpp:320-345).
+            for slot in 1..128usize {
+                if let Some(existing) = &names[slot] {
+                    if existing.eq_ignore_ascii_case(mat_name)
+                        && tex_name
+                            .map(|tex| {
+                                textures[slot]
+                                    .as_deref()
+                                    .is_some_and(|t| t.eq_ignore_ascii_case(tex))
+                            })
+                            .unwrap_or(true)
+                    {
+                        return true;
+                    }
+                }
+            }
+            let material = local_library
+                .as_ref()
+                .and_then(|library| library.get(mat_name))
+                .or_else(|| {
+                    global_library
+                        .as_ref()
+                        .and_then(|library| library.get(mat_name))
+                });
+            let Some(material) = material else {
+                return false;
+            };
+            if let Some(tex) = tex_name {
+                if !texture_exists(tex) {
+                    return false;
+                }
+            }
+            let Some(slot) = (1..128usize).find(|&slot| names[slot].is_none()) else {
+                return false;
+            };
+            names[slot] = Some(mat_name.to_string());
+            textures[slot] = tex_name.map(str::to_string);
+            shapes[slot] = Some(crate::chunky::ChunkShape::from_shape(
+                material.int("Shape").unwrap_or(0),
+            ));
+            densities[slot] = material.int("Density").unwrap_or(0);
+            true
+        };
+
+        // First loop: DefaultMatTex (C4Material.cpp:349-370).
+        for material in &ordered {
+            let overlay = material
+                .value("TextureOverlay")
+                .filter(|overlay| texture_exists(overlay))
+                .unwrap_or("Smooth");
+            let name = material.value("Name").unwrap_or_default().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            get_index(
+                &name,
+                Some(overlay),
+                &mut names,
+                &mut textures,
+                &mut shapes,
+                &mut densities,
+            );
+        }
+        // Second loop: the cross-ref specs (C4Material.cpp:474-484).
+        for material in &ordered {
+            for key in ["BlastShiftTo", "BelowTempConvertTo", "AboveTempConvertTo"] {
+                let Some(spec) = material.strings(key).first() else {
+                    continue;
+                };
+                if spec.is_empty() {
+                    continue;
+                }
+                let (mat_name, tex_name) = match spec.split_once('-') {
+                    Some((mat, tex)) => (mat, Some(tex)),
+                    None => (spec.as_str(), None),
+                };
+                // GetIndexMatTex: exact pair first, then the material's
+                // default entry stands in (no further add).
+                get_index(
+                    mat_name,
+                    tex_name,
+                    &mut names,
+                    &mut textures,
+                    &mut shapes,
+                    &mut densities,
+                );
+            }
+        }
+    }
+
+    if std::env::var("LC_DEBUG_MAP").is_ok() {
+        for slot in 1..9usize {
+            eprintln!("RUSTTEX {slot} = {:?} density={}", names[slot], densities[slot]);
+        }
+    }
     Some(MapPixelClassifier {
         densities,
         names,
