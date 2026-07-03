@@ -169,6 +169,7 @@
 | gui-menus | no DrawElement rendering, layout, text progression, portraits |
 | startup-launcher | player-selection dialog stub; no update check/first-start UX |
 | particles | sim side done (SafeRandom by design, non-sync); Particle.txt gfx loading + draw procs open |
+| in-game HUD | C++-faithful chrome done (upper board/logo/title/Game.Time, DrawPlayerInfo fixed items, cursor portrait+rank+name, energy bar, startup keyboard+name, one-line message board; oracles C4UpperBoard.cpp:46-96, C4Viewport.cpp:884-965/1281-1476, C4ObjectInfo.cpp:302-371, C4MessageBoard.cpp:243-306). OPEN: contents/inventory row (Contents.DrawIDList), DrawPlayerControls, rank-name line, board scroll/fade anim, player-colored board lines; lc-app registers players without crew (join_player unused) so GoldRush shows the faithful empty no-crew corner |
 
 ## Known harness issues
 
