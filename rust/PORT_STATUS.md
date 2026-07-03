@@ -650,6 +650,21 @@ full-scenario shadow-diff (see Parity harnesses).
   This misparse affected EVERY script `!X op Y` condition - expect
   broad behavioral shifts (for the better) in the live compare.
 
+- **Known harness issue — MIDI music cannot play (tracked 2026-07-02):**
+  `Cannot play music file ...: Mix_LoadMUS_RW failed: No SoundFonts
+  have been requested` spams Clonk.log (~1500x/run). This is the C++
+  engine's SDL2_mixer MIDI backend (C4MusicSystem.cpp:118): fluidsynth
+  needs a GM soundfont (.sf2) and neither the engine nor the
+  environment configures one (no Mix_SetSoundFonts call, no
+  SDL_SOUNDFONTS env, no soundfont installed under
+  /opt/homebrew/share/soundfonts). NOT a Rust-port defect; harmless to
+  parity (measure greps target "parity mismatch"). Fix options:
+  (a) install a GM soundfont (e.g. GeneralUser GS ~30MB) and export
+  SDL_SOUNDFONTS=/path/to/font.sf2 before launching (or call
+  Mix_SetSoundFonts at C4MusicSystem init with a config key);
+  (b) set Music=false in ~/Library/Preferences/legacyclonk.config to
+  silence it (kills music for real play sessions too).
+
 ## Gates
 
 - **`cargo test --workspace`: GREEN** (~1240 pass, cargo exit 0). The old
