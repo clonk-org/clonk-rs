@@ -31359,6 +31359,50 @@ func Trigger() {
         assert_eq!(flams, 1, "exactly one FLAM spawned");
     }
 
+    // FnCreateConstruction takes a C4ID first parameter
+    // (C4Script.cpp:1911-1912) — DoExplosion's `CreateConstruction(FXB1,
+    // x, y+level, cause_plr, level*5)` passes the id value directly.
+    #[test]
+    fn create_construction_accepts_id_values() {
+        let caller_script = r#"#strict
+local aSite;
+func Trigger() {
+    aSite = CreateConstruction(BLST, 0, 0, -1, 50);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("BLST", "Blast", "#strict\n").expect("blast compiles"),
+            )
+            .expect("blast registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let site = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "BLST")
+            .expect("construction site exists");
+        assert_eq!(
+            site.state.construction,
+            FULL_CON / 2,
+            "iCompletion * FullCon / 100 (C4Script.cpp:1930)"
+        );
+    }
+
     #[test]
     fn call_runs_own_def_script_function_like_cpp() {
         // FnCall (C4Script.cpp:3424-3432): Call(name, p0..p8) runs `name` on

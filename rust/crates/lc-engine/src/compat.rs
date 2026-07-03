@@ -12132,12 +12132,15 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
+    // FnCreateConstruction takes a C4ID (C4Script.cpp:1911-1912); our
+    // resources address definitions by their id string, so id values and
+    // strings coincide.
     let definition = match &args[0] {
-        Value::String(name) if !name.is_empty() => name.clone(),
-        Value::String(_) | Value::Nil => return Ok(Value::Nil),
+        Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
+        Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => return Ok(Value::Nil),
         other => {
             return Err(RuntimeError::new(format!(
-                "CreateConstruction: expected string for definition, got {}",
+                "CreateConstruction: expected id for definition, got {}",
                 other.type_name()
             )))
         }
