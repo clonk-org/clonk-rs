@@ -3025,6 +3025,29 @@ fn load_legacy_landscape(
     manifest: &LegacyScenarioManifest,
     classifier: Option<&MapPixelClassifier>,
 ) -> Result<Option<Landscape>, ScenarioError> {
+    let Some(mut landscape) = load_legacy_landscape_body(group, manifest, classifier)? else {
+        return Ok(None);
+    };
+    // C4Landscape::ScenarioInit (C4Landscape.cpp:67-73): the border-open
+    // keys, then the AutoScanSideOpen side scan over the built landscape.
+    let borders = &manifest.core.landscape;
+    landscape.set_border_open(
+        borders.left_open,
+        borders.right_open,
+        borders.top_open,
+        borders.bottom_open,
+    );
+    if borders.auto_scan_side_open {
+        landscape.scan_side_open();
+    }
+    Ok(Some(landscape))
+}
+
+fn load_legacy_landscape_body(
+    group: &Group,
+    manifest: &LegacyScenarioManifest,
+    classifier: Option<&MapPixelClassifier>,
+) -> Result<Option<Landscape>, ScenarioError> {
     let landscape_section = manifest.sections.get("landscape");
     let map_zoom_u32 = legacy_map_zoom(landscape_section);
     let map_width_hint = landscape_section
@@ -9378,6 +9401,125 @@ global func Step(state, frame, random)
         assert!(!landscape.is_liquid_at(5, 25));
         // Map column 3: all sky.
         assert!(!landscape.is_solid_at(35, 38), "sky column has no ground");
+    }
+
+    #[test]
+    fn legacy_scenario_threads_border_open_keys_into_the_landscape() {
+        // C4Landscape::ScenarioInit (C4Landscape.cpp:67-73) copies the
+        // Scenario.txt LeftOpen/RightOpen/TopOpen/BottomOpen keys onto the
+        // landscape; AutoScanSideOpen=0 keeps the explicit side values.
+        let dir = tempdir().expect("tempdir");
+        let defs_root = dir.path().join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+        std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+
+        let scenario_dir = dir.path().join("Borders.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Borders\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapZoom=10\nTopOpen=0\nBottomOpen=1\nLeftOpen=7\nRightOpen=9\nAutoScanSideOpen=0\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[
+                &[0, 0, 0, 0],
+                &[0, 0, 0, 0],
+                &[30, 30, 30, 0],
+                &[30, 30, 30, 30],
+            ]),
+        )
+        .expect("write map");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "# table\n30=Earth-Smooth\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write earth");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let landscape = engine.landscape().expect("landscape loaded");
+        assert_eq!(landscape.left_open(), 7);
+        assert_eq!(landscape.right_open(), 9);
+        assert!(!landscape.top_open());
+        assert!(landscape.bottom_open());
+    }
+
+    #[test]
+    fn legacy_scenario_auto_scan_side_open_scans_the_border_columns() {
+        // AutoScanSideOpen defaults to true (C4Scenario.cpp:297):
+        // ScanSideOpen (C4Landscape.cpp:231-238) replaces LeftOpen /
+        // RightOpen with the first non-sky pixel of the border columns.
+        let dir = tempdir().expect("tempdir");
+        let defs_root = dir.path().join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+        std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+
+        let scenario_dir = dir.path().join("Scan.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Scan\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Landscape]\nMapZoom=10\n",
+        )
+        .expect("write scenario core");
+        // Column 0 turns solid at map row 2 (world y 20); column 3 is all
+        // sky (right side fully open: RightOpen = world height 40).
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[
+                &[0, 30, 30, 0],
+                &[0, 30, 30, 0],
+                &[30, 30, 30, 0],
+                &[30, 30, 30, 0],
+            ]),
+        )
+        .expect("write map");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "# table\n30=Earth-Smooth\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write earth");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let landscape = engine.landscape().expect("landscape loaded");
+        assert_eq!(landscape.left_open(), 20, "first non-sky pixel in column 0");
+        assert_eq!(
+            landscape.right_open(),
+            40,
+            "all-sky border column opens the full height"
+        );
     }
 
     #[test]

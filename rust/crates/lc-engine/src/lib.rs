@@ -11271,6 +11271,9 @@ impl Engine {
         // texmap material names into engine ids now that both exist.
         let materials = &self.materials;
         landscape.resolve_grid_materials(|name| materials.id_of(name));
+        // MVehic (C4Game::InitMaterialTexture, C4Game.cpp:1669): the
+        // closed-border material for GetPix's MCVehic reads.
+        landscape.set_vehicle_material(materials.id_of("Vehicle"));
         self.landscape = Some(landscape);
         self.reset_sectors_from_landscape();
     }
@@ -26405,6 +26408,41 @@ mod tests {
             Some(earth),
             "Pix2Mat resolves solid pixels to the engine material id"
         );
+    }
+
+    #[test]
+    fn set_landscape_resolves_the_vehicle_border_material_like_mvehic() {
+        // MVehic = Material.Get("Vehicle") (C4Game::InitMaterialTexture,
+        // C4Game.cpp:1669); GetPix's closed borders read MCVehic which
+        // GBackMat maps back to that material (C4Landscape.h:144-161,
+        // 173-176).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            Friction=100
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let vehicle = materials.id_of("Vehicle").expect("vehicle exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(1);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(10, 5, Some(earth)));
+        let landscape = engine.landscape().expect("landscape set");
+        assert_eq!(
+            landscape.border_material_at(-1, 3),
+            Some(vehicle),
+            "closed side reads the Vehicle material"
+        );
+        assert_eq!(landscape.border_material_at(4, -1), None, "top open");
     }
 
     #[test]
