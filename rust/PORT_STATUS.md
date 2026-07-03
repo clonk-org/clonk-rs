@@ -637,7 +637,18 @@ full-scenario shadow-diff (see Parity harnesses).
   backstop (~33 warnings/120 ticks) - somewhere in the nested-scope
   machinery a recursion level reads a stale action view (rider guard
   vs coach IsStill). Root-causing the scope staleness is the open
-  task; the game runs (120 ticks in ~19s).
+  task; the game runs (120 ticks in ~19s). RESOLVED same night: the
+  "stale view" was a PARSER PRECEDENCE bug - the speculative
+  assignment-operand parse for unary `!` (the DYNB `!x = y` pattern)
+  committed ANY expression, so `!A && B` parsed as `!(A && B)`. The
+  Cowboy Riding guard short-circuited inside the negation and fired
+  SetAction without ever evaluating GetAction. Fix: commit the
+  speculative parse ONLY for Expr::Assignment, else re-parse the
+  operand at unary precedence (C4Aul binds `!` tighter than any binary
+  op); reset_speculative also dropped the peeked-but-unconsumed token
+  (latent, newly exercised). Goldrush: ZERO warnings, recursion gone.
+  This misparse affected EVERY script `!X op Y` condition - expect
+  broad behavioral shifts (for the better) in the live compare.
 
 ## Gates
 

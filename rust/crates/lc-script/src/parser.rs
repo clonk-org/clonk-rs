@@ -1230,12 +1230,17 @@ impl<'a> Parser<'a> {
 
     fn reset_speculative(&mut self) {
         if let Some(tokens) = self.speculative_tokens.take() {
+            // A peeked-but-unconsumed token is NOT in the speculative
+            // record (consume() records at consume time) — it is the
+            // stream position right AFTER the recorded tokens, so it goes
+            // back into the buffer first (ending up behind the replay).
+            if let Some(peeked) = self.peeked.take() {
+                self.lookahead_buffer.insert(0, peeked);
+            }
             // Restore tokens in reverse order so they come out in the correct order
             for token in tokens.into_iter().rev() {
                 self.lookahead_buffer.insert(0, token);
             }
-            // Clear peeked to ensure restored tokens are seen first
-            self.peeked = None;
         }
     }
 
@@ -1261,12 +1266,23 @@ impl<'a> Parser<'a> {
 
                 // Ensure we always clean up speculative mode
                 let final_result = match result {
-                    Ok(expr) => {
-                        // Always commit and use the expression
-                        // If it's an assignment: !(x = y) works correctly
-                        // If not: !x also works correctly (parse_assignment parsed just the operand)
+                    Ok(expr @ Expr::Assignment(..)) => {
+                        // The DYNB pattern: !x = y parses as !(x = y).
                         self.commit_speculative();
                         Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)))
+                    }
+                    Ok(_) => {
+                        // C4Aul precedence: `!` binds its unary operand only
+                        // (`!A && B` is `(!A) && B`). Committing the full
+                        // assignment-level parse here swallowed binary
+                        // chains into the negation — the Cowboy Riding
+                        // guard fired without evaluating its second
+                        // operand (the rider 1425 SetAction recursion).
+                        self.reset_speculative();
+                        match self.parse_unary() {
+                            Ok(operand) => Ok(Expr::Unary(UnaryOp::Not, Box::new(operand))),
+                            Err(e) => Err(e),
+                        }
                     }
                     Err(e) => {
                         // Parse failed, reset and try normal precedence (skip ! handling since already consumed)
@@ -1839,6 +1855,45 @@ fn static_const_multi_declarators_parse() {
 
     fn parse_script(source: &str) -> Result<Script, ParseError> {
         Parser::new(source).parse_script()
+    }
+
+    // C4Aul precedence: unary `!` binds its operand only — `!A && B` is
+    // `(!A) && B`. The speculative assignment-operand parse (`!x = y` ->
+    // `!(x = y)`, the DYNB pattern) must not swallow binary chains: the
+    // Cowboy Riding guard `!(target->~IsStill()) && GetAction() eq "X"`
+    // misparsed as `!(IsStill() && GetAction() eq "X")` fires SetAction
+    // without ever evaluating GetAction (the rider 1425 recursion).
+    #[test]
+    fn bang_binds_unary_operand_not_the_and_chain() {
+        let script =
+            parse_script(r#"func Test() { return !First() && Second(); }"#).expect("parses");
+        let function = &script.functions[0];
+        let Stmt::Return(Some(expr)) = &function.body[0] else {
+            panic!("expected return with expression");
+        };
+        match expr {
+            Expr::Binary(lhs, BinaryOp::And, _) => {
+                assert!(
+                    matches!(&**lhs, Expr::Unary(UnaryOp::Not, _)),
+                    "lhs must be the negated call, got {lhs:?}"
+                );
+            }
+            other => panic!("expected top-level && with (!First()) lhs, got {other:?}"),
+        }
+    }
+
+    // The DYNB pattern keeps its special parse: `!x = y` -> `!(x = y)`.
+    #[test]
+    fn bang_assignment_still_parses_as_negated_assignment() {
+        let script = parse_script(r#"func Test() { var x; return !x = 42; }"#).expect("parses");
+        let function = &script.functions[0];
+        let Stmt::Return(Some(expr)) = &function.body[1] else {
+            panic!("expected return with expression");
+        };
+        assert!(
+            matches!(expr, Expr::Unary(UnaryOp::Not, inner) if matches!(&**inner, Expr::Assignment(..))),
+            "expected !(x = 42), got {expr:?}"
+        );
     }
 
     #[test]
