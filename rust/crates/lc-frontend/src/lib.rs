@@ -1922,33 +1922,6 @@ impl GraphicsSystem {
         let color = object_color(object).modulate(lighting);
         let owner_color = owner_colors.get(&object.owner).copied();
         let rotation_degrees = (object.rotation.rem_euclid(360)) as f32;
-        if object.vertices.len() >= 3 {
-            let mut points = Vec::with_capacity(object.vertices.len());
-            let mut min_x = f32::MAX;
-            let mut max_x = f32::MIN;
-            let mut min_y = f32::MAX;
-            let mut max_y = f32::MIN;
-            for vertex in &object.vertices {
-                let world_x = (object.position.x + vertex.x) as f32;
-                let world_y = (object.position.y + vertex.y) as f32;
-                let x = (world_x - self.viewport_x) * zoom;
-                let y = (world_y - self.viewport_y) * zoom;
-                points.push((x.round() as i32, y.round() as i32));
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
-            }
-
-            if max_x >= -zoom
-                && min_x <= content_width + zoom
-                && max_y >= -zoom
-                && min_y <= content_height + zoom
-                && fill_polygon(&mut self.surface, &points, color)
-            {
-                return;
-            }
-        }
 
         let screen_x = (object.position.x as f32 - self.viewport_x) * zoom;
         let screen_y = (object.position.y as f32 - self.viewport_y) * zoom;
@@ -2093,6 +2066,37 @@ impl GraphicsSystem {
                 base_transform,
             );
             return;
+        }
+
+        // No sprite available: debug fallbacks only (C++ objects always
+        // have a graphics facet, so these paths have no oracle) — the
+        // vertex polygon, then a plain dot.
+        if object.vertices.len() >= 3 {
+            let mut points = Vec::with_capacity(object.vertices.len());
+            let mut min_x = f32::MAX;
+            let mut max_x = f32::MIN;
+            let mut min_y = f32::MAX;
+            let mut max_y = f32::MIN;
+            for vertex in &object.vertices {
+                let world_x = (object.position.x + vertex.x) as f32;
+                let world_y = (object.position.y + vertex.y) as f32;
+                let x = (world_x - self.viewport_x) * zoom;
+                let y = (world_y - self.viewport_y) * zoom;
+                points.push((x.round() as i32, y.round() as i32));
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+
+            if max_x >= -zoom
+                && min_x <= content_width + zoom
+                && max_y >= -zoom
+                && min_y <= content_height + zoom
+                && fill_polygon(&mut self.surface, &points, color)
+            {
+                return;
+            }
         }
 
         let size = (6.0 * zoom).max(3.0);
@@ -4306,6 +4310,79 @@ mod tests {
             .surface()
             .get_pixel(screen_x as u32, screen_y as u32);
         assert_eq!(pixel, Some(expected));
+    }
+
+    fn solid_sprite(
+        definition_id: &str,
+        width: u32,
+        height: u32,
+        color: Color,
+        shape: Option<DefinitionRect>,
+        stretch_growth: bool,
+    ) -> Arc<HashMap<String, DefinitionSprite>> {
+        let pixels: Vec<u8> = (0..width * height)
+            .flat_map(|_| [color.r, color.g, color.b, color.a])
+            .collect();
+        let mut sprites = HashMap::new();
+        sprites.insert(
+            sprite_map_key(definition_id, None),
+            DefinitionSprite {
+                image: ImageData::new(width, height, pixels),
+                actions: HashMap::new(),
+                color_mask: None,
+                shape,
+                stretch_growth,
+            },
+        );
+        Arc::new(sprites)
+    }
+
+    #[test]
+    fn sprite_takes_precedence_over_vertex_polygon() {
+        // C4Object::Draw never renders shape vertices as geometry — an
+        // object with a graphics facet always blits it (src/C4Object.cpp:
+        // 2388-2392 idle DrawFace); the polygon is only our debug fallback
+        // for sprite-less objects.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].vertices = vec![
+            ObjectVertex::new(-6, -6),
+            ObjectVertex::new(6, -6),
+            ObjectVertex::new(6, 6),
+            ObjectVertex::new(-6, 6),
+        ];
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+
+        let green = Color::opaque(0, 200, 0);
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Sprite Precedence",
+            test_font(),
+            solid_sprite(
+                "TestObject",
+                8,
+                8,
+                green,
+                Some(DefinitionRect::new(-4, -4, 8, 8)),
+                false,
+            ),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let screen_x = (snapshot.objects[0].position.x - viewport_x) as u32;
+        let screen_y = (snapshot.objects[0].position.y - viewport_y) as u32;
+        assert_eq!(
+            graphics.surface().get_pixel(screen_x, screen_y),
+            Some(green),
+            "expected the sprite pixel, not the vertex-polygon fill"
+        );
     }
 
     #[test]
