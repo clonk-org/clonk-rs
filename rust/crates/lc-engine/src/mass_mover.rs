@@ -329,10 +329,20 @@ impl Engine {
             // Contact material reaction check (:126-132):
             // corrosion/evaporation/inflammation below, left, right.
             for (dx, dy) in [(0, 1), (-1, 0), (1, 0)] {
-                if self
-                    .execute_mass_move_reaction(mat, x, y, x + dx, y + dy)
-                    .consumes_material()
-                {
+                let result = self.execute_mass_move_reaction(mat, x, y, x + dx, y + dy);
+                if result.consumes_material() {
+                    // mrfConvert meeMassMove (C4Material.cpp:654-657):
+                    // conversion-transfer — the mover's material spawns as
+                    // a PXS at the mover position before the extraction.
+                    if matches!(result, crate::material::MaterialReactionExecution::Converted(_)) {
+                        self.pxs_system.create(
+                            mat,
+                            crate::math::itofix(x),
+                            crate::math::itofix(y),
+                            crate::math::C4Fixed::ZERO,
+                            crate::math::C4Fixed::ZERO,
+                        );
+                    }
                     // material has been used up (:130)
                     let _ = self.extract_material(x, y);
                     return true;
@@ -1160,6 +1170,61 @@ mod tests {
         assert_eq!(engine.mass_movers.create_ptr(), 0);
         assert_eq!(engine.mass_movers.slot(0).map(|m| (m.x, m.y)), Some((1, 0)));
         assert_eq!(engine.mass_movers.slot(4), None);
+    }
+
+    #[test]
+    fn blocked_mover_convert_reaction_transfers_to_pxs() {
+        // mrfConvert on meeMassMove (C4Material.cpp:654-657): conversion-
+        // transfer — the MOVER's material spawns as a PXS at the mover
+        // position (the convert target is ignored on this event) and the
+        // reaction reports consumed, so Execute extracts the pixel.
+        let materials = materials(
+            r#"
+            [Material Goo]
+            Name=Goo
+            Density=25
+            Instable=1
+            MaxSlide=0
+
+            [Reaction]
+            Type=Convert
+            TargetSpec=Rock
+            ConvertMat=Rock
+
+            [Material Rock]
+            Name=Rock
+            Density=80
+            "#,
+        );
+        let goo = materials.id_of("Goo").expect("goo material");
+        let rock = materials.id_of("Rock").expect("rock material");
+        let mut landscape = Landscape::flat_with_material(3, 5, Some(rock));
+        landscape.set_default_liquid_material(Some(goo));
+        landscape.set_liquid_column(
+            1,
+            vec![crate::LiquidSegment::with_material(4, 4, Some(goo))],
+        );
+        let mut engine = engine_with(materials, landscape);
+        assert!(engine.mass_mover_create(1, 4, false));
+
+        engine.tick_mass_movers();
+
+        let pxs: Vec<_> = engine.pxs_system.iter().collect();
+        assert_eq!(pxs.len(), 1, "exactly one conversion-transfer PXS");
+        assert_eq!(pxs[0].mat, goo, "the PXS carries the MOVER's material");
+        assert_eq!(
+            (crate::math::fixtoi(pxs[0].x), crate::math::fixtoi(pxs[0].y)),
+            (1, 4),
+            "spawned at the mover position"
+        );
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(1, 4)),
+            None,
+            "the consumed goo was extracted"
+        );
     }
 
     #[test]

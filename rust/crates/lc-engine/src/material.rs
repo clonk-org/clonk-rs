@@ -905,6 +905,7 @@ impl MaterialSet {
             reaction.kind,
             landscape,
             self,
+            pxs_material,
             pxs_x,
             pxs_y,
             landscape_x,
@@ -957,6 +958,7 @@ fn execute_mass_move_reaction_kind(
     reaction: MaterialReactionKind,
     landscape: &mut Landscape,
     materials: &MaterialSet,
+    pxs_material: MaterialId,
     pxs_x: i32,
     pxs_y: i32,
     landscape_x: i32,
@@ -972,11 +974,12 @@ fn execute_mass_move_reaction_kind(
         // (`Engine::execute_mass_move_reaction`); this builtin-kind path is
         // never reached for them.
         MaterialReactionKind::Script { .. } => MaterialReactionExecution::Unhandled,
-        MaterialReactionKind::Convert {
-            target: Some(target),
-            ..
-        } => MaterialReactionExecution::Converted(target),
-        MaterialReactionKind::Convert { target: None, .. } => MaterialReactionExecution::Consumed,
+        // mrfConvert meeMassMove (C4Material.cpp:654-657): unconditional
+        // conversion-transfer of the MOVER's material to PXS — the convert
+        // target (even an invalid one) plays no role on this event.
+        MaterialReactionKind::Convert { .. } => {
+            MaterialReactionExecution::Converted(pxs_material)
+        }
         MaterialReactionKind::Poof => {
             // mrfPoof meeMassMove (C4Material.cpp:669-670): a real
             // ExtractMaterial — FindMatTop + clear here, the
