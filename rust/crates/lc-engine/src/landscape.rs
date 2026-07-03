@@ -530,6 +530,23 @@ impl Landscape {
         }
     }
 
+    /// The InsertMaterial dead-material write (C4Landscape.cpp:1218):
+    /// `SetPix(tx, ty, Mat2PixColDefault(mat) + GBackIFT(tx, ty))` — the
+    /// material byte keeps the CURRENT pixel's IFT bit.
+    pub fn insert_material_pix(&mut self, x: i32, y: i32, material: MaterialId) -> bool {
+        let Some(grid) = self.pixels.as_mut() else {
+            return false;
+        };
+        let Some(byte) = grid.byte_for_material(material) else {
+            return false;
+        };
+        let Some(current) = grid.byte_at(x, y) else {
+            return false;
+        };
+        grid.write_byte(x, y, byte | (current & 0x80));
+        true
+    }
+
     /// DigFreeSinglePix (C4Landscape.h): clears the pixel when it is
     /// denser than its neighbour toward (dx, dy).
     pub fn dig_free_single_pix(
@@ -931,7 +948,7 @@ impl Landscape {
         }
     }
 
-    fn mark_mass_mover_dirty(&mut self) {
+    pub(crate) fn mark_mass_mover_dirty(&mut self) {
         self.mass_mover_dirty = true;
     }
 

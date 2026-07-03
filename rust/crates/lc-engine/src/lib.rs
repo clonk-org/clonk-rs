@@ -22841,6 +22841,17 @@ impl Engine {
     /// `C4PXS::Execute` (C4PXS.cpp:28-127). Returns the surviving PXS, or
     /// `None` when it deactivates.
     fn execute_pxs(&mut self, mut pixel: pxs::Pxs) -> Option<pxs::Pxs> {
+        if std::env::var("LC_RUST_RNG_TRACE").is_ok() && (17..=19).contains(&self.frame) {
+            crate::rng::rng_trace_line(&format!(
+                "PXS {} {} {} {} {} {}",
+                pixel.mat.index(),
+                fixtoi_prec(pixel.x, 256),
+                fixtoi_prec(pixel.y, 256),
+                fixtoi_prec(pixel.xdir, 256),
+                fixtoi_prec(pixel.ydir, 256),
+                self.frame
+            ));
+        }
         // Safety (C4PXS.cpp:40-43)
         let Some(material) = self.materials.get_by_id(pixel.mat) else {
             return None;
@@ -23232,10 +23243,10 @@ impl Engine {
                     // continue existing
                     return false;
                 }
-                // Else: dead. Insert material here (C4Material.cpp:789)
-                if let Some(landscape) = self.landscape.as_mut() {
-                    landscape.insert_material_at(*x, *y, pixel.mat);
-                }
+                // Else: dead. Insert material here (C4Material.cpp:789 →
+                // C4Landscape::InsertMaterial full port)
+                let (ix, iy, mat) = (*x, *y, pixel.mat);
+                self.insert_material(mat, ix, iy, 0, 0);
                 true
             }
         }
@@ -23398,6 +23409,140 @@ impl Engine {
     /// alive (splashed or sliding). Mutates pos/speed like the C++ by-ref
     /// parameters.
     #[allow(clippy::too_many_arguments)]
+    /// C4Landscape::InsertMaterial (C4Landscape.cpp:1158-1223) with the
+    /// CR defaults LandscapePushPull=0, LandscapeInsertThrust=1
+    /// (C4Scenario.cpp:237-238): move up above same density with the
+    /// primitive slide, then the FindMatSlide loop RE-CREATES the pixel
+    /// as PXS while it can still fall (the landing splash droplet that
+    /// kept flying in C++ but died in the old rust column stub), then
+    /// the reaction with the material below (meePXSPos), then the dead-
+    /// material write with the insert-thrust recursion.
+    fn insert_material(&mut self, mat: MaterialId, tx: i32, ty: i32, vx: i32, vy: i32) -> bool {
+        let Some(material) = self.materials.get_by_id(mat) else {
+            return false;
+        };
+        let mdens = material.density();
+        if mdens == 0 {
+            return true;
+        }
+        let max_slide = material.max_slide();
+        let Some((width, height)) = self
+            .landscape
+            .as_ref()
+            .and_then(|landscape| landscape.grid_dimensions())
+        else {
+            // Fixture worlds without a plane keep the column model.
+            return self
+                .landscape
+                .as_mut()
+                .map(|landscape| landscape.insert_material_at(tx, ty, mat))
+                .unwrap_or(false);
+        };
+        // Bounds (`ty` may equal Height, C4Landscape.cpp:1166)
+        if !(0..width).contains(&tx) || !(0..=height).contains(&ty) {
+            return false;
+        }
+        let (mut tx, mut ty) = (tx, ty);
+        let density_at = |engine: &Self, x: i32, y: i32| -> i32 {
+            engine
+                .landscape
+                .as_ref()
+                .map(|landscape| landscape.density_at(x, y, &engine.materials))
+                .unwrap_or(0)
+        };
+        // Move up above same density with the primitive slide
+        // (C4Landscape.cpp:1179-1189)
+        while mdens == density_at(self, tx, ty) {
+            ty -= 1;
+            if ty < 0 {
+                return false;
+            }
+            if density_at(self, tx - 1, ty) < mdens {
+                tx -= 1;
+            }
+            if density_at(self, tx + 1, ty) < mdens {
+                tx += 1;
+            }
+        }
+        // Stuck in higher density
+        if density_at(self, tx, ty) > mdens {
+            return false;
+        }
+        // Try slide: while a slide position exists and the pixel below is
+        // free, the material continues as PXS (C4Landscape.cpp:1192-1196)
+        loop {
+            let slid = self
+                .landscape
+                .as_ref()
+                .map(|landscape| {
+                    let (mut sx, mut sy) = (tx, ty);
+                    let ok = landscape.find_mat_slide(&mut sx, &mut sy, 1, mdens, max_slide, &self.materials);
+                    (ok, sx, sy)
+                })
+                .unwrap_or((false, tx, ty));
+            if !slid.0 {
+                break;
+            }
+            tx = slid.1;
+            ty = slid.2;
+            if density_at(self, tx, ty + 1) < mdens {
+                self.pxs_system.create(
+                    mat,
+                    itofix(tx),
+                    itofix(ty),
+                    fixed10(vx),
+                    fixed10(vy),
+                );
+                return true;
+            }
+        }
+        // Try reaction with the material below (C4Landscape.cpp:1199-1209)
+        let below_mat = self.landscape_material(tx, ty + 1);
+        let reaction = self.materials.reaction_for_event(
+            Some(mat),
+            below_mat,
+            MaterialInteractionEvent::PxsPos,
+        );
+        if !matches!(reaction.kind, MaterialReactionKind::None) || reaction.user_defined {
+            let mut probe = pxs::Pxs {
+                mat,
+                x: itofix(tx),
+                y: itofix(ty),
+                xdir: fixed10(vx),
+                ydir: fixed10(vy),
+            };
+            let mut pos_changed = false;
+            let (mut rx, mut ry) = (tx, ty);
+            if self.execute_pxs_reaction(
+                reaction,
+                &mut rx,
+                &mut ry,
+                tx,
+                ty + 1,
+                &mut probe,
+                below_mat,
+                MaterialInteractionEvent::PxsPos,
+                &mut pos_changed,
+            ) {
+                // the material to be inserted killed itself in some
+                // material reaction below
+                return true;
+            }
+        }
+        // Insert dead material, keeping the current pixel's IFT
+        // (C4Landscape.cpp:1211-1218); the displaced material thrusts up
+        // (LandscapeInsertThrust default 1, :1220-1221).
+        let old_mat = self.landscape_material(tx, ty);
+        if let Some(landscape) = self.landscape.as_mut() {
+            landscape.insert_material_pix(tx, ty, mat);
+            landscape.mark_mass_mover_dirty();
+        }
+        if let Some(old_mat) = old_mat {
+            self.insert_material(old_mat, tx, ty - 1, 0, 0);
+        }
+        true
+    }
+
     fn mrf_insert_check(
         &mut self,
         x: &mut i32,

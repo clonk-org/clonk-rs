@@ -176,6 +176,16 @@ fn rng_trace(count: i32, range: i32, value: i32) {
     }
 }
 
+/// Ledger-forensics free-form probe line (env-gated diagnostics).
+pub fn rng_trace_line(text: &str) {
+    use std::io::Write;
+    if let Some(file) = trace_file() {
+        if let Ok(mut file) = file.lock() {
+            let _ = writeln!(file, "{text}");
+        }
+    }
+}
+
 /// Ledger-forensics frame marker: mirrors the C++ probe's `FRAME n`
 /// lines so per-frame draw censuses align (env-gated, diagnostic only).
 pub fn rng_trace_frame_marker(frame: u64) {

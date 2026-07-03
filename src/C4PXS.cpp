@@ -27,6 +27,12 @@ static const C4Fixed WindDrift_Factor = itofix(1, 800);
 
 void C4PXS::Execute()
 {
+	if (getenv("LC_RNG_TRACE") && Game.FrameCounter >= 17 && Game.FrameCounter <= 19)
+	{
+		if (FILE *f = LcRngTraceFile())
+			fprintf(f, "PXS %d %d %d %d %d %d\n", Mat, fixtoi(x, 256), fixtoi(y, 256), fixtoi(xdir, 256), fixtoi(ydir, 256), Game.FrameCounter);
+	}
+
 #ifdef DEBUGREC_PXS
 	{
 		C4RCExecPXS rc;
