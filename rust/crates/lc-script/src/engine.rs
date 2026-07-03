@@ -408,6 +408,31 @@ impl Engine {
     /// Like [`call_with_locals`], but also provides the `this` object context
     /// returned by `Expr::This`. Pass `Value::Object(id)` for an object context
     /// or `Value::Nil` for no context.
+    /// Like [`call_with_locals_and_this`], against SHARED live cells: the
+    /// session mutates them in place (C++ object locals), so callers fold
+    /// via [`crate::vm::LocalCells::snapshot`] instead of a return map.
+    pub fn call_with_cells_and_this(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<Value, ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        )
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_global_variables(self.globals_named.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_this(this);
+        vm.call_with_cells(name, args, cells).map_err(ScriptError::from)
+    }
+
     pub fn call_with_locals_and_this(
         &self,
         name: &str,

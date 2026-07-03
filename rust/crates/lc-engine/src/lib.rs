@@ -16325,6 +16325,27 @@ impl Engine {
                 } => {
                     self.revoke_player_knowledge(player_id, &definition_id)?;
                 }
+                PlayerCommand::SetCursor {
+                    player_id,
+                    object,
+                    select_crew,
+                } => {
+                    // FnSetCursor (C4Script.cpp:2951-2958).
+                    let valid = object
+                        .map(|id| self.find_object_index(id).is_some())
+                        .unwrap_or(true);
+                    if valid {
+                        let selection = self.crew_selection.entry(player_id).or_default();
+                        selection.cursor = object;
+                        if select_crew {
+                            if let Some(id) = object {
+                                if !selection.selected.contains(&id) {
+                                    selection.selected.push(id);
+                                }
+                            }
+                        }
+                    }
+                }
                 PlayerCommand::SetWealth { player_id, value } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
                         player.set_wealth(value);
@@ -35149,7 +35170,125 @@ protected func Script1() { StartTheMovie(); }
         );
     }
 
-    // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure
+    // C4Aul mutates the LIVE object: a nested call's own-local write is
+    // visible to a DEEPER synchronous call on the same object within the
+    // same outer call. The Talker's DoStartMovie sets `sMovName` and
+    // ends with AddEffect("Movie", this(), 1, ...) whose synchronous
+    // FxMovieStart reads LocalN("sMovName") to PrivateCall
+    // Mov<Name>Start (Talker.c4d/Script.c:123-177).
+    #[test]
+    fn in_flight_local_writes_are_visible_to_deeper_calls_like_cpp() {
+        let talker_script = r#"#strict
+local sName;
+local iSaw;
+func Begin() {
+    sName = "Intro";
+    AddEffect("Movie", this(), 1, 10, this());
+    return(1);
+}
+func FxMovieStart(pTarget, iNumber, fTemp) {
+    LocalN("iSaw", pTarget) = LocalN("sName", pTarget);
+    return(0);
+}
+"#;
+        let scenario_script = r#"#strict
+protected func Script1() { PrivateCall(CreateObject(TALK), "Begin"); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        let talker =
+            Definition::from_script("TALK", "Talker", talker_script).expect("talker compiles");
+        engine
+            .register_definition(talker)
+            .expect("talker registers");
+        engine
+            .install_scenario_script_with_convention("Fixture", scenario_script, true)
+            .expect("scenario script loads");
+
+        engine.scenario_script_go = true;
+        for _ in 0..20 {
+            engine.tick().expect("tick");
+        }
+
+        let talker_idx = engine
+            .objects
+            .iter()
+            .position(|object| object.definition_id.as_str() == "TALK")
+            .expect("talker exists");
+        let saw = engine.objects[talker_idx]
+            .state
+            .local_vars
+            .get("iSaw")
+            .cloned();
+        assert_eq!(
+            saw,
+            Some(Value::String("Intro".to_string())),
+            "the synchronous FxMovieStart sees the in-flight sName write"
+        );
+    }
+
+    // `pPlayer->FindObject(HORS, 0, 0, -1, -1)` (M_Mov_Intro.c:16): an    // `pPlayer->FindObject(HORS, 0, 0, -1, -1)` (M_Mov_Intro.c:16): an
+    // object-TARGETED engine-function call — C++ resolves the ENGINE
+    // FindObject with cthr->Obj = the target (C4AulExec object calls fall
+    // back to engine functions, C4AulExec.cpp:1259-1261), so the closest
+    // search runs caller-relative to the TARGET (FnFindObject adjusts
+    // x/y by cthr->Obj, C4Script.cpp:2115-2121).
+    #[test]
+    fn object_targeted_host_find_object_uses_target_as_caller() {
+        let caller_script = r#"#strict
+func Probe(pOther) {
+    var pFound = pOther->FindObject(ANML, 0, 0, -1, -1);
+    if (pFound) FoundIt(pFound);
+    return(1);
+}
+func FoundIt(pObj) { RemoveObject(pObj); return(1); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        let caller =
+            Definition::from_script("CALR", "Caller", caller_script).expect("caller compiles");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        let mut animal_def = simple_definition("ANML");
+        animal_def.set_category(CATEGORY_OBJECT);
+        engine
+            .register_definition(animal_def)
+            .expect("animal registers");
+        let mut probe_def = simple_definition("PROB");
+        probe_def.set_category(CATEGORY_OBJECT);
+        engine
+            .register_definition(probe_def)
+            .expect("probe registers");
+
+        let caller_id = engine
+            .spawn_object(
+                SpawnConfig::new("CALR")
+                    .with_position(Vector2::new(10, 10))
+                    .with_category(CATEGORY_OBJECT),
+            )
+            .expect("caller spawns");
+        let other = engine
+            .spawn_object(SpawnConfig::new("PROB").with_position(Vector2::new(500, 40)))
+            .expect("probe spawns");
+        let animal = engine
+            .spawn_object(SpawnConfig::new("ANML").with_position(Vector2::new(510, 40)))
+            .expect("animal spawns");
+
+        let idx = engine.find_object_index(caller_id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Probe", vec![Value::Object(other.as_u64())])
+            .expect("Probe runs");
+
+        let removed = engine
+            .find_object_index(animal)
+            .map(|index| engine.objects[index].destroyed)
+            .unwrap_or(true);
+        assert!(
+            removed,
+            "the target-relative closest search finds the animal next to pOther"
+        );
+    }
+
+    // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure
     // MARKER effect: `AddEffect("Divinity", o, 200, 1)` on FOREIGN
     // targets found via the FindObject find-next iteration
     // (Talker.c4d/Script.c:137-138). C4Effect::New creates the effect

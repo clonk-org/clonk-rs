@@ -175,6 +175,13 @@ pub(crate) enum PlayerCommand {
     },
     /// `FnSetWealth` (C4Script.cpp:2761-2766), already clamped.
     SetWealth { player_id: i32, value: i32 },
+    /// FnSetCursor (C4Script.cpp:2951-2958): pPlr->SetCursor(pObj) and,
+    /// unless fNoSelectCrew, SelectCrew(pObj, true).
+    SetCursor {
+        player_id: i32,
+        object: Option<ObjectId>,
+        select_crew: bool,
+    },
 }
 
 impl HostWorldObject {
@@ -3759,6 +3766,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetVisibility", get_visibility);
     script.register_host_function("FinishCommand", finish_command);
     script.register_host_function("SetCrewEnabled", set_crew_enabled);
+    script.register_host_function("GetCrewEnabled", get_crew_enabled);
+    script.register_host_function("GetChar", get_char);
+    script.register_host_function("GetColorDw", get_color_dw);
+    script.register_host_function("SetCursor", set_cursor_host);
     script.register_host_function("Fling", fling);
     script.register_host_function("Jump", jump);
     script.register_host_function("EnergyCheck", energy_check);
@@ -4015,6 +4026,9 @@ fn render_c4id(raw: i32) -> String {
 fn format_c4id_string(value: &Value, function: &str) -> Result<String, RuntimeError> {
     match value {
         Value::Int(raw) => Ok(render_c4id(*raw)),
+        // A literal id value (FnFormat %i via C4VID).
+        Value::C4Id(id) if !id.is_empty() => Ok(id.clone()),
+        Value::C4Id(_) => Ok("NONE".to_string()),
         Value::String(text) if !text.is_empty() => Ok(text.clone()),
         Value::String(_) | Value::Nil => Ok("NONE".to_string()),
         other => Err(RuntimeError::new(format!(
@@ -8969,6 +8983,127 @@ fn get_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnSetCrewEnabled (C4Script.cpp:4814-4836): CrewDisabled = !enabled;
 /// disabling also deselects (the cursor re-adjust runs on the engine
 /// selection refresh).
+/// FnGetColorDw (C4Script.cpp:3652-3656): the object's dword color;
+/// nil without an object.
+fn get_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let target =
+        consume_optional_object_reference_argument(args, &mut index, "GetColorDw", "obj")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let active = context.object_context().map(|object| object.id());
+        let Some(target) = target.or(active) else {
+            return Ok(Value::Nil);
+        };
+        // A same-call SetColorDw staged the value on the scope.
+        if Some(target) == active {
+            if let Some(color) = context
+                .object_context()
+                .and_then(|object| object.pending_update.color)
+            {
+                return Ok(Value::Int(color as i32));
+            }
+        }
+        match context.get_world_object(target) {
+            Some(object) => Ok(Value::Int(
+                object
+                    .full_state()
+                    .map(|state| state.color as i32)
+                    .unwrap_or(0),
+            )),
+            None => Ok(Value::Nil),
+        }
+    })
+}
+
+/// FnGetChar (C4Script.cpp:4367-4376): the byte at the index, 0 past/// FnGetChar (C4Script.cpp:4367-4376): the byte at the index, 0 past
+/// the end, nil without a string.
+fn get_char(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(Value::String(text)) = args.first() else {
+        return Ok(Value::Nil);
+    };
+    let index = match args.get(1) {
+        Some(Value::Int(value)) => *value,
+        _ => 0,
+    };
+    if index < 0 {
+        return Ok(Value::Int(0));
+    }
+    Ok(Value::Int(
+        text.as_bytes()
+            .get(index as usize)
+            .map(|byte| i32::from(*byte))
+            .unwrap_or(0),
+    ))
+}
+
+/// FnGetCrewEnabled (C4Script.cpp:4813-4819): !CrewDisabled; nil/// FnGetCrewEnabled (C4Script.cpp:4813-4819): !CrewDisabled; nil
+/// without an object.
+fn get_crew_enabled(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let target =
+        consume_optional_object_reference_argument(args, &mut index, "GetCrewEnabled", "obj")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let active = context.object_context().map(|object| object.id());
+        let target = target.or(active);
+        let Some(target) = target else {
+            return Ok(Value::Nil);
+        };
+        // A same-call SetCrewEnabled staged the flag on the scope.
+        if Some(target) == active {
+            if let Some(disabled) = context
+                .object_context()
+                .and_then(|object| object.pending_update.crew_disabled)
+            {
+                return Ok(Value::Bool(!disabled));
+            }
+        }
+        match context.get_world_object(target) {
+            Some(object) => Ok(Value::Bool(
+                !object
+                    .full_state()
+                    .map(|state| state.crew_disabled)
+                    .unwrap_or(false),
+            )),
+            None => Ok(Value::Nil),
+        }
+    })
+}
+
+/// FnSetCursor (C4Script.cpp:2951-2958): set the player cursor (and
+/// crew selection unless fNoSelectCrew).
+fn set_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetCursor", "player")?;
+    let object = args
+        .get(1)
+        .map(|arg| parse_object_reference_argument(arg, "SetCursor", "obj"))
+        .transpose()?
+        .flatten();
+    let no_select_crew = matches!(args.get(4), Some(Value::Bool(true)) | Some(Value::Int(1)));
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if context.world.player(player_id).is_none() {
+            return Ok(Value::Bool(false));
+        }
+        context.record_player_command(PlayerCommand::SetCursor {
+            player_id,
+            object,
+            select_crew: !no_select_crew,
+        });
+        Ok(Value::Bool(true))
+    })
+}
+
 fn set_crew_enabled(args: &[Value]) -> Result<Value, RuntimeError> {
     let enabled = matches!(args.first(), Some(Value::Bool(true)) | Some(Value::Int(1)));
     let target = args
@@ -15500,21 +15635,52 @@ fn call_world_object_function_with(
         origin,
     } = prep;
     let entry_locals = local_vars.clone();
+    // LIVE local cells shared across every session on this object within
+    // the outer call (C++ mutates the one live C4Object): the first
+    // session seeds them from the snapshot, deeper sessions reuse them —
+    // and their writes are visible mid-call. The creating session owns
+    // cleanup.
+    let (cells, created_session) = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        match borrow.as_mut() {
+            Some(context) => match context.session_local_cells.get(&target) {
+                Some(cells) => (cells.clone(), false),
+                None => {
+                    let cells = lc_script::LocalCells::from_local_vars(&local_vars);
+                    context
+                        .session_local_cells
+                        .insert(target, cells.clone());
+                    (cells, true)
+                }
+            },
+            None => (lc_script::LocalCells::from_local_vars(&local_vars), false),
+        }
+    });
     // The HOST_CONTEXT borrow is released here: the nested VM's host
     // functions re-borrow it against the swapped-in scope.
-    let call = script.call_with_locals_and_this(
+    let call = script.call_with_cells_and_this(
         function,
         args,
-        &local_vars,
+        &cells,
         object_reference_value(target),
     );
+    if created_session {
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                context.session_local_cells.remove(&target);
+            }
+        });
+    }
     let (result, stored_locals) = match call {
-        Ok((value, updated)) => (Ok(value), updated),
+        Ok(value) => (Ok(value), cells.snapshot()),
         // Partial side effects before the error still fold (C++ mutates
-        // live state); the VM-final locals are lost with the unwind, so the
-        // pre-call locals stand in.
-        Err(lc_script::ScriptError::Runtime(err)) => (Err(err), local_vars),
-        Err(other) => (Err(RuntimeError::new(other.to_string())), local_vars),
+        // live state) — the shared cells carry every write made before
+        // the unwind.
+        Err(lc_script::ScriptError::Runtime(err)) => (Err(err), cells.snapshot()),
+        Err(other) => (
+            Err(RuntimeError::new(other.to_string())),
+            cells.snapshot(),
+        ),
     };
     if let Some(origin) = origin {
         HOST_CONTEXT.with(|cell| {
@@ -15569,6 +15735,12 @@ fn value_raw_truthy(value: &Value) -> bool {
 struct EffectHostContext {
     object: Option<ObjectScopeContext>,
     global: Option<EffectScopeContext>,
+    /// LIVE local cells per object with an in-flight VM session: deeper
+    /// nested calls onto the same object share them, so mid-call local
+    /// writes are visible immediately (C++ mutates the live C4Object —
+    /// the Talker's DoStartMovie sets sMovName and the synchronous
+    /// FxMovieStart reads it within the same outer call).
+    session_local_cells: HashMap<ObjectId, lc_script::LocalCells>,
     world: HostWorldContext,
     player_overrides: HashMap<i32, PlayerState>,
     player_commands: Vec<PlayerCommand>,
@@ -15719,6 +15891,7 @@ impl EffectHostContext {
             game_over_triggered,
             dormant_scopes: Vec::new(),
             nested_objects: HashMap::new(),
+            session_local_cells: HashMap::new(),
             nested_order: Vec::new(),
             foreign_local_cells: HashMap::new(),
         }
@@ -17388,7 +17561,9 @@ mod tests {
         "GetAlive",
         "GetBreath",
         "GetCategory",
+        "GetChar",
         "GetClimate",
+        "GetColorDw",
         "GetComDir",
         "GetCommand",
         "GetComponent",
@@ -17397,6 +17572,7 @@ mod tests {
         "GetController",
         "GetCrew",
         "GetCrewCount",
+        "GetCrewEnabled",
         "GetCursor",
         "GetDefCoreVal",
         "GetDir",
@@ -17499,6 +17675,7 @@ mod tests {
         "SetComponent",
         "SetController",
         "SetCrewEnabled",
+        "SetCursor",
         "SetDir",
         "SetEntrance",
         "SetGraphics",

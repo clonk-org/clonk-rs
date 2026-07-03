@@ -101,6 +101,36 @@ impl ObjectState {
     }
 }
 
+/// A shareable handle to an object's live local-variable cells: every VM
+/// session created from the same handle reads and writes the SAME cells —
+/// C++ semantics, where nested calls onto an in-flight object see its
+/// mid-call local writes immediately (C4Aul mutates the live C4Object).
+#[derive(Clone, Default)]
+pub struct LocalCells {
+    state: ObjectState,
+}
+
+impl LocalCells {
+    pub fn from_local_vars(local_vars: &HashMap<String, Value>) -> Self {
+        Self {
+            state: ObjectState::from_local_vars(local_vars),
+        }
+    }
+
+    /// Every named local and indexed slot as a plain map (the fold shape
+    /// call_with_locals returns).
+    pub fn snapshot(&self) -> HashMap<String, Value> {
+        let mut out = HashMap::new();
+        for (name, cell) in self.state.named_locals.borrow().iter() {
+            out.insert(name.clone(), cell.borrow().clone());
+        }
+        for (idx, cell) in self.state.local_slots.borrow().iter() {
+            out.insert(format!("__local_{idx}"), cell.borrow().clone());
+        }
+        out
+    }
+}
+
 fn slot_cell(slots: &SlotMap, index: i32) -> ValueCell {
     slots
         .borrow_mut()
@@ -484,6 +514,18 @@ impl<'a> Vm<'a> {
     /// host-side C4AulParSet pattern where pars carry `GetRef()` values.
     pub(crate) fn call_args(&self, name: &str, args: Vec<CallArg>) -> Result<Value, RuntimeError> {
         self.invoke_value(name, args, 0, ObjectState::default())
+    }
+
+    /// Call against SHARED local cells (see [`LocalCells`]): writes land
+    /// live — deeper sessions on the same object observe them mid-call.
+    pub(crate) fn call_with_cells(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &LocalCells,
+    ) -> Result<Value, RuntimeError> {
+        let args = args.iter().cloned().map(CallArg::Value).collect();
+        self.invoke_value(name, args, 0, cells.state.clone())
     }
 
     /// Call a function with per-object local variable context
