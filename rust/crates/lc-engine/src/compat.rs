@@ -8,7 +8,7 @@ use crate::command::{
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::material::MaterialSet;
-use crate::math::{fixtoi_prec, integer_distance, itofix_prec, C4Fixed, FixedVec2};
+use crate::math::{fixed100, fixtoi_prec, integer_distance, itofix, itofix_prec, C4Fixed, FixedVec2};
 use crate::message::{
     MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_MULTIPLE,
     HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
@@ -2050,6 +2050,135 @@ fn get_menu(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(menu
         .map(|menu| menu.identification)
         .unwrap_or(Value::Int(0)))
+}
+
+/// FnPunch (C4Script.cpp:328-332) → ObjectComPunch (C4ObjectCom.cpp:
+/// 735-767): a zero punch derives from the Fight physicals
+/// (BoundBy(5*attacker/target, 0, 10)); QueryCatchBlow on the target
+/// halves punch > 1 and stops the blow; the target loses punch% energy
+/// and its ComDir stops either way; a stopped blow returns false without
+/// a fling; punch >= 10 tries the Tumble action (xdir FIXED100(150)*tdir,
+/// ydir -2), the regular path GetPunched (xdir FIXED100(250)*tdir,
+/// ydir 0) — each firing CatchBlow(punch, attacker) on success.
+/// (LastEnergyLossCausePlayer kill tracing rides the engine's DoEnergy
+/// caused-by, which the scope energy write does not carry yet — the same
+/// gap as the DoEnergy host function.)
+fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(target) =
+        parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "Punch", "target")?
+    else {
+        return Ok(Value::Bool(false)); // !pTarget (C4ObjectCom.cpp:737)
+    };
+    let mut punch = parse_optional_i32(args.get(1), "Punch", "punch")?.unwrap_or(0);
+
+    // Read phase: attacker (cthr->Obj) dir + both Fight physicals.
+    let read = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        let scope = context.object_context()?;
+        let attacker = scope.id();
+        let attacker_fight = scope.resolved_physical(false).fight;
+        // tdir = +1, DIR_Left -> -1 (C4ObjectCom.cpp:745).
+        let tdir = match scope.direction() {
+            Direction::Left => -1,
+            Direction::Right => 1,
+        };
+        if !context.ensure_object_scope(target) {
+            return None;
+        }
+        let target_fight = context
+            .object_scope(target)
+            .map(|scope| scope.resolved_physical(false).fight)
+            .unwrap_or(0);
+        Some((attacker, attacker_fight, tdir, target_fight))
+    });
+    let Some((attacker, attacker_fight, tdir, target_fight)) = read else {
+        return Ok(Value::Bool(false)); // !cthr->Obj / unknown target
+    };
+
+    if punch == 0 && target_fight != 0 {
+        punch = (5 * attacker_fight / target_fight).clamp(0, 10);
+    }
+    if punch == 0 {
+        return Ok(Value::Bool(true)); // nothing to do (C4ObjectCom.cpp:741)
+    }
+
+    // PSF_QueryCatchBlow (fail-safe; callee errors log and read as false,
+    // C4Object::Call fPassErrors=false).
+    let blow_stopped =
+        match call_world_object_own_function(target, "QueryCatchBlow", &[object_reference_value(attacker)]) {
+            Some(Ok(value)) => value.as_bool(),
+            Some(Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    "script error in QueryCatchBlow; continuing like the C++ fail-safe exec"
+                );
+                false
+            }
+            None => false,
+        };
+    if blow_stopped && punch > 1 {
+        punch /= 2; // caught blow halves damage (C4ObjectCom.cpp:743)
+    }
+
+    // DoEnergy(-punch, false) + ComDir stop happen even for stopped blows.
+    let written = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        context
+            .object_scope_mut(target)
+            .map(|scope| {
+                scope.adjust_energy(-punch, false);
+                scope.set_command_direction(CommandDirection::Stop);
+            })
+            .is_some()
+    });
+    if !written {
+        return Ok(Value::Bool(false));
+    }
+    if blow_stopped {
+        return Ok(Value::Bool(false)); // no tumbles for caught blows
+    }
+
+    let try_fling = |action: &str, velocity: FixedVec2| -> bool {
+        let action_set = matches!(
+            call_world_object_function(target, "SetAction", &[Value::String(action.to_string())]),
+            Some(Ok(value)) if value.as_bool()
+        );
+        if !action_set {
+            return false;
+        }
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return false;
+            };
+            context
+                .object_scope_mut(target)
+                .map(|scope| scope.set_fixed_velocity(velocity))
+                .is_some()
+        })
+    };
+    let flung = (punch >= 10
+        && try_fling("Tumble", FixedVec2::new(fixed100(150) * tdir, itofix(-2))))
+        || try_fling("GetPunched", FixedVec2::new(fixed100(250) * tdir, C4Fixed::ZERO));
+    if !flung {
+        return Ok(Value::Bool(false));
+    }
+    // PSF_CatchBlow after a successful fling (C4ObjectCom.cpp:754,762).
+    if let Some(Err(error)) = call_world_object_own_function(
+        target,
+        "CatchBlow",
+        &[Value::Int(punch), object_reference_value(attacker)],
+    ) {
+        tracing::warn!(
+            %error,
+            "script error in CatchBlow; continuing like the C++ fail-safe exec"
+        );
+    }
+    Ok(Value::Bool(true))
 }
 
 /// The literal-text half of the FnAddMenuItem sprintf (C4Script.cpp:
@@ -4249,6 +4378,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetCursor", set_cursor_host);
     script.register_host_function("Fling", fling);
     script.register_host_function("Jump", jump);
+    script.register_host_function("Punch", punch);
     script.register_host_function("EnergyCheck", energy_check);
     script.register_host_function("GetContact", get_contact);
     script.register_host_function("PathFree", path_free);
@@ -18232,6 +18362,7 @@ mod tests {
         "Pow",
         "PrivateCall",
         "ProtectedCall",
+        "Punch",
         "PushParticles",
         "Random",
         "RemoveEffect",

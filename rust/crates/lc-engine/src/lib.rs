@@ -32814,6 +32814,151 @@ func Trigger() {
     }
 
     #[test]
+    fn punch_follows_object_com_punch_semantics_like_cpp() {
+        // FnPunch (C4Script.cpp:328-332) -> ObjectComPunch
+        // (C4ObjectCom.cpp:735-767): zero punch derives from the Fight
+        // physicals (clamp(5*attacker/target, 0, 10)); QueryCatchBlow
+        // halves punch > 1 and stops the blow (return false, no tumble);
+        // energy drops -punch% and ComDir stops either way; punch >= 10
+        // tries Tumble (xdir FIXED100(150)*tdir, ydir -2), else GetPunched
+        // (xdir FIXED100(250)*tdir, ydir 0), each firing CatchBlow(punch,
+        // attacker) on success.
+        let attacker_script = r#"
+        func Bite(target, strength) { return Punch(target, strength); }
+        "#;
+        let victim_script = r#"
+        local catchBlow;
+        local stopBlows;
+        func QueryCatchBlow(byObj) { return stopBlows; }
+        func CatchBlow(level, byObj) { catchBlow = level; }
+        "#;
+        let mut attacker_def = Definition::from_script("SNKE", "Snake", attacker_script)
+            .expect("attacker compiles");
+        attacker_def.set_physical(PhysicalInfo {
+            fight: 50_000,
+            ..PhysicalInfo::default()
+        });
+        let mut victim_def =
+            Definition::from_script("CLNK", "Clonk", victim_script).expect("victim compiles");
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        actions.insert("GetPunched".to_string(), ActionSpec::default());
+        actions.insert("Tumble".to_string(), ActionSpec::default());
+        victim_def.configure_actions(Some("Idle".to_string()), actions);
+        victim_def.set_physical(PhysicalInfo {
+            fight: 25_000,
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+        // A victim without Tumble/GetPunched AND without Fight: the derived
+        // punch stays zero -> Punch is a no-op success (C4ObjectCom.cpp:741).
+        let pillow_def =
+            Definition::from_script("PILW", "Pillow", victim_script).expect("pillow compiles");
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(attacker_def)
+            .expect("attacker registers");
+        engine
+            .register_definition(victim_def)
+            .expect("victim registers");
+        engine
+            .register_definition(pillow_def)
+            .expect("pillow registers");
+        let snake = engine
+            .spawn_object(SpawnConfig::new("SNKE").with_position(Vector2::new(50, 50)))
+            .expect("snake spawns");
+        let spawn_victim = |engine: &mut Engine| {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("CLNK")
+                        .with_position(Vector2::new(52, 50))
+                        .with_alive(true)
+                        .with_energy(50_000),
+                )
+                .expect("victim spawns")
+        };
+        let v_regular = spawn_victim(&mut engine);
+        let v_hard = spawn_victim(&mut engine);
+        let v_catcher = spawn_victim(&mut engine);
+        let v_derived = spawn_victim(&mut engine);
+        let pillow = engine
+            .spawn_object(
+                SpawnConfig::new("PILW")
+                    .with_position(Vector2::new(52, 50))
+                    .with_alive(true)
+                    .with_energy(50_000),
+            )
+            .expect("pillow spawns");
+        engine.tick().expect("tick succeeds");
+
+        // tdir = +1 for a right-facing attacker (C4ObjectCom.cpp:745).
+        let snake_idx = engine.find_object_index(snake).expect("snake exists");
+        engine.objects[snake_idx].state.direction = Direction::Right;
+        // A pre-punch ComDir so the COMD_Stop write is observable.
+        let idx = engine.find_object_index(v_regular).expect("victim exists");
+        engine.objects[idx].state.command_direction = CommandDirection::Right;
+
+        let bite = |engine: &mut Engine, target: ObjectId, strength: Option<i32>| {
+            let idx = engine.find_object_index(snake).expect("snake exists");
+            let args = vec![
+                Value::Object(target.as_u64()),
+                strength.map(Value::Int).unwrap_or(Value::Nil),
+            ];
+            engine
+                .call_object_function(idx, "Bite", args)
+                .expect("Bite succeeds")
+        };
+
+        // Regular punch (8 < 10): GetPunched, xdir FIXED100(250), ydir 0.
+        assert_eq!(bite(&mut engine, v_regular, Some(8)), Value::Bool(true));
+        let idx = engine.find_object_index(v_regular).expect("victim exists");
+        let victim = &engine.objects[idx];
+        assert_eq!(victim.state.energy, 42_000, "-8% of C4MaxPhysical");
+        assert_eq!(victim.state.action.name, "GetPunched");
+        assert_eq!(victim.fixed_velocity.x, fixed100(250));
+        assert_eq!(victim.fixed_velocity.y, C4Fixed::ZERO);
+        assert_eq!(victim.state.command_direction, CommandDirection::Stop);
+        assert_eq!(
+            victim.state.local_vars.get("catchBlow"),
+            Some(&Value::Int(8)),
+            "CatchBlow(level, byObj) fired"
+        );
+
+        // Hard punch (>= 10): Tumble with the tumble fling.
+        assert_eq!(bite(&mut engine, v_hard, Some(12)), Value::Bool(true));
+        let idx = engine.find_object_index(v_hard).expect("victim exists");
+        let victim = &engine.objects[idx];
+        assert_eq!(victim.state.energy, 38_000, "-12%");
+        assert_eq!(victim.state.action.name, "Tumble");
+        assert_eq!(victim.fixed_velocity.x, fixed100(150));
+        assert_eq!(victim.fixed_velocity.y, itofix(-2));
+
+        // Caught blow: halved damage, no tumble, Punch returns false.
+        let idx = engine.find_object_index(v_catcher).expect("victim exists");
+        engine.objects[idx]
+            .state
+            .local_vars
+            .insert("stopBlows".to_string(), Value::Int(1));
+        assert_eq!(bite(&mut engine, v_catcher, Some(8)), Value::Bool(false));
+        let idx = engine.find_object_index(v_catcher).expect("victim exists");
+        let victim = &engine.objects[idx];
+        assert_eq!(victim.state.energy, 46_000, "halved to -4%");
+        assert_ne!(victim.state.action.name, "GetPunched", "no fling");
+
+        // Zero punch derives from the Fight physicals:
+        // clamp(5*50000/25000, 0, 10) = 10 -> hard punch.
+        assert_eq!(bite(&mut engine, v_derived, None), Value::Bool(true));
+        let idx = engine.find_object_index(v_derived).expect("victim exists");
+        assert_eq!(engine.objects[idx].state.action.name, "Tumble");
+
+        // No Fight physical on the target: punch stays 0 -> no-op success.
+        assert_eq!(bite(&mut engine, pillow, None), Value::Bool(true));
+        let idx = engine.find_object_index(pillow).expect("pillow exists");
+        assert_eq!(engine.objects[idx].state.energy, 50_000, "untouched");
+    }
+
+    #[test]
     fn do_damage_asks_effects_for_non_living_and_fires_callback() {
         // C4Object::DoDamage (C4Object.cpp:1330-1343): NON-living things ask
         // their effects first (the inverse of DoEnergy's Alive gate), the
