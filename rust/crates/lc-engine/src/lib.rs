@@ -13515,6 +13515,18 @@ impl Engine {
                         .advance_with_library_by(&action_library, phase_advance)
                 };
 
+                // The phase-end transition runs through SetAction
+                // (C4Object.cpp:5462), which ALWAYS resyncs the fixed
+                // coords to the integer position (:4144) — the tumbling
+                // snake's fix_y snaps back every 17-phase cycle. Hold
+                // clamps without a transition (wrapped=false).
+                if advance_outcome.wrapped {
+                    let object = &mut self.objects[idx];
+                    object.fixed_position = FixedVec2::from_ints(
+                        object.state.position.x,
+                        object.state.position.y,
+                    );
+                }
                 // A same-name NextAction chain still owes its EndCall+StartCall
                 // pair (SetAction with SAC_StartCall|SAC_EndCall,
                 // C4Object.cpp:5462); name-changing wraps are recorded by the
@@ -20062,6 +20074,29 @@ impl Engine {
         if let Some(idx) = self.find_object_index(id) {
             self.objects[idx].state.in_liquid = in_liquid;
         }
+    }
+
+    /// Debug helper: landscape liquid probe.
+    /// Debug helper: raw density probe.
+    pub fn debug_landscape_density(&self, x: i32, y: i32) -> Option<i32> {
+        self.landscape
+            .as_ref()
+            .map(|landscape| landscape.density_at(x, y, &self.materials))
+    }
+
+    /// Debug helper: raw grid byte at a pixel.
+    pub fn debug_landscape_byte(&self, x: i32, y: i32) -> Option<u8> {
+        self.landscape
+            .as_ref()
+            .and_then(|landscape| landscape.pixel_grid())
+            .and_then(|grid| grid.byte_at(x, y))
+    }
+
+    pub fn debug_landscape_is_liquid(&self, x: i32, y: i32) -> bool {
+        self.landscape
+            .as_ref()
+            .map(|landscape| landscape.is_liquid_at(x, y))
+            .unwrap_or(false)
     }
 
     pub fn debug_landscape_is_solid(&self, x: i32, y: i32) -> bool {

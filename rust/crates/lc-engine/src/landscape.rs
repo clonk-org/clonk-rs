@@ -1155,6 +1155,20 @@ impl Landscape {
     }
 
     pub fn is_liquid_at(&self, x: i32, y: i32) -> bool {
+        // GBackLiquid = DensityLiquid(GBackDensity(x, y))
+        // (C4Wrappers.h:179-182): density in [C4M_Liquid, C4M_Solid).
+        // The per-pixel grid is authoritative when present (static maps
+        // paint their water as material pixels, never as liquid
+        // columns); the segment columns remain the fixture model.
+        if let Some(grid) = &self.pixels {
+            if x >= 0 && (x as u32) < self.width && y >= 0 && y < self.estimated_height() {
+                return grid
+                    .density_at(x, y)
+                    .map(|density| (C4M_LIQUID..C4M_SOLID).contains(&density))
+                    .unwrap_or(false);
+            }
+            return false;
+        }
         if x < 0 {
             return false;
         }
