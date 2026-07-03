@@ -12591,6 +12591,38 @@ impl Engine {
     }
 
     pub fn register_definition(&mut self, definition: Definition) -> Result<(), EngineError> {
+
+        // A def script's `global func`s land on the ENGINE scope like any
+        // System.c4g global (C4AulParse "global" storage — the GoldRush
+        // Talker's StartMovie is called from the scenario script). They
+        // join the global table with the same overload chaining as
+        // install_additional_global_scripts.
+        let def_globals: Vec<(String, lc_script::Function)> = definition
+            .script
+            .global_access_functions()
+            .map(|(name, function)| (name.clone(), function.clone()))
+            .collect();
+        if !def_globals.is_empty() {
+            let mut functions: HashMap<String, lc_script::Function> = self
+                .global_script_functions
+                .as_deref()
+                .cloned()
+                .unwrap_or_default();
+            for (function_name, mut function) in def_globals {
+                if let Some(previous) = functions.remove(&function_name) {
+                    function.push_overload(previous);
+                }
+                functions.insert(function_name, function);
+            }
+            let table = Some(Arc::new(functions));
+            self.global_script_functions = table.clone();
+            for existing in self.definitions.values_mut() {
+                existing.set_global_functions(table.clone());
+            }
+            if let Some(script) = self.scenario_script.as_mut() {
+                script.set_global_functions(table.clone());
+            }
+        }
         let id = definition.id().to_string();
         if self.definitions.contains_key(&id) {
             return Err(EngineError::DefinitionAlreadyExists(id));
@@ -13251,14 +13283,6 @@ impl Engine {
         }
         self.apply_landscape_temperature_conversions();
         self.tick_player_systems();
-        // C4GameScriptHost::Execute (C4ScriptHost.cpp:222-232): while
-        // Game.Script.Go, every 10th frame calls Script%d with the counter
-        // post-incrementing — the timed intro/movie sections.
-        if self.scenario_script_go && frame % 10 == 0 && self.scenario_script.is_some() {
-            let section = format!("Script{}", self.scenario_script_counter);
-            self.scenario_script_counter += 1;
-            tolerate_script_error(self.call_scenario_script_function(&section, Vec::new()))?;
-        }
         // The per-tick scenario Step (and its `random` argument DRAW) is a
         // JSON-fixture convention: C++ never calls Step on scenario
         // scripts, and the draw would shift the synced stream every frame.
@@ -14292,6 +14316,17 @@ impl Engine {
         self.rebuild_sectors();
         let alive: HashSet<_> = self.objects.iter().map(|object| object.id).collect();
         self.messages.tick(&alive);
+        // C4GameScriptHost::Execute (C4ScriptHost.cpp:222-232): while
+        // Game.Script.Go, every 10th frame calls Script%d with the counter
+        // post-incrementing — the timed intro/movie sections. Runs AFTER
+        // ExecObjects and Messages.Execute in the C++ frame
+        // (C4Game.cpp:810-822): effects it adds first execute NEXT frame
+        // (the intro Divinity markers compare at t=0 on their add frame).
+        if self.scenario_script_go && frame % 10 == 0 && self.scenario_script.is_some() {
+            let section = format!("Script{}", self.scenario_script_counter);
+            self.scenario_script_counter += 1;
+            tolerate_script_error(self.call_scenario_script_function(&section, Vec::new()))?;
+        }
         self.transfer_zones.retain_existing(&alive);
         self.prune_selection();
         self.process_spawn_queue(spawn_requests)?;
@@ -15964,15 +15999,13 @@ impl Engine {
                     .map(|(outcome, audio_state, new_rng, timer_result)| {
                         // C4Effect::Execute (C4Effect.cpp:342-357): FxTimer
                         // returning C4Fx_Execute_Kill (-1, C4Effects.h:40)
-                        // kills the effect; so does an elapsed interval
-                        // with NO timer function.
-                        timer_kill = if dispatch_definition
+                        // kills the effect. A MISSING timer function does
+                        // nothing — `if (pEffect->pFnTimer)` guards the
+                        // whole arm, so pure marker effects (the intro's
+                        // "Divinity") persist.
+                        timer_kill = dispatch_definition
                             .has_effect_callback(&event.effect.name, "Timer")
-                        {
-                            matches!(timer_result, Some(Value::Int(-1)))
-                        } else {
-                            true
-                        };
+                            && matches!(timer_result, Some(Value::Int(-1)));
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Stopped(reason) => dispatch_definition.call_effect_stop(
@@ -35057,7 +35090,129 @@ func Sweep() {
         assert_eq!(pinned, 2, "StayThere lands on every NPC");
     }
 
-    // C4Game::NewObject runs PSF_Construction and (via the initial
+    // The REAL GoldRush chain is one level deeper: the SCENARIO script
+    // (Script1 -> StartMovie, a global func from the Talker def) does
+    // PrivateCall(CreateObject(_TLK), "DoStartMovie") and THAT loop
+    // AddEffects foreign targets (Talker.c4d/Script.c:118-138) — a
+    // nested call inside a nested call from a non-object scope.
+    #[test]
+    fn scenario_private_call_blesses_foreign_objects_like_cpp() {
+        let talker_script = r#"#strict
+global func StartTheMovie() {
+    return(PrivateCall(CreateObject(TALK), "DoBless"));
+}
+private func DoBless() {
+    var o;
+    while (o = FindObject(0, 0,0,0,0, OCF_Alive, 0,0, 0, o))
+        AddEffect("Divinity", o, 200, 1);
+    return(1);
+}
+"#;
+        let scenario_script = r#"#strict
+protected func Script1() { StartTheMovie(); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        let talker =
+            Definition::from_script("TALK", "Talker", talker_script).expect("talker compiles");
+        engine
+            .register_definition(talker)
+            .expect("talker registers");
+        let mut animal_def = simple_definition("ANML");
+        animal_def.set_category(CATEGORY_OBJECT);
+        engine
+            .register_definition(animal_def)
+            .expect("animal registers");
+        engine
+            .install_scenario_script_with_convention("Goldrush", scenario_script, true)
+            .expect("scenario script loads");
+
+        let animal = engine
+            .spawn_object(
+                SpawnConfig::new("ANML")
+                    .with_position(Vector2::new(40, 40))
+                    .with_alive(true),
+            )
+            .expect("animal spawns");
+
+        engine.scenario_script_go = true;
+        for _ in 0..20 {
+            engine.tick().expect("tick");
+        }
+
+        let idx = engine.find_object_index(animal).expect("animal exists");
+        let effects = engine.objects[idx].state.effects.clone();
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect.name == "Divinity" && effect.priority == 200),
+            "Divinity lands through the scenario->foreign chain: {effects:?}"
+        );
+    }
+
+    // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure
+    // MARKER effect: `AddEffect("Divinity", o, 200, 1)` on FOREIGN
+    // targets found via the FindObject find-next iteration
+    // (Talker.c4d/Script.c:137-138). C4Effect::New creates the effect
+    // even when no Fx* callbacks exist anywhere (C4Effect.cpp:64-118 —
+    // no function lookup gates creation).
+    #[test]
+    fn foreign_add_effect_creates_marker_effect_like_cpp() {
+        let talker_script = r#"#strict
+func Bless() {
+    var o;
+    while (o = FindObject(0, 0,0,0,0, OCF_Alive, 0,0, 0, o))
+        AddEffect("Divinity", o, 200, 1);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let talker =
+            Definition::from_script("TALK", "Talker", talker_script).expect("talker compiles");
+        engine
+            .register_definition(talker)
+            .expect("talker registers");
+        let mut animal_def = simple_definition("ANML");
+        animal_def.set_category(CATEGORY_OBJECT);
+        engine
+            .register_definition(animal_def)
+            .expect("animal registers");
+
+        let talker_id = engine
+            .spawn_object(SpawnConfig::new("TALK").with_category(CATEGORY_OBJECT))
+            .expect("talker spawns");
+        let animal_a = engine
+            .spawn_object(
+                SpawnConfig::new("ANML")
+                    .with_position(Vector2::new(40, 40))
+                    .with_alive(true),
+            )
+            .expect("animal a spawns");
+        let animal_b = engine
+            .spawn_object(
+                SpawnConfig::new("ANML")
+                    .with_position(Vector2::new(90, 40))
+                    .with_alive(true),
+            )
+            .expect("animal b spawns");
+
+        let idx = engine.find_object_index(talker_id).expect("talker exists");
+        engine
+            .call_object_function(idx, "Bless", Vec::new())
+            .expect("Bless runs");
+
+        for id in [animal_a, animal_b] {
+            let idx = engine.find_object_index(id).expect("animal exists");
+            let effects = engine.objects[idx].state.effects.clone();
+            assert!(
+                effects.iter().any(|effect| {
+                    effect.name == "Divinity" && effect.priority == 200 && effect.interval == 1
+                }),
+                "marker effect lands on foreign target {id:?}: {effects:?}"
+            );
+        }
+    }
+
+    // C4Game::NewObject runs PSF_Construction and (via the initial    // C4Game::NewObject runs PSF_Construction and (via the initial
     // DoCon's completion) PSF_Initialize INSIDE FnCreateObject
     // (C4Game.cpp:1117-1127): the new object's script side effects exist
     // the moment CreateObject returns. GoldRush: every clonk's appended
@@ -36223,8 +36378,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
     fn effect_timer_kill_semantics_follow_cpp() {
         // C4Effect::Execute (C4Effect.cpp:342-357): an FxTimer returning
         // C4Fx_Execute_Kill (-1, C4Effects.h:40) kills the effect; an
-        // effect whose interval elapses with NO timer function is killed
-        // too; a zero interval never reaches either arm.
+        // effect with NO timer function persists (`if (pFnTimer)` guards
+        // the arm — marker effects); a zero interval never reaches it.
         let script = r#"
         global func Initialize(state, random) {
             return { effects = [
@@ -36284,9 +36439,9 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .collect();
         assert_eq!(
             names,
-            vec!["Inert"],
-            "Doomed killed by -1 at iTime 4, Mute killed at its first \
-             timerless gate, zero-interval Idle survives"
+            vec!["Inert", "Mute"],
+            "Doomed killed by -1 at iTime 4; timerless Mute persists as a \
+             marker; zero-interval Inert survives"
         );
         let calls = call_log.lock().unwrap().clone();
         let stop_calls = calls.iter().filter(|name| *name == "FxDoomedStop").count();
