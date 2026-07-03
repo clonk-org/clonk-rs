@@ -7649,6 +7649,30 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         object.set_crew_member(true);
         object.set_owner(player);
+        // The new crew member gets an info whose physicals resolve at
+        // once (C4Player::MakeCrewMember → C4ObjectInfoList::New;
+        // C4Object::Init `if (Alive) Energy = GetPhysical()->Energy`,
+        // C4Object.cpp:192). With FairCrew ON (the LegacyClonk default)
+        // the def physicals promote to RankByExperience(strength)
+        // (C4Def.cpp:860-874; PromotionUpdate Energy = max(def,
+        // (50+5*rank)*C4MaxPhysical/100, C4InfoCore.cpp:207-213) — the
+        // same resolution the join path uses. Without it the fresh COWB
+        // the GoldRush Trapper recruits-and-grabs carries NO info
+        // physicals, and the grab downgraded the Trapper's max energy.
+        let mut promoted = object.definition_physical;
+        let rank = if crate::USE_FAIR_CREW {
+            crate::fair_crew_rank(crate::FAIR_CREW_STRENGTH)
+        } else {
+            0
+        };
+        promoted.energy = promoted
+            .energy
+            .max((50 + 5 * rank.clamp(0, 10)) * (crate::C4_MAX_PHYSICAL / 100));
+        object.info_physical = Some(promoted);
+        object.record_physicals();
+        if object.alive() {
+            object.set_energy(promoted.energy);
+        }
         Ok(true)
     })?;
     if joined {

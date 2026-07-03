@@ -435,6 +435,11 @@ void C4Object::DoMovement()
 		if (fix_r > +FixHalfCircle) { fix_r -= FixFullCircle; r = fixtoi(fix_r); }
 	}
 
+	if (Number == 1450 && Game.FrameCounter >= 20 && Game.FrameCounter <= 22 && getenv("LC_RNG_TRACE"))
+	{
+		if (FILE *f = LcRngTraceFile())
+			fprintf(f, "COACH-POST f=%d xdir=%d contact=%d\n", Game.FrameCounter, fixtoi(xdir, 65536), t_contact);
+	}
 	// Reput solid mask: Might have been removed by motion or
 	// motion might be out of date from last frame.
 	UpdateSolidMask(true);

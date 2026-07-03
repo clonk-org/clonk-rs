@@ -5127,6 +5127,11 @@ void C4Object::ExecAction()
 
 		iTXDir = fMove + fWalk * BoundBy<int32_t>(iPullX - Action.Target->x, -10, +10) / 10;
 
+		if (getenv("LC_RNG_TRACE") && Game.FrameCounter >= 19 && Game.FrameCounter <= 22)
+		{
+			if (FILE *f = LcRngTraceFile())
+				fprintf(f, "CPPPULL f=%d horse=%d comdir=%d txdir=%d push=%d twdt=%d tx=%d px=%d\n", Game.FrameCounter, Number, Action.ComDir, fixtoi(iTXDir, 65536), pPhysical->Push, Action.Target->Shape.Wdt, Action.Target->x, iPullX);
+		}
 		// Push object
 		if (!Action.Target->Push(iTXDir, ValByPhysical(250, pPhysical->Push), false))
 		{

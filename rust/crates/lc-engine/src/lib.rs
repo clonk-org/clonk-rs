@@ -19476,6 +19476,17 @@ impl Engine {
         // Work towards txdir (C4Object.cpp:1775-1783).
         let mut xdir = target.fixed_velocity.x;
         math::towards(&mut xdir, txdir, dforce);
+        if std::env::var("LC_PULLDBG").is_ok() && (19..=22).contains(&self.frame) {
+            eprintln!(
+                "PULLDBG f{} target={} {} -> {} (txdir {} dforce {})",
+                self.frame,
+                target.id.as_u64(),
+                target.fixed_velocity.x.val(),
+                xdir.val(),
+                txdir.val(),
+                dforce.val()
+            );
+        }
         target.fixed_velocity.x = xdir;
         // Straighten (C4Object.cpp:1785-1794); the normalized rotation maps
         // back to the C++ signed range.
