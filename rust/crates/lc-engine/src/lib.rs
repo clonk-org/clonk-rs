@@ -22865,7 +22865,10 @@ impl Engine {
     }
 
     /// `C4PXSSystem::Execute` (C4PXS.cpp:212-234): free empty chunks, then
-    /// run every live PXS in chunk-major slot order.
+    /// run every live PXS in chunk-major slot order, IN PLACE — the slot
+    /// stays occupied while its PXS executes, so a PXS created inside a
+    /// reaction can never be handed the executing slot (New(),
+    /// C4PXS.cpp:195-202).
     fn tick_pxs(&mut self) {
         self.pxs_system.free_empty_chunks();
         for chunk in 0..pxs::PXS_MAX_CHUNK {
@@ -22873,12 +22876,12 @@ impl Engine {
                 continue;
             }
             for slot in 0..pxs::PXS_CHUNK_SIZE {
-                let Some(pixel) = self.pxs_system.take_slot(chunk, slot) else {
+                let Some(pixel) = self.pxs_system.peek_slot(chunk, slot) else {
                     continue;
                 };
                 match self.execute_pxs(pixel) {
                     Some(updated) => self.pxs_system.put_slot(chunk, slot, updated),
-                    None => self.pxs_system.release_slot(chunk),
+                    None => self.pxs_system.clear_slot(chunk, slot),
                 }
             }
         }
@@ -27971,6 +27974,92 @@ mod tests {
             "InsertMaterial landed the pixel against the border"
         );
         assert_eq!(engine.rng, mirror, "no synced draws on this path");
+    }
+
+    #[test]
+    fn pxs_created_mid_execute_never_takes_the_executing_slot() {
+        // C4PXSSystem::Execute runs each PXS IN PLACE (C4PXS.cpp:218-240):
+        // while a PXS executes, its slot still carries Mat != MNone, so a
+        // PXS created inside a reaction (InsertMaterial's slide loop
+        // re-creates the droplet, C4Landscape.cpp:1192-1196) can never be
+        // handed that slot by New() (C4PXS.cpp:195-202). Only after the
+        // reaction kills the pixel does Deactivate free it — the droplet
+        // must land in the NEXT slot, keeping the deterministic
+        // chunk-major execution order.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+            SplashRate=0
+            MaxSlide=10
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let mut engine = Engine::with_seed(3);
+        engine.set_materials(materials);
+
+        // Pixel world 12x12: a water pool in columns 0..=6 (rows 6..11)
+        // with a step down to open air at column 7 — the insert slide
+        // finds the ledge and re-creates the pixel as a droplet there.
+        let mut densities = vec![0i32; 128];
+        densities[20] = 25;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[20] = Some("Water".into());
+        let mut bytes = vec![0u8; 12 * 12];
+        for y in 6..12 {
+            for x in 0..=6 {
+                bytes[y * 12 + x] = 20;
+            }
+        }
+        let grid = landscape::PixelGrid::new(12, 12, bytes, densities, names, vec![None; 128]);
+        let mut world =
+            Landscape::with_default_material(12, vec![6; 12], Some(water)).expect("builds");
+        world.set_world_height(12);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        // Slot 0: a submerged water PXS moving down — the water-vs-water
+        // move contact inserts (killing it) and the insert slides to the
+        // ledge, creating the droplet DURING slot 0's execution.
+        assert!(engine.pxs_system.create(
+            water,
+            math::itofix(3),
+            math::itofix(7),
+            math::C4Fixed::ZERO,
+            math::itofix(1),
+        ));
+        engine.tick_pxs();
+
+        let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
+        assert_eq!(survivors.len(), 1, "only the droplet survives");
+        assert_eq!(fixtoi(survivors[0].x), 7, "droplet sits on the ledge");
+        assert_eq!(
+            engine.pxs_system.count(),
+            1,
+            "chunk counts stay exact through the mid-execute create"
+        );
+
+        // The executing slot 0 freed on death; the droplet occupies slot 1
+        // (C++ New() skipped the still-live slot 0). The next create must
+        // reuse slot 0 and execute BEFORE the droplet.
+        assert!(engine.pxs_system.create(
+            water,
+            math::itofix(9),
+            math::itofix(2),
+            math::C4Fixed::ZERO,
+            math::C4Fixed::ZERO,
+        ));
+        let order: Vec<i32> = engine.pxs_system.iter().map(|pxs| fixtoi(pxs.x)).collect();
+        assert_eq!(
+            order,
+            [9, 7],
+            "slot 0 was free during the droplet's creation only in C++ terms — \
+             the droplet must sit in slot 1"
+        );
     }
 
     #[test]
