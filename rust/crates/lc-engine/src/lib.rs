@@ -5296,6 +5296,7 @@ pub struct Definition {
     /// C4Object.cpp:5655) and bakes through the rotated branch of
     /// C4SolidMask::Put (C4SolidMask.cpp:108-174).
     rotated_solid_masks: bool,
+    no_component_mass: bool,
     /// NoStabilize=1 opts out of the small-tilt upright snap
     /// (C4Object::Stabilize, C4Movement.cpp:491).
     no_stabilize: bool,
@@ -5440,6 +5441,7 @@ impl Definition {
             border_bound: 0,
             upright_attach: 0,
             rotated_solid_masks: false,
+            no_component_mass: false,
             no_stabilize: false,
             timer: 35,
             timer_call: None,
@@ -5599,6 +5601,7 @@ impl Definition {
         definition.set_border_bound(resource.core.border_bound);
         definition.set_upright_attach(resource.core.upright_attach);
         definition.set_rotated_solid_masks(resource.core.rotated_solid_masks);
+        definition.set_no_component_mass(resource.core.no_component_mass);
         definition.set_no_stabilize(resource.core.no_stabilize);
         definition.set_timer(resource.core.timer);
         definition.set_timer_call(resource.core.timer_call.clone());
@@ -6123,6 +6126,14 @@ impl Definition {
     /// solid mask (C4Object.cpp:5655).
     pub fn rotated_solid_masks(&self) -> bool {
         self.rotated_solid_masks
+    }
+
+    pub fn no_component_mass(&self) -> bool {
+        self.no_component_mass
+    }
+
+    pub fn set_no_component_mass(&mut self, no_component_mass: bool) {
+        self.no_component_mass = no_component_mass;
     }
 
     pub fn set_rotated_solid_masks(&mut self, rotated_solid_masks: bool) {
@@ -17242,11 +17253,7 @@ impl Engine {
             if wet && !state.in_liquid {
                 // Entry splash (C4Movement.cpp:450-453): fast + heavy
                 // objects splash — synced RNG draws + FXU1 bubbles.
-                let object_mass = self
-                    .definitions
-                    .get(&self.objects[idx].definition_id)
-                    .map(|definition| definition.mass())
-                    .unwrap_or(0);
+                let object_mass = self.effective_object_mass(idx);
                 let state = &self.objects[idx].state;
                 let should_splash =
                     state.ocf & crate::ocf::HIT_SPEED2 != 0 && object_mass > 3;
@@ -19498,6 +19505,52 @@ impl Engine {
     /// for upright pushes. Still open: the pre-mobilization velocity zeroing
     /// (no Mobile flag) and the Tick35 stuck check (contact + Stuck
     /// callback + message).
+    /// The LIVE object mass (C4Object::UpdateMass, C4Object.cpp:497-505):
+    /// `max((Def->Mass + OwnMass) * Con / FullCon, 1)` plus the contents
+    /// mass unless NoComponentMass (OwnMass is unmodeled — Objects.txt
+    /// OwnMass loads are rare). The GoldRush coach carries ~30 items: its
+    /// pull dforce divides by ~747, not the def 150.
+    fn effective_object_mass(&self, index: usize) -> i32 {
+        fn inner(engine: &Engine, index: usize, depth: usize) -> i32 {
+            if depth > 8 {
+                return 1;
+            }
+            let object = &engine.objects[index];
+            let (def_mass, no_component_mass) = engine
+                .definitions
+                .get(&object.definition_id)
+                .map(|definition| (definition.mass(), definition.no_component_mass()))
+                .unwrap_or((0, false));
+            // (Def->Mass + OwnMass) * Con / FullCon (C4Object.cpp:499) —
+            // OwnMass carries script SetMass overrides (the ArrowPack
+            // family: SetMass(GetMass(item)*PackCount), ArrowPack.c4d).
+            let mut mass = ((def_mass + object.state.own_mass)
+                .saturating_mul(object.state.construction)
+                / FULL_CON)
+                .max(1);
+            if !no_component_mass {
+                for content in &object.state.contents {
+                    if let Some(content_idx) = engine.find_object_index(*content) {
+                        let m = inner(engine, content_idx, depth + 1);
+                        if depth == 0
+                            && object.state.contents.len() > 20
+                            && std::env::var("LC_MASSDBG").is_ok()
+                        {
+                            eprintln!(
+                                "MASSDBG {} {}",
+                                engine.objects[content_idx].definition_id.as_str(),
+                                m
+                            );
+                        }
+                        mass += m;
+                    }
+                }
+            }
+            mass
+        }
+        inner(self, index, 0)
+    }
+
     fn push_object(
         &mut self,
         target_idx: usize,
@@ -19517,10 +19570,13 @@ impl Engine {
         if self.object_ocf_at_index(target_idx) & ocf::GRAB == 0 {
             return false;
         }
+        // dforce divides by the LIVE Mass incl. contents (C4Object::Push
+        // C4Object.cpp:1770 uses this->Mass; UpdateMass :497-505).
+        let live_mass = self.effective_object_mass(target_idx);
         let (grab, mass) = self
             .definitions
             .get(&self.objects[target_idx].definition_id)
-            .map(|definition| (definition.grab(), definition.mass()))
+            .map(|definition| (definition.grab(), live_mass))
             .unwrap_or((0, 0));
         // Grabbing okay, no pushing (C4Object.cpp:1763).
         if grab == 2 {
@@ -20350,11 +20406,10 @@ impl Engine {
                         let v2 = self.objects[candidate_idx].fixed_velocity;
                         let dx_dir = v2.x - v1.x;
                         let dy_dir = v2.y - v1.y;
-                        let candidate_mass = self
-                            .definitions
-                            .get(&self.objects[candidate_idx].definition_id)
-                            .map(|definition| definition.mass())
-                            .unwrap_or(0);
+                        // "realistic" hit energy uses the LIVE Mass
+                        // (C4GameObjects.cpp:171; UpdateMass includes
+                        // contents).
+                        let candidate_mass = self.effective_object_mass(candidate_idx);
                         let hit_energy =
                             fixtoi((dx_dir * dx_dir + dy_dir * dy_dir) * candidate_mass / 5);
                         // reduced to 1/3rd, but never dropped to zero by it
@@ -20365,7 +20420,9 @@ impl Engine {
                             C4FX_CALL_ENG_OBJ_HIT,
                             self.objects[candidate_idx].state.owner,
                         );
-                        let tmass = obj1_mass.max(50);
+                        // tmass = max(obj1->Mass, 50) with the LIVE mass
+                        // (C4GameObjects.cpp:174).
+                        let tmass = self.effective_object_mass(idx).max(50);
                         let candidate_velocity = self.objects[candidate_idx].fixed_velocity;
                         // fling unless airborne off-Tick3 (C4GameObjects.cpp:176)
                         let procedure = self

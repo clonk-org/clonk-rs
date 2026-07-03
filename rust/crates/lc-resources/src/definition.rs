@@ -236,6 +236,9 @@ pub struct DefCore {
     /// RotatedSolidmasks (C4Def.cpp:414, default 0): solid masks stay put
     /// while the object is rotated (C4Object.cpp:5655).
     pub rotated_solid_masks: bool,
+    /// `NoComponentMass` (C4Def compile): contents mass does not add to
+    /// the live Mass (C4Object::UpdateMass, C4Object.cpp:497-501).
+    pub no_component_mass: bool,
     /// NoStabilize (C4Def.cpp:402): opts out of the Stabilize upright snap.
     pub no_stabilize: bool,
     /// Timer= interval in frames (default 35, C4Def.cpp:298).
@@ -500,6 +503,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut upright_attach: u32 = 0;
     // RotatedSolidmasks (C4Def.cpp:414, default 0).
     let mut rotated_solid_masks = false;
+    let mut no_component_mass = false;
     // NoStabilize (C4Def.cpp:402, default 0): opts out of C4Object::Stabilize.
     let mut no_stabilize = false;
     // Timer=/TimerCall= (C4Def.cpp:298-299): the per-object Def timer.
@@ -699,6 +703,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "rotatedsolidmasks" => {
                 rotated_solid_masks = parse_bool(value);
             }
+            "nocomponentmass" => {
+                no_component_mass = parse_bool(value);
+            }
             "nostabilize" => {
                 no_stabilize = parse_bool(value);
             }
@@ -784,6 +791,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         border_bound,
         upright_attach,
         rotated_solid_masks,
+        no_component_mass,
         no_stabilize,
         timer,
         timer_call,

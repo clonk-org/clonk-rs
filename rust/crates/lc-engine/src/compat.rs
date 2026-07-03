@@ -7561,6 +7561,17 @@ fn sqrt_func(args: &[Value]) -> Result<Value, RuntimeError> {
 /// object's Mass = max(Def->Mass * Con / FullCon, 1)
 /// (C4Object.cpp:188; OwnMass/contents mass unmodeled). Nil without both.
 fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
+    if std::env::var("LC_MASSDBG").is_ok() {
+        let peek = parse_definition_argument(args.get(1), "GetMass").ok().flatten();
+        let mass = peek.as_ref().and_then(|d| {
+            HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|c| c.world.definition_metadata(d).map(|m| m.mass))
+            })
+        });
+        eprintln!("MASSDBG GetMass args={args:?} -> {mass:?}");
+    }
     let definition = parse_definition_argument(args.get(1), "GetMass")?;
     if let Some(definition) = definition {
         return HOST_CONTEXT.with(|cell| {
@@ -7853,10 +7864,28 @@ fn set_mass(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(id) = context.object_context().map(|object| object.id()) else {
             return Ok(Value::Bool(false));
         };
+        // The scope's own definition id — a synchronous Initialize (the
+        // ArrowPack UpdateMass at CreateContents) runs before the object
+        // reaches the world/pending views, so get_world_object misses it
+        // and OwnMass = iValue - Def->Mass (C4Script.cpp:3627-3631)
+        // silently lost the Def->Mass term.
         let def_mass = context
-            .get_world_object(id)
-            .and_then(|object| context.world.definition_metadata(object.definition_id()))
-            .map(|metadata| metadata.mass)
+            .object_context()
+            .and_then(|object| object.definition_id.clone())
+            .and_then(|definition_id| {
+                context
+                    .world
+                    .definition_metadata(&definition_id)
+                    .map(|metadata| metadata.mass)
+            })
+            .or_else(|| {
+                context
+                    .get_world_object(id)
+                    .and_then(|object| {
+                        context.world.definition_metadata(object.definition_id())
+                    })
+                    .map(|metadata| metadata.mass)
+            })
             .unwrap_or(0);
         let Some(object) = context.object_context_mut() else {
             return Ok(Value::Bool(false));

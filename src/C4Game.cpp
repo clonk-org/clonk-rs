@@ -809,6 +809,17 @@ bool C4Game::Execute() // Returns true if the game is over
 
 	if (getenv("LC_RNG_TRACE")) LcRngTraceMarker(FrameCounter);
 	EXEC_S(ExecObjects();, ExecObjectsStat)
+	if (getenv("LC_RNG_TRACE") && FrameCounter >= 20 && FrameCounter <= 22)
+	{
+		if (FILE *f = LcRngTraceFile())
+			if (C4Object *coach = Objects.ObjectPointer(1450))
+			{
+				fprintf(f, "MASS f=%d coach=%d def=%d own=%d con=%d\n", FrameCounter, coach->Mass, coach->Def->Mass, coach->OwnMass, coach->GetCon());
+				for (C4ObjectLink *l = coach->Contents.First; l; l = l->Next)
+					if (l->Obj)
+						fprintf(f, "CMASS %s %d\n", C4IdText(l->Obj->Def->id), l->Obj->Mass);
+			}
+	}
 	if (pGlobalEffects)
 		EXEC_S_DR(pGlobalEffects->Execute(nullptr);, GEStats, "GEEx\0");
 	EXEC_S_DR(PXS.Execute();,                      PXSStat,         "PXSEx")
