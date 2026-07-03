@@ -174,6 +174,32 @@ impl PixelGrid {
         self.set_byte(x, y, 0);
     }
 
+    /// The default tunnel byte (`Mat2PixColDefault(MTunnel)`): the first
+    /// texmap slot named Tunnel.
+    fn tunnel_byte(&self) -> u8 {
+        self.material_names
+            .iter()
+            .position(|name| {
+                name.as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("Tunnel"))
+            })
+            .map(|index| index as u8)
+            .unwrap_or(0)
+    }
+
+    /// C4Landscape::ClearPix (C4Landscape.cpp:880-888): an IFT pixel
+    /// clears to the tunnel background (+IFT); a surface pixel to sky.
+    pub fn clear_pix(&mut self, x: i32, y: i32) {
+        let Some(byte) = self.byte_at(x, y) else {
+            return;
+        };
+        if byte & 0x80 != 0 {
+            self.set_byte(x, y, self.tunnel_byte() | 0x80);
+        } else {
+            self.set_byte(x, y, 0);
+        }
+    }
+
     fn fill_band(&mut self, x: i32, from_y: i32, to_y: i32, byte: u8) {
         for y in from_y.max(0)..to_y.min(self.height as i32) {
             self.set_byte(x, y, byte);
@@ -428,6 +454,60 @@ impl Landscape {
 
     /// Resolve the grid's Pix2Mat table once the engine materials exist
     /// (UpdatePixMaps, C4Landscape.cpp:2832-2839).
+    /// C4Landscape::DigFreePix (C4Landscape.cpp:936-944) on the pixel
+    /// grid: returns the material at the pixel (C++ returns it even when
+    /// nothing clears); clears only DigFree materials. `None` when no
+    /// grid exists — callers keep the column-model fallback.
+    pub fn dig_free_pix(&mut self, x: i32, y: i32, materials: &MaterialSet) -> Option<MaterialId> {
+        self.pixels.as_ref()?;
+        let material_id = self
+            .pixels
+            .as_ref()
+            .and_then(|grid| grid.material_id_at(x, y));
+        if let Some(id) = material_id {
+            if materials
+                .get_by_id(id)
+                .map(|material| material.dig_free())
+                .unwrap_or(false)
+            {
+                if let Some(grid) = self.pixels.as_mut() {
+                    grid.clear_pix(x, y);
+                }
+            }
+        }
+        material_id
+    }
+
+    /// ClearPix on the grid (no diggable gate) — C4Landscape::ClearRect's
+    /// per-pixel body (C4Landscape.cpp:2184-2194).
+    pub fn clear_pix(&mut self, x: i32, y: i32) -> bool {
+        match self.pixels.as_mut() {
+            Some(grid) => {
+                grid.clear_pix(x, y);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// DigFreeSinglePix (C4Landscape.h): clears the pixel when it is
+    /// denser than its neighbour toward (dx, dy).
+    pub fn dig_free_single_pix(
+        &mut self,
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+        materials: &MaterialSet,
+    ) {
+        if self.pixels.is_none() {
+            return;
+        }
+        if self.density_at(x, y, materials) > self.density_at(x + dx, y + dy, materials) {
+            let _ = self.dig_free_pix(x, y, materials);
+        }
+    }
+
     pub fn resolve_grid_materials(&mut self, lookup: impl FnMut(&str) -> Option<MaterialId>) {
         if let Some(grid) = self.pixels.as_mut() {
             grid.resolve_materials(lookup);

@@ -362,11 +362,30 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         .ok_or_else(|| anyhow!("no content/**/*.c4s matches `{filter}`"))?;
     tracing::info!("scenario-errors: {}", scenario_path.display());
 
-    let material_library = lc_resources::MaterialLibrary::from_group(
+    let global_material_library = lc_resources::MaterialLibrary::from_group(
         &lc_resources::Group::open(content_root.join("Material.c4g"))
             .context("opening content/Material.c4g")?,
     )
     .map_err(|error| anyhow!("loading material library: {error}"))?;
+    // Scenario-local materials load FIRST, the global set after
+    // (C4Game::InitMaterialTexture, C4Game.cpp:882-960); each load
+    // prepends new names (C4Material.cpp:263-299).
+    let local_material_library = lc_resources::Group::open(scenario_path.join("Material.c4g"))
+        .ok()
+        .and_then(|group| lc_resources::MaterialLibrary::from_group(&group).ok());
+    let local_material_library = if std::env::var("LC_XTASK_GLOBAL_MATS_ONLY").is_ok() {
+        None
+    } else {
+        local_material_library
+    };
+    let material_library = match &local_material_library {
+        Some(local) => lc_resources::MaterialLibrary::from_overloaded_loads(&[
+            local,
+            &global_material_library,
+        ])
+        .map_err(|error| anyhow!("merging material libraries: {error}"))?,
+        None => global_material_library,
+    };
     let system_scripts = lc_resources::Group::open(repo_root.join("planet/System.c4g"))
         .ok()
         .and_then(|group| lc_engine::scenario::load_system_scripts(&group).ok())
@@ -531,6 +550,17 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         rows.sort();
         for (id, definition) in rows {
             println!("SPAWN {id} {definition}");
+        }
+    }
+    if std::env::var("LC_XTASK_PROBE_MAT").is_ok() {
+        for (x, y) in [(1998, 556), (1998, 557), (1998, 558), (1998, 559), (1998, 560), (1996, 557), (2000, 559)] {
+            println!(
+                "MATPROBE ({x},{y}) byte={:?} density={:?} material={:?} in_liquid_probe={:?}",
+                engine.debug_landscape_byte(x, y),
+                engine.debug_landscape_density(x, y),
+                engine.debug_landscape_material_name(x, y),
+                engine.debug_landscape_is_liquid(x, y),
+            );
         }
     }
     if let Ok(dump) = std::env::var("LC_XTASK_DUMP_LANDSCAPE") {

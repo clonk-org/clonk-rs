@@ -18,6 +18,9 @@ const RND3_SIZE: usize = 500;
 pub struct LcgRng {
     pub hold: u32,
     pub count: i32,
+    /// Temp forensics: when set, draws append to LC_RUST_RNG_TRACE.
+    #[serde(skip, default)]
+    pub trace: bool,
     /// Pre-computed Rnd3 circular buffer (FRndBuf3). C4Random.cpp:26.
     rnd3_buf: Vec<i32>,
     /// Current buffer index (FRndPtr3). C4Random.cpp:27.
@@ -32,6 +35,7 @@ impl LcgRng {
         Self {
             hold: seed,
             count: 0,
+            trace: false,
             rnd3_buf: vec![0i32; RND3_SIZE],
             rnd3_ptr: 0,
         }
@@ -52,7 +56,11 @@ impl LcgRng {
             return 0;
         }
         self.hold = self.hold.wrapping_mul(214013).wrapping_add(2531011);
-        ((self.hold >> 16) % range as u32) as i32
+        let value = ((self.hold >> 16) % range as u32) as i32;
+        if self.trace {
+            rng_trace(self.count, range, value);
+        }
+        value
     }
 
     /// Stateless one-shot LCG step. C4Random.h:64-69.
@@ -145,6 +153,25 @@ impl rand_core::RngCore for LcgRng {
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
+
+/// Temp forensics: append draws to LC_RUST_RNG_TRACE (mirrors the C++
+/// C4Random.h probe; alignment by count/range/value).
+fn rng_trace(count: i32, range: i32, value: i32) {
+    use std::io::Write;
+    use std::sync::OnceLock;
+    static TRACE: OnceLock<Option<std::sync::Mutex<std::fs::File>>> = OnceLock::new();
+    let trace = TRACE.get_or_init(|| {
+        std::env::var("LC_RUST_RNG_TRACE")
+            .ok()
+            .and_then(|path| std::fs::File::create(path).ok())
+            .map(std::sync::Mutex::new)
+    });
+    if let Some(file) = trace {
+        if let Ok(mut file) = file.lock() {
+            let _ = writeln!(file, "{count} {range} {value}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -298,3 +325,5 @@ mod tests {
         }
     }
 }
+
+

@@ -2755,9 +2755,18 @@ pub(crate) fn build_map_pixel_classifier(
         let texture_exists =
             |name: &str| texture_names.iter().any(|t| t.eq_ignore_ascii_case(name));
 
+        // The C++ material-map order: each load PREPENDS new names
+        // (scenario loads first, global after — C4Material.cpp:263-299)
+        // → [global-uniques…, scenario…], scenario winning collisions.
         let ordered: Vec<&lc_resources::MaterialDefinition> = global_library
             .iter()
             .flat_map(|library| library.iter())
+            .filter(|definition| {
+                local_library
+                    .as_ref()
+                    .map(|local| local.get(definition.name()).is_none())
+                    .unwrap_or(true)
+            })
             .chain(local_library.iter().flat_map(|library| library.iter()))
             .collect();
 
@@ -3030,6 +3039,9 @@ fn load_legacy_landscape(
                     .ok()
                     .and_then(|value| value.trim().parse::<i32>().ok())
                     .unwrap_or(0);
+                if std::env::var("LC_DEBUG_MAP").is_ok() {
+                    eprintln!("RUST MAPSEED {map_seed}");
+                }
                 return classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, map_seed)
                     .map(Some);
             }

@@ -42,6 +42,30 @@ impl MaterialLibrary {
         Self::from_definitions(collected)
     }
 
+    /// C4MaterialMap::Load overload semantics (C4Material.cpp:263-299):
+    /// each load PREPENDS the materials whose names are new; earlier
+    /// loads win name collisions. `loads` in LOAD order (scenario-local
+    /// first, global after) yields [later-uniques…, …, earliest…] — the
+    /// C++ final map order (dynamic texmap slots depend on it).
+    pub fn from_overloaded_loads(loads: &[&MaterialLibrary]) -> Result<Self, MaterialError> {
+        let mut merged: Vec<MaterialDefinition> = Vec::new();
+        for load in loads {
+            let fresh: Vec<MaterialDefinition> = load
+                .iter()
+                .filter(|definition| {
+                    !merged.iter().any(|existing| {
+                        existing
+                            .name()
+                            .eq_ignore_ascii_case(definition.name())
+                    })
+                })
+                .cloned()
+                .collect();
+            merged.splice(0..0, fresh);
+        }
+        Self::from_definitions(merged)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &MaterialDefinition> {
         self.materials.iter()
     }

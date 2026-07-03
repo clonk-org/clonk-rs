@@ -1662,6 +1662,9 @@ fn get_material_val(args: &[Value]) -> Result<Value, RuntimeError> {
 /// object (with start/abort calls). Routed through the reentrancy seam so
 /// the target's SetAction host fn runs in the target's scope.
 fn object_set_action(args: &[Value]) -> Result<Value, RuntimeError> {
+    if std::env::var("LC_DEBUG_CHBM").is_ok() {
+        tracing::warn!(?args, "OSA ObjectSetAction");
+    }
     let Some(target) = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
         "ObjectSetAction",
@@ -6196,6 +6199,16 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
+    if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
+        let context = HOST_CONTEXT.with(|cell| {
+            cell.borrow().as_ref().and_then(|context| {
+                context
+                    .object_context()
+                    .map(|object| format!("{}", object.id().as_u64()))
+            })
+        });
+        tracing::warn!(?args, ?context, "RNDCALL");
+    }
     if args.len() > 1 {
         return Err(RuntimeError::new(
             "Random expects at most 1 argument: upper exclusive bound",
@@ -7842,6 +7855,9 @@ fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
+    if std::env::var("LC_DEBUG_CHBM").is_ok() {
+        tracing::warn!(?args, "OSA SetAction");
+    }
     if args.is_empty() {
         return Err(RuntimeError::new(
             "SetAction expects at least 1 argument: action name",

@@ -20583,6 +20583,15 @@ impl Engine {
     }
 
     /// Debug helper: raw grid byte at a pixel.
+    /// Debug helper: the resolved material NAME at a pixel.
+    pub fn debug_landscape_material_name(&self, x: i32, y: i32) -> Option<String> {
+        self.landscape
+            .as_ref()
+            .and_then(|landscape| landscape.material_at(x, y))
+            .and_then(|id| self.materials.get_by_id(id))
+            .map(|material| material.name().to_string())
+    }
+
     pub fn debug_landscape_byte(&self, x: i32, y: i32) -> Option<u8> {
         self.landscape
             .as_ref()
@@ -21259,34 +21268,69 @@ impl Engine {
         if radius <= 0 {
             return;
         }
+        let materials = self.materials.clone();
         let Some(landscape) = self.landscape.as_mut() else {
             return;
         };
         let mut removal_counts: HashMap<MaterialId, i32> = HashMap::new();
-        let width = landscape.width() as i32;
-        let radius_sq = i64::from(radius) * i64::from(radius);
-        for dx in -radius..=radius {
-            let column = center.x.saturating_add(dx);
-            if column < 0 || column >= width {
-                continue;
+        if landscape.pixel_grid().is_some() {
+            // C4Landscape::DigFree (C4Landscape.cpp:980-1001), including
+            // the single-pixel edge clears and C++'s reuse of the LAST
+            // row's line width for the bottom edge.
+            let mut line_width = 0;
+            for ycnt in -radius..radius {
+                let remaining = i64::from(radius) * i64::from(radius)
+                    - i64::from(ycnt) * i64::from(ycnt);
+                line_width = (remaining as f64).sqrt() as i32;
+                let line_y = center.y + ycnt;
+                let extend = i32::from(line_width == 0);
+                for xcnt in -line_width..line_width + extend {
+                    if let Some(material_id) =
+                        landscape.dig_free_pix(center.x + xcnt, line_y, &materials)
+                    {
+                        *removal_counts.entry(material_id).or_insert(0) += 1;
+                    }
+                }
+                landscape.dig_free_single_pix(center.x - line_width - 1, line_y, -1, 0, &materials);
+                landscape.dig_free_single_pix(
+                    center.x + line_width + extend,
+                    line_y,
+                    1,
+                    0,
+                    &materials,
+                );
             }
-            let dx_sq = i64::from(dx) * i64::from(dx);
-            if dx_sq > radius_sq {
-                continue;
+            landscape.dig_free_single_pix(center.x, center.y - radius - 1, 0, -1, &materials);
+            let extend = i32::from(line_width == 0);
+            for xcnt in -line_width..line_width + extend {
+                landscape.dig_free_single_pix(center.x + xcnt, center.y + radius, 0, 1, &materials);
             }
-            let remaining = radius_sq - dx_sq;
-            if remaining < 0 {
-                continue;
-            }
-            let vertical = (remaining as f64).sqrt().floor() as i32;
-            let target = center.y.saturating_add(vertical);
-            if let Some((material_id, removed)) =
-                Self::dig_column(&self.materials, landscape, column, target)
-            {
-                removal_counts
-                    .entry(material_id)
-                    .and_modify(|value| *value = value.saturating_add(removed))
-                    .or_insert(removed);
+        } else {
+            let width = landscape.width() as i32;
+            let radius_sq = i64::from(radius) * i64::from(radius);
+            for dx in -radius..=radius {
+                let column = center.x.saturating_add(dx);
+                if column < 0 || column >= width {
+                    continue;
+                }
+                let dx_sq = i64::from(dx) * i64::from(dx);
+                if dx_sq > radius_sq {
+                    continue;
+                }
+                let remaining = radius_sq - dx_sq;
+                if remaining < 0 {
+                    continue;
+                }
+                let vertical = (remaining as f64).sqrt().floor() as i32;
+                let target = center.y.saturating_add(vertical);
+                if let Some((material_id, removed)) =
+                    Self::dig_column(&materials, landscape, column, target)
+                {
+                    removal_counts
+                        .entry(material_id)
+                        .and_modify(|value| *value = value.saturating_add(removed))
+                        .or_insert(removed);
+                }
             }
         }
         self.apply_dig_removal_counts(removal_counts, requested, by_object);
@@ -21303,24 +21347,38 @@ impl Engine {
         if width <= 0 || height <= 0 {
             return;
         }
+        let materials = self.materials.clone();
         let Some(landscape) = self.landscape.as_mut() else {
             return;
         };
         let mut removal_counts: HashMap<MaterialId, i32> = HashMap::new();
-        let landscape_width = landscape.width() as i32;
-        let bottom = origin.y.saturating_add(height);
-        for offset in 0..width {
-            let column = origin.x.saturating_add(offset);
-            if column < 0 || column >= landscape_width {
-                continue;
+        if landscape.pixel_grid().is_some() {
+            // C4Landscape::DigFreeRect (C4Landscape.cpp:1003-1014):
+            // per-pixel DigFreePix; EVERY valid-material pixel counts
+            // toward the digger's material contents, dug free or not.
+            for cx in origin.x..origin.x.saturating_add(width) {
+                for cy in origin.y..origin.y.saturating_add(height) {
+                    if let Some(material_id) = landscape.dig_free_pix(cx, cy, &materials) {
+                        *removal_counts.entry(material_id).or_insert(0) += 1;
+                    }
+                }
             }
-            if let Some((material_id, removed)) =
-                Self::dig_column(&self.materials, landscape, column, bottom)
-            {
-                removal_counts
-                    .entry(material_id)
-                    .and_modify(|value| *value = value.saturating_add(removed))
-                    .or_insert(removed);
+        } else {
+            let landscape_width = landscape.width() as i32;
+            let bottom = origin.y.saturating_add(height);
+            for offset in 0..width {
+                let column = origin.x.saturating_add(offset);
+                if column < 0 || column >= landscape_width {
+                    continue;
+                }
+                if let Some((material_id, removed)) =
+                    Self::dig_column(&materials, landscape, column, bottom)
+                {
+                    removal_counts
+                        .entry(material_id)
+                        .and_modify(|value| *value = value.saturating_add(removed))
+                        .or_insert(removed);
+                }
             }
         }
         self.apply_dig_removal_counts(removal_counts, requested, by_object);
@@ -21333,17 +21391,32 @@ impl Engine {
         if width <= 0 || height <= 0 {
             return;
         }
+        let materials = self.materials.clone();
         let Some(landscape) = self.landscape.as_mut() else {
             return;
         };
-        let landscape_width = landscape.width() as i32;
-        let bottom = origin.y.saturating_add(height);
-        for offset in 0..width {
-            let column = origin.x.saturating_add(offset);
-            if column < 0 || column >= landscape_width {
-                continue;
+        if landscape.pixel_grid().is_some() {
+            // C4Landscape::ClearRect (C4Landscape.cpp:2184-2194):
+            // per-pixel ClearPix with NO diggable gate; each row spins
+            // the Rnd3 ring `if (Rnd3()) Rnd3();`.
+            for cy in origin.y..origin.y.saturating_add(height) {
+                for cx in origin.x..origin.x.saturating_add(width) {
+                    landscape.clear_pix(cx, cy);
+                }
+                if self.rng.rnd3() != 0 {
+                    self.rng.rnd3();
+                }
             }
-            let _ = Self::dig_column(&self.materials, landscape, column, bottom);
+        } else {
+            let landscape_width = landscape.width() as i32;
+            let bottom = origin.y.saturating_add(height);
+            for offset in 0..width {
+                let column = origin.x.saturating_add(offset);
+                if column < 0 || column >= landscape_width {
+                    continue;
+                }
+                let _ = Self::dig_column(&materials, landscape, column, bottom);
+            }
         }
     }
 

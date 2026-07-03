@@ -1771,17 +1771,46 @@ fn load_scenario_into_runtime(
     runtime.engine = Engine::with_seed(seed);
     // The lc-app boot sequence: materials, then the engine-global
     // System.c4g scripts, then the scenario (which adds its own System.c4g).
-    if let Some(material_root) = path
-        .ancestors()
-        .find(|ancestor| ancestor.join("Material.c4g").exists())
     {
-        let library = lc_resources::Group::open(material_root.join("Material.c4g"))
-            .map_err(|error| format!("failed to open Material.c4g: {error}"))
-            .and_then(|group| {
-                lc_resources::MaterialLibrary::from_group(&group)
-                    .map_err(|error| format!("failed to load material library: {error}"))
-            })?;
-        runtime.engine.configure_materials_from_library(&library);
+        // C4Game::InitMaterialTexture (C4Game.cpp:882-960): the
+        // scenario-local Material.c4g loads FIRST, the global one after
+        // when the local TexMap.txt says OverloadMaterials; each load
+        // prepends new names (C4Material.cpp:263-299).
+        let open_library = |root: &std::path::Path| {
+            lc_resources::Group::open(root.join("Material.c4g"))
+                .ok()
+                .and_then(|group| lc_resources::MaterialLibrary::from_group(&group).ok())
+        };
+        let local_root = path.join("Material.c4g").exists().then(|| path.to_path_buf());
+        let local = local_root.as_deref().and_then(open_library);
+        let overload_materials = local_root
+            .as_deref()
+            .map(|root| {
+                std::fs::read(root.join("Material.c4g").join("TexMap.txt"))
+                    .map(|bytes| {
+                        lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(
+                            &bytes,
+                        ))
+                        .overload_materials
+                    })
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+        let global = overload_materials
+            .then(|| {
+                path.ancestors()
+                    .skip(1)
+                    .find(|ancestor| ancestor.join("Material.c4g").exists())
+                    .and_then(open_library)
+            })
+            .flatten();
+        let loads: Vec<&lc_resources::MaterialLibrary> =
+            [local.as_ref(), global.as_ref()].into_iter().flatten().collect();
+        if !loads.is_empty() {
+            let merged = lc_resources::MaterialLibrary::from_overloaded_loads(&loads)
+                .map_err(|error| format!("failed to merge material libraries: {error}"))?;
+            runtime.engine.configure_materials_from_library(&merged);
+        }
     }
     if let Some(planet_root) = path
         .ancestors()
@@ -2340,6 +2369,9 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             // precedes and explains most downstream state diffs.
             {
                 let rng = runtime.engine.debug_rng_clone();
+                if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
+                    eprintln!("RNGMARK frame={frame} rust_count={} cpp_count={rng_count}", rng.count);
+                }
                 if (rng.hold != rng_hold || rng.count != rng_count)
                     && !runtime.rng_mismatch_reported
                 {
