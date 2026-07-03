@@ -7940,7 +7940,7 @@ impl ScenarioScript {
             args.push(build_scenario_state_value(snapshot));
             args.push(Value::Int(random));
         }
-        self.call_raw(
+        match self.call_raw(
             "Initialize",
             args,
             snapshot,
@@ -7953,7 +7953,13 @@ impl ScenarioScript {
             particle_defs,
             definition_scripts,
             definition_metadata,
-        )
+        ) {
+            Ok((batch, audio, rng, None)) => Ok((batch, audio, rng)),
+            // Strict wrappers surface the script error (fixtures assert
+            // on it); the partial batch is dropped like before.
+            Ok((_, _, _, Some(error))) => Err(error),
+            Err(error) => Err(error),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7983,7 +7989,7 @@ impl ScenarioScript {
         };
         args.push(Value::Int(truncated));
         args.push(Value::Int(random));
-        self.call_raw(
+        match self.call_raw(
             "Step",
             args,
             snapshot,
@@ -7996,7 +8002,13 @@ impl ScenarioScript {
             particle_defs,
             definition_scripts,
             definition_metadata,
-        )
+        ) {
+            Ok((batch, audio, rng, None)) => Ok((batch, audio, rng)),
+            // Strict wrappers surface the script error (fixtures assert
+            // on it); the partial batch is dropped like before.
+            Ok((_, _, _, Some(error))) => Err(error),
+            Err(error) => Err(error),
+        }
     }
 
     fn has_function(&self, function: &str) -> bool {
@@ -8018,7 +8030,7 @@ impl ScenarioScript {
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
-    ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
+    ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng, Option<EngineError>), EngineError> {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
@@ -8045,11 +8057,21 @@ impl ScenarioScript {
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
-        let result = result.map_err(|source| EngineError::Script {
-            definition: self.name.clone(),
-            function: function.to_string(),
-            source,
-        })?;
+        // C++ mutates live state as the script runs: an error only aborts
+        // the CONTINUATION — everything staged before it stands
+        // (C4AulExec fail-safe). The host-side batch folds regardless;
+        // the error rides along for the caller to log/propagate.
+        let (result, script_error) = match result {
+            Ok(value) => (value, None),
+            Err(source) => (
+                Value::Nil,
+                Some(EngineError::Script {
+                    definition: self.name.clone(),
+                    function: function.to_string(),
+                    source,
+                }),
+            ),
+        };
 
         let compat::EffectContextOutcome {
             object: host_object_effects,
@@ -8132,7 +8154,7 @@ impl ScenarioScript {
             batch.script_go = host_script_go;
         }
         let audio_state = audio_guard.finish();
-        Ok((batch, audio_state, rng))
+        Ok((batch, audio_state, rng, script_error))
     }
 
     /// Raw-value scenario call for engine-internal callbacks (mrfScript):
@@ -11621,7 +11643,7 @@ impl Engine {
             Some(_) => return Ok(()),
             None => unreachable!("scenario script must be present"),
         };
-        let (batch, audio_state, new_rng) = script.call_raw(
+        let (batch, audio_state, new_rng, script_error) = script.call_raw(
             function,
             args,
             &snapshot,
@@ -11637,8 +11659,14 @@ impl Engine {
         )?;
         self.rng = new_rng;
         self.audio_registry = audio_state;
+        // Partial side effects fold BEFORE the error surfaces: C++
+        // mutates live state as the script runs — GoldRush's Script1
+        // creates the intro Talker before any later line can fail.
         let _ = self.apply_scenario_batch(batch)?;
-        Ok(())
+        match script_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn check_game_over(&mut self) -> Result<(), EngineError> {
@@ -35170,7 +35198,53 @@ protected func Script1() { StartTheMovie(); }
         );
     }
 
-    // C4Aul mutates the LIVE object: a nested call's own-local write is
+    // `g_pIntroHorse->SetGait(3)` (M_Mov_Intro.c:19): an arrow call to a
+    // PRIVATE function on another object, with an argument. CR resolves
+    // it (C4AulExec object calls) and the argument arrives intact.
+    #[test]
+    fn arrow_call_to_private_function_passes_arguments() {
+        let horse_script = r#"#strict
+local iGot;
+private func SetGait(inGait) {
+    iGot = inGait;
+    return(1);
+}
+"#;
+        let rider_script = r#"#strict
+func Probe(pOther) {
+    pOther->SetGait(3);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let horse =
+            Definition::from_script("HRSE", "Horse", horse_script).expect("horse compiles");
+        engine.register_definition(horse).expect("horse registers");
+        let rider =
+            Definition::from_script("RIDR", "Rider", rider_script).expect("rider compiles");
+        engine.register_definition(rider).expect("rider registers");
+
+        let horse_id = engine
+            .spawn_object(SpawnConfig::new("HRSE").with_category(CATEGORY_OBJECT))
+            .expect("horse spawns");
+        let rider_id = engine
+            .spawn_object(SpawnConfig::new("RIDR").with_category(CATEGORY_OBJECT))
+            .expect("rider spawns");
+
+        let idx = engine.find_object_index(rider_id).expect("rider exists");
+        engine
+            .call_object_function(idx, "Probe", vec![Value::Object(horse_id.as_u64())])
+            .expect("Probe runs");
+
+        let horse_idx = engine.find_object_index(horse_id).expect("horse exists");
+        assert_eq!(
+            engine.objects[horse_idx].state.local_vars.get("iGot"),
+            Some(&Value::Int(3)),
+            "the arrow-call argument arrives in the private function"
+        );
+    }
+
+    // C4Aul mutates the LIVE object: a nested call's own-local write is    // C4Aul mutates the LIVE object: a nested call's own-local write is
     // visible to a DEEPER synchronous call on the same object within the
     // same outer call. The Talker's DoStartMovie sets `sMovName` and
     // ends with AddEffect("Movie", this(), 1, ...) whose synchronous
