@@ -3464,8 +3464,7 @@ impl Object {
                         layer.position.x + layer.shape_rect.x + layer.shape_rect.width + shape_x,
                     )
                 };
-                if let Some(bound) = target_bounds(&mut self.fixed_position.x, low, high) {
-                    *target_x = fixtoi(self.fixed_position.x);
+                if let Some(bound) = target_bounds(target_x, low, high) {
                     self.fixed_velocity.x = C4Fixed::ZERO;
                     self.state.velocity = self.velocity_pixels();
                     let cnat = if bound < 0 { CNAT_LEFT } else { CNAT_RIGHT };
@@ -3479,11 +3478,10 @@ impl Object {
         }
         let shape_x = movement.shape_rect.map(|shape| shape.x).unwrap_or(0);
         if let Some(bound) = target_bounds(
-            &mut self.fixed_position.x,
+            target_x,
             -shape_x,
             landscape.width() as i32 + shape_x,
         ) {
-            *target_x = fixtoi(self.fixed_position.x);
             self.fixed_velocity.x = C4Fixed::ZERO;
             self.state.velocity = self.velocity_pixels();
             let cnat = if bound < 0 { CNAT_LEFT } else { CNAT_RIGHT };
@@ -3515,8 +3513,7 @@ impl Object {
                         layer.position.y + layer.shape_rect.y + layer.shape_rect.height + shape_y,
                     )
                 };
-                if let Some(bound) = target_bounds(&mut self.fixed_position.y, low, high) {
-                    *target_y = fixtoi(self.fixed_position.y);
+                if let Some(bound) = target_bounds(target_y, low, high) {
                     self.fixed_velocity.y = C4Fixed::ZERO;
                     self.state.velocity = self.velocity_pixels();
                     let cnat = if bound < 0 { CNAT_TOP } else { CNAT_BOTTOM };
@@ -3525,18 +3522,16 @@ impl Object {
             }
         }
 
-        if movement.border_bound & C4D_BORDER_TOP != 0 && self.fixed_position.y < itofix(-shape_y) {
-            self.fixed_position.y = itofix(-shape_y);
-            *target_y = fixtoi(self.fixed_position.y);
+        if movement.border_bound & C4D_BORDER_TOP != 0
+            && target_bounds(target_y, -shape_y, i32::MAX).is_some()
+        {
             self.fixed_velocity.y = C4Fixed::ZERO;
             self.state.velocity = self.velocity_pixels();
             on_contact(self, CNAT_TOP)?;
         }
         if movement.border_bound & C4D_BORDER_BOTTOM != 0 {
             let bottom = landscape.estimated_height() + shape_y;
-            if self.fixed_position.y > itofix(bottom) {
-                self.fixed_position.y = itofix(bottom);
-                *target_y = fixtoi(self.fixed_position.y);
+            if target_bounds(target_y, i32::MIN, bottom).is_some() {
                 self.fixed_velocity.y = C4Fixed::ZERO;
                 self.state.velocity = self.velocity_pixels();
                 on_contact(self, CNAT_BOTTOM)?;
@@ -8922,9 +8917,12 @@ fn shape_attach(
     attached
 }
 
-fn target_bounds(target: &mut C4Fixed, low: i32, high: i32) -> Option<i32> {
-    let low = itofix(low);
-    let high = itofix(high);
+/// C4Object::TargetBounds (C4Movement.cpp:128-150): clamps the INT step
+/// target and zeroes the dir — fix_x/fix_y are NOT resynced, so an
+/// out-of-bounds object legitimately walks its int position back inside
+/// while the fixed coordinate keeps the outside value (the rider-at-the-
+/// map-edge x/fix split).
+fn target_bounds(target: &mut i32, low: i32, high: i32) -> Option<i32> {
     if *target < low {
         *target = low;
         Some(-1)
@@ -35394,7 +35392,9 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.position.x, 9);
         let idx = engine.find_object_index(id).expect("object exists");
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(9));
+        // TargetBounds clamps the INT step target only (C4Movement.cpp:
+        // 128-150) — fix_x keeps the momentum-advanced value.
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(13));
         assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
     }
 
@@ -35452,7 +35452,9 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         assert_eq!(object.position.x, 29);
 
         let idx = engine.find_object_index(mover_id).expect("object exists");
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(29));
+        // The fixed coordinate keeps the momentum-advanced value
+        // (TargetBounds clamps the INT target only).
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(33));
         assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
     }
 
@@ -35916,10 +35918,12 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         assert_eq!(bottom.position.y, 19);
 
         let top_idx = engine.find_object_index(top_id).expect("object exists");
-        assert_eq!(engine.objects[top_idx].fixed_position.y, itofix(1));
+        // TargetBounds clamps the INT step target only — both fixed
+        // coordinates keep their momentum-advanced values.
+        assert_eq!(engine.objects[top_idx].fixed_position.y, itofix(-3));
         assert_eq!(engine.objects[top_idx].fixed_velocity.y, C4Fixed::ZERO);
         let bottom_idx = engine.find_object_index(bottom_id).expect("object exists");
-        assert_eq!(engine.objects[bottom_idx].fixed_position.y, itofix(19));
+        assert_eq!(engine.objects[bottom_idx].fixed_position.y, itofix(23));
         assert_eq!(engine.objects[bottom_idx].fixed_velocity.y, C4Fixed::ZERO);
     }
 
