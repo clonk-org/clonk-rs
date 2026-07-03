@@ -49,11 +49,13 @@
   COACH-POST f22=19967) are mutually inconsistent with C4Object.cpp —
   towards(0,119276,109226)=109226 stands until frame end, and one
   DoMovement can cut at most 32768+19660+32768 (raw) so 109226→19967 is
-  unreachable; but 21933−1966=19967 (one wheel quantum), 21933−109226 =
-  −87293, and −87293−1966−109226 = −89259+19967... form a coherent ±
-  oscillation IF the horse's push txdir alternated sign — impossible
-  under a steady COMD_Right (txdir ≥ 0 with BoundBy clamp). Suspects to
-  probe on the C++ side: (a) the horse's ComDir/Action.Dir timeline at
+  unreachable; but the values close into an exact per-frame cycle
+  21933 −1966(wheel quantum)= 19967 −109226(push toward a txdir<−89259)=
+  −89259 +1966 = −87293 +109226(push toward +119276) = 21933 — i.e. the
+  cpp coach oscillated ±1.3px/f under a SIGN-ALTERNATING push txdir,
+  which is impossible under a steady COMD_Right (txdir ≥ 0 with the
+  BoundBy clamp) and impossible for COMD_Left at the rig's geometry
+  (b clamps to +10 → txdir=0). Suspects to probe on the C++ side: (a) the horse's ComDir/Action.Dir timeline at
   f19-f23 (ContactRight→TurnLeft flip?), (b) whether cpp #1455-1497 are
   really coach-1450 contents (numbering skew), (c) the coach's xdir
   logged INSIDE the first content's CopyMotion at f21, (d) cpp Push
