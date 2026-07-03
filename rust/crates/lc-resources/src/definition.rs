@@ -212,6 +212,9 @@ pub struct DefCore {
     pub rotateable: i32,
     pub border_bound: i32,
     pub upright_attach: u32,
+    /// RotatedSolidmasks (C4Def.cpp:414, default 0): solid masks stay put
+    /// while the object is rotated (C4Object.cpp:5655).
+    pub rotated_solid_masks: bool,
     /// NoStabilize (C4Def.cpp:402): opts out of the Stabilize upright snap.
     pub no_stabilize: bool,
     /// Timer= interval in frames (default 35, C4Def.cpp:298).
@@ -474,6 +477,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut rotateable: i32 = 0;
     let mut border_bound: i32 = 0;
     let mut upright_attach: u32 = 0;
+    // RotatedSolidmasks (C4Def.cpp:414, default 0).
+    let mut rotated_solid_masks = false;
     // NoStabilize (C4Def.cpp:402, default 0): opts out of C4Object::Stabilize.
     let mut no_stabilize = false;
     // Timer=/TimerCall= (C4Def.cpp:298-299): the per-object Def timer.
@@ -670,6 +675,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "uprightattach" => {
                 upright_attach = parse_i32(value).unwrap_or(0).max(0) as u32;
             }
+            "rotatedsolidmasks" => {
+                rotated_solid_masks = parse_bool(value);
+            }
             "nostabilize" => {
                 no_stabilize = parse_bool(value);
             }
@@ -754,6 +762,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         rotateable,
         border_bound,
         upright_attach,
+        rotated_solid_masks,
         no_stabilize,
         timer,
         timer_call,
@@ -2117,6 +2126,23 @@ Attach=1
 
         let defaulted = parse_def_core(b"[DefCore]\nid=JOLT\n").expect("defcore parsed");
         assert!(!defaulted.stretch_growth);
+    }
+
+    #[test]
+    fn parse_def_core_rotated_solidmasks_flag_like_cpp() {
+        // Mirrors src/C4Def.cpp:414: DefCore `RotatedSolidmasks` compiles
+        // with default 0; nonzero lets C4Object::UpdateSolidMask keep the
+        // mask while rotated (src/C4Object.cpp:5655).
+        let data = br#"
+            [DefCore]
+            id=ELEV
+            RotatedSolidmasks=1
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert!(parsed.rotated_solid_masks);
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=HUT0\n").expect("defcore parsed");
+        assert!(!defaulted.rotated_solid_masks);
     }
 
     #[test]
