@@ -1036,6 +1036,24 @@ impl Landscape {
         }
     }
 
+    /// `GBackIFT` (C4Wrappers.h:174-177): the pixel's IFT bit with the
+    /// GetPix border rules (border sky/MCVehic bytes carry no IFT).
+    pub fn is_ift_at(&self, x: i32, y: i32) -> bool {
+        if self.border_pixel(x, y).is_some() {
+            return false;
+        }
+        if let Some(grid) = &self.pixels {
+            return grid
+                .byte_at(x, y)
+                .map(|byte| byte & 0x80 != 0)
+                .unwrap_or(false);
+        }
+        self.tunnels
+            .get(&(x.max(0) as u32))
+            .map(|ranges| ranges.iter().any(|&(top, bottom)| y >= top && y <= bottom))
+            .unwrap_or(false)
+    }
+
     /// C4Landscape::ScenarioInit border-open assignment
     /// (C4Landscape.cpp:67-71) from the Scenario.txt keys.
     pub fn set_border_open(&mut self, left_open: i32, right_open: i32, top_open: bool, bottom_open: bool) {

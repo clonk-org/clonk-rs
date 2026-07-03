@@ -23,6 +23,7 @@ mod effect;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 pub mod fixtures;
+mod init_placement;
 mod input;
 mod landscape;
 mod map_creator;
@@ -5289,6 +5290,10 @@ pub struct Definition {
     constructable: bool,
     construction_offset: i32,
     stretch_growth: bool,
+    /// `Placement=` (C4Def.cpp:312): 0 surface, 1 liquid, 2 air.
+    placement: i32,
+    /// `Growth=` (C4Def.cpp:358): PlaceVegetation's random-growth gate.
+    growth: i32,
     basement: i32,
     rotateable: i32,
     border_bound: i32,
@@ -5437,6 +5442,8 @@ impl Definition {
             constructable: false,
             construction_offset: 0,
             stretch_growth: false,
+            placement: 0,
+            growth: 0,
             basement: 0,
             rotateable: 0,
             border_bound: 0,
@@ -5596,6 +5603,8 @@ impl Definition {
         definition.set_constructable(resource.core.constructable);
         definition.set_construction_offset(resource.core.con_size_off);
         definition.set_stretch_growth(resource.core.stretch_growth);
+        definition.set_placement(resource.core.placement);
+        definition.set_growth(resource.core.growth);
         definition.set_basement(resource.core.basement);
         definition.set_rotateable(resource.core.rotateable);
         definition.set_border_bound(resource.core.border_bound);
@@ -6232,6 +6241,22 @@ impl Definition {
 
     pub fn set_stretch_growth(&mut self, stretch_growth: bool) {
         self.stretch_growth = stretch_growth;
+    }
+
+    pub fn placement(&self) -> i32 {
+        self.placement
+    }
+
+    pub fn set_placement(&mut self, placement: i32) {
+        self.placement = placement;
+    }
+
+    pub fn growth(&self) -> i32 {
+        self.growth
+    }
+
+    pub fn set_growth(&mut self, growth: i32) {
+        self.growth = growth;
     }
 
     pub fn basement(&self) -> i32 {
@@ -21312,6 +21337,8 @@ impl Engine {
         definition.set_constructable(core.constructable);
         definition.set_construction_offset(core.con_size_off);
         definition.set_stretch_growth(core.stretch_growth);
+        definition.set_placement(core.placement);
+        definition.set_growth(core.growth);
         definition.set_basement(core.basement);
         definition.set_rotateable(core.rotateable);
         definition.set_border_bound(core.border_bound);

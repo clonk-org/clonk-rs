@@ -33,11 +33,23 @@ struct ScenarioExpectations {
     landscape_source: &'static str,
 }
 
+/// C4IDList entries with count > 0 — zero-weight entries never place
+/// anything in C++ (ListExpandValids repeats each id `count` times,
+/// C4Game.cpp:2929-2947), so they carry no expectation.
 fn parse_id_list(raw: &str) -> Vec<String> {
     raw.split(';')
-        .filter_map(|token| token.trim().split('=').next())
-        .filter(|id| !id.is_empty())
-        .map(|id| id.to_ascii_uppercase())
+        .filter_map(|token| {
+            let mut parts = token.trim().splitn(2, '=');
+            let id = parts.next()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let count: i32 = parts
+                .next()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(0);
+            (count > 0).then(|| id.to_ascii_uppercase())
+        })
         .collect()
 }
 
@@ -120,7 +132,15 @@ fn expectations_for(path: &Path) -> Result<ScenarioExpectations> {
             section_value(&sections, "environment", "objects").unwrap_or(""),
         ),
         goals: parse_id_list(section_value(&sections, "game", "goals").unwrap_or("")),
-        rules: parse_id_list(section_value(&sections, "game", "rules").unwrap_or("")),
+        // InitRules places max(count, 1) per listed rule (C4Game.cpp:4004)
+        // — zero-weight rule entries still place one.
+        rules: section_value(&sections, "game", "rules")
+            .unwrap_or("")
+            .split(';')
+            .filter_map(|token| token.trim().split('=').next())
+            .filter(|id| !id.is_empty())
+            .map(|id| id.to_ascii_uppercase())
+            .collect(),
         landscape_source,
     })
 }
@@ -135,6 +155,10 @@ struct WorldReport {
     materials: Vec<(String, u64)>,
     sky: bool,
     objects_by_def: BTreeMap<String, usize>,
+    /// Registered definition ids — an expectation on an id the loader
+    /// never registered is a C++-consistent miss (C4Id2Def -> nullptr),
+    /// not a placement gap.
+    known_defs: std::collections::BTreeSet<String>,
     error: Option<String>,
 }
 
@@ -218,6 +242,7 @@ fn measure_world(
             .entry(object.definition_id.clone())
             .or_default() += 1;
     }
+    report.known_defs = engine.definition_ids().map(str::to_string).collect();
     Ok(report)
 }
 
@@ -242,9 +267,15 @@ fn flags_for(expect: &ScenarioExpectations, world: &WorldReport) -> Vec<String> 
     if world.objects_by_def.is_empty() {
         flags.push("no-objects".to_string());
     }
+    // A placement expectation only stands when at least one listed id is
+    // a REGISTERED definition (C4Id2Def semantics); ids absent from the
+    // loaded packs fail in C++ too.
     let has_any = |ids: &[String]| {
-        ids.iter()
-            .any(|id| world.objects_by_def.get(id).copied().unwrap_or(0) > 0)
+        let known: Vec<&String> = ids.iter().filter(|id| world.known_defs.contains(*id)).collect();
+        known.is_empty()
+            || known
+                .iter()
+                .any(|id| world.objects_by_def.get(*id).copied().unwrap_or(0) > 0)
     };
     if !expect.no_initialize {
         if !expect.vegetation.is_empty()

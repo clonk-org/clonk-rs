@@ -196,6 +196,34 @@ pub struct Scenario {
     /// present only for legacy scenario loads — `apply` replays the
     /// synced-RNG init draws so the ledger matches C++ from frame 0.
     pub(crate) weather_init: Option<LegacyWeatherInit>,
+    /// The C4Game::InitGame environment placements (C4Game.cpp:2493-2503);
+    /// present only for legacy scenario loads.
+    pub(crate) init_placement: Option<LegacyInitPlacement>,
+}
+
+/// The C4Game::InitGame environment-placement inputs (C4Game.cpp:
+/// 2493-2503): Scenario.txt `[Landscape] Vegetation=/InEarth=`,
+/// `[Animals]`, `[Environment] Objects=` and `[Game] Goals=/Rules=`,
+/// plus the NoInitialize gate and the MEarth material name.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LegacyInitPlacement {
+    pub no_initialize: bool,
+    pub vegetation: Vec<(String, i32)>,
+    pub vegetation_level: LegacyC4SVal,
+    pub in_earth: Vec<(String, i32)>,
+    pub in_earth_level: LegacyC4SVal,
+    pub animals: Vec<(String, i32)>,
+    pub nests: Vec<(String, i32)>,
+    pub environment: Vec<(String, i32)>,
+    pub goals: Vec<(String, i32)>,
+    pub rules: Vec<(String, i32)>,
+    pub earth_material: String,
+}
+
+impl Default for LegacyC4SVal {
+    fn default() -> Self {
+        Self::new(0, 0, 0, 100)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -461,6 +489,19 @@ impl Scenario {
                 .ok()
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
             map_zoom: manifest.core.landscape.map_zoom,
+            init_placement: Some(LegacyInitPlacement {
+                no_initialize: manifest.core.head.no_initialize,
+                vegetation: id_list_pairs(&manifest.core.landscape.vegetation),
+                vegetation_level: manifest.core.landscape.vegetation_level,
+                in_earth: id_list_pairs(&manifest.core.landscape.in_earth),
+                in_earth_level: manifest.core.landscape.in_earth_level,
+                animals: id_list_pairs(&manifest.core.animals.free_life),
+                nests: id_list_pairs(&manifest.core.animals.earth_nest),
+                environment: id_list_pairs(&manifest.core.environment.objects),
+                goals: id_list_pairs(&manifest.core.game.goals),
+                rules: id_list_pairs(&manifest.core.game.rules),
+                earth_material: manifest.core.landscape.material.clone(),
+            }),
         })
     }
 
@@ -555,11 +596,9 @@ impl Scenario {
         }
 
         engine.set_environment(self.environment.unwrap_or_default());
-        if let Some(weather_init) = self.weather_init {
-            // C4Weather::Init runs at the END of C4Game::InitGame after
-            // Landscape.ScenarioInit's Gravity draw.
-            engine.apply_weather_init(&weather_init);
-        }
+        // Weather.Init's draws happen AFTER the definitions, the loaded
+        // objects and the InitVegetation→InitGoals placements — see the
+        // block below the spawn loop (C4Game.cpp:2496-2507).
         if let Some(sky) = &self.sky {
             engine.set_sky(sky.settings.clone());
         } else {
@@ -785,6 +824,25 @@ impl Scenario {
                     }
                 }
             }
+        }
+
+        // C4Game::InitGame environment placements (C4Game.cpp:2493-2503):
+        // InitVegetation/InitInEarth/InitAnimals/InitEnvironment/InitRules/
+        // InitGoals run after the loaded objects, gated on
+        // `!C4S.Head.NoInitialize && LandscapeLoaded`, drawing from the
+        // synced ledger BETWEEN the Gravity draw and Weather.Init's.
+        if let Some(placement) = self
+            .init_placement
+            .as_ref()
+            .filter(|placement| !placement.no_initialize && self.landscape.is_some())
+        {
+            engine.run_legacy_init_placements(placement);
+        }
+        if let Some(weather_init) = self.weather_init {
+            // C4Weather::Init runs at the END of C4Game::InitGame after
+            // Landscape.ScenarioInit's Gravity draw and the placements
+            // (C4Game.cpp:2507).
+            engine.apply_weather_init(&weather_init);
         }
 
         if let Some(script) = &self.script {
@@ -1114,6 +1172,7 @@ impl Scenario {
             player_starts: PlayerStart::slots_from_legacy(&[]),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
+            init_placement: None,
         })
     }
 }
@@ -1557,6 +1616,14 @@ fn parse_bool_field(field: &str, raw: &str) -> Result<bool, ScenarioError> {
             "invalid boolean for `{field}`: {err}"
         ))),
     }
+}
+
+/// C4IDList entries as (id, count) pairs — a bare id compiles count 0
+/// (mkDefaultAdapt(count, 0), C4IDList.cpp:252).
+fn id_list_pairs(list: &LegacyIdList) -> Vec<(String, i32)> {
+    list.iter()
+        .map(|entry| (entry.id.clone(), entry.count.unwrap_or(0)))
+        .collect()
 }
 
 fn parse_legacy_id_list(field: &str, raw: &str) -> Result<LegacyIdList, ScenarioError> {
@@ -2428,9 +2495,15 @@ fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, Scen
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let section = current_section
-            .clone()
-            .unwrap_or_else(|| "head".to_string());
+        // Values before the first section header are ROOT-level in the
+        // C++ INI tree (StdCompilerINIRead::CreateNameTree,
+        // StdCompiler.cpp:794-860) — invisible to the [Head] naming.
+        // Shipped content depends on it: Tournament.c4s's mangled `Head]`
+        // line makes C++ compile a DEFAULT head (NoInitialize=0), so its
+        // goal/rule/vegetation placements DO run.
+        let Some(section) = current_section.clone() else {
+            continue;
+        };
         sections
             .entry(section)
             .or_default()
@@ -6780,6 +6853,7 @@ global func Step(state, frame, random)
             player_starts: PlayerStart::slots_from_legacy(&[]),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
+            init_placement: None,
         };
 
         let mut engine = Engine::with_seed(11);
@@ -6874,6 +6948,7 @@ global func Step(state, frame, random)
             player_starts: PlayerStart::slots_from_legacy(&[]),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
+            init_placement: None,
         };
 
         let mut engine = Engine::with_seed(7);
@@ -9315,6 +9390,160 @@ global func Step(state, frame, random)
         assert_eq!(engine.objects[idx].state.rotation, 90);
     }
 
+    // C4Game::InitGame environment placements (C4Game.cpp:2493-2503):
+    // scenarios without NoInitialize place [Landscape] Vegetation= on
+    // surface soil (PlaceVegetation, C4Game.cpp:2962-3007), InEarth= into
+    // earth pixels (PlaceInEarth, C4Game.cpp:2949-2960) and create the
+    // [Environment] Objects= / [Game] Goals=/Rules= objects
+    // (C4Game.cpp:3988-4018) — all through the synced ledger between the
+    // Gravity draw and Weather.Init's.
+    #[test]
+    fn init_placements_populate_vegetation_inearth_and_rule_objects() {
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        for (folder, core) in [
+            (
+                "Tree.c4d",
+                // Growth admits the random-con draw (C4Game.cpp:2974).
+                "[DefCore]\nid=TREE\nName=Tree\nCategory=2\nWidth=8\nHeight=12\n\
+                 Offset=-4,-6\nVertices=1\nVertexX=0\nVertexY=0\nGrowth=4\nPlacement=0\n",
+            ),
+            (
+                "Rock.c4d",
+                "[DefCore]\nid=ROCK\nName=Rock\nCategory=16\nWidth=6\nHeight=6\nOffset=-3,-3\n",
+            ),
+            (
+                "Goal.c4d",
+                "[DefCore]\nid=GOAL\nName=Goal\nCategory=4096\n",
+            ),
+            (
+                "Rule.c4d",
+                "[DefCore]\nid=RULE\nName=Rule\nCategory=8192\n",
+            ),
+            (
+                "Envr.c4d",
+                "[DefCore]\nid=ENVR\nName=Envr\nCategory=16384\n",
+            ),
+        ] {
+            let def_dir = defs_root.join(folder);
+            std::fs::create_dir_all(&def_dir).expect("definition dir");
+            std::fs::write(def_dir.join("DefCore.txt"), core).expect("write defcore");
+        }
+
+        let scenario_dir = dir.path().join("Placements.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Placements\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Game]\nGoals=GOAL=1;\nRules=RULE=1;\n\n\
+             [Landscape]\nMapZoom=10\nMaterial=Earth\n\
+             Vegetation=TREE=1;\nVegetationLevel=100,0\n\
+             InEarth=ROCK=1;\nInEarthLevel=100,0\n\n\
+             [Environment]\nObjects=ENVR=1;\n",
+        )
+        .expect("write scenario core");
+        // 20x20 map, zoom 10 → 200x200 world: sky rows 0-9, earth 10-19
+        // (surface at world y=100, inside PlaceVegetation's [50, hgt-50]).
+        let mut rows: Vec<Vec<u8>> = Vec::new();
+        for y in 0..20 {
+            rows.push(vec![if y < 10 { 0u8 } else { 30 }; 20]);
+        }
+        let row_refs: Vec<&[u8]> = rows.iter().map(|row| row.as_slice()).collect();
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&row_refs),
+        )
+        .expect("write map");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
+        )
+        .expect("write earth");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
+        )
+        .expect("materials parse");
+        let mut engine = Engine::with_seed(7);
+        engine.configure_materials_from_library(&library);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let count = |id: &str| {
+            engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == id)
+                .count()
+        };
+        // amt = (GBackWdt/50) * VegLevel/100 = 4 tries, 20 attempts each
+        // over an all-soil surface: placements land.
+        assert!(count("TREE") >= 1, "vegetation placed on surface soil");
+        // amt = (200*200/5000) * 100/100 = 8 in-earth tries.
+        assert!(count("ROCK") >= 1, "in-earth objects placed");
+        assert_eq!(count("GOAL"), 1, "InitGoals creates the goal object");
+        assert_eq!(count("RULE"), 1, "InitRules creates the rule object");
+        assert_eq!(
+            count("ENVR"),
+            1,
+            "InitEnvironment creates the environment object"
+        );
+
+        // Vegetation sits at the earth surface (y=100) + the 3+5 soil
+        // probe offsets; in-earth rocks live inside the ground.
+        let tree = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "TREE")
+            .expect("tree exists");
+        assert!(
+            (90..=130).contains(&tree.state.position.y),
+            "tree y {} anchors at the surface",
+            tree.state.position.y
+        );
+        let rock = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "ROCK")
+            .expect("rock exists");
+        assert!(
+            rock.state.position.y >= 100,
+            "rock y {} is inside the earth",
+            rock.state.position.y
+        );
+
+        // NoInitialize=1 skips the whole block (C4Game.cpp:2493).
+        let scenario_txt = std::fs::read_to_string(scenario_dir.join("Scenario.txt")).unwrap();
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            scenario_txt.replace("Title=Placements", "Title=Placements\nNoInitialize=1"),
+        )
+        .expect("rewrite scenario core");
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario reloads");
+        let mut engine = Engine::with_seed(7);
+        engine.configure_materials_from_library(&library);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let count = |id: &str| {
+            engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == id)
+                .count()
+        };
+        assert_eq!(count("TREE"), 0, "NoInitialize skips vegetation");
+        assert_eq!(count("GOAL"), 0, "NoInitialize skips goals");
+    }
+
     // Objects.txt Mobile/FixX/FixY/FixR/RDir ingestion
     // (C4Object.cpp:2762-2772): loaded objects keep the serialized Mobile
     // verbatim (default false) with the exact C4Fixed sub-pixel
@@ -10028,6 +10257,12 @@ global func Step(state, frame, random)
         // Landscape.ScenarioInit's Gravity draw precedes the weather
         // evaluates (C4Landscape.cpp:66); this scenario's Gravity=120.
         LegacyC4SVal::new(120, 0, 10, 200).evaluate(&mut replay);
+        // No NoInitialize: InitVegetation/InitInEarth ALWAYS evaluate
+        // their levels — one draw each even with empty id lists
+        // (C4Game.cpp:3069,3084) — between the Gravity draw and
+        // Weather.Init's.
+        LegacyC4SVal::new(50, 30, 0, 100).evaluate(&mut replay);
+        LegacyC4SVal::new(50, 0, 0, 100).evaluate(&mut replay);
         LegacyC4SVal::new(30, 10, 0, 100).evaluate(&mut replay);
         LegacyC4SVal::new(45, 0, 0, 100).evaluate(&mut replay);
         LegacyC4SVal::new(60, 10, 0, 100).evaluate(&mut replay);

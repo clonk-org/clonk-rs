@@ -229,6 +229,12 @@ pub struct DefCore {
     pub constructable: bool,
     pub con_size_off: i32,
     pub stretch_growth: bool,
+    /// `Placement=` (C4Def.cpp:312): 0 surface, 1 liquid, 2 air —
+    /// PlaceVegetation/PlaceAnimal dispatch on it (C4Game.cpp:2978,3034).
+    pub placement: i32,
+    /// `Growth=` (C4Def.cpp:358): growth speed; non-zero admits the
+    /// random-growth draw in PlaceVegetation (C4Game.cpp:2974).
+    pub growth: i32,
     pub basement: i32,
     pub rotateable: i32,
     pub border_bound: i32,
@@ -494,6 +500,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut constructable = false;
     let mut con_size_off: i32 = 0;
     let mut stretch_growth = false;
+    let mut placement: i32 = 0;
+    let mut growth: i32 = 0;
     let mut basement: i32 = 0;
     let mut rotateable: i32 = 0;
     let mut border_bound: i32 = 0;
@@ -684,6 +692,12 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "stretchgrowth" => {
                 stretch_growth = parse_bool(value);
             }
+            "placement" => {
+                placement = parse_i32(value).unwrap_or(0);
+            }
+            "growth" => {
+                growth = parse_i32(value).unwrap_or(0);
+            }
             "basement" => {
                 basement = parse_i32(value).unwrap_or(0).max(0);
             }
@@ -779,6 +793,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         constructable,
         con_size_off,
         stretch_growth,
+        placement,
+        growth,
         basement,
         rotateable,
         border_bound,
