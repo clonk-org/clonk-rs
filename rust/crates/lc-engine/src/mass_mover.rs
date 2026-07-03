@@ -413,7 +413,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::landscape::Landscape;
-    use crate::MaterialSet;
+    use crate::{MaterialInteractionEvent, MaterialSet};
     use lc_resources::MaterialLibrary;
 
     fn materials(source: &str) -> MaterialSet {
@@ -889,6 +889,277 @@ mod tests {
             remaining, None,
             "the truthy script return consumed the goo (ExtractMaterial)"
         );
+    }
+
+    /// Grid world: 5x5, water byte 20, earth byte 30 (DigFree).
+    fn grid_engine(bytes: Vec<u8>) -> Engine {
+        let materials = materials(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Instable=1
+            MaxSlide=0
+
+            [Material Earth]
+            Name=Earth
+            Density=50
+            DigFree=1
+            "#,
+        );
+        let mut densities = vec![0i32; 128];
+        densities[20] = 25;
+        densities[30] = 50;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[20] = Some("Water".into());
+        names[30] = Some("Earth".into());
+        let grid =
+            crate::landscape::PixelGrid::new(5, 5, bytes, densities, names, vec![None; 128]);
+        let mut landscape = Landscape::new(5, vec![5, 5, 5, 5, 5]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        let mut engine = Engine::with_seed(2);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine
+    }
+
+    #[test]
+    fn dig_free_pix_fires_check_instability_range() {
+        // C4Landscape::DigFreePix (C4Landscape.cpp:936-944): the trailing
+        // CheckInstabilityRange fires at the probed pixel — digging earth
+        // NEXT to water re-arms the water via the (tx-1,ty) fallback probe.
+        let mut bytes = vec![0u8; 25];
+        bytes[2 * 5 + 1] = 20; // water at (1,2)
+        bytes[2 * 5 + 2] = 30; // earth at (2,2)
+        let mut engine = grid_engine(bytes);
+        let water = engine.materials.id_of("Water").expect("water");
+        let dug = engine.dig_free_pix(2, 2);
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(2, 2)),
+            None,
+            "DigFree earth cleared"
+        );
+        assert_eq!(
+            dug.and_then(|id| engine.materials.get_by_id(id)).map(|m| m.density()),
+            Some(50),
+            "DigFreePix returns the dug material"
+        );
+        let mover = engine.mass_movers.slot(1).expect("side probe armed the water");
+        assert_eq!((mover.mat, mover.x, mover.y), (water, 1, 2));
+    }
+
+    #[test]
+    fn dig_free_pix_probes_even_undiggable_pixels() {
+        // C4Landscape::DigFreePix (C4Landscape.cpp:942): the instability
+        // probe runs even when nothing clears — probing sky next to water
+        // still creates the mover.
+        let mut bytes = vec![0u8; 25];
+        bytes[2 * 5 + 1] = 20; // water at (1,2); (2,2) stays sky
+        let mut engine = grid_engine(bytes);
+        let dug = engine.dig_free_pix(2, 2);
+        assert_eq!(dug, None);
+        let mover = engine.mass_movers.slot(1).expect("probe fired on a sky dig");
+        assert_eq!((mover.x, mover.y), (1, 2));
+    }
+
+    #[test]
+    fn mass_move_poof_reaction_extracts_and_fires_instability() {
+        // mrfPoof on meeMassMove (C4Material.cpp:669-670) runs a REAL
+        // ExtractMaterial — whose CheckInstabilityRange (C4Landscape.cpp:
+        // 1154) re-arms neighbouring instable material.
+        let materials = materials(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Instable=1
+            MaxSlide=0
+            Extinguisher=1
+
+            [Material Lava]
+            Name=Lava
+            Density=50
+            Incindiary=1
+            "#,
+        );
+        let mut densities = vec![0i32; 128];
+        densities[20] = 25;
+        densities[30] = 50;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[20] = Some("Water".into());
+        names[30] = Some("Lava".into());
+        let mut bytes = vec![0u8; 25];
+        bytes[3 * 5 + 2] = 30; // lava at (2,3)
+        bytes[3 * 5 + 1] = 20; // water at (1,3)
+        let grid =
+            crate::landscape::PixelGrid::new(5, 5, bytes, densities, names, vec![None; 128]);
+        let mut landscape = Landscape::new(5, vec![5, 5, 5, 5, 5]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        let water = materials.id_of("Water").expect("water");
+        let mut engine = Engine::with_seed(2);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+
+        let result = engine.execute_mass_move_reaction(water, 2, 2, 2, 3);
+        assert!(result.consumes_material(), "water+lava poofs");
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(2, 3)),
+            None,
+            "the lava pixel was extracted"
+        );
+        let mover = engine.mass_movers.slot(1).expect("instability armed the water");
+        assert_eq!((mover.mat, mover.x, mover.y), (water, 1, 3));
+    }
+
+    #[test]
+    fn pxs_move_corrode_clears_in_place_and_fires_instability() {
+        // mrfCorrode on meePXSMove (C4Material.cpp:731-733): ClearBackPix
+        // (= ClearPix, C4Wrappers.h:92) clears the landscape pixel IN
+        // PLACE — no FindMatTop — then CheckInstabilityRange fires at that
+        // exact pixel.
+        let materials = materials(
+            r#"
+            [Material Acid]
+            Name=Acid
+            Density=25
+            Instable=1
+            MaxSlide=0
+            Corrosive=100
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Instable=1
+            MaxSlide=0
+
+            [Material Rock]
+            Name=Rock
+            Density=80
+            Corrode=100
+            "#,
+        );
+        let mut densities = vec![0i32; 128];
+        densities[20] = 25; // acid
+        densities[25] = 25; // water
+        densities[30] = 80; // rock
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[20] = Some("Acid".into());
+        names[25] = Some("Water".into());
+        names[30] = Some("Rock".into());
+        let mut bytes = vec![0u8; 25];
+        bytes[2 * 5 + 2] = 30; // rock at (2,2) — above the corroded pixel
+        bytes[3 * 5 + 2] = 30; // rock at (2,3) — the corroded pixel
+        bytes[3 * 5 + 1] = 25; // water at (1,3)
+        let grid =
+            crate::landscape::PixelGrid::new(5, 5, bytes, densities, names, vec![None; 128]);
+        let mut landscape = Landscape::new(5, vec![5, 5, 5, 5, 5]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        let acid = materials.id_of("Acid").expect("acid");
+        let water = materials.id_of("Water").expect("water");
+        let rock = materials.id_of("Rock").expect("rock");
+        let mut engine = Engine::with_seed(2);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+
+        let reaction = engine.materials.reaction_for_event(
+            Some(acid),
+            Some(rock),
+            MaterialInteractionEvent::PxsMove,
+        );
+        let mut pixel = crate::pxs::Pxs {
+            mat: acid,
+            x: crate::math::itofix(2),
+            y: crate::math::itofix(1),
+            xdir: crate::math::C4Fixed::ZERO,
+            ydir: crate::math::C4Fixed::ZERO,
+        };
+        let (mut x, mut y) = (2, 1);
+        let mut pos_changed = false;
+        let died = engine.execute_pxs_reaction(
+            reaction,
+            &mut x,
+            &mut y,
+            2,
+            3,
+            &mut pixel,
+            Some(rock),
+            MaterialInteractionEvent::PxsMove,
+            &mut pos_changed,
+        );
+        assert!(died, "corrosion at 100/100 always consumes the PXS");
+        let at = |engine: &Engine, x: i32, y: i32| {
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(x, y))
+        };
+        assert_eq!(at(&engine, 2, 3), None, "the corroded pixel cleared IN PLACE");
+        assert_eq!(
+            at(&engine, 2, 2),
+            Some(rock),
+            "no FindMatTop: the rock above the corroded pixel survives"
+        );
+        let mover = engine.mass_movers.slot(1).expect("instability armed the water");
+        assert_eq!((mover.mat, mover.x, mover.y), (water, 1, 3));
+    }
+
+    #[test]
+    fn blast_circle_probes_instability_across_the_crater() {
+        // C4Landscape::BlastFree (C4Landscape.cpp:1056-1063): every pixel
+        // of the blast circle runs BlastFreePix, which ends in
+        // CheckInstabilityRange (:975) even when nothing was blasted free
+        // — a blast INTO water arms movers.
+        let materials = water_materials();
+        let water = materials.id_of("Water").expect("water material");
+        let mut landscape = Landscape::flat(5, 10);
+        landscape.set_default_liquid_material(Some(water));
+        landscape.set_liquid_column(
+            1,
+            vec![crate::LiquidSegment::with_material(2, 2, Some(water))],
+        );
+        let mut engine = engine_with(materials, landscape);
+        assert_eq!(engine.mass_movers.live_movers(), 0);
+        let _ = engine.blast_circle(crate::Vector2::new(2, 2), 1, None);
+        let mover = engine.mass_movers.slot(1).expect("blast probe armed the water");
+        assert_eq!((mover.mat, mover.x, mover.y), (water, 1, 2));
+    }
+
+    #[test]
+    fn shake_free_probes_instability_across_the_circle() {
+        // C4Landscape::ShakeFree (C4Landscape.cpp:1017-1028): every pixel
+        // runs ShakeFreePix, which ends in CheckInstabilityRange (:955)
+        // unconditionally.
+        let materials = water_materials();
+        let water = materials.id_of("Water").expect("water material");
+        let mut landscape = Landscape::flat(5, 10);
+        landscape.set_default_liquid_material(Some(water));
+        landscape.set_liquid_column(
+            1,
+            vec![crate::LiquidSegment::with_material(2, 2, Some(water))],
+        );
+        let mut engine = engine_with(materials, landscape);
+        engine.execute_shake_circle_operation(crate::Vector2::new(2, 2), 1);
+        let mover = engine.mass_movers.slot(1).expect("shake probe armed the water");
+        assert_eq!((mover.mat, mover.x, mover.y), (water, 1, 2));
+    }
+
+    #[test]
+    fn game_start_synchronize_consolidates_the_mover_set() {
+        // C4Game::Synchronize calls MassMover.Synchronize()
+        // (C4Game.cpp:3700) = Consolidate (C4MassMover.cpp:249-252).
+        let mut engine = water_drop_engine();
+        let water = engine.materials.id_of("Water").expect("water");
+        engine.mass_movers.fill_slot(4, MassMover { mat: water, x: 1, y: 0 });
+        engine.game_start_synchronize();
+        assert_eq!(engine.mass_movers.create_ptr(), 0);
+        assert_eq!(engine.mass_movers.slot(0).map(|m| (m.x, m.y)), Some((1, 0)));
+        assert_eq!(engine.mass_movers.slot(4), None);
     }
 
     #[test]

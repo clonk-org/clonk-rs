@@ -11265,6 +11265,22 @@ impl Engine {
         if !result.shift_candidates.is_empty() {
             self.apply_blast_shifts(radius, &result);
         }
+        // C4Landscape::BlastFree's per-pixel BlastFreePix ends in
+        // CheckInstabilityRange (C4Landscape.cpp:959-978) for EVERY pixel
+        // of the blast circle (:1056-1063), before the material-count
+        // evaluation (:1065-1079). The column blast above cannot interleave
+        // the probes with the clears, so they run as a post-pass in the
+        // C++ scan order (residual interleaving gap until blasting is
+        // per-pixel).
+        for ycnt in -radius..=radius {
+            let remaining =
+                i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
+            let lwdt = (remaining as f64).sqrt() as i32;
+            let dpy = center.y + ycnt;
+            for xcnt in -lwdt..lwdt + i32::from(lwdt == 0) {
+                self.check_instability_range(center.x + xcnt, dpy);
+            }
+        }
         if !result.removed_by_material.is_empty() {
             self.process_blast_reactions(center, controller, &result);
         }
@@ -21058,6 +21074,9 @@ impl Engine {
         }
         self.rng = LcgRng::seed_from_u64(self.random_seed);
         self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
+        // MassMover.Synchronize() (C4Game.cpp:3700): consolidate the slot
+        // set and reset CreatePtr (C4MassMover.cpp:249-252).
+        self.mass_movers.synchronize();
         // C4Game::Synchronize's tail: TransferZones.Synchronize()
         // broadcasts ~UpdateTransferZone to EVERY object AFTER the
         // FixRandom re-fix (C4Game.cpp:3695,3710; C4ObjectList.cpp:
@@ -21665,20 +21684,30 @@ impl Engine {
         else {
             return;
         };
-        {
-            let landscape = self.landscape.as_mut().expect("grid mode checked");
-            for cy in 0..bake.height {
-                for cx in 0..bake.width {
-                    let saved = bake.buffer[(cy * bake.width + cx) as usize];
-                    if saved == vehicle {
-                        continue;
-                    }
-                    let lx = bake.x + cx;
-                    let ly = bake.y + cy;
-                    if landscape.grid_byte_at(lx, ly) == Some(vehicle) {
+        for cy in 0..bake.height {
+            for cx in 0..bake.width {
+                let saved = bake.buffer[(cy * bake.width + cx) as usize];
+                if saved == vehicle {
+                    continue;
+                }
+                let lx = bake.x + cx;
+                let ly = bake.y + cy;
+                if self
+                    .landscape
+                    .as_ref()
+                    .and_then(|landscape| landscape.grid_byte_at(lx, ly))
+                    == Some(vehicle)
+                {
+                    if let Some(landscape) = self.landscape.as_mut() {
                         landscape.grid_write_byte(lx, ly, saved);
                     }
                 }
+                // Instability probe per mask-used pixel — C++ Remove runs
+                // it whether or not the restore write happened
+                // (C4SolidMask.cpp:244-257); every rust removal path
+                // mirrors a C++ Remove(fCauseInstability=true) caller
+                // (C4Object.cpp:5652/5667, C4Movement.cpp:123/545).
+                self.check_instability_range(lx, ly);
             }
         }
         // Re-put overlapping masks: doubled MCVehic pixels were just
@@ -22269,6 +22298,38 @@ impl Engine {
         }
     }
 
+    /// C4Landscape::DigFreePix (C4Landscape.cpp:936-944): clear DigFree
+    /// materials, then CheckInstabilityRange at the probed pixel — ALWAYS,
+    /// even when nothing clears. Returns the material like the C++ (grid
+    /// worlds only; `None` without a plane).
+    fn dig_free_pix(&mut self, tx: i32, ty: i32) -> Option<MaterialId> {
+        let mat = {
+            let materials = &self.materials;
+            self.landscape
+                .as_mut()
+                .and_then(|landscape| landscape.dig_free_pix(tx, ty, materials))
+        };
+        self.check_instability_range(tx, ty);
+        mat
+    }
+
+    /// C4Landscape::DigFreeSinglePix (C4Landscape.h:236-240): DigFreePix
+    /// (with its instability probe) only when the pixel is denser than its
+    /// neighbour toward (dx, dy).
+    fn dig_free_single_pix(&mut self, x: i32, y: i32, dx: i32, dy: i32) {
+        let denser = self
+            .landscape
+            .as_ref()
+            .map(|landscape| {
+                landscape.density_at(x, y, &self.materials)
+                    > landscape.density_at(x + dx, y + dy, &self.materials)
+            })
+            .unwrap_or(false);
+        if denser {
+            let _ = self.dig_free_pix(x, y);
+        }
+    }
+
     fn execute_dig_circle_operation(
         &mut self,
         center: Vector2,
@@ -22279,8 +22340,7 @@ impl Engine {
         if radius <= 0 {
             return;
         }
-        let materials = self.materials.clone();
-        let Some(landscape) = self.landscape.as_mut() else {
+        let Some(landscape) = self.landscape.as_ref() else {
             return;
         };
         let mut removal_counts: HashMap<MaterialId, i32> = HashMap::new();
@@ -22296,27 +22356,23 @@ impl Engine {
                 let line_y = center.y + ycnt;
                 let extend = i32::from(line_width == 0);
                 for xcnt in -line_width..line_width + extend {
-                    if let Some(material_id) =
-                        landscape.dig_free_pix(center.x + xcnt, line_y, &materials)
-                    {
+                    if let Some(material_id) = self.dig_free_pix(center.x + xcnt, line_y) {
                         *removal_counts.entry(material_id).or_insert(0) += 1;
                     }
                 }
-                landscape.dig_free_single_pix(center.x - line_width - 1, line_y, -1, 0, &materials);
-                landscape.dig_free_single_pix(
-                    center.x + line_width + extend,
-                    line_y,
-                    1,
-                    0,
-                    &materials,
-                );
+                self.dig_free_single_pix(center.x - line_width - 1, line_y, -1, 0);
+                self.dig_free_single_pix(center.x + line_width + extend, line_y, 1, 0);
             }
-            landscape.dig_free_single_pix(center.x, center.y - radius - 1, 0, -1, &materials);
+            self.dig_free_single_pix(center.x, center.y - radius - 1, 0, -1);
             let extend = i32::from(line_width == 0);
             for xcnt in -line_width..line_width + extend {
-                landscape.dig_free_single_pix(center.x + xcnt, center.y + radius, 0, 1, &materials);
+                self.dig_free_single_pix(center.x + xcnt, center.y + radius, 0, 1);
             }
         } else {
+            let materials = self.materials.clone();
+            let Some(landscape) = self.landscape.as_mut() else {
+                return;
+            };
             let width = landscape.width() as i32;
             let radius_sq = i64::from(radius) * i64::from(radius);
             for dx in -radius..=radius {
@@ -22358,8 +22414,7 @@ impl Engine {
         if width <= 0 || height <= 0 {
             return;
         }
-        let materials = self.materials.clone();
-        let Some(landscape) = self.landscape.as_mut() else {
+        let Some(landscape) = self.landscape.as_ref() else {
             return;
         };
         let mut removal_counts: HashMap<MaterialId, i32> = HashMap::new();
@@ -22369,12 +22424,16 @@ impl Engine {
             // toward the digger's material contents, dug free or not.
             for cx in origin.x..origin.x.saturating_add(width) {
                 for cy in origin.y..origin.y.saturating_add(height) {
-                    if let Some(material_id) = landscape.dig_free_pix(cx, cy, &materials) {
+                    if let Some(material_id) = self.dig_free_pix(cx, cy) {
                         *removal_counts.entry(material_id).or_insert(0) += 1;
                     }
                 }
             }
         } else {
+            let materials = self.materials.clone();
+            let Some(landscape) = self.landscape.as_mut() else {
+                return;
+            };
             let landscape_width = landscape.width() as i32;
             let bottom = origin.y.saturating_add(height);
             for offset in 0..width {
@@ -22534,6 +22593,20 @@ impl Engine {
                     C4Fixed::ZERO,
                     C4Fixed::ZERO,
                 );
+            }
+        }
+        // C4Landscape::ShakeFree's per-pixel ShakeFreePix ends in
+        // CheckInstabilityRange (C4Landscape.cpp:946-956) for EVERY pixel
+        // of the circle, walked top row LAST (`ycnt = rad - 1; ycnt >=
+        // -rad`, :1021-1027). The column shake above cannot interleave the
+        // probes, so they run as a post-pass in the C++ scan order.
+        for ycnt in (-radius..radius).rev() {
+            let remaining =
+                i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
+            let lwdt = (remaining as f64).sqrt() as i32;
+            let dpy = center.y + ycnt;
+            for xcnt in -lwdt..lwdt + i32::from(lwdt == 0) {
+                self.check_instability_range(center.x + xcnt, dpy);
             }
         }
     }
@@ -23066,10 +23139,10 @@ impl Engine {
                     // either splash or slide prevented interaction
                     return false;
                 }
-                // Always kill both landscape and PXS mat
-                if let Some(landscape) = self.landscape.as_mut() {
-                    let _ = landscape.extract_material_at(ls_x, ls_y);
-                }
+                // Always kill both landscape and PXS mat — a real
+                // ExtractMaterial (C4Material.cpp:682) including its
+                // CheckInstabilityRange (C4Landscape.cpp:1154).
+                let _ = self.extract_material(ls_x, ls_y);
                 if self.rng.rnd3() == 0 {
                     self.spawn_smoke(*x, *y, 3);
                 }
@@ -23108,9 +23181,21 @@ impl Engine {
                     &mut self.rng,
                 );
                 if corroded {
-                    if let Some(landscape) = self.landscape.as_mut() {
-                        let _ = landscape.extract_material_at(ls_x, ls_y);
+                    // ClearBackPix (= ClearPix) IN PLACE, then
+                    // CheckInstabilityRange at that exact pixel
+                    // (C4Material.cpp:731-733).
+                    let cleared = self
+                        .landscape
+                        .as_mut()
+                        .map(|landscape| landscape.clear_pix(ls_x, ls_y))
+                        .unwrap_or(false);
+                    if !cleared {
+                        // column-model fixture worlds keep the column removal
+                        if let Some(landscape) = self.landscape.as_mut() {
+                            let _ = landscape.extract_material_at(ls_x, ls_y);
+                        }
                     }
+                    self.check_instability_range(ls_x, ls_y);
                     // effect draws (C4Material.cpp:734-735): 1/5 smoke with a
                     // Random(3) size component, then the 1/20 sound draw
                     if self.rng.random(5) == 0 {
@@ -23304,18 +23389,28 @@ impl Engine {
                 _ => material::MaterialReactionExecution::Unhandled,
             };
         }
-        let Some(landscape) = self.landscape.as_mut() else {
-            return material::MaterialReactionExecution::Unhandled;
+        let mut instability_probes = Vec::new();
+        let result = {
+            let Some(landscape) = self.landscape.as_mut() else {
+                return material::MaterialReactionExecution::Unhandled;
+            };
+            self.materials.execute_mass_move_reaction(
+                landscape,
+                pxs_material,
+                pxs_x,
+                pxs_y,
+                landscape_x,
+                landscape_y,
+                &mut self.rng,
+                &mut instability_probes,
+            )
         };
-        self.materials.execute_mass_move_reaction(
-            landscape,
-            pxs_material,
-            pxs_x,
-            pxs_y,
-            landscape_x,
-            landscape_y,
-            &mut self.rng,
-        )
+        // The CheckInstabilityRange half of each ExtractMaterial the
+        // reaction ran (C4Landscape.cpp:1154).
+        for (probe_x, probe_y) in instability_probes {
+            self.check_instability_range(probe_x, probe_y);
+        }
+        result
     }
 
     /// Runs a `Type=Script` material reaction function (mrfScript,
@@ -24491,11 +24586,9 @@ impl Engine {
             if landscape.is_liquid_at(tx, ty) && !landscape.is_semi_solid_at(tx, sy) {
                 let r2 = -self.rng.random(200);
                 let r1 = self.rng.random(151) - 75;
-                let materials = self.materials.clone();
-                let extracted = self
-                    .landscape
-                    .as_mut()
-                    .and_then(|landscape| landscape.extract_material_with(tx, ty, &materials));
+                // Full ExtractMaterial (C4Effect.cpp:825) including the
+                // CheckInstabilityRange half (C4Landscape.cpp:1154).
+                let extracted = self.extract_material(tx, ty);
                 if let Some(material) = extracted {
                     self.pxs_system.create(
                         material,
@@ -39154,6 +39247,79 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             .flat_map(|y| (0..width).map(move |x| (x, y)))
             .filter(|&(x, y)| landscape.grid_byte_at(x, y) == Some(vehicle))
             .collect()
+    }
+
+    #[test]
+    fn solid_mask_removal_fires_instability_on_restored_pixels() {
+        // C4SolidMask::Remove with fCauseInstability (C4SolidMask.cpp:
+        // 255-257): every restored mask pixel gets a CheckInstabilityRange —
+        // water freed from under a vehicle mask immediately re-arms its
+        // mass mover. All rust removal paths mirror C++ Remove(true, ...)
+        // callers (C4Object.cpp:5652/5667, C4Movement.cpp:123/545).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Instable=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+
+        let densities = vec![0, 100, 100, 25];
+        let names = vec![
+            None,
+            Some("Earth".into()),
+            Some("Vehicle".into()),
+            Some("Water".into()),
+        ];
+        let mut bytes = vec![0u8; 400];
+        bytes[10 * 20 + 10] = 3; // water at (10,10)
+        let grid = landscape::PixelGrid::new(20, 20, bytes, densities, names, vec![None; 4]);
+        let mut landscape = Landscape::new(20, vec![0; 20]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+
+        let mut definition = simple_definition("Bar");
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, 0, 3, 1)));
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 3, 1, 0, 0)));
+
+        let mut engine = Engine::with_seed(7);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Bar").with_position(Vector2::new(10, 10)))
+            .expect("bar spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].state.position = Vector2::new(10, 10);
+        engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
+        engine.update_solid_mask(idx);
+        assert!(
+            vehicle_pixels(&engine).contains(&(10, 10)),
+            "the mask covers the water pixel"
+        );
+        assert_eq!(engine.mass_movers.live_movers(), 0);
+
+        engine.remove_solid_mask(idx);
+
+        let landscape = engine.landscape().expect("landscape set");
+        assert_eq!(
+            landscape.material_at(10, 10),
+            Some(water),
+            "the water pixel restored from the mask buffer"
+        );
+        assert!(
+            engine.mass_movers.live_movers() >= 1,
+            "the restored water pixel re-armed a mass mover"
+        );
     }
 
     #[test]
