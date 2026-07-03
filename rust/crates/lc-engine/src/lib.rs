@@ -15688,11 +15688,6 @@ impl Engine {
                         } else {
                             true
                         };
-                        if std::env::var("LC_DEBUG_SCHED").is_ok()
-                            && event.effect.name == "IntScheduleCall"
-                        {
-                            tracing::warn!(?timer_result, timer_kill, number = event.effect.number, "SCHEDKILL");
-                        }
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Stopped(reason) => dispatch_definition.call_effect_stop(
@@ -23428,10 +23423,11 @@ impl Engine {
             if landscape.is_liquid_at(tx, ty) && !landscape.is_semi_solid_at(tx, sy) {
                 let r2 = -self.rng.random(200);
                 let r1 = self.rng.random(151) - 75;
+                let materials = self.materials.clone();
                 let extracted = self
                     .landscape
                     .as_mut()
-                    .and_then(|landscape| landscape.extract_material_at(tx, ty));
+                    .and_then(|landscape| landscape.extract_material_with(tx, ty, &materials));
                 if let Some(material) = extracted {
                     self.pxs_system.create(
                         material,

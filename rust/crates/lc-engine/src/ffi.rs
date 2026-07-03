@@ -1592,7 +1592,13 @@ fn runtime_snapshot_mismatch(
         problems.push("global effects mismatch".into());
     }
 
-    if expected.particles != actual.particles {
+    // Particles are NOT C++ sync state (C4ControlSyncCheck hashes frame/
+    // control/rng/player data only; C4Particle uses SafeRandom) — the
+    // strict equality only ever passed while both sides were empty.
+    // Opt back in with LC_RUST_ENGINE_COMPARE_PARTICLES=1.
+    if std::env::var("LC_RUST_ENGINE_COMPARE_PARTICLES").is_ok()
+        && expected.particles != actual.particles
+    {
         problems.push(format!(
             "particle state mismatch (expected {} entries, got {})",
             expected.particles.len(),

@@ -1764,6 +1764,78 @@ impl Landscape {
         }
     }
 
+    /// C4Landscape::FindMatTop (C4Landscape.cpp:1118-1146): slide the
+    /// point up along same-material pixels (within the material's
+    /// MaxSlide) to the column top — extraction always takes the
+    /// SURFACE pixel, leaving the probed spot wet.
+    fn find_mat_top(
+        &self,
+        material: MaterialId,
+        mut x: i32,
+        mut y: i32,
+        materials: &MaterialSet,
+    ) -> (i32, i32) {
+        let max_slide = materials
+            .get_by_id(material)
+            .map(|entry| entry.max_slide())
+            .unwrap_or(0);
+        let mat_at = |x: i32, y: i32| self.material_at(x, y) == Some(material);
+        loop {
+            let mut left = true;
+            let mut right = true;
+            let mut slide = 0;
+            let mut cslide = 0;
+            while cslide <= max_slide && (left || right) {
+                if left {
+                    if !mat_at(x - cslide, y) {
+                        left = false;
+                    } else if mat_at(x - cslide, y - 1) {
+                        slide = 1;
+                        break;
+                    }
+                }
+                if right {
+                    if !mat_at(x + cslide, y) {
+                        right = false;
+                    } else if mat_at(x + cslide, y - 1) {
+                        slide = 2;
+                        break;
+                    }
+                }
+                cslide += 1;
+            }
+            match slide {
+                1 => {
+                    x -= cslide;
+                    y -= 1;
+                }
+                2 => {
+                    x += cslide;
+                    y -= 1;
+                }
+                _ => break,
+            }
+        }
+        (x, y)
+    }
+
+    /// C4Landscape::ExtractMaterial (C4Landscape.cpp:1148-1156) with a
+    /// materials set for the MaxSlide lookup.
+    pub fn extract_material_with(
+        &mut self,
+        x: i32,
+        y: i32,
+        materials: &MaterialSet,
+    ) -> Option<MaterialId> {
+        if self.pixels.is_some() {
+            let material = self.material_at(x, y)?;
+            let (top_x, top_y) = self.find_mat_top(material, x, y, materials);
+            self.clear_pix(top_x, top_y);
+            return Some(material);
+        }
+        self.extract_material_at(x, y)
+    }
+
     pub fn extract_material_at(&mut self, x: i32, y: i32) -> Option<MaterialId> {
         if self.is_liquid_at(x, y) {
             self.remove_liquid_at(x, y)

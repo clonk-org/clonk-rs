@@ -7,16 +7,22 @@
 
 ## Current status
 
-- **Live parity through frame 9 (2026-07-03).** Frame-1 epic complete
-  (393→0); the frame-2..9 classes fell same-day (DFA_SWIM out-of-liquid
-  exit + unattached exit frame, PhaseCall post-advance phase, phase-wrap
-  fix resync, full C4Object::ContactAction port, GetBreath). First
-  divergence now at **frame 10**: the CHBM connect beam's Connecting()
-  EndCall removes it in rust because the SYNTHESIZED LANDSCAPE diverges
-  from C++'s ChunkOZoom output (the horse falls off a road C++ has;
-  ponds lack water — the pond columns read tunnel-over-solid). ACTIVE
-  EPIC: exact map-zoom parity — dump the C++ Surface8 bytes via a
-  bridge probe and pixel-diff against the rust plane.
+- **Live parity through frame 16 (2026-07-03, pinned seed).** The
+  frame-1 epic (393→0) and every wall from frame 2 to 16 fell in one
+  arc: swim exits, ContactAction, target-preserving SetAction, the
+  material overload chain, per-pixel digging, effect numbering +
+  global-aware effect callbacks, Recruitment/GetPortrait, Splash/
+  BubbleOut with FindMatTop extraction. Current wall: **frame 17**,
+  ~10 objects (an animal Jump-vs-Walk class at x≈4118 plus subpix
+  echoes) — deep-gameplay butterfly, next forensic target.
+  Debug: pin runs with `LC_PIN_SEED=424242` (C4GameParameters.cpp,
+  env-gated) so C++ runs are reproducible; get the map seed from
+  `LC_DEBUG_MAP=1` (rust prints `RUST MAPSEED n`); replay headless with
+  `LC_RUST_ENGINE_MAP_SEED=n`. Landscape dumps: `LC_DUMP_LANDSCAPE`
+  (bridge), `LC_RUST_ENGINE_DUMP_LANDSCAPE` (runtime),
+  `LC_XTASK_DUMP_LANDSCAPE` (xtask). RNG ledger traces:
+  `LC_RNG_TRACE=<file>` (C++ temp probe in C4Random.h, re-add when
+  needed) + `LC_RUST_RNG_TRACE=<file>` (committed, ledger-gated).
 - The two original foundational breaks (C4Fixed positions, ChaCha RNG) are
   long fixed: positions/velocities are 16.16 `C4Fixed`, `Random()` is the C++
   LCG with a shared ledger, and the join/init draw sequences are
@@ -120,8 +126,12 @@
   matrix) is not ported; padding/nil rules cover real content.
 - mrfScript material reactions resolve against the scenario script (C++ uses
   the global engine).
-- ChunkOZoom map synthesis is exercised headless-only (live imports the C++
-  landscape).
+- The comparator skips particle-state equality (C4Particle is
+  SafeRandom presentation, absent from C4ControlSyncCheck); opt back in
+  with `LC_RUST_ENGINE_COMPARE_PARTICLES=1`.
+- Same-seed landscape planes match C++ at 99.66% — the remaining 0.34%
+  is C4SolidMask::Put's MCVehic bake-in (rust overlays masks instead of
+  writing pixels; movement combines them at the density probes).
 
 ## Determinism-critical OPEN gaps
 
@@ -163,6 +173,12 @@
   `~/Library/Preferences/legacyclonk.config`.
 - lc-app sim-tick script errors still exit the app (event loop) — needs the
   same fail-safe treatment the engine has.
+- FLNT `Hit` script errors headless (`script error in Hit of FLNT`) —
+  surfaced once flints actually land after the AI/schedule fixes; needs
+  the inner error dug out (likely a missing host fn).
+- The headless xtask world skips the player join: GoldRush intro-driven
+  state (cavalry recruitment draws, coach splash) reproduces only with
+  the live pinned harness.
 
 ## Changelog
 
