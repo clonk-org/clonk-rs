@@ -59,7 +59,7 @@ pub use control::{
     COM_MENU_SELECT, COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET,
     COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
 };
-pub use effect::EffectState;
+pub use effect::{EffectState, EffectVarValue};
 pub use input::PlayerInputState;
 pub use landscape::{
     BlastResult, CollisionResolution, Landscape, LandscapeCommand, LandscapeError, LiquidColumn,

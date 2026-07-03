@@ -639,6 +639,145 @@ global func Step(state, frame, random) { return nil; }
     }
 
     #[test]
+    fn goldrush_style_control_chain_runs_50_ticks_without_errors() -> Result<(), EngineError> {
+        // The GoldRush TRPR/COWB regression, headless: the crew clonk runs
+        // the VERBATIM CLNK control chain (Clonk.c4d/Script.c:195-241,
+        // 860-875) — int returns, Control2Effect, EffectCall by number —
+        // while an armed item answers Fx<Name>Control* on its command
+        // target (FnEffectCall, C4Script.cpp:5589-5601). Dig press/release,
+        // throw and jump (Up) must never error; C++ plays this content
+        // without a single script warning.
+        let clonk_script = r#"
+#strict
+protected func ControlDig()
+{
+  if (Control2Effect("ControlDig")) return(1);
+  return(0);
+}
+protected func ControlDigReleased()
+{
+  if (Control2Effect("ControlDigReleased")) return(1);
+  return(0);
+}
+protected func ControlThrow()
+{
+  if (Control2Effect("ControlThrow")) return(1);
+  return(0);
+}
+private func Control2Effect(string szControl)
+{
+  var i = GetEffectCount(0, this()), iEffect;
+  var res;
+  while (i--)
+  {
+    iEffect = GetEffect("*Control*", this(), i);
+    if ( GetEffect(0, this(), iEffect, 1) )
+      res += EffectCall(this(), iEffect, szControl);
+  }
+  return(res);
+}
+"#;
+        let gun_script = r#"
+#strict
+public func Arm()
+{
+  AddEffect("GunControl", FindObject(TRPR), 100, 0, this());
+  return(1);
+}
+public func FxGunControlControlDig(pTarget, iNumber)
+{
+  EffectVar(0, pTarget, iNumber) = EffectVar(0, pTarget, iNumber) + 1;
+  return(1);
+}
+public func FxGunControlControlDigReleased(pTarget, iNumber)
+{
+  EffectVar(0, pTarget, iNumber) = EffectVar(0, pTarget, iNumber) + 1;
+  return(1);
+}
+public func FxGunControlControlThrow(pTarget, iNumber)
+{
+  EffectVar(0, pTarget, iNumber) = EffectVar(0, pTarget, iNumber) + 1;
+  return(1);
+}
+"#;
+        let mut clonk = Definition::from_script("TRPR", "Trapper", clonk_script)
+            .expect("clonk script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        clonk.configure_actions(Some("Idle".to_string()), actions);
+        clonk.set_movement_profile(MovementProfile::default());
+        let gun = Definition::from_script("GUNX", "Gun", gun_script).expect("gun script compiles");
+
+        let mut engine = Engine::new();
+        engine.register_definition(clonk)?;
+        engine.register_definition(gun)?;
+        engine.register_player(PlayerConfig::new(1, "Test"))?;
+
+        let crew = engine.spawn_object(
+            SpawnConfig::new("TRPR")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_action(ActionState::new("Idle")),
+        )?;
+        let gun_id = engine.spawn_object(SpawnConfig::new("GUNX").with_owner(1))?;
+        engine.select_crew(1, vec![crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+        assert!(engine.execute_context_menu(gun_id, "Arm")?);
+
+        let mut dispatcher = InputDispatcher::new();
+        let events: &[(u64, ControlEvent)] = &[
+            (
+                5,
+                ControlEvent::Command {
+                    command: ControlCommand::Dig,
+                    kind: CommandKind::Press,
+                },
+            ),
+            (
+                10,
+                ControlEvent::Command {
+                    command: ControlCommand::Dig,
+                    kind: CommandKind::Release,
+                },
+            ),
+            (
+                15,
+                ControlEvent::Command {
+                    command: ControlCommand::Throw,
+                    kind: CommandKind::Press,
+                },
+            ),
+            (20, ControlEvent::Press(ControlButton::Up)),
+            (25, ControlEvent::Release(ControlButton::Up)),
+        ];
+
+        for tick in 0..50u64 {
+            for (when, event) in events {
+                if *when == tick {
+                    dispatcher.handle_event(&mut engine, 1, *event)?;
+                }
+            }
+            engine.tick()?;
+        }
+
+        let snapshot = engine.object_snapshot(crew).expect("crew snapshot");
+        let effect = snapshot
+            .effects
+            .iter()
+            .find(|effect| effect.name == "GunControl")
+            .expect("control effect still installed");
+        assert_eq!(
+            effect.vars.first(),
+            Some(&lc_engine::EffectVarValue::Int(3)),
+            "dig press/release and throw all reached the Fx callbacks"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn command_events_update_actions_via_control_scripts() -> Result<(), EngineError> {
         let script = r#"
 global func Initialize(state, random) { return nil; }
