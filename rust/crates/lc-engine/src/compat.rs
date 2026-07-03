@@ -3821,6 +3821,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
     script.register_host_function("GetController", get_controller);
+    script.register_host_function("SetController", set_controller);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetOCF", get_ocf);
@@ -9786,8 +9787,7 @@ fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
 // ── C4FindObject / C4SortObject condition trees (C4FindObject.{h,cpp}) ──────
 
 /// C4FO_* constants (C4FindObject.h:27-50) as a parsed condition tree.
-/// Known divergences: `Controller` compares the owner (the engine has no
-/// separate controller); `Layer` is unmodeled on host objects (never
+/// Known divergences: `Layer` is unmodeled on host objects (never
 /// matches); shape tests use the vertices bounding box.
 #[derive(Debug, Clone)]
 enum FindCondition {
@@ -10065,7 +10065,8 @@ impl FindCondition {
             FindCondition::Container(container) => object.container() == *container,
             FindCondition::AnyContainer => object.container().is_some(),
             FindCondition::Owner(owner) => object.owner() == *owner,
-            FindCondition::Controller(controller) => object.owner() == *controller,
+            // C4FindObjectController::Check (C4FindObject.cpp:628-631).
+            FindCondition::Controller(controller) => object.controller() == *controller,
             // C4FindObjectFunc::Check (C4FindObject.cpp:653-662): no
             // overload visible to the object's def → silently false; the
             // result converts with raw C4Value truthiness, not getBool.
@@ -14337,6 +14338,67 @@ fn get_controller(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnSetController (C4Script.cpp:1322-1331): NO_OWNER always passes, any
+/// other value must be a valid player; foreign targets are written via the
+/// nested-call seam like RemoveObject.
+fn set_controller(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(RuntimeError::new(
+            "SetController expects 1 or 2 arguments: controller and optional target",
+        ));
+    }
+
+    let new_controller = value_to_i32(&args[0], "SetController", "controller")?;
+    let target_id = args
+        .get(1)
+        .map(|arg| parse_object_reference_argument(arg, "SetController", "target"))
+        .transpose()?
+        .flatten();
+
+    let (valid_player, active) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref();
+        (
+            context
+                .map(|context| context.player_state(new_controller).is_some())
+                .unwrap_or(false),
+            context
+                .and_then(|context| context.object_context().map(|object| object.id())),
+        )
+    });
+    // validate player (C4Script.cpp:1325)
+    if new_controller != OWNER_NONE && !valid_player {
+        return Ok(Value::Bool(false));
+    }
+
+    if let Some(target) = target_id {
+        if Some(target) != active {
+            return match call_world_object_function(
+                target,
+                "SetController",
+                &[Value::Int(new_controller)],
+            ) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = match borrow.as_mut() {
+            Some(context) => context,
+            None => return Ok(Value::Bool(false)),
+        };
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+        object.set_controller(new_controller);
+        Ok(Value::Bool(true))
+    })
+}
+
 fn get_alive(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -17020,6 +17082,7 @@ mod tests {
         "SetComDir",
         "SetCommand",
         "SetComponent",
+        "SetController",
         "SetCrewEnabled",
         "SetDir",
         "SetEntrance",

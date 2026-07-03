@@ -2165,6 +2165,12 @@ impl ObjectState {
         }
         if let Some(owner) = delta.owner {
             self.owner = owner;
+            // SetOwner "automatically updates controller"
+            // (C4Object.cpp:5499-5500); an explicit SetController in the
+            // same batch still wins below.
+            self.controller = delta.controller.unwrap_or(owner);
+        } else if let Some(controller) = delta.controller {
+            self.controller = controller;
         }
         if let Some(category) = delta.category {
             self.category = category;
@@ -2248,6 +2254,9 @@ struct ObjectDelta {
     action: Option<ActionUpdate>,
     status: Option<ObjectStatus>,
     owner: Option<i32>,
+    /// FnSetController (C4Script.cpp:1322-1331) / SetOwner's automatic
+    /// controller update (C4Object.cpp:5499-5500).
+    controller: Option<i32>,
     category: Option<i32>,
     own_mass: Option<i32>,
     crew_member: Option<bool>,
@@ -2309,6 +2318,9 @@ impl ObjectDelta {
         }
         if let Some(owner) = update.owner {
             self.owner = Some(owner);
+        }
+        if let Some(controller) = update.controller {
+            self.controller = Some(controller);
         }
         if let Some(category) = update.category {
             self.category = Some(category);
@@ -2384,6 +2396,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             action: update.action,
             status: update.status,
             owner: update.owner,
+            controller: update.controller,
             category: update.category,
             crew_member: update.crew_member,
             crew_disabled: update.crew_disabled,
@@ -2650,6 +2663,7 @@ impl ObjectUpdate {
             && self.action.is_none()
             && self.status.is_none()
             && self.owner.is_none()
+            && self.controller.is_none()
             && self.category.is_none()
             && self.crew_member.is_none()
             && self.alive.is_none()
@@ -34545,6 +34559,78 @@ func Trigger() {
             .expect("bandit exists");
         assert_eq!(bandit.state.owner, OWNER_NONE, "owner stays NO_OWNER");
         assert_eq!(bandit.state.controller, 2, "controller traces the cause");
+    }
+
+    // FnSetController (C4Script.cpp:1322-1331): NO_OWNER always passes,
+    // any other value must be a valid player, and foreign targets are
+    // written directly (the BlastObjects shockwave marks flung
+    // projectiles with the causing player, Explode.c:116).
+    #[test]
+    fn set_controller_validates_player_and_writes_foreign_targets() {
+        let caller_script = r#"#strict
+local iSelf, iInvalid, iForeign, iCleared;
+func Trigger(object pOther) {
+    iInvalid = SetController(9);
+    iSelf = SetController(1);
+    iForeign = SetController(1, pOther);
+    iCleared = SetController(-1);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(1, "P1"))
+            .expect("player registers");
+        let caller =
+            Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        let other = Definition::from_script("OTHR", "Other", "#strict\n").expect("other compiles");
+        engine.register_definition(other).expect("other registers");
+
+        let caller_id = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0),
+            )
+            .expect("caller spawns");
+        let other_id = engine
+            .spawn_object(
+                SpawnConfig::new("OTHR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0),
+            )
+            .expect("other spawns");
+        let idx = engine.find_object_index(caller_id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", vec![Value::Object(other_id.as_u64())])
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(caller_id).expect("caller exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(
+            locals.get("iInvalid"),
+            Some(&Value::Bool(false)),
+            "invalid player rejected (ValidPlr gate)"
+        );
+        assert_eq!(locals.get("iSelf"), Some(&Value::Bool(true)));
+        assert_eq!(locals.get("iForeign"), Some(&Value::Bool(true)));
+        assert_eq!(
+            locals.get("iCleared"),
+            Some(&Value::Bool(true)),
+            "NO_OWNER bypasses the player check"
+        );
+        assert_eq!(
+            engine.objects[idx].state.controller, OWNER_NONE,
+            "self ends cleared"
+        );
+        let other_idx = engine.find_object_index(other_id).expect("other exists");
+        assert_eq!(
+            engine.objects[other_idx].state.controller, 1,
+            "foreign target updated"
+        );
     }
 
     // FnChangeDef -> C4Object::ChangeDef (C4Object.cpp:1180-1231): the
