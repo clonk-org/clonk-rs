@@ -8609,13 +8609,11 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|arg| parse_object_reference_argument(arg, "SetAction", "target"))
         .transpose()?
         .flatten();
-    let update_target1 = args.get(1).is_some();
     let target2 = args
         .get(2)
         .map(|arg| parse_object_reference_argument(arg, "SetAction", "target2"))
         .transpose()?
         .flatten();
-    let update_target2 = args.get(2).is_some();
     if args.len() > 4 {
         return Err(RuntimeError::new(format!(
             "SetAction: expected at most 4 arguments, got {}",
@@ -8653,12 +8651,13 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         update.set_name(name.clone());
         update.set_force(false);
 
-        // SetActionByName carries the action targets
-        // (C4Object.cpp SetActionByName -> SetAction(pTarget, pTarget2)).
-        if update_target1 {
+        // SetActionByName carries the action targets, and C4Object::SetAction
+        // assigns them ONLY when non-null (C4Object.cpp:4123-4125:
+        // `if (pTarget) Action.Target = pTarget;`) — nil preserves.
+        if target1.is_some() {
             object.set_action_target(0, target1);
         }
-        if update_target2 {
+        if target2.is_some() {
             object.set_action_target(1, target2);
         }
         if changed_action {
@@ -23043,6 +23042,22 @@ mod tests {
         let update = outcome.object_update.expect("action update recorded");
         let action = update.action.expect("action update exists");
         assert_eq!(action.target, Some(Some(ObjectId::new(2))));
+    }
+
+    #[test]
+    fn set_action_nil_targets_preserve_the_existing_ones_like_cpp() {
+        // C4Object::SetAction assigns the targets ONLY when given
+        // (C4Object.cpp:4123-4125: `if (pTarget) Action.Target = pTarget;`)
+        // — SetAction(name, nil, nil) keeps the previous targets, for
+        // explicit nils and omitted arguments alike.
+        let args = vec![Value::String("Jump".into()), Value::Nil, Value::Nil];
+        let (result, outcome) = with_object_host_context(|| set_action(&args));
+        let value = result.expect("SetAction returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("action update recorded");
+        let action = update.action.expect("action update exists");
+        assert_eq!(action.target, None, "nil target1 must not stage a clear");
+        assert_eq!(action.target2, None, "nil target2 must not stage a clear");
     }
 
     #[test]
