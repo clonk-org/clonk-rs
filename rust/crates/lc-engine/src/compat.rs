@@ -9892,12 +9892,16 @@ impl FindCondition {
             FindCondition::Exclude(excluded) => Some(object.id) != *excluded,
             FindCondition::Id(id) => object.definition_id() == id,
             FindCondition::InRect(rect) => {
+                // C4FindObjectInRect::Check is a plain point-in-rect on the
+                // object CENTER (C4FindObject.cpp) — the old
+                // contains_offset(pos - rect.xy) clause double-subtracted
+                // the origin and matched far-away objects whose offset
+                // happened to land back inside (the 597 NoDmg class).
                 let position = object.position();
-                rect.contains_offset(position.x - rect.x, position.y - rect.y)
-                    || (position.x >= rect.x
-                        && position.x < rect.x + rect.width
-                        && position.y >= rect.y
-                        && position.y < rect.y + rect.height)
+                position.x >= rect.x
+                    && position.x < rect.x + rect.width
+                    && position.y >= rect.y
+                    && position.y < rect.y + rect.height
             }
             FindCondition::AtPoint(x, y) => {
                 let metadata = world.definition_metadata(object.definition_id());
