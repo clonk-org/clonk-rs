@@ -8402,18 +8402,18 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("DoEnergy requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        // `if (!pObj) pObj = cthr->Obj` is only the local-call default
+        // (C4Script.cpp:494) — a named target may be FOREIGN.
+        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
+            return Ok(Value::Bool(false));
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
-
-        object.adjust_energy(change, exact);
+        let Some(scope) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
+        scope.adjust_energy(change, exact);
         Ok(Value::Bool(true))
     })
 }

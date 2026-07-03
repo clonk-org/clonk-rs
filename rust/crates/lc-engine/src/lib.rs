@@ -37899,6 +37899,46 @@ func Selection(pFrom) { iSel = 1; return 1; }
         );
     }
 
+    // FnDoEnergy's pObj (C4Script.cpp:492-499): `if (!pObj) pObj = cthr->Obj`
+    // is only the local-call default — a named FOREIGN target takes the
+    // change (C4Object::DoEnergy percent scale, C4Object.cpp:1345-1365).
+    #[test]
+    fn do_energy_reaches_a_foreign_target_like_cpp() {
+        let script = r#"#strict
+func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
+"#;
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(SpawnConfig::new("VCTM").with_category(CATEGORY_OBJECT))
+            .expect("victim spawns");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 50_000;
+        engine.objects[victim_idx].state.alive = true;
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        let result = engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        assert_eq!(result, Value::Bool(true));
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.energy,
+            40_000,
+            "-10% of C4MaxPhysical lands on the foreign target (C4Object.cpp:1347,1361)"
+        );
+    }
+
     // FnGetCommand (C4Script.cpp:918-945): element 0 returns the C++
     // CommandName string of the requested stack entry; without commands
     // the call yields nil (never an error).
