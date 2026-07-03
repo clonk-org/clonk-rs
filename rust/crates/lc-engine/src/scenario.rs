@@ -655,6 +655,11 @@ impl Scenario {
         // appends resolve FIRST, then includes (C4AulLink.cpp:27-28), and
         // `global func` declarations in definition scripts join the
         // engine-global table (AA_GLOBAL ownership).
+        // Appends first, includes after: #appendto CLNK functions ARE
+        // visible through include chains (live-verified: the GoldRush
+        // scenario calls pObj->SetAI(...) — appended to CLNK by the
+        // scenario's AI.c4d — on BNDT objects that #include COWB #include
+        // CLNK, and C++ resolves it).
         engine.resolve_appends();
         engine.resolve_includes()?;
         engine.collect_definition_global_functions();
