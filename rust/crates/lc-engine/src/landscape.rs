@@ -339,6 +339,11 @@ enum BorderPixel {
 pub struct BlastResult {
     pub removed_by_material: HashMap<MaterialId, i32>,
     pub affected_columns: Vec<(i32, i32)>,
+    /// `BlastMatCount` (C4Landscape::BlastFree, C4Landscape.cpp:1044-1055):
+    /// in-circle pixels per material counted BEFORE removal, including
+    /// materials that neither BlastFree nor BlastShiftTo. The cast
+    /// amounts (:1066-1079) and the BlastShiftTo probability
+    /// (BlastFreePix, :964-970) derive from this count.
     pub pixel_count_by_material: HashMap<MaterialId, i32>,
     pub shift_candidates: Vec<BlastShiftCandidate>,
 }
@@ -1303,6 +1308,26 @@ impl Landscape {
 
         self.ensure_material_capacity();
 
+        // BlastMatCount (C4Landscape::BlastFree, C4Landscape.cpp:1044-1055):
+        // count every valid in-circle material pixel BEFORE removal — the
+        // C++ loop shape (ycnt -rad..=rad, lwdt = sqrt(rad²-ycnt²), xcnt
+        // -lwdt..lwdt + the lwdt==0 extension). BlastShiftTo evaluation and
+        // the Blast2Object/Blast2PXS cast amounts derive from this count,
+        // so inert materials count too.
+        for y_offset in -radius..=radius {
+            let remaining =
+                i64::from(radius) * i64::from(radius) - i64::from(y_offset) * i64::from(y_offset);
+            let line_width = (remaining.max(0) as f64).sqrt() as i32;
+            let y = center.y.saturating_add(y_offset);
+            let extend = i32::from(line_width == 0);
+            for x_offset in -line_width..line_width + extend {
+                let x = center.x.saturating_add(x_offset);
+                if let Some(material_id) = self.material_at(x, y) {
+                    *result.pixel_count_by_material.entry(material_id).or_insert(0) += 1;
+                }
+            }
+        }
+
         let width = self.width as i32;
         let radius_sq = i64::from(radius) * i64::from(radius);
         let mut column_targets: Vec<Option<i32>> = vec![None; self.surface.len()];
@@ -1377,11 +1402,6 @@ impl Landscape {
             if !material.blast_free() {
                 if let Some(target) = material.blast_shift_to_target() {
                     if target != material_id {
-                        result
-                            .pixel_count_by_material
-                            .entry(material_id)
-                            .and_modify(|count| *count += removed_height)
-                            .or_insert(removed_height);
                         result.shift_candidates.push(BlastShiftCandidate {
                             column,
                             material: material_id,
@@ -3260,6 +3280,49 @@ mod tests {
 
         let landscape_non_flammable = Landscape::flat_with_material(5, 60, Some(stone));
         assert!(!landscape_non_flammable.can_incinerate(2, 65, &materials));
+    }
+
+    #[test]
+    fn blast_circle_precounts_in_circle_pixels_per_material_like_cpp() {
+        // C4Landscape::BlastFree counts every valid in-circle material
+        // pixel BEFORE removal (C4Landscape.cpp:1048-1055) — including
+        // materials that neither BlastFree nor BlastShiftTo — and the
+        // cast amounts derive from that count (:1066-1079). Circle loop:
+        // ycnt -rad..=rad, lwdt = sqrt(rad²-ycnt²), xcnt -lwdt..lwdt with
+        // the lwdt==0 single-pixel extension.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+            BlastFree=1
+
+            [Material Granite]
+            Name=Granite
+            Density=150
+            Friction=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let granite = materials.id_of("Granite").expect("granite exists");
+
+        let mut landscape =
+            Landscape::with_default_material(17, vec![40; 17], Some(earth)).expect("builds");
+        landscape.set_world_height(80);
+        for column in 9..17 {
+            landscape.set_solid_material(column, Some(granite));
+        }
+
+        let result = landscape.blast_circle(Vector2::new(8, 40), 4, &materials);
+        // Solid half of the r=4 circle at the surface row 40: earth
+        // pixels x∈4..=8 (rows 40..44), granite x∈9..=11.
+        assert_eq!(result.pixel_count_by_material.get(&earth), Some(&17));
+        assert_eq!(result.pixel_count_by_material.get(&granite), Some(&8));
+        // Granite neither BlastFrees nor shifts: nothing removed.
+        assert_eq!(result.removed_by_material.get(&granite), None);
     }
 
     fn vehicle_earth_materials() -> (MaterialSet, MaterialId, MaterialId) {

@@ -11294,7 +11294,9 @@ impl Engine {
         if !result.shift_candidates.is_empty() {
             self.apply_blast_shifts(radius, &result);
         }
-        if !result.removed_by_material.is_empty() {
+        // The evaluate loop keys on the PRE-blast BlastMatCount, not on
+        // what was removed (C4Landscape.cpp:1065-1079).
+        if !result.pixel_count_by_material.is_empty() {
             self.process_blast_reactions(center, controller, &result);
         }
         Some(result)
@@ -22594,85 +22596,80 @@ impl Engine {
         }
     }
 
+    /// C4Landscape::BlastFree evaluate loop (C4Landscape.cpp:1065-1079):
+    /// materials in INDEX order, gated on the pre-blast BlastMatCount;
+    /// within one material BlastCastObjects runs BEFORE PXS.Cast, and each
+    /// object is created inline between its draws and the next.
     fn process_blast_reactions(
         &mut self,
         center: Vector2,
         controller: Option<i32>,
         result: &BlastResult,
     ) {
-        let mut spawn_requests = Vec::new();
+        let material_casts: Vec<(MaterialId, Option<String>, Option<i32>, Option<i32>)> = self
+            .materials
+            .iter()
+            .map(|material| {
+                (
+                    material.id(),
+                    material.blast_to_object_name().map(str::to_string),
+                    material.blast_to_object_ratio(),
+                    material.blast_to_pxs_ratio(),
+                )
+            })
+            .collect();
 
-        for (material_id, removed) in &result.removed_by_material {
-            if *removed <= 0 {
+        for (material_id, object_name, object_ratio, pxs_ratio) in material_casts {
+            let count = result
+                .pixel_count_by_material
+                .get(&material_id)
+                .copied()
+                .unwrap_or(0);
+            // `if (BlastMatCount[cnt])` (C4Landscape.cpp:1067)
+            if count == 0 {
                 continue;
             }
 
-            let (
-                material_id_value,
-                splash_rate,
-                blast_to_pxs_ratio,
-                blast_to_object_name,
-                blast_to_object_ratio,
-            ) = match self.materials.get_by_id(*material_id) {
-                Some(material) => (
-                    material.id(),
-                    material.splash_rate(),
-                    material.blast_to_pxs_ratio(),
-                    material.blast_to_object_name().map(|name| name.to_string()),
-                    material.blast_to_object_ratio(),
-                ),
-                None => continue,
-            };
+            // Blast2Object → C4Game::BlastCastObjects (C4Game.cpp:1723-1735):
+            // per object 4 draws in argument-evaluation order — rdir =
+            // itofix(Random(3) + 1), ydir = FIXED10(Random(61) - 40),
+            // xdir = FIXED10(Random(61) - 30), angle = Random(360) — then
+            // CreateObject(id, nullptr, NO_OWNER, tx, ty, …, iByPlayer).
+            // The draws happen BEFORE C4Id2Def, so an unloaded definition
+            // still consumes them (C4Game.cpp:1142-1148).
+            if let (Some(definition_id), Some(ratio)) = (object_name, object_ratio) {
+                if ratio != 0 {
+                    let num = count / ratio;
+                    for _ in 0..num {
+                        let rdir = itofix(self.rng.random(3) + 1);
+                        let ydir = fixed10(self.rng.random(61) - 40);
+                        let xdir = fixed10(self.rng.random(61) - 30);
+                        let rotation = self.rng.random(360);
+                        let config = SpawnConfig::new(definition_id.clone())
+                            .with_position(center)
+                            .with_rotation(rotation)
+                            .with_fixed_velocity(FixedVec2::new(xdir, ydir))
+                            .with_rotation_velocity(rdir)
+                            .with_owner(OWNER_NONE)
+                            .with_controller(controller.unwrap_or(OWNER_NONE));
+                        // Unknown definition: C4Id2Def → nullptr, no object.
+                        let _ = self.spawn_object(config);
+                    }
+                }
+            }
 
-            if let Some(ratio) = blast_to_pxs_ratio {
-                if ratio > 0 {
-                    // BlastFree → PXS.Cast(mat, count, tx, ty, 60)
-                    // (C4Landscape.cpp:1075-1078)
-                    let pxs_count = (*removed / ratio).max(0);
+            // Blast2PXSRatio → PXS.Cast(mat, BlastMatCount/ratio, tx, ty, 60)
+            // (C4Landscape.cpp:1075-1078)
+            if let Some(ratio) = pxs_ratio {
+                if ratio != 0 {
                     self.pxs_system.cast(
                         &mut self.rng,
-                        material_id_value,
-                        pxs_count,
+                        material_id,
+                        count / ratio,
                         center.x,
                         center.y,
                         60,
                     );
-                }
-            }
-
-            if let (Some(definition_id), Some(ratio)) =
-                (blast_to_object_name.as_ref(), blast_to_object_ratio)
-            {
-                if ratio <= 0 {
-                    continue;
-                }
-                if !self.definitions.contains_key(definition_id) {
-                    continue;
-                }
-                let spawn_count = (*removed / ratio).max(0);
-                if spawn_count <= 0 {
-                    continue;
-                }
-                let owner = controller.unwrap_or(OWNER_NONE);
-                for _ in 0..spawn_count {
-                    let rotation = self.rng.gen_range(0..360);
-                    let velocity =
-                        Vector2::new(self.rng.gen_range(-30..=30), self.rng.gen_range(-40..=20));
-                    spawn_requests.push(
-                        SpawnConfig::new(definition_id.clone())
-                            .with_position(center)
-                            .with_velocity(velocity)
-                            .with_rotation(rotation)
-                            .with_owner(owner),
-                    );
-                }
-            }
-        }
-
-        if !spawn_requests.is_empty() {
-            for config in spawn_requests {
-                if let Err(err) = self.spawn_object(config) {
-                    let _ = err;
                 }
             }
         }
@@ -26363,6 +26360,196 @@ mod tests {
     }
 
     #[test]
+    fn blast_cast_amounts_derive_from_the_pre_blast_circle_count() -> Result<(), EngineError> {
+        // C4Landscape::BlastFree computes cast amounts from BlastMatCount —
+        // the PRE-removal in-circle pixel count (C4Landscape.cpp:1048-1055,
+        // 1066-1079) — not from what was actually cleared. A material with
+        // BlastFree=0 still casts BlastMatCount/Blast2PXSRatio particles.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Rock]
+            Name=Rock
+            Density=150
+            Friction=100
+            Blast2PXSRatio=2
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let rock = materials.id_of("Rock").expect("rock exists");
+        let mut engine = Engine::with_seed(7);
+        engine.set_materials(materials);
+        let mut world = Landscape::flat_with_material(17, 40, Some(rock));
+        world.set_world_height(80);
+        engine.set_landscape(world);
+
+        let result = engine
+            .blast_circle(Vector2::new(8, 40), 4, None)
+            .expect("blast applies");
+        assert!(
+            result.removed_by_material.is_empty(),
+            "BlastFree=0 removes nothing"
+        );
+        let pre_count = result
+            .pixel_count_by_material
+            .get(&rock)
+            .copied()
+            .unwrap_or_default();
+        assert_eq!(pre_count, 25, "solid half circle of r=4");
+        assert_eq!(
+            engine.pxs_system.count() as i32,
+            pre_count / 2,
+            "PXS.Cast(mat, BlastMatCount/Blast2PXSRatio) (C4Landscape.cpp:1075-1078)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn blast_cast_fan_out_matches_the_cpp_evaluate_loop() -> Result<(), EngineError> {
+        // C4Landscape::BlastFree evaluate loop (C4Landscape.cpp:1065-1079):
+        // materials in INDEX order; within a material BlastCastObjects runs
+        // BEFORE PXS.Cast. BlastCastObjects (C4Game.cpp:1723-1735) draws 4
+        // per object in argument-evaluation order — rdir = itofix(Random(3)
+        // + 1), ydir = FIXED10(Random(61) - 40), xdir = FIXED10(Random(61)
+        // - 30), angle = Random(360) — creating each object INLINE with
+        // owner NO_OWNER and the blast controller.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Dust]
+            Name=Dust
+            Density=100
+            Friction=25
+            BlastFree=1
+            Blast2PXSRatio=5
+
+            [Material Ruby]
+            Name=Ruby
+            Density=120
+            Friction=40
+            BlastFree=1
+            Blast2Object=GEM0
+            Blast2ObjectRatio=4
+            Blast2PXSRatio=5
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let dust = materials.id_of("Dust").expect("dust exists");
+        let ruby = materials.id_of("Ruby").expect("ruby exists");
+        let mut engine = Engine::with_seed(13);
+        engine.set_materials(materials);
+        // Script-less rotateable def: no callback draws disturb the stream.
+        let mut gem = Definition::from_script("GEM0", "GEM0", "").expect("compiles");
+        gem.set_rotateable(1);
+        engine.register_definition(gem).expect("gem registers");
+        let mut world = Landscape::flat_with_material(17, 40, Some(dust));
+        world.set_world_height(80);
+        for column in 9..17 {
+            world.set_solid_material(column, Some(ruby));
+        }
+        engine.set_landscape(world);
+
+        let mut mirror = engine.rng.clone();
+        let controller = 3;
+        let result = engine
+            .blast_circle(Vector2::new(8, 40), 4, Some(controller))
+            .expect("blast applies");
+        // Pre-blast counts: dust x∈4..=8 → 17, ruby x∈9..=11 → 8.
+        assert_eq!(result.pixel_count_by_material.get(&dust), Some(&17));
+        assert_eq!(result.pixel_count_by_material.get(&ruby), Some(&8));
+
+        // Dust (index 0): no Blast2Object → PXS.Cast(dust, 17/5 = 3, …, 60)
+        // draws Random(61) twice per particle (C4PXS.cpp:309-322).
+        for _ in 0..3 {
+            mirror.random(61);
+            mirror.random(61);
+        }
+        // Ruby (index 1): 8/4 = 2 objects FIRST, 4 draws each…
+        let mut expected_objects = Vec::new();
+        for _ in 0..2 {
+            let r4 = mirror.random(3);
+            let r3 = mirror.random(61);
+            let r2 = mirror.random(61);
+            let r1 = mirror.random(360);
+            expected_objects.push((r1, r2, r3, r4));
+        }
+        // …then PXS.Cast(ruby, 8/5 = 1, …).
+        mirror.random(61);
+        mirror.random(61);
+        assert_eq!(engine.rng, mirror, "synced draw stream matches C++");
+
+        let gems: Vec<&Object> = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "GEM0")
+            .collect();
+        assert_eq!(gems.len(), 2);
+        for (object, (r1, r2, r3, r4)) in gems.iter().zip(expected_objects) {
+            assert_eq!(object.state.rotation, r1.rem_euclid(360));
+            assert_eq!(object.fixed_velocity.x, math::fixed10(r2 - 30), "xdir");
+            assert_eq!(object.fixed_velocity.y, math::fixed10(r3 - 40), "ydir");
+            assert_eq!(object.rotation_velocity, math::itofix(r4 + 1), "rdir");
+            assert_eq!(object.state.owner, OWNER_NONE, "CreateObject NO_OWNER");
+            assert_eq!(object.state.controller, controller, "iByPlayer");
+        }
+        assert_eq!(engine.pxs_system.count(), 4, "3 dust + 1 ruby particles");
+        Ok(())
+    }
+
+    #[test]
+    fn blast_object_cast_consumes_draws_for_unknown_definitions() -> Result<(), EngineError> {
+        // C4Game::BlastCastObjects evaluates the 4 Random draws as call
+        // ARGUMENTS before CreateObject's C4Id2Def check (C4Game.cpp:
+        // 1726-1733, 1142-1148): an unloaded id spawns nothing but the
+        // stream advances — and the following PXS cast still lines up.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Emerald]
+            Name=Emerald
+            Density=120
+            Friction=40
+            BlastFree=1
+            Blast2Object=MISS
+            Blast2ObjectRatio=4
+            Blast2PXSRatio=5
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let emerald = materials.id_of("Emerald").expect("emerald exists");
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        let mut world = Landscape::flat_with_material(17, 40, Some(emerald));
+        world.set_world_height(80);
+        engine.set_landscape(world);
+
+        let mut mirror = engine.rng.clone();
+        let result = engine
+            .blast_circle(Vector2::new(8, 40), 4, None)
+            .expect("blast applies");
+        assert_eq!(result.pixel_count_by_material.get(&emerald), Some(&25));
+        // 25/4 = 6 objects worth of draws, definition never loaded…
+        for _ in 0..6 {
+            mirror.random(3);
+            mirror.random(61);
+            mirror.random(61);
+            mirror.random(360);
+        }
+        // …then PXS.Cast(emerald, 25/5 = 5).
+        for _ in 0..5 {
+            mirror.random(61);
+            mirror.random(61);
+        }
+        assert_eq!(engine.rng, mirror, "unknown-def draws are consumed");
+        assert!(
+            engine.objects.is_empty(),
+            "C4Id2Def null spawns no objects"
+        );
+        assert_eq!(engine.pxs_system.count(), 5);
+        Ok(())
+    }
+
+    #[test]
     fn set_landscape_resolves_pixel_grid_materials_like_update_pix_maps() {
         // UpdatePixMaps fills Pix2Mat by resolving each texmap entry's
         // material NAME against the loaded material map
@@ -26481,18 +26668,18 @@ mod tests {
         let result = engine
             .blast_circle(Vector2::new(8, 40), 4, Some(controller))
             .expect("blast applies");
-        let removed = result
-            .removed_by_material
+        let pre_count = result
+            .pixel_count_by_material
             .get(&rock)
             .copied()
             .unwrap_or_default();
-        assert!(removed > 0, "expected blast to remove rock material");
+        assert!(pre_count > 0, "expected in-circle rock pixels");
 
         let ratio = 2;
-        let expected_spawns = (removed / ratio).max(0);
+        let expected_spawns = pre_count / ratio;
         assert!(
             expected_spawns > 0,
-            "expected blast to spawn objects when material is removed"
+            "expected blast to spawn objects for the counted material"
         );
         let after_snapshot = engine.snapshot();
         let new_objects: Vec<_> = after_snapshot
@@ -26503,7 +26690,7 @@ mod tests {
         assert_eq!(
             new_objects.len() as i32,
             expected_spawns,
-            "blast should spawn one object per {:?} removed pixels",
+            "blast should spawn one object per {:?} counted pixels",
             ratio
         );
 
@@ -26512,21 +26699,27 @@ mod tests {
                 object.definition_id, "GEM0",
                 "blast should spawn configured definition"
             );
+            // FIXED10(Random(61)-30) / FIXED10(Random(61)-40)
+            // (C4Game.cpp:1730-1731): ±3.0 / -4.0..+2.0 as integers.
             assert!(
-                (-30..=30).contains(&object.velocity.x),
-                "expected horizontal velocity to follow legacy FIXED10 distribution"
+                (-3..=3).contains(&object.velocity.x),
+                "expected horizontal velocity to follow the FIXED10 range"
             );
             assert!(
-                (-40..=20).contains(&object.velocity.y),
-                "expected vertical velocity to follow legacy FIXED10 distribution"
+                (-4..=2).contains(&object.velocity.y),
+                "expected vertical velocity to follow the FIXED10 range"
             );
             assert!(
                 (0..360).contains(&object.rotation),
                 "expected rotation to be normalised"
             );
+            // CreateObject(id, nullptr, NO_OWNER, …, iByPlayer)
+            // (C4Game.cpp:1733): the blast controller is the CONTROLLER,
+            // not the owner.
+            assert_eq!(object.owner, OWNER_NONE, "owner is NO_OWNER");
             assert_eq!(
-                object.owner, controller,
-                "expected spawned object owner to match controller"
+                object.controller, controller,
+                "controller carries the blasting player"
             );
         }
         Ok(())
