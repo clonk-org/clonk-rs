@@ -6756,46 +6756,48 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let mut match_index = 0;
-    for effect in &effects {
-        if let Some(filter) = name_filter {
-            // C4Effect::Get wildcard-compares names (C4Effect.cpp:229).
-            if !s_wildcard_match_ex(&effect.name, filter) {
-                continue;
-            }
-        }
+    let found = match name_filter {
+        // Name/wildcard given: find by name and index
+        // (C4Script.cpp:5471-5472 -> C4Effect::Get(szName, iIndex,...),
+        // wildcard compare at C4Effect.cpp:229).
+        Some(filter) => effects
+            .iter()
+            .filter(|effect| s_wildcard_match_ex(&effect.name, filter))
+            .filter(|effect| {
+                max_priority
+                    .map(|limit| effect.priority.abs() <= limit)
+                    .unwrap_or(true)
+            })
+            .nth(desired_index),
+        // No name: iIndex is the effect NUMBER (C4Script.cpp:5474-5475 ->
+        // C4Effect::Get(iNumber, fIncludeDead=true), C4Effect.cpp:240-256).
+        None => effects
+            .iter()
+            .find(|effect| effect.number == i32::try_from(desired_index).unwrap_or(i32::MAX))
+            .filter(|effect| {
+                max_priority
+                    .map(|limit| effect.priority.abs() <= limit)
+                    .unwrap_or(true)
+            }),
+    };
 
-        if let Some(limit) = max_priority {
-            if effect.priority.abs() > limit {
-                continue;
-            }
-        }
-
-        if match_index == desired_index {
-            return Ok(match query {
-                0 => {
-                    let identifier = match_index.saturating_add(1);
-                    let id = i32::try_from(identifier).unwrap_or(i32::MAX);
-                    Value::Int(id)
-                }
-                1 => Value::String(effect.name.clone()),
-                2 => Value::Int(effect.priority),
-                3 => Value::Int(effect.interval),
-                4 => effect.command_target.map(Value::Int).unwrap_or(Value::Nil),
-                5 => effect
-                    .command_id
-                    .as_ref()
-                    .map(|id| Value::String(id.clone()))
-                    .unwrap_or(Value::Nil),
-                6 => Value::Int(effect.timer),
-                _ => build_effect_value(effect),
-            });
-        }
-
-        match_index += 1;
-    }
-
-    Ok(Value::Nil)
+    Ok(found
+        .map(|effect| match query {
+            // 0: number (C4Script.cpp:5481 `C4VInt(pEffect->iNumber)`)
+            0 => Value::Int(effect.number),
+            1 => Value::String(effect.name.clone()),
+            2 => Value::Int(effect.priority),
+            3 => Value::Int(effect.interval),
+            4 => effect.command_target.map(Value::Int).unwrap_or(Value::Nil),
+            5 => effect
+                .command_id
+                .as_ref()
+                .map(|id| Value::String(id.clone()))
+                .unwrap_or(Value::Nil),
+            6 => Value::Int(effect.timer),
+            _ => build_effect_value(effect),
+        })
+        .unwrap_or(Value::Nil))
 }
 
 fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -6912,13 +6914,16 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
+    // FnEffectVar resolves the effect BY NUMBER (C4Effect::Get(iNumber,
+    // true), C4Script.cpp:5583); snapshot proplists carry positional
+    // stand-in numbers from extract_effects_from_state.
     let effects = extract_effects_from_state(&args[1])?;
-    if effect_number == 0 || effect_number > effects.len() {
-        return Ok(Value::Nil);
-    }
-    let effect = &effects[effect_number - 1];
-    let value = effect.var(var_index);
-    Ok(effect_var_to_value(&value))
+    let number = i32::try_from(effect_number).unwrap_or(i32::MAX);
+    Ok(effects
+        .iter()
+        .find(|effect| effect.number == number)
+        .map(|effect| effect_var_to_value(&effect.var(var_index)))
+        .unwrap_or(Value::Nil))
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -16158,6 +16163,14 @@ fn extract_effects_from_state(state: &Value) -> Result<Vec<EffectState>, Runtime
                 if !vars.is_empty() {
                     effect = effect.with_vars(vars);
                 }
+                // Fixture proplists usually carry no allocated iNumber; the
+                // list position + 1 stands in so by-number lookups
+                // (GetEffect without name, EffectVar, EffectCall) stay
+                // usable on snapshot state.
+                effect.number = match props.get("number") {
+                    Some(Value::Int(value)) if *value > 0 => *value,
+                    _ => i32::try_from(effects.len() + 1).unwrap_or(i32::MAX),
+                };
                 effects.push(effect);
             }
             Ok(effects)
@@ -16170,7 +16183,8 @@ fn extract_effects_from_state(state: &Value) -> Result<Vec<EffectState>, Runtime
 }
 
 fn build_effect_value(effect: &EffectState) -> Value {
-    let mut map = HashMap::with_capacity(5);
+    let mut map = HashMap::with_capacity(6);
+    map.insert("number".into(), Value::Int(effect.number));
     map.insert("name".into(), Value::String(effect.name.clone()));
     map.insert("priority".into(), Value::Int(effect.priority));
     map.insert("interval".into(), Value::Int(effect.interval));
@@ -17539,17 +17553,19 @@ impl EffectScopeContext {
                     false
                 }
             })
-        } else if self.effects.is_empty() {
-            None
-        } else if index == 0 {
-            Some(0)
         } else {
-            let effect_number = index.saturating_sub(1);
-            if effect_number < self.effects.len() {
-                Some(effect_number)
-            } else {
-                None
-            }
+            // No name: iIndex is the effect NUMBER (FnRemoveEffect,
+            // C4Script.cpp:5502-5507 -> C4Effect::Get(iNumber, false),
+            // C4Effect.cpp:240-256). Numbers start at 1, so 0 matches
+            // nothing.
+            let number = i32::try_from(index).unwrap_or(i32::MAX);
+            (number > 0)
+                .then(|| {
+                    self.effects
+                        .iter()
+                        .position(|effect| effect.number == number)
+                })
+                .flatten()
         };
 
         let position = match position {
@@ -23069,6 +23085,54 @@ mod tests {
     }
 
     #[test]
+    fn get_effect_query_zero_returns_effect_number_like_cpp() {
+        // FnGetEffect query 0 returns pEffect->iNumber (C4Script.cpp:5481)
+        // — the per-object monotonic handle (C4Effect.cpp:76-78), NOT a
+        // list position. Removing an earlier effect must not renumber the
+        // survivor: Control2Effect feeds this handle straight into
+        // EffectCall (Clonk.c4d/Script.c:860-875).
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[Value::String("First".into()), state.clone()])?;
+            add_effect(&[Value::String("XControl".into()), state.clone()])?;
+            remove_effect(&[Value::String("First".into()), state.clone()])?;
+            get_effect(&[Value::String("*Control*".into()), state.clone()])
+        });
+        let value = result.expect("GetEffect succeeds");
+        assert_eq!(
+            value,
+            Value::Int(2),
+            "the surviving effect keeps its allocated iNumber"
+        );
+    }
+
+    #[test]
+    fn get_effect_without_name_resolves_by_number_like_cpp() {
+        // FnGetEffect with no/empty name treats iIndex as the effect
+        // NUMBER (C4Script.cpp:5471-5476 -> C4Effect::Get(iNumber, true),
+        // C4Effect.cpp:240-256). Control2Effect's
+        // `GetEffect(0, this(), iEffect, 1)` relies on it.
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[Value::String("First".into()), state.clone()])?;
+            add_effect(&[Value::String("XControl".into()), state.clone()])?;
+            remove_effect(&[Value::String("First".into()), state.clone()])?;
+            get_effect(&[
+                Value::Int(0),
+                state.clone(),
+                Value::Int(2),
+                Value::Int(1),
+            ])
+        });
+        let value = result.expect("GetEffect succeeds");
+        assert_eq!(
+            value,
+            Value::String("XControl".into()),
+            "number 2 resolves the effect even at list position 0"
+        );
+    }
+
+    #[test]
     fn get_effect_count_filters_by_name_and_priority() {
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
@@ -23187,13 +23251,26 @@ mod tests {
     fn get_and_remove_effect_accept_falsy_name_like_cpp_set0() {
         // Same Set0 path as above: `GetEffect(0, this(), i)` follows the
         // GetEffectCount(0, …) call in Control2Effect (Clonk.c4d Script.c:868)
-        // and JumpAndRun.c:86 calls `RemoveEffect(0, this(), number)`.
+        // and JumpAndRun.c:86 calls `RemoveEffect(0, this(), number)`. A
+        // falsy name means BY-NUMBER resolution (C4Script.cpp:5474-5476,
+        // 5502-5507): the AddEffect handle round-trips, number 0 finds
+        // nothing (numbers start at 1, C4Effect.cpp:76-78).
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
-            let number = get_effect(&[Value::Int(0), state.clone()])?;
+            let number =
+                add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
             assert!(matches!(number, Value::Int(n) if n > 0));
-            remove_effect(&[Value::Int(0), state.clone()])?;
+            assert_eq!(
+                get_effect(&[Value::Int(0), state.clone(), number.clone()])?,
+                number,
+                "the AddEffect handle resolves by number"
+            );
+            assert_eq!(
+                get_effect(&[Value::Int(0), state.clone()])?,
+                Value::Nil,
+                "number 0 matches no effect like C4Effect::Get"
+            );
+            remove_effect(&[Value::Int(0), state.clone(), number])?;
             get_effect_count(&[Value::Nil, state.clone()])
         });
         let value = result.expect("falsy-name GetEffect/RemoveEffect chain succeeds");
