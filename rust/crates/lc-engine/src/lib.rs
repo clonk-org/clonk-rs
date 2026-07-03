@@ -8591,6 +8591,17 @@ struct LayerMovementBounds {
     border_bound: i32,
 }
 
+/// The effective solid-mask parameters of an eligible object
+/// (C4Object::UpdateSolidMask reads SolidMask/Shape/r off the object,
+/// C4Object.cpp:5648-5656).
+#[derive(Debug, Clone)]
+struct SolidMaskSpec {
+    mask: DefinitionTargetRect,
+    pixels: Option<Rc<Vec<u8>>>,
+    shape_x: i32,
+    shape_y: i32,
+}
+
 /// A PUT solid mask (C4SolidMask::Put, unrotated, C4SolidMask.cpp:
 /// 24-107): the landscape-clipped MaskPutRect plus the saved background
 /// bytes ("MatBuff"); the vehicle byte marks unused buffer slots.
@@ -21229,10 +21240,7 @@ impl Engine {
     /// The object's effective solid mask spec when eligible
     /// (C4Object::UpdateSolidMask gates: mask enabled, FullCon, not
     /// contained, no rotation, C4Object.cpp:5652-5656).
-    fn solid_mask_spec(
-        &self,
-        index: usize,
-    ) -> Option<(DefinitionTargetRect, Option<Rc<Vec<u8>>>, i32, i32)> {
+    fn solid_mask_spec(&self, index: usize) -> Option<SolidMaskSpec> {
         let object = self.objects.get(index)?;
         if object.destroyed
             || matches!(object.state.status, ObjectStatus::Deleted)
@@ -21254,7 +21262,12 @@ impl Engine {
             SolidMaskPixels::Alpha(pixels) => Some(Rc::clone(&pixels)),
         };
         let shape = definition.shape_rect()?;
-        Some((mask, pixels, shape.x, shape.y))
+        Some(SolidMaskSpec {
+            mask,
+            pixels,
+            shape_x: shape.x,
+            shape_y: shape.y,
+        })
     }
 
     /// C4SolidMask::Put (regular, unrotated, C4SolidMask.cpp:24-107):
@@ -21271,7 +21284,13 @@ impl Engine {
         else {
             return;
         };
-        let Some((mask, pixels, shape_x, shape_y)) = self.solid_mask_spec(index) else {
+        let Some(SolidMaskSpec {
+            mask,
+            pixels,
+            shape_x,
+            shape_y,
+        }) = self.solid_mask_spec(index)
+        else {
             return;
         };
         let Some((grid_width, grid_height)) = self
