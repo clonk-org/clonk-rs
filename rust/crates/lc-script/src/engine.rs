@@ -435,6 +435,20 @@ impl Engine {
         self.functions.contains_key(name)
     }
 
+    /// Own functions OR the engine-global table. Object callbacks
+    /// (Initialize/TimerCall/…) resolve own-script only, but EFFECT
+    /// callbacks recurse up the C4Aul tree to the script engine
+    /// (FxIntScheduleCallTimer lives in the planet Helpers.c) —
+    /// C4Effect resolves Fx* against the command target's Def script
+    /// with engine-level fallback.
+    pub fn has_function_or_global(&self, name: &str) -> bool {
+        self.functions.contains_key(name)
+            || self
+                .global_functions
+                .as_deref()
+                .is_some_and(|table| table.contains_key(name))
+    }
+
     pub fn has_host_function(&self, name: &str) -> bool {
         self.host_functions.contains_key(name)
     }
@@ -473,7 +487,7 @@ impl Engine {
         function_name.push_str("Fx");
         function_name.push_str(effect_name);
         function_name.push_str(event);
-        if !self.has_function(&function_name) {
+        if !self.has_function_or_global(&function_name) {
             return Ok(None);
         }
         self.call_with_locals_and_this(&function_name, args, local_vars, this)
@@ -485,7 +499,7 @@ impl Engine {
         function_name.push_str("Fx");
         function_name.push_str(effect_name);
         function_name.push_str(event);
-        self.has_function(&function_name)
+        self.has_function_or_global(&function_name)
     }
 
     pub fn set_debugger_hooks(&mut self, hooks: DebuggerHooks) {

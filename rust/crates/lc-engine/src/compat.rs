@@ -1794,22 +1794,21 @@ fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
                 .get(&target)
                 .and_then(|state| state.scope.portrait_source_override().cloned())
         };
-        let source = overridden
-            .or_else(|| {
-                context
-                    .get_world_object(target)
-                    .and_then(|object| {
-                        object
-                            .full_state()
-                            .map(|state| state.portrait_source.clone())
-                    })
-                    .flatten()
-            })
-            .or_else(|| {
-                context
-                    .get_world_object(target)
-                    .map(|object| object.definition_id().to_string())
-            });
+        // FnGetPortrait (C4Script.cpp:5359-5395): no assigned portrait
+        // graphics -> nil. A def-id fallback here broke the cavalry's
+        // AdjustPortrait guard (`GetPortrait(this(), true) != GetID()`
+        // must be TRUE for a fresh crew NPC so the Random(3) portrait
+        // pick runs).
+        let source = overridden.or_else(|| {
+            context
+                .get_world_object(target)
+                .and_then(|object| {
+                    object
+                        .full_state()
+                        .map(|state| state.portrait_source.clone())
+                })
+                .flatten()
+        });
         Ok(source.map(Value::C4Id).unwrap_or(Value::Nil))
     })
 }
@@ -6199,16 +6198,6 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
-    if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
-        let context = HOST_CONTEXT.with(|cell| {
-            cell.borrow().as_ref().and_then(|context| {
-                context
-                    .object_context()
-                    .map(|object| format!("{}", object.id().as_u64()))
-            })
-        });
-        tracing::warn!(?args, ?context, "RNDCALL");
-    }
     if args.len() > 1 {
         return Err(RuntimeError::new(
             "Random expects at most 1 argument: upper exclusive bound",
@@ -6938,11 +6927,13 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(true)
     })?;
     if joined {
-        // OnJoinCrew(player) fires inside MakeCrewMember
-        // (C4Player.cpp:1206-1209); errors pass like any script call.
+        // PSF_OnJoinCrew resolves to the script function "Recruitment"
+        // (C4Script.h:107 `#define PSF_OnJoinCrew "~Recruitment"`), fired
+        // inside MakeCrewMember (C4Player.cpp:1206-1209); errors pass
+        // like any script call.
         if let Some(active) = active {
             if let Some(result) =
-                call_world_object_script_function(active, "OnJoinCrew", &[Value::Int(player)])
+                call_world_object_script_function(active, "Recruitment", &[Value::Int(player)])
             {
                 result?;
             }
@@ -15669,13 +15660,17 @@ impl EffectScopeContext {
             effect.timer = 0;
         }
 
-        if let Some(index) = self
+        // C4Effect::New: same-name effects coexist; the number is the
+        // per-object max + 1 (C4Effect.cpp:76-78) and is the script-side
+        // handle AddEffect returns.
+        effect.number = self
             .effects
             .iter()
-            .position(|existing| existing.name == effect.name)
-        {
-            self.effects.remove(index);
-        }
+            .map(|existing| existing.number)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
 
         let mut insert_pos = 0;
         while insert_pos < self.effects.len()
@@ -15685,8 +15680,8 @@ impl EffectScopeContext {
         }
 
         self.effects.insert(insert_pos, effect.clone());
-        self.commands.push(EffectCommand::add(effect));
-        (insert_pos + 1) as i32
+        self.commands.push(EffectCommand::add(effect.clone()));
+        effect.number
     }
 
     fn effect_var(
@@ -15698,10 +15693,10 @@ impl EffectScopeContext {
         if effect_number == 0 {
             return None;
         }
-        let index = effect_number - 1;
-        if index >= self.effects.len() {
-            return None;
-        }
+        let index = self
+            .effects
+            .iter()
+            .position(|effect| effect.number == effect_number as i32)?;
         let effect = &mut self.effects[index];
         if let Some(value) = new_value {
             effect.set_var(var_index, value);

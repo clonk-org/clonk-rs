@@ -15,6 +15,10 @@ pub enum EffectVarValue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectState {
+    /// C4Effect::iNumber (C4Effect.cpp:76-78): per-object monotonic
+    /// (max existing + 1). Zero = not yet allocated.
+    #[serde(default)]
+    pub number: i32,
     pub name: String,
     pub priority: i32,
     pub interval: i32,
@@ -35,6 +39,7 @@ pub struct EffectState {
 impl EffectState {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            number: 0,
             name: name.into(),
             priority: 100,
             interval: 0,

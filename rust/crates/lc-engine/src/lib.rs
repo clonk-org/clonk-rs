@@ -3812,11 +3812,16 @@ impl Object {
         for command in commands {
             match command {
                 EffectCommand::Add(effect) => {
-                    let (inserted, replaced) = self.insert_effect(effect.clone());
-                    if let Some(replaced) = replaced {
-                        events.push(EffectEvent::stopped(replaced, EffectStopReason::Replaced));
+                    let is_update = effect.number > 0
+                        && self
+                            .state
+                            .effects
+                            .iter()
+                            .any(|existing| existing.number == effect.number);
+                    let (inserted, _) = self.insert_effect(effect.clone());
+                    if !is_update {
+                        events.push(EffectEvent::started(inserted));
                     }
-                    events.push(EffectEvent::started(inserted));
                 }
                 EffectCommand::Remove { name, no_callbacks } => {
                     if let Some(removed) = self.remove_effect(name) {
@@ -3883,6 +3888,10 @@ impl Object {
 
     // iIntervall/iTime are stored verbatim (C4Effect.cpp:66-67) - a zero
     // interval means the timer never fires.
+    /// C4Effect::New semantics: same-name effects COEXIST; each gets a
+    /// per-object monotonic number (max existing + 1, C4Effect.cpp:76-78).
+    /// A carried nonzero number matching an existing effect is an UPDATE
+    /// (EffectVar writes fold back through the add command).
     fn insert_effect(&mut self, mut effect: EffectState) -> (EffectState, Option<EffectState>) {
         if effect.interval < 0 {
             effect.interval = 0;
@@ -3890,12 +3899,28 @@ impl Object {
         if effect.timer < 0 {
             effect.timer = 0;
         }
-        let replaced = self
-            .state
-            .effects
-            .iter()
-            .position(|existing| existing.name == effect.name)
-            .map(|pos| self.state.effects.remove(pos));
+        if effect.number > 0 {
+            if let Some(existing) = self
+                .state
+                .effects
+                .iter_mut()
+                .find(|existing| existing.number == effect.number)
+            {
+                *existing = effect.clone();
+                return (effect, None);
+            }
+        }
+        if effect.number == 0 {
+            effect.number = self
+                .state
+                .effects
+                .iter()
+                .map(|existing| existing.number)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1)
+                .max(1);
+        }
         let mut insert_pos = 0;
         while insert_pos < self.state.effects.len()
             && self.state.effects[insert_pos].priority.abs() < effect.priority.abs()
@@ -3904,7 +3929,7 @@ impl Object {
         }
         let inserted = effect.clone();
         self.state.effects.insert(insert_pos, effect);
-        (inserted, replaced)
+        (inserted, None)
     }
 
     fn remove_effect(&mut self, name: &str) -> Option<EffectState> {
@@ -9560,7 +9585,11 @@ impl Engine {
             materials_shared: std::cell::RefCell::new(None),
             objects: Vec::new(),
             next_object_id: 1,
-            rng: LcgRng::seed_from_u64(seed),
+            rng: {
+                let mut rng = LcgRng::seed_from_u64(seed);
+                rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
+                rng
+            },
             scenario_script_go: false,
             scenario_script_counter: 0,
             random_seed: seed,
@@ -20407,6 +20436,7 @@ impl Engine {
             object.upright_t_attach = 0;
         }
         self.rng = LcgRng::seed_from_u64(self.random_seed);
+        self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
         // C4Game::Synchronize's tail: TransferZones.Synchronize()
         // broadcasts ~UpdateTransferZone to EVERY object AFTER the
         // FixRandom re-fix (C4Game.cpp:3695,3710; C4ObjectList.cpp:
@@ -23747,18 +23777,11 @@ fn rgb_to_value(color: RgbColor) -> Value {
 }
 
 fn build_effect_value(effect: &EffectState) -> Value {
-    let mut props = HashMap::with_capacity(6);
-    props.insert("name".into(), Value::String(effect.name.clone()));
-    props.insert("priority".into(), Value::Int(effect.priority));
-    props.insert("interval".into(), Value::Int(effect.interval));
-    props.insert("timer".into(), Value::Int(effect.timer));
-    if let Some(target) = effect.command_target {
-        props.insert("command_target".into(), Value::Int(target));
-    }
-    if let Some(id) = &effect.command_id {
-        props.insert("command_target_id".into(), Value::String(id.clone()));
-    }
-    Value::Proplist(props)
+    // C++ passes iNumber (an int handle) as the Fx* callback's second
+    // argument — scripts feed it back into EffectVar/RemoveEffect
+    // (FxIntScheduleCallTimer, planet Helpers.c). The old proplist here
+    // broke every script that used the handle.
+    Value::Int(effect.number)
 }
 
 fn merge_environment_delta(target: &mut EnvironmentDelta, source: &EnvironmentDelta) {
