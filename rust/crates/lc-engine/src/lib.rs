@@ -12616,6 +12616,16 @@ impl Engine {
             .iter()
             .position(|object| object.id == cursor)
             .ok_or(EngineError::UnknownObject(cursor))?;
+
+        // C4Object::DirectCom (C4Object.cpp:3363-3367): a contained clonk
+        // hands every non-Special com to its container and DirectCom
+        // returns — the clonk's own Control<Com> is never consulted.
+        if !matches!(command, ControlCommand::Special | ControlCommand::Special2) {
+            if let Some(container) = self.objects[index].state.container {
+                return self.contained_control(index, cursor, container, command, kind);
+            }
+        }
+
         let definition_id = self.objects[index].definition_id.clone();
         let state_snapshot = self.objects[index].state.clone();
         let definition = self
@@ -12650,6 +12660,50 @@ impl Engine {
             &definition_id,
         )?;
         Ok(handled)
+    }
+
+    /// C4Object::ContainedControl script dispatch (C4Object.cpp:3208-3306):
+    /// the container's `Contained<Com>` function runs with the container as
+    /// context and the clonk as parameter (`sf->Exec(Contained,
+    /// {C4VObj(this)})`, :3221,3230) after the controller propagates
+    /// (`Contained->Controller = Controller`, :3367). The com is consumed
+    /// either way — DirectCom returns unconditionally. The hardcoded
+    /// non-script fallbacks (COM_Down exit, COM_Throw command,
+    /// COM_Up/COM_Dig base buy/sell, Take/Take2; :3243-3306) are command-AI
+    /// features not yet ported — see PORT_STATUS.
+    fn contained_control(
+        &mut self,
+        crew_index: usize,
+        crew_id: ObjectId,
+        container: ObjectId,
+        command: ControlCommand,
+        kind: CommandKind,
+    ) -> Result<bool, EngineError> {
+        let Some(container_index) = self.find_object_index(container) else {
+            return Ok(true);
+        };
+        let controller = self.objects[crew_index].state.controller;
+        self.objects[container_index].state.controller = controller;
+        let Some(function) = com_name(command, kind).map(|com| format!("Contained{com}")) else {
+            return Ok(true);
+        };
+        let definition_id = self.objects[container_index].definition_id.clone();
+        let action_library = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
+            .action_library()
+            .clone();
+        let args = [compat::object_reference_value(crew_id)];
+        self.call_movement_object_function(
+            container_index,
+            &function,
+            &args,
+            &action_library,
+            container,
+            &definition_id,
+        )?;
+        Ok(true)
     }
 
     pub fn try_grab_nearby(&mut self, owner: i32) -> Result<bool, EngineError> {
