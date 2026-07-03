@@ -403,7 +403,8 @@ impl FrontendAssets {
                         sprites.insert(
                             "Walker".to_string(),
                             DefinitionSprite {
-                                default_facet: None,
+                                shape: None,
+                                stretch_growth: false,
                                 image,
                                 actions: HashMap::new(),
                                 color_mask: None,
@@ -5143,10 +5144,8 @@ impl GameApp {
                 .unwrap_or_default();
 
             let default_key = sprite_map_key(definition_id, None);
-            let shape_facet = self
-                .engine
-                .definition_shape_rect(definition_id)
-                .map(|rect| (rect.width, rect.height));
+            let shape_facet = self.engine.definition_shape_rect(definition_id);
+            let stretch_growth = self.engine.definition_stretch_growth(definition_id);
             if let Some(image) = self.engine.definition_sprite_image(definition_id, None) {
                 let width = image.width();
                 let height = image.height();
@@ -5157,7 +5156,8 @@ impl GameApp {
                 sprites.insert(
                     default_key.clone(),
                     DefinitionSprite {
-                        default_facet: shape_facet,
+                        shape: shape_facet,
+                        stretch_growth,
                         image: ImageData::from_arc(width, height, pixels),
                         actions: actions.clone(),
                         color_mask: mask,
@@ -5169,7 +5169,8 @@ impl GameApp {
                 sprites.insert(
                     default_key.clone(),
                     DefinitionSprite {
-                        default_facet: shape_facet,
+                        shape: shape_facet,
+                        stretch_growth,
                         image: ImageData::from_arc(width, height, image.into_pixels()),
                         actions: actions.clone(),
                         color_mask: None,
@@ -5194,7 +5195,8 @@ impl GameApp {
                     sprites.insert(
                         key,
                         DefinitionSprite {
-                            default_facet: shape_facet,
+                            shape: shape_facet,
+                            stretch_growth,
                             image: ImageData::from_arc(width, height, pixels),
                             actions: actions.clone(),
                             color_mask: mask,

@@ -21,10 +21,10 @@ mod startup_menu;
 mod startup_options;
 
 use lc_engine::{
-    DefinitionActionGraphics, Direction, DrawTransform, EnvironmentFrame, EnvironmentSettings,
-    FloatVector2, GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot,
-    ObjectStatus, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
-    SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent, CATEGORY_SORT_LIMIT,
+    DefinitionActionGraphics, DefinitionRect, Direction, DrawTransform, EnvironmentFrame,
+    EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay,
+    ObjectId, ObjectSnapshot, ObjectStatus, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
+    SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent, CATEGORY_SORT_LIMIT, FULL_CON,
     OWNER_NONE,
 };
 use lc_graphics::{
@@ -96,10 +96,16 @@ pub struct DefinitionSprite {
     pub image: ImageData,
     pub actions: HashMap<String, DefinitionActionGraphics>,
     pub color_mask: Option<ColorByOwnerMask>,
-    /// The def Shape size: idle objects draw Shape.Wdt x Shape.Hgt from
-    /// the graphics origin (C4Object::DrawFace, C4Object.cpp:438-460),
-    /// never the whole sprite sheet.
-    pub default_facet: Option<(i32, i32)>,
+    /// The def Shape rect (DefCore Offset + Width/Height): idle objects
+    /// draw Shape.Wdt x Shape.Hgt from the graphics origin
+    /// (C4Object::DrawFace, C4Object.cpp:438-460) — never the whole
+    /// sprite sheet — and the face is anchored at the shape top-left,
+    /// x + Shape.x / y + Shape.y (C4Object::Draw, C4Object.cpp:2231).
+    pub shape: Option<DefinitionRect>,
+    /// DefCore StretchGrowth → C4Def::GrowthType (src/C4Def.cpp:387):
+    /// Con scales the shape on both axes (C4Shape::Stretch) instead of
+    /// height only (C4Shape::Jolt), C4Object.cpp:329-333.
+    pub stretch_growth: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1916,43 +1922,9 @@ impl GraphicsSystem {
         let color = object_color(object).modulate(lighting);
         let owner_color = owner_colors.get(&object.owner).copied();
         let rotation_degrees = (object.rotation.rem_euclid(360)) as f32;
-        if object.vertices.len() >= 3 {
-            let mut points = Vec::with_capacity(object.vertices.len());
-            let mut min_x = f32::MAX;
-            let mut max_x = f32::MIN;
-            let mut min_y = f32::MAX;
-            let mut max_y = f32::MIN;
-            for vertex in &object.vertices {
-                let world_x = (object.position.x + vertex.x) as f32;
-                let world_y = (object.position.y + vertex.y) as f32;
-                let x = (world_x - self.viewport_x) * zoom;
-                let y = (world_y - self.viewport_y) * zoom;
-                points.push((x.round() as i32, y.round() as i32));
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
-            }
-
-            if max_x >= -zoom
-                && min_x <= content_width + zoom
-                && max_y >= -zoom
-                && min_y <= content_height + zoom
-                && fill_polygon(&mut self.surface, &points, color)
-            {
-                return;
-            }
-        }
 
         let screen_x = (object.position.x as f32 - self.viewport_x) * zoom;
         let screen_y = (object.position.y as f32 - self.viewport_y) * zoom;
-        if screen_x < -10.0
-            || screen_y < -10.0
-            || screen_x > content_width + 10.0
-            || screen_y > content_height + 10.0
-        {
-            return;
-        }
 
         let base_transform = object.draw_transform;
         let (base_definition_id, base_graphics_name) =
@@ -1981,101 +1953,14 @@ impl GraphicsSystem {
                 .cloned();
         }
         if let Some(sprite) = sprite {
-            if self.draw_action_sprite(
+            self.draw_object_face(
                 object,
                 &sprite,
                 owner_color,
-                screen_x,
-                screen_y,
                 zoom,
                 rotation_degrees,
                 base_transform,
-            ) {
-                self.draw_object_overlays(
-                    object,
-                    owner_color,
-                    screen_x,
-                    screen_y,
-                    zoom,
-                    rotation_degrees,
-                    base_transform,
-                );
-                return;
-            }
-            // Idle/base face: Shape.Wdt x Hgt from the graphics origin
-            // (C4Object::DrawFace) — the full sheet only when no shape
-            // is known (loader sprites).
-            let (facet_w, facet_h) = sprite
-                .default_facet
-                .filter(|(w, h)| *w > 0 && *h > 0)
-                .unwrap_or((sprite.image.width() as i32, sprite.image.height() as i32));
-            let facet_w = facet_w.min(sprite.image.width() as i32);
-            let facet_h = facet_h.min(sprite.image.height() as i32);
-            let source_rect = SourceRect::new(0, 0, facet_w, facet_h);
-            if !Self::source_within_image(&sprite.image, &source_rect) {
-                return;
-            }
-            let mut scale_x = 1.0f32;
-            let mut scale_y = 1.0f32;
-            let mut offset_x = 0.0f32;
-            let mut offset_y = 0.0f32;
-            let mut flip_x = false;
-            if let Some(transform) = base_transform {
-                if (transform.scale_x).abs() > f32::EPSILON {
-                    scale_x = transform.scale_x;
-                }
-                if (transform.scale_y).abs() > f32::EPSILON {
-                    scale_y = transform.scale_y;
-                }
-                offset_x = transform.offset_x;
-                offset_y = transform.offset_y;
-            }
-            let final_screen_x = screen_x + offset_x * zoom;
-            let final_screen_y = screen_y + offset_y * zoom;
-            if scale_x < 0.0 {
-                flip_x = !flip_x;
-                scale_x = -scale_x;
-            }
-            if scale_y < 0.0 {
-                scale_y = -scale_y;
-            }
-            // Growth scale: DrawFace stretches by Con (C4Object.cpp:448).
-            let con_scale = (object.construction.max(0) as f32 / 100_000.0).min(1.0);
-            let con_scale = if con_scale > 0.0 { con_scale } else { 1.0 };
-            let sprite_width = (facet_w as f32 * con_scale * zoom * scale_x).max(1.0);
-            let sprite_height = (facet_h as f32 * con_scale * zoom * scale_y).max(1.0);
-            if rotation_degrees.abs() <= f32::EPSILON {
-                let rect = GuiRect::from_origin_size(
-                    GuiPoint::new(
-                        final_screen_x - sprite_width / 2.0,
-                        final_screen_y - sprite_height / 2.0,
-                    ),
-                    GuiSize::new(sprite_width, sprite_height),
-                );
-                draw_image_region(
-                    &mut self.surface,
-                    &rect,
-                    &sprite.image,
-                    sprite.color_mask.as_ref(),
-                    &source_rect,
-                    flip_x,
-                    owner_color,
-                );
-            } else {
-                draw_image_region_rotated(
-                    &mut self.surface,
-                    final_screen_x,
-                    final_screen_y,
-                    sprite_width,
-                    sprite_height,
-                    &sprite.image,
-                    sprite.color_mask.as_ref(),
-                    &source_rect,
-                    flip_x,
-                    owner_color,
-                    rotation_degrees,
-                );
-            }
+            );
             self.draw_object_overlays(
                 object,
                 owner_color,
@@ -2086,6 +1971,45 @@ impl GraphicsSystem {
                 base_transform,
             );
             return;
+        }
+
+        if screen_x < -10.0
+            || screen_y < -10.0
+            || screen_x > content_width + 10.0
+            || screen_y > content_height + 10.0
+        {
+            return;
+        }
+
+        // No sprite available: debug fallbacks only (C++ objects always
+        // have a graphics facet, so these paths have no oracle) — the
+        // vertex polygon, then a plain dot.
+        if object.vertices.len() >= 3 {
+            let mut points = Vec::with_capacity(object.vertices.len());
+            let mut min_x = f32::MAX;
+            let mut max_x = f32::MIN;
+            let mut min_y = f32::MAX;
+            let mut max_y = f32::MIN;
+            for vertex in &object.vertices {
+                let world_x = (object.position.x + vertex.x) as f32;
+                let world_y = (object.position.y + vertex.y) as f32;
+                let x = (world_x - self.viewport_x) * zoom;
+                let y = (world_y - self.viewport_y) * zoom;
+                points.push((x.round() as i32, y.round() as i32));
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+
+            if max_x >= -zoom
+                && min_x <= content_width + zoom
+                && max_y >= -zoom
+                && min_y <= content_height + zoom
+                && fill_polygon(&mut self.surface, &points, color)
+            {
+                return;
+            }
         }
 
         let size = (6.0 * zoom).max(3.0);
@@ -2108,29 +2032,316 @@ impl GraphicsSystem {
         );
     }
 
-    fn draw_action_sprite(
+    /// C4Shape con-scaling for drawing (C4Object::UpdateShape,
+    /// src/C4Object.cpp:325-333): GrowthType stretches x/y/Wdt/Hgt
+    /// (C4Shape::Stretch, src/C4Shape.cpp:103-116), otherwise only
+    /// y/Hgt shrink (C4Shape::Jolt, src/C4Shape.cpp:119-128).
+    fn con_scaled_shape(shape: DefinitionRect, con: i32, stretch_growth: bool) -> DefinitionRect {
+        if con == FULL_CON {
+            return shape;
+        }
+        let percent = con * 100 / FULL_CON;
+        let mut scaled = shape;
+        if stretch_growth {
+            scaled.x = scaled.x * percent / 100;
+            scaled.width = scaled.width * percent / 100;
+        }
+        scaled.y = scaled.y * percent / 100;
+        scaled.height = scaled.height * percent / 100;
+        scaled
+    }
+
+    /// The def Shape rect used for drawing; loader sprites without a def
+    /// shape fall back to the whole image centered on the position.
+    fn sprite_def_shape(sprite: &DefinitionSprite) -> DefinitionRect {
+        sprite
+            .shape
+            .filter(|shape| shape.width > 0 && shape.height > 0)
+            .unwrap_or_else(|| {
+                let width = sprite.image.width() as i32;
+                let height = sprite.image.height() as i32;
+                DefinitionRect::new(-width / 2, -height / 2, width, height)
+            })
+    }
+
+    /// C4Object::Draw facet selection (src/C4Object.cpp:2388-2468):
+    /// idle draws the base face only; active actions draw the optional
+    /// FacetBase face plus the action facet — an active action with
+    /// neither draws nothing (src/C4Object.cpp:2402).
+    fn draw_object_face(
         &mut self,
         object: &ObjectSnapshot,
         sprite: &DefinitionSprite,
         owner_color: Option<Color>,
-        screen_x: f32,
-        screen_y: f32,
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
-    ) -> bool {
-        self.draw_action_graphic(
+    ) {
+        let con = object.construction.clamp(0, FULL_CON);
+        let def_shape = Self::sprite_def_shape(sprite);
+        let inst_shape = Self::con_scaled_shape(def_shape, con, sprite.stretch_growth);
+        let Some(graphics) = sprite.actions.get(object.action.name.as_str()) else {
+            // Idle: BaseFace only, phase (0,0) (src/C4Object.cpp:2388-2392).
+            self.draw_base_face(
+                object,
+                sprite,
+                con,
+                def_shape,
+                inst_shape,
+                0,
+                0,
+                false,
+                owner_color,
+                zoom,
+                rotation_degrees,
+                transform,
+            );
+            return;
+        };
+        let direction_index = match object.direction {
+            Direction::Left => 0,
+            Direction::Right => 1,
+        };
+        let (draw_dir, flipped) = Self::resolve_draw_direction(graphics, direction_index);
+        // FacetBase face underneath, phase (0, DrawDir)
+        // (src/C4Object.cpp:2397-2399).
+        if graphics.facet_base {
+            self.draw_base_face(
+                object,
+                sprite,
+                con,
+                def_shape,
+                inst_shape,
+                0,
+                draw_dir as i32,
+                flipped,
+                owner_color,
+                zoom,
+                rotation_degrees,
+                transform,
+            );
+        }
+        let Some(facet) = &graphics.facet else {
+            return;
+        };
+        if facet.width <= 0 || facet.height <= 0 {
+            return;
+        }
+        // Drawing phase; Reverse mirrors it (src/C4Object.cpp:2419-2420).
+        let length = (graphics.length.unwrap_or(1).max(1) as i32).max(1);
+        let mut phase = object.action.phase.rem_euclid(length);
+        if graphics.reverse {
+            phase = length - 1 - phase;
+        }
+        let source = SourceRect::new(
+            facet.x + facet.width.saturating_mul(phase),
+            facet.y + facet.height.saturating_mul(draw_dir as i32),
+            facet.width,
+            facet.height,
+        );
+        // Full con: the facet at cox+FacetX/coy+FacetY; growing: the
+        // con-scaled shape rect at cox/coy (src/C4Object.cpp:2450-2467).
+        let cox = (object.position.x + inst_shape.x) as f32;
+        let coy = (object.position.y + inst_shape.y) as f32;
+        let dest = if con == FULL_CON {
+            (
+                cox + facet.target_x as f32,
+                coy + facet.target_y as f32,
+                facet.width as f32,
+                facet.height as f32,
+            )
+        } else {
+            (cox, coy, inst_shape.width as f32, inst_shape.height as f32)
+        };
+        self.blit_face(
             sprite,
-            object.action.name.as_str(),
-            object.action.phase,
-            object.direction,
+            source,
+            dest,
+            (
+                cox + inst_shape.width as f32 / 2.0,
+                coy + inst_shape.height as f32 / 2.0,
+            ),
+            flipped,
             owner_color,
-            screen_x,
-            screen_y,
             zoom,
             rotation_degrees,
             transform,
-        )
+        );
+    }
+
+    /// C4Object::DrawFace (src/C4Object.cpp:438-467): the base face is
+    /// the def Shape.Wdt x Shape.Hgt crop at phase (iPhaseX, iPhaseY),
+    /// stretched by Con — GrowthType shrinks both axes toward the shape
+    /// center, otherwise the width stays and the bottom source slice is
+    /// shown (construction display).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_base_face(
+        &mut self,
+        object: &ObjectSnapshot,
+        sprite: &DefinitionSprite,
+        con: i32,
+        def_shape: DefinitionRect,
+        inst_shape: DefinitionRect,
+        phase_x: i32,
+        phase_y: i32,
+        flipped: bool,
+        owner_color: Option<Color>,
+        zoom: f32,
+        rotation_degrees: f32,
+        transform: Option<DrawTransform>,
+    ) {
+        let swdt = def_shape.width;
+        let shgt = def_shape.height;
+        let fx = swdt * phase_x;
+        let mut fy = shgt * phase_y;
+        let fwdt = swdt;
+        let mut fhgt = shgt;
+
+        let cox = object.position.x + inst_shape.x;
+        let coy = object.position.y + inst_shape.y;
+
+        // Grow-type display (src/C4Object.cpp:448-451).
+        let mut tx = (cox + (inst_shape.width - swdt * con / FULL_CON) / 2) as f32;
+        let ty = (coy + (inst_shape.height - shgt * con / FULL_CON) / 2) as f32;
+        let mut twdt = (swdt * con / FULL_CON) as f32;
+        let thgt = (shgt * con / FULL_CON) as f32;
+
+        // Construction-type display (src/C4Object.cpp:453-460).
+        if !sprite.stretch_growth {
+            tx = cox as f32 + (inst_shape.width - swdt) as f32 / 2.0;
+            twdt = swdt as f32;
+            fy += shgt * (FULL_CON - con).max(0) / FULL_CON;
+            fhgt = (shgt * con / FULL_CON).min(shgt);
+        }
+
+        self.blit_face(
+            sprite,
+            SourceRect::new(fx, fy, fwdt, fhgt),
+            (tx, ty, twdt, thgt),
+            (
+                cox as f32 + inst_shape.width as f32 / 2.0,
+                coy as f32 + inst_shape.height as f32 / 2.0,
+            ),
+            flipped,
+            owner_color,
+            zoom,
+            rotation_degrees,
+            transform,
+        );
+    }
+
+    /// Blit one object face: clamps the source to the sheet (ActMap
+    /// facets may nominally exceed it — Tree1 Still is 73x73 on a
+    /// 71px-tall Graphics.png; GL clamps), mirrors flipped faces around
+    /// the shape center (C4DrawTransform flipdir, C4Object::UpdateFlipDir
+    /// src/C4Object.cpp:415-418, applied at src/C4Object.cpp:2458),
+    /// applies the script draw transform at the shape center
+    /// (SetTransformAt, src/C4Object.cpp:2431) and rotates around it
+    /// (src/C4Object.cpp:483-488, 2428-2435).
+    #[allow(clippy::too_many_arguments)]
+    fn blit_face(
+        &mut self,
+        sprite: &DefinitionSprite,
+        source: SourceRect,
+        dest: (f32, f32, f32, f32),
+        shape_center: (f32, f32),
+        flipped: bool,
+        owner_color: Option<Color>,
+        zoom: f32,
+        rotation_degrees: f32,
+        transform: Option<DrawTransform>,
+    ) {
+        let (mut dest_x, mut dest_y, mut dest_w, mut dest_h) = dest;
+        if dest_w <= 0.0 || dest_h <= 0.0 || source.width <= 0 || source.height <= 0 {
+            return;
+        }
+        let image_w = sprite.image.width() as i32;
+        let image_h = sprite.image.height() as i32;
+        if source.x < 0 || source.y < 0 {
+            return;
+        }
+        let clamped_w = source.width.min(image_w - source.x);
+        let clamped_h = source.height.min(image_h - source.y);
+        if clamped_w <= 0 || clamped_h <= 0 {
+            return;
+        }
+        dest_w *= clamped_w as f32 / source.width as f32;
+        dest_h *= clamped_h as f32 / source.height as f32;
+        let source = SourceRect::new(source.x, source.y, clamped_w, clamped_h);
+
+        let mut flip = flipped;
+        if flip {
+            dest_x = 2.0 * shape_center.0 - (dest_x + dest_w);
+        }
+        if let Some(transform) = transform {
+            let scale_x = if transform.scale_x.abs() > f32::EPSILON {
+                transform.scale_x
+            } else {
+                1.0
+            };
+            let scale_y = if transform.scale_y.abs() > f32::EPSILON {
+                transform.scale_y
+            } else {
+                1.0
+            };
+            let x0 = shape_center.0 + (dest_x - shape_center.0) * scale_x + transform.offset_x;
+            let x1 =
+                shape_center.0 + (dest_x + dest_w - shape_center.0) * scale_x + transform.offset_x;
+            let y0 = shape_center.1 + (dest_y - shape_center.1) * scale_y + transform.offset_y;
+            let y1 =
+                shape_center.1 + (dest_y + dest_h - shape_center.1) * scale_y + transform.offset_y;
+            dest_x = x0.min(x1);
+            dest_y = y0.min(y1);
+            dest_w = (x1 - x0).abs();
+            dest_h = (y1 - y0).abs();
+            if scale_x < 0.0 {
+                flip = !flip;
+            }
+        }
+
+        if dest_w <= 0.0 || dest_h <= 0.0 {
+            return;
+        }
+
+        let viewport_x = self.viewport_x;
+        let viewport_y = self.viewport_y;
+        if rotation_degrees.abs() <= f32::EPSILON {
+            let rect = GuiRect::from_origin_size(
+                GuiPoint::new((dest_x - viewport_x) * zoom, (dest_y - viewport_y) * zoom),
+                GuiSize::new(dest_w * zoom, dest_h * zoom),
+            );
+            draw_image_region(
+                &mut self.surface,
+                &rect,
+                &sprite.image,
+                sprite.color_mask.as_ref(),
+                &source,
+                flip,
+                owner_color,
+            );
+        } else {
+            // The dest rect center orbits the shape center
+            // (src/C4Object.cpp:483-488).
+            let angle = rotation_degrees.to_radians();
+            let (sin, cos) = angle.sin_cos();
+            let rel_x = dest_x + dest_w / 2.0 - shape_center.0;
+            let rel_y = dest_y + dest_h / 2.0 - shape_center.1;
+            let center_x = shape_center.0 + rel_x * cos - rel_y * sin;
+            let center_y = shape_center.1 + rel_x * sin + rel_y * cos;
+            draw_image_region_rotated(
+                &mut self.surface,
+                (center_x - viewport_x) * zoom,
+                (center_y - viewport_y) * zoom,
+                dest_w * zoom,
+                dest_h * zoom,
+                &sprite.image,
+                sprite.color_mask.as_ref(),
+                &source,
+                flip,
+                owner_color,
+                rotation_degrees,
+            );
+        }
     }
 
     fn draw_action_graphic(
@@ -4299,6 +4510,363 @@ mod tests {
             .surface()
             .get_pixel(screen_x as u32, screen_y as u32);
         assert_eq!(pixel, Some(expected));
+    }
+
+    fn solid_sprite(
+        definition_id: &str,
+        width: u32,
+        height: u32,
+        color: Color,
+        shape: Option<DefinitionRect>,
+        stretch_growth: bool,
+    ) -> Arc<HashMap<String, DefinitionSprite>> {
+        let pixels: Vec<u8> = (0..width * height)
+            .flat_map(|_| [color.r, color.g, color.b, color.a])
+            .collect();
+        let mut sprites = HashMap::new();
+        sprites.insert(
+            sprite_map_key(definition_id, None),
+            DefinitionSprite {
+                image: ImageData::new(width, height, pixels),
+                actions: HashMap::new(),
+                color_mask: None,
+                shape,
+                stretch_growth,
+            },
+        );
+        Arc::new(sprites)
+    }
+
+    #[test]
+    fn sprite_takes_precedence_over_vertex_polygon() {
+        // C4Object::Draw never renders shape vertices as geometry — an
+        // object with a graphics facet always blits it (src/C4Object.cpp:
+        // 2388-2392 idle DrawFace); the polygon is only our debug fallback
+        // for sprite-less objects.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].vertices = vec![
+            ObjectVertex::new(-6, -6),
+            ObjectVertex::new(6, -6),
+            ObjectVertex::new(6, 6),
+            ObjectVertex::new(-6, 6),
+        ];
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+
+        let green = Color::opaque(0, 200, 0);
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Sprite Precedence",
+            test_font(),
+            solid_sprite(
+                "TestObject",
+                8,
+                8,
+                green,
+                Some(DefinitionRect::new(-4, -4, 8, 8)),
+                false,
+            ),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let screen_x = (snapshot.objects[0].position.x - viewport_x) as u32;
+        let screen_y = (snapshot.objects[0].position.y - viewport_y) as u32;
+        assert_eq!(
+            graphics.surface().get_pixel(screen_x, screen_y),
+            Some(green),
+            "expected the sprite pixel, not the vertex-polygon fill"
+        );
+    }
+
+    #[test]
+    fn idle_face_is_anchored_at_shape_top_left() {
+        // C4Object::Draw anchors the face at the shape top-left:
+        // cox = x + Shape.x, coy = y + Shape.y (src/C4Object.cpp:2231),
+        // and DrawFace blits Shape.Wdt x Shape.Hgt there
+        // (src/C4Object.cpp:438-451) — never centered on the position.
+        let mut snapshot = make_snapshot();
+        // Keep the focus on a sprite-less dummy so its selection marks /
+        // energy bar do not overdraw the probed object.
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].definition_id = "FocusDummy".to_string();
+        let mut subject = snapshot.objects[0].clone();
+        subject.id = ObjectId::new(2);
+        subject.definition_id = "TestObject".to_string();
+        subject.position = Vector2::new(64, 40);
+        subject.crew_member = false;
+        snapshot.objects.push(subject);
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+
+        let green = Color::opaque(0, 200, 0);
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Idle Anchor",
+            test_font(),
+            solid_sprite(
+                "TestObject",
+                8,
+                8,
+                green,
+                Some(DefinitionRect::new(-8, -8, 8, 8)),
+                false,
+            ),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let sx = 64 - viewport_x;
+        let sy = 40 - viewport_y;
+        // The face covers world [56,64) x [32,40).
+        assert_eq!(
+            graphics.surface().get_pixel((sx - 5) as u32, (sy - 5) as u32),
+            Some(green),
+            "expected the face inside the shape rect"
+        );
+        assert_ne!(
+            graphics.surface().get_pixel((sx + 1) as u32, (sy + 1) as u32),
+            Some(green),
+            "face must not extend past the shape rect (centered draw would)"
+        );
+        assert_ne!(
+            graphics.surface().get_pixel((sx - 9) as u32, (sy - 9) as u32),
+            Some(green),
+            "face must start at the shape top-left"
+        );
+    }
+
+    #[test]
+    fn growing_face_shrinks_toward_the_scaled_shape_rect() {
+        // GrowthType con display (src/C4Object.cpp:448-451): the target
+        // is swdt*Con/FullCon x shgt*Con/FullCon centered in the
+        // con-scaled shape rect (C4Shape::Stretch scales Offset too,
+        // src/C4Shape.cpp:105-109) — not centered on the position.
+        let mut snapshot = make_snapshot();
+        // Keep the focus on a sprite-less dummy so its selection marks /
+        // energy bar do not overdraw the probed object.
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].definition_id = "FocusDummy".to_string();
+        let mut subject = snapshot.objects[0].clone();
+        subject.id = ObjectId::new(2);
+        subject.definition_id = "TestObject".to_string();
+        subject.position = Vector2::new(64, 40);
+        subject.crew_member = false;
+        subject.construction = FULL_CON / 2;
+        snapshot.objects.push(subject);
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+
+        let green = Color::opaque(0, 200, 0);
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Growth Anchor",
+            test_font(),
+            solid_sprite(
+                "TestObject",
+                8,
+                16,
+                green,
+                Some(DefinitionRect::new(0, -16, 8, 16)),
+                true,
+            ),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let sx = 64 - viewport_x;
+        let sy = 40 - viewport_y;
+        // Con 50%: inst shape (0,-8,4,8), target 4x8 at world [64,68) x [32,40).
+        // (Probe the lower face rows: the GUI overlay text occupies the
+        // top rows of the tiny test surface.)
+        assert_eq!(
+            graphics.surface().get_pixel((sx + 1) as u32, (sy - 2) as u32),
+            Some(green),
+            "expected the half-grown face inside the con-scaled shape"
+        );
+        assert_ne!(
+            graphics.surface().get_pixel((sx - 2) as u32, (sy - 2) as u32),
+            Some(green),
+            "half-grown face must not spill left of the scaled shape"
+        );
+        assert_ne!(
+            graphics.surface().get_pixel((sx + 5) as u32, (sy - 2) as u32),
+            Some(green),
+            "half-grown face must be half-width"
+        );
+    }
+
+    #[test]
+    fn base_graphics_variant_selects_the_named_sprite() {
+        // SetGraphics swaps GetGraphics() to a named C4AdditionalDefGraphics
+        // (src/C4DefGraphics.cpp, C4Object::SetGraphics); the snapshot
+        // carries the variant on ObjectBaseGraphics and the renderer must
+        // blit that sheet, not the default one.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].definition_id = "FocusDummy".to_string();
+        let mut subject = snapshot.objects[0].clone();
+        subject.id = ObjectId::new(2);
+        subject.definition_id = "TestObject".to_string();
+        subject.position = Vector2::new(64, 40);
+        subject.crew_member = false;
+        subject.base_graphics = Some(lc_engine::ObjectBaseGraphics {
+            definition: "TestObject".to_string(),
+            graphics_name: Some("2".to_string()),
+            blit_mode: 0,
+        });
+        snapshot.objects.push(subject);
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+
+        let red = Color::opaque(200, 0, 0);
+        let green = Color::opaque(0, 200, 0);
+        let shape = Some(DefinitionRect::new(-4, -4, 8, 8));
+        let mut sprites = HashMap::new();
+        sprites.extend(
+            solid_sprite("TestObject", 8, 8, red, shape, false)
+                .as_ref()
+                .clone(),
+        );
+        sprites.insert(
+            sprite_map_key("TestObject", Some("2")),
+            solid_sprite("TestObject", 8, 8, green, shape, false)
+                .as_ref()
+                .clone()
+                .remove(&sprite_map_key("TestObject", None))
+                .expect("variant sprite"),
+        );
+
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Variant",
+            test_font(),
+            Arc::new(sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let sx = 64 - viewport_x;
+        let sy = 40 - viewport_y;
+        assert_eq!(
+            graphics.surface().get_pixel((sx + 1) as u32, (sy + 1) as u32),
+            Some(green),
+            "expected the '2' graphics variant, not the default sheet"
+        );
+    }
+
+    #[test]
+    fn action_facet_is_anchored_at_shape_plus_facet_target() {
+        // Regular action facet at full con: drawn facet-sized at
+        // cox + Action.FacetX / coy + Action.FacetY (src/C4Object.cpp:
+        // 2453-2459), sourcing Facet x/y from the sheet.
+        let mut snapshot = make_snapshot();
+        // Keep the focus on a sprite-less dummy so its selection marks /
+        // energy bar do not overdraw the probed object.
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].definition_id = "FocusDummy".to_string();
+        let mut subject = snapshot.objects[0].clone();
+        subject.id = ObjectId::new(2);
+        subject.definition_id = "TestObject".to_string();
+        subject.position = Vector2::new(64, 40);
+        subject.crew_member = false;
+        subject.action = lc_engine::ActionState::new("Still");
+        snapshot.objects.push(subject);
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+
+        // 16x8 sheet: left half red, right half green.
+        let red = Color::opaque(200, 0, 0);
+        let green = Color::opaque(0, 200, 0);
+        let mut pixels = Vec::new();
+        for _y in 0..8 {
+            for x in 0..16 {
+                let color = if x < 8 { red } else { green };
+                pixels.extend_from_slice(&[color.r, color.g, color.b, color.a]);
+            }
+        }
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Still".to_string(),
+            DefinitionActionGraphics {
+                facet: Some(lc_engine::DefinitionActionFacet {
+                    x: 8,
+                    y: 0,
+                    width: 8,
+                    height: 8,
+                    target_x: 2,
+                    target_y: 4,
+                }),
+                directions: 1,
+                flip_dir: None,
+                reverse: false,
+                facet_base: false,
+                facet_top_face: false,
+                facet_target_stretch: false,
+                length: Some(1),
+            },
+        );
+        let mut sprites = HashMap::new();
+        sprites.insert(
+            sprite_map_key("TestObject", None),
+            DefinitionSprite {
+                image: ImageData::new(16, 8, pixels),
+                actions,
+                color_mask: None,
+                shape: Some(DefinitionRect::new(-4, -4, 8, 8)),
+                stretch_growth: false,
+            },
+        );
+
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Facet Anchor",
+            test_font(),
+            Arc::new(sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let sx = 64 - viewport_x;
+        let sy = 40 - viewport_y;
+        // cox = 64-4, coy = 40-4; facet dest [62,70) x [40,48) with the
+        // GREEN sheet half (Facet x=8).
+        assert_eq!(
+            graphics.surface().get_pixel((sx + 1) as u32, (sy + 3) as u32),
+            Some(green),
+            "expected the facet at cox+FacetX/coy+FacetY sourcing Facet x/y"
+        );
+        assert_ne!(
+            graphics.surface().get_pixel((sx - 3) as u32, (sy - 3) as u32),
+            Some(green),
+            "facet must not be centered on the position"
+        );
     }
 
     #[test]
