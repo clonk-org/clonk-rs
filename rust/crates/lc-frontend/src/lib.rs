@@ -21,9 +21,9 @@ mod startup_menu;
 mod startup_options;
 
 use lc_engine::{
-    DefinitionActionGraphics, Direction, DrawTransform, EnvironmentFrame, EnvironmentSettings,
-    FloatVector2, GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot,
-    ObjectStatus, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
+    DefinitionActionGraphics, DefinitionRect, Direction, DrawTransform, EnvironmentFrame,
+    EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay,
+    ObjectId, ObjectSnapshot, ObjectStatus, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
     SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent, CATEGORY_SORT_LIMIT,
     OWNER_NONE,
 };
@@ -96,10 +96,16 @@ pub struct DefinitionSprite {
     pub image: ImageData,
     pub actions: HashMap<String, DefinitionActionGraphics>,
     pub color_mask: Option<ColorByOwnerMask>,
-    /// The def Shape size: idle objects draw Shape.Wdt x Shape.Hgt from
-    /// the graphics origin (C4Object::DrawFace, C4Object.cpp:438-460),
-    /// never the whole sprite sheet.
-    pub default_facet: Option<(i32, i32)>,
+    /// The def Shape rect (DefCore Offset + Width/Height): idle objects
+    /// draw Shape.Wdt x Shape.Hgt from the graphics origin
+    /// (C4Object::DrawFace, C4Object.cpp:438-460) — never the whole
+    /// sprite sheet — and the face is anchored at the shape top-left,
+    /// x + Shape.x / y + Shape.y (C4Object::Draw, C4Object.cpp:2231).
+    pub shape: Option<DefinitionRect>,
+    /// DefCore StretchGrowth → C4Def::GrowthType (src/C4Def.cpp:387):
+    /// Con scales the shape on both axes (C4Shape::Stretch) instead of
+    /// height only (C4Shape::Jolt), C4Object.cpp:329-333.
+    pub stretch_growth: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -2006,8 +2012,9 @@ impl GraphicsSystem {
             // (C4Object::DrawFace) — the full sheet only when no shape
             // is known (loader sprites).
             let (facet_w, facet_h) = sprite
-                .default_facet
-                .filter(|(w, h)| *w > 0 && *h > 0)
+                .shape
+                .filter(|shape| shape.width > 0 && shape.height > 0)
+                .map(|shape| (shape.width, shape.height))
                 .unwrap_or((sprite.image.width() as i32, sprite.image.height() as i32));
             let facet_w = facet_w.min(sprite.image.width() as i32);
             let facet_h = facet_h.min(sprite.image.height() as i32);
