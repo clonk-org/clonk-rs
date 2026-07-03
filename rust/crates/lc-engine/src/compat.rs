@@ -16649,7 +16649,7 @@ fn call_world_object_function_with(
 /// `C4Value::operator bool` (C4Value.h:76,183-185): raw-data truthiness —
 /// false only for nil, 0 and false; non-empty-ness is NOT required for
 /// strings/arrays/maps, and no type conversion happens (unlike `getBool`).
-fn value_raw_truthy(value: &Value) -> bool {
+pub(crate) fn value_raw_truthy(value: &Value) -> bool {
     !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false))
 }
 
