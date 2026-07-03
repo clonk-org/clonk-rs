@@ -5248,6 +5248,11 @@ pub struct Definition {
     rotateable: i32,
     border_bound: i32,
     upright_attach: u32,
+    /// RotatedSolidmasks (C4Def.cpp:414): the solid mask stays put while
+    /// the object is rotated (C4Object::UpdateSolidMask gate,
+    /// C4Object.cpp:5655) and bakes through the rotated branch of
+    /// C4SolidMask::Put (C4SolidMask.cpp:108-174).
+    rotated_solid_masks: bool,
     /// NoStabilize=1 opts out of the small-tilt upright snap
     /// (C4Object::Stabilize, C4Movement.cpp:491).
     no_stabilize: bool,
@@ -5389,6 +5394,7 @@ impl Definition {
             rotateable: 0,
             border_bound: 0,
             upright_attach: 0,
+            rotated_solid_masks: false,
             no_stabilize: false,
             timer: 35,
             timer_call: None,
@@ -5541,6 +5547,7 @@ impl Definition {
         definition.set_rotateable(resource.core.rotateable);
         definition.set_border_bound(resource.core.border_bound);
         definition.set_upright_attach(resource.core.upright_attach);
+        definition.set_rotated_solid_masks(resource.core.rotated_solid_masks);
         definition.set_no_stabilize(resource.core.no_stabilize);
         definition.set_timer(resource.core.timer);
         definition.set_timer_call(resource.core.timer_call.clone());
@@ -6041,6 +6048,16 @@ impl Definition {
 
     pub fn set_upright_attach(&mut self, upright_attach: u32) {
         self.upright_attach = upright_attach;
+    }
+
+    /// RotatedSolidmasks (C4Def.cpp:414): rotation does not disable the
+    /// solid mask (C4Object.cpp:5655).
+    pub fn rotated_solid_masks(&self) -> bool {
+        self.rotated_solid_masks
+    }
+
+    pub fn set_rotated_solid_masks(&mut self, rotated_solid_masks: bool) {
+        self.rotated_solid_masks = rotated_solid_masks;
     }
 
     pub fn collection_rect(&self) -> Option<DefinitionRect> {
@@ -8660,6 +8677,34 @@ struct LayerMovementBounds {
     border_bound: i32,
 }
 
+/// The effective solid-mask parameters of an eligible object
+/// (C4Object::UpdateSolidMask reads SolidMask/Shape/r off the object,
+/// C4Object.cpp:5648-5656).
+#[derive(Debug, Clone)]
+struct SolidMaskSpec {
+    mask: DefinitionTargetRect,
+    pixels: Option<Rc<Vec<u8>>>,
+    shape_x: i32,
+    shape_y: i32,
+    /// MaskPutRotation (C4SolidMask.cpp:42): the object's `r` at put
+    /// time; nonzero only with Def->RotatedSolidmasks.
+    rotation: i32,
+}
+
+/// The rotated-put parameters of a bake (C4SolidMask.cpp:108-174): the
+/// buffer is the MatBuffPitch square around the rotated mask extent and
+/// membership needs the inverse-rotation sample per buffer cell.
+#[derive(Debug, Clone, Copy)]
+struct RotatedBake {
+    /// MaskPutRotation in degrees.
+    rotation: i32,
+    /// MatBuffPitch = int(sqrt(Wdt^2+Hgt^2)) + 1 (ctor,
+    /// C4SolidMask.cpp:415): the enlarged square buffer edge.
+    mat_buff_pitch: i32,
+    /// SolidMask.Hgt (bounds partner of `SolidMaskBake::mask_width`).
+    mask_height: i32,
+}
+
 /// A PUT solid mask (C4SolidMask::Put, unrotated, C4SolidMask.cpp:
 /// 24-107): the landscape-clipped MaskPutRect plus the saved background
 /// bytes ("MatBuff"); the vehicle byte marks unused buffer slots.
@@ -8670,15 +8715,20 @@ struct SolidMaskBake {
     y: i32,
     width: i32,
     height: i32,
-    /// Mask-space offset of the clipped rect (MaskPutRect.tx/ty).
+    /// Buffer-space offset of the clipped rect (MaskPutRect.tx/ty).
+    /// Unrotated, buffer coordinates coincide with mask coordinates;
+    /// rotated, they index the MatBuffPitch square.
     tx: i32,
     ty: i32,
     /// Full mask width (the alpha-pixel row pitch).
     mask_width: i32,
     /// Per-pixel alpha mask (1 = solid); None = full rectangle.
     pixels: Option<Rc<Vec<u8>>>,
-    /// Saved background bytes, row-major width*height.
+    /// Saved background bytes, row-major width*height (the clipped
+    /// window of C++'s MatBuffPitch-pitched pSolidMaskMatBuff).
     buffer: Vec<u8>,
+    /// Some for a rotated put (C4SolidMask.cpp:108-174).
+    rotated: Option<RotatedBake>,
 }
 
 impl SolidMaskBake {
@@ -8689,13 +8739,54 @@ impl SolidMaskBake {
             && other.y < self.y + self.height
     }
 
-    fn mask_set(&self, mask_x: i32, mask_y: i32) -> bool {
+    /// Alpha lookup at MASK coordinates (pSolidMask[iMy*iPitch+iMx],
+    /// C4SolidMask.cpp:150); the rect variant (no sprite) is solid
+    /// everywhere the caller's bounds allow.
+    fn mask_pixel(&self, mask_x: i32, mask_y: i32) -> bool {
         match &self.pixels {
             None => true,
             Some(pixels) => pixels
                 .get((mask_y * self.mask_width + mask_x) as usize)
                 .map(|value| *value != 0)
                 .unwrap_or(false),
+        }
+    }
+
+    /// Mask membership at BUFFER coordinates. Unrotated they ARE mask
+    /// coordinates; rotated, the cell maps back into the mask through
+    /// the inverse-rotation sample of C4SolidMask::Put. Per-cell C4Fixed
+    /// products equal the put loop's accumulation bit-for-bit: every
+    /// accumuland is (integer)*itofix(1)-scaled, so `itofix(n) * m`
+    /// divides exactly by the 2^16 scale — no truncation anywhere until
+    /// the final fixtoi, which both paths share.
+    ///
+    /// NB for a future attached-object backup port: C++'s
+    /// DensityProvider does NOT take this sample for rotated masks — it
+    /// reads the put BUFFER (C4SolidMask.cpp:218-227), so pixels another
+    /// mask claimed first count non-solid there. `buffer[..] != vehicle`
+    /// is the faithful test, not `mask_set`.
+    fn mask_set(&self, buff_x: i32, buff_y: i32) -> bool {
+        match self.rotated {
+            None => self.mask_pixel(buff_x, buff_y),
+            Some(rotated) => {
+                // Matrix of -MaskPutRotation (C4SolidMask.cpp:111-112).
+                let negated = itofix(-rotated.rotation);
+                let ma1 = negated.cos_deg();
+                let ma2 = -negated.sin_deg();
+                let mb1 = negated.sin_deg();
+                let mb2 = negated.cos_deg();
+                let half = rotated.mat_buff_pitch / 2;
+                // iMx/iMy (C4SolidMask.cpp:147-148).
+                let mask_x = fixtoi(itofix(buff_x - half) * ma1 + itofix(buff_y - half) * ma2)
+                    + self.mask_width / 2;
+                let mask_y = fixtoi(itofix(buff_x - half) * mb1 + itofix(buff_y - half) * mb2)
+                    + rotated.mask_height / 2;
+                mask_x >= 0
+                    && mask_y >= 0
+                    && mask_x < self.mask_width
+                    && mask_y < rotated.mask_height
+                    && self.mask_pixel(mask_x, mask_y)
+            }
         }
     }
 }
@@ -21053,6 +21144,7 @@ impl Engine {
         definition.set_rotateable(core.rotateable);
         definition.set_border_bound(core.border_bound);
         definition.set_upright_attach(core.upright_attach);
+        definition.set_rotated_solid_masks(core.rotated_solid_masks);
         definition.set_no_stabilize(core.no_stabilize);
         definition.set_timer(core.timer);
         definition.set_timer_call(core.timer_call.clone());
@@ -21315,20 +21407,21 @@ impl Engine {
     /// The object's effective solid mask spec when eligible
     /// (C4Object::UpdateSolidMask gates: mask enabled, FullCon, not
     /// contained, no rotation, C4Object.cpp:5652-5656).
-    fn solid_mask_spec(
-        &self,
-        index: usize,
-    ) -> Option<(DefinitionTargetRect, Option<Rc<Vec<u8>>>, i32, i32)> {
+    fn solid_mask_spec(&self, index: usize) -> Option<SolidMaskSpec> {
         let object = self.objects.get(index)?;
         if object.destroyed
             || matches!(object.state.status, ObjectStatus::Deleted)
             || object.state.container.is_some()
             || object.state.construction < FULL_CON
-            || object.state.rotation != 0
         {
             return None;
         }
         let definition = self.definitions.get(&object.definition_id)?;
+        // Rotation only blocks the mask without Def->RotatedSolidmasks
+        // (`if (!r || Def->RotatedSolidmasks)`, C4Object.cpp:5655).
+        if object.state.rotation != 0 && !definition.rotated_solid_masks() {
+            return None;
+        }
         let mask = match object.state.solid_mask_override {
             Some(rect) if rect.width <= 0 || rect.height <= 0 => return None,
             Some(rect) => rect,
@@ -21340,7 +21433,13 @@ impl Engine {
             SolidMaskPixels::Alpha(pixels) => Some(Rc::clone(&pixels)),
         };
         let shape = definition.shape_rect()?;
-        Some((mask, pixels, shape.x, shape.y))
+        Some(SolidMaskSpec {
+            mask,
+            pixels,
+            shape_x: shape.x,
+            shape_y: shape.y,
+            rotation: object.state.rotation,
+        })
     }
 
     /// C4SolidMask::Put (regular, unrotated, C4SolidMask.cpp:24-107):
@@ -21357,7 +21456,7 @@ impl Engine {
         else {
             return;
         };
-        let Some((mask, pixels, shape_x, shape_y)) = self.solid_mask_spec(index) else {
+        let Some(spec) = self.solid_mask_spec(index) else {
             return;
         };
         let Some((grid_width, grid_height)) = self
@@ -21367,6 +21466,17 @@ impl Engine {
         else {
             return;
         };
+        if spec.rotation != 0 {
+            self.put_solid_mask_rotated(index, vehicle, spec, (grid_width, grid_height));
+            return;
+        }
+        let SolidMaskSpec {
+            mask,
+            pixels,
+            shape_x,
+            shape_y,
+            ..
+        } = spec;
         let position = self.objects[index].state.position;
         let ox = position.x + shape_x + mask.target_x;
         let oy = position.y + shape_y + mask.target_y;
@@ -21397,6 +21507,7 @@ impl Engine {
             mask_width: mask.width,
             pixels,
             buffer: vec![vehicle; (width * height) as usize],
+            rotated: None,
         };
         let landscape = self.landscape.as_mut().expect("grid mode checked");
         for cy in 0..height {
@@ -21413,6 +21524,126 @@ impl Engine {
                 bake.buffer[(cy * width + cx) as usize] = old;
                 landscape.grid_write_byte(lx, ly, vehicle);
             }
+        }
+        self.objects[index].solid_mask_bake = Some(bake);
+    }
+
+    /// The rotated branch of C4SolidMask::Put (C4SolidMask.cpp:108-174):
+    /// clip the MatBuffPitch square around the rotated extent to the
+    /// landscape, then inverse-rotate every buffer cell back into the
+    /// mask with the C4Fixed matrix accumulation. Reached only with
+    /// Def->RotatedSolidmasks (C4Object.cpp:5655).
+    fn put_solid_mask_rotated(
+        &mut self,
+        index: usize,
+        vehicle: u8,
+        spec: SolidMaskSpec,
+        (grid_width, grid_height): (i32, i32),
+    ) {
+        let SolidMaskSpec {
+            mask,
+            pixels,
+            shape_x,
+            shape_y,
+            rotation,
+        } = spec;
+        let position = self.objects[index].state.position;
+        // MatBuffPitch = int(sqrt(Wdt^2+Hgt^2)) + 1 (ctor,
+        // C4SolidMask.cpp:415): f64 sqrt of an exact integer is correctly
+        // rounded on both sides, and `as i32` truncates like the C++
+        // static_cast.
+        let mat_buff_pitch =
+            f64::from(mask.width * mask.width + mask.height * mask.height).sqrt() as i32 + 1;
+        // Rotation matrix for -MaskPutRotation (C4SolidMask.cpp:111-112).
+        let negated = itofix(-rotation);
+        let ma1 = negated.cos_deg();
+        let ma2 = -negated.sin_deg();
+        let mb1 = negated.sin_deg();
+        let mb2 = negated.cos_deg();
+        // Upper-left corner of the landscape copy rect
+        // (C4SolidMask.cpp:114-117): rotate the mask center, then back
+        // off half the enlarged square.
+        let center_x = shape_x + mask.target_x + mask.width / 2;
+        let center_y = shape_y + mask.target_y + mask.height / 2;
+        let xstart = position.x + fixtoi(ma1 * itofix(center_x) - ma2 * itofix(center_y))
+            - mat_buff_pitch / 2;
+        let ystart = position.y + fixtoi(-mb1 * itofix(center_x) + mb2 * itofix(center_y))
+            - mat_buff_pitch / 2;
+        // Store put rect (C4SolidMask.cpp:119-128); like C++, a fully
+        // off-landscape mask puts nothing (the loop bounds go empty —
+        // here: no bake, so Remove is the same no-op).
+        let mut rect_x = xstart;
+        let mut tx = 0;
+        if rect_x < 0 {
+            tx = -rect_x;
+            rect_x = 0;
+        }
+        let mut rect_y = ystart;
+        let mut ty = 0;
+        if rect_y < 0 {
+            ty = -rect_y;
+            rect_y = 0;
+        }
+        let width = (xstart + mat_buff_pitch).min(grid_width) - rect_x;
+        let height = (ystart + mat_buff_pitch).min(grid_height) - rect_y;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let mut bake = SolidMaskBake {
+            x: rect_x,
+            y: rect_y,
+            width,
+            height,
+            tx,
+            ty,
+            mask_width: mask.width,
+            pixels,
+            buffer: vec![vehicle; (width * height) as usize],
+            rotated: Some(RotatedBake {
+                rotation,
+                mat_buff_pitch,
+                mask_height: mask.height,
+            }),
+        };
+        // Go through the clipping rect with the EXACT C4Fixed matrix
+        // accumulation (C4SolidMask.cpp:130-173). x0/y0 are integer
+        // fixed values, so every product and running sum below is an
+        // exact multiple of the matrix entries — bit-identical to C++.
+        let x0 = itofix(tx - mat_buff_pitch / 2);
+        let y0 = itofix(ty - mat_buff_pitch / 2);
+        let landscape = self.landscape.as_mut().expect("grid mode checked");
+        let mut ya = y0 * ma2;
+        let mut yb = y0 * mb2;
+        for cy in 0..height {
+            let mut xa = x0 * ma1;
+            let mut xb = x0 * mb1;
+            for cx in 0..width {
+                // Position in the solidmask buffer (C4SolidMask.cpp:147-148).
+                let mask_x = fixtoi(xa + ya) + mask.width / 2;
+                let mask_y = fixtoi(xb + yb) + mask.height / 2;
+                // In bounds and solid (C4SolidMask.cpp:150)?
+                if mask_x >= 0
+                    && mask_y >= 0
+                    && mask_x < mask.width
+                    && mask_y < mask.height
+                    && bake.mask_pixel(mask_x, mask_y)
+                {
+                    let lx = rect_x + cx;
+                    let ly = rect_y + cy;
+                    // Regular put stores the pixel even when it is
+                    // already MCVehic (C4SolidMask.cpp:156-160) — it
+                    // just will not be used for restore.
+                    let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
+                    bake.buffer[(cy * width + cx) as usize] = old;
+                    landscape.grid_write_byte(lx, ly, vehicle);
+                }
+                // Cells the rotated mask misses keep the MCVehic marker
+                // the buffer was initialized with (C4SolidMask.cpp:165-167).
+                xa += ma1;
+                xb += mb1;
+            }
+            ya += ma2;
+            yb += mb2;
         }
         self.objects[index].solid_mask_bake = Some(bake);
     }
@@ -21509,6 +21740,9 @@ impl Engine {
             let Some(object) = self.objects.get(index) else {
                 continue;
             };
+            // Rotation blocks the overlay even with RotatedSolidmasks:
+            // this rect model cannot express a rotated mask, and grid
+            // worlds (all real content) take the bake path above.
             if object.destroyed
                 || matches!(object.state.status, ObjectStatus::Deleted)
                 || object.state.container.is_some()
@@ -38750,6 +38984,314 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine
             .tick()
             .expect("a Contact* script error must not abort the tick");
+    }
+
+    #[test]
+    fn definition_from_resource_carries_rotated_solidmasks_like_cpp() -> Result<(), EngineError> {
+        // The C4Def compile threads RotatedSolidmasks (src/C4Def.cpp:414)
+        // through to the UpdateSolidMask gate (src/C4Object.cpp:5655).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Elevator.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=ELEV\nName=Elevator\nCategory=C4D_Object\nShape=0,0,4,4\nSolidMask=0,0,4,4,0,0\nRotatedSolidmasks=1\n",
+        )
+        .expect("write defcore");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource)?;
+        assert!(definition.rotated_solid_masks());
+        Ok(())
+    }
+
+    /// A pixel-grid landscape whose texmap carries a Vehicle slot (byte
+    /// 2) so C4SolidMask baking is active (grid mode, `put_solid_mask`);
+    /// byte 1 is solid Earth, byte 0 sky.
+    fn vehicle_grid_landscape(width: u32, height: u32) -> Landscape {
+        let densities = vec![0, 100, 100];
+        let names = vec![None, Some("Earth".into()), Some("Vehicle".into())];
+        let grid = landscape::PixelGrid::new(
+            width,
+            height,
+            vec![0u8; (width * height) as usize],
+            densities,
+            names,
+            vec![None; 3],
+        );
+        let mut landscape =
+            Landscape::new(width, vec![0; width as usize]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        landscape
+    }
+
+    /// Every landscape pixel currently carrying the Vehicle byte
+    /// (row-major order).
+    fn vehicle_pixels(engine: &Engine) -> Vec<(i32, i32)> {
+        let landscape = engine.landscape().expect("landscape set");
+        let (width, height) = landscape.grid_dimensions().expect("grid mode");
+        let vehicle = landscape.grid_vehicle_byte().expect("vehicle byte");
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .filter(|&(x, y)| landscape.grid_byte_at(x, y) == Some(vehicle))
+            .collect()
+    }
+
+    #[test]
+    fn rotated_solid_mask_bakes_inverse_rotated_pixels_like_cpp() {
+        // Mirrors the rotated branch of C4SolidMask::Put
+        // (src/C4SolidMask.cpp:108-174), gated by Def->RotatedSolidmasks
+        // (src/C4Object.cpp:5655).
+        //
+        // Hand-derived golden: 3x1 bar mask (Shape=-1,0,3,1;
+        // SolidMask=0,0,3,1,0,0), object center (10,10), r=90.
+        // MatBuffPitch = int(sqrt(9+1))+1 = 4 (ctor, src/C4SolidMask.cpp:415).
+        // Sin(-90) = -1, Cos(-90) = 0 (SineTable exact at multiples of 90),
+        // centerx = -1+0+1 = 0, centery = 0+0+0 = 0, so
+        // xstart = 10+0-2 = 8, ystart = 8 (src/C4SolidMask.cpp:114-117).
+        // Per cell (xcnt,ycnt) of the 4x4 square (:130-173):
+        //   iMx = fixtoi((ycnt-2)*Ma2) + 1 = ycnt-1   in [0,3) => ycnt 1..=3
+        //   iMy = fixtoi((xcnt-2)*Mb1) + 0 = 2-xcnt   in [0,1) => xcnt = 2
+        // The horizontal bar bakes as the vertical bar (10,9),(10,10),(10,11).
+        let mut definition = simple_definition("Bar");
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, 0, 3, 1)));
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 3, 1, 0, 0)));
+        definition.set_rotated_solid_masks(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine.set_landscape(vehicle_grid_landscape(20, 20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Bar").with_position(Vector2::new(10, 10)))
+            .expect("bar spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].state.position = Vector2::new(10, 10);
+        engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
+        engine.objects[idx].state.rotation = 90;
+        engine.objects[idx].fixed_rotation = itofix(90);
+        engine.update_solid_mask(idx);
+
+        assert_eq!(vehicle_pixels(&engine), vec![(10, 9), (10, 10), (10, 11)]);
+    }
+
+    #[test]
+    fn rotated_solid_mask_at_45_degrees_bakes_diamond_superset_like_cpp() {
+        // Mirrors src/C4SolidMask.cpp:130-173 at a non-cardinal angle.
+        //
+        // Hand-derived golden: 3x3 mask (Shape=-1,-1,3,3;
+        // SolidMask=0,0,3,3,0,0), object center (10,10), r=45.
+        // MatBuffPitch = int(sqrt(18))+1 = 5; SineTable[4500] = 46340, so
+        // Ma1=Ma2=Mb2=46340, Mb1=-46340; centerx=centery=0 =>
+        // xstart=ystart=8. Per 5x5 cell: iMx = fixtoi((xcnt-2+ycnt-2)*
+        // 46340)+1, iMy = fixtoi((-(xcnt-2)+ycnt-2)*46340)+1; e.g. cell
+        // (2,0): iMx = fixtoi(-92680)+1 = 0, iMy = fixtoi(-92680+92680)+1
+        // = 1 => hit at (10,8); cell (0,0): iMx = fixtoi(-185360)+1 = -2
+        // => miss. The rotated square covers the unrotated 3x3 PLUS the
+        // four diagonal corner pixels — the enlarged diamond.
+        let mut definition = simple_definition("Sqr");
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 3, 3)));
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 3, 3, 0, 0)));
+        definition.set_rotated_solid_masks(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine.set_landscape(vehicle_grid_landscape(20, 20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Sqr").with_position(Vector2::new(10, 10)))
+            .expect("square spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].state.position = Vector2::new(10, 10);
+        engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
+        engine.objects[idx].state.rotation = 45;
+        engine.objects[idx].fixed_rotation = itofix(45);
+        engine.update_solid_mask(idx);
+
+        assert_eq!(
+            vehicle_pixels(&engine),
+            vec![
+                (10, 8),
+                (9, 9),
+                (10, 9),
+                (11, 9),
+                (8, 10),
+                (9, 10),
+                (10, 10),
+                (11, 10),
+                (12, 10),
+                (9, 11),
+                (10, 11),
+                (11, 11),
+                (10, 12),
+            ]
+        );
+    }
+
+    #[test]
+    fn rotated_solid_mask_removal_restores_landscape_exactly_like_cpp() {
+        // Mirrors src/C4SolidMask.cpp:240-259: Remove restores the saved
+        // background bytes from the MatBuffPitch-pitched buffer wherever
+        // the buffer byte is not MCVehic — for a rotated bake that is
+        // exactly the inverse-rotation hit set of Put.
+        let mut definition = simple_definition("Sqr");
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 3, 3)));
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 3, 3, 0, 0)));
+        definition.set_rotated_solid_masks(true);
+
+        let mut engine = Engine::with_seed(7);
+        let mut landscape = vehicle_grid_landscape(20, 20);
+        // Earth under three of the diamond pixels (mask hits) and one
+        // outside it (never touched).
+        landscape.grid_write_byte(10, 8, 1);
+        landscape.grid_write_byte(10, 10, 1);
+        landscape.grid_write_byte(9, 11, 1);
+        landscape.grid_write_byte(3, 3, 1);
+        let original = landscape.pixel_grid().expect("grid set").bytes().to_vec();
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Sqr").with_position(Vector2::new(10, 10)))
+            .expect("square spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].state.position = Vector2::new(10, 10);
+        engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
+        engine.objects[idx].state.rotation = 45;
+        engine.objects[idx].fixed_rotation = itofix(45);
+        engine.update_solid_mask(idx);
+        assert!(
+            vehicle_pixels(&engine).contains(&(10, 8)),
+            "rotated mask must be baked before the removal is meaningful"
+        );
+
+        engine.remove_solid_mask(idx);
+
+        let restored = engine
+            .landscape()
+            .expect("landscape set")
+            .pixel_grid()
+            .expect("grid set")
+            .bytes()
+            .to_vec();
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn rotation_without_rotated_solidmasks_removes_the_mask_like_cpp() {
+        // Mirrors the C4Object::UpdateSolidMask gate
+        // (src/C4Object.cpp:5648-5668): without Def->RotatedSolidmasks a
+        // rotated object falls through to "remove and destroy mask".
+        let mut definition = simple_definition("Sqr");
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 3, 3)));
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 3, 3, 0, 0)));
+
+        let mut engine = Engine::with_seed(7);
+        engine.set_landscape(vehicle_grid_landscape(20, 20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Sqr").with_position(Vector2::new(10, 10)))
+            .expect("square spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].state.position = Vector2::new(10, 10);
+        engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
+        engine.update_solid_mask(idx);
+        assert!(
+            !vehicle_pixels(&engine).is_empty(),
+            "the unrotated mask must bake first"
+        );
+
+        engine.objects[idx].state.rotation = 45;
+        engine.objects[idx].fixed_rotation = itofix(45);
+        engine.update_solid_mask(idx);
+
+        assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
+        assert!(engine.objects[idx].solid_mask_bake.is_none());
+    }
+
+    #[test]
+    fn removing_overlapping_mask_reputs_rotated_mask_pixels_like_cpp() {
+        // Mirrors src/C4SolidMask.cpp:262-273: Remove re-puts every other
+        // put mask across the freed rect; for a rotated mask the re-put
+        // membership is the same inverse-rotation sample as Put
+        // (src/C4SolidMask.cpp:144-167 with RegularPut false).
+        //
+        // Order matters: the unrotated 1x1 blocker puts FIRST and owns
+        // the shared pixel's Earth backup; the rotated bar puts second
+        // and stores MCVehic there (unused for restore). Removing the
+        // blocker restores Earth, then the re-put of the rotated bar
+        // must claim the pixel back (and refresh its buffer with Earth,
+        // C4SolidMask.cpp:156-160), or the bar would be left with a hole.
+        let mut bar = simple_definition("Bar");
+        bar.set_shape_rect(Some(DefinitionRect::new(-1, 0, 3, 1)));
+        bar.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 3, 1, 0, 0)));
+        bar.set_rotated_solid_masks(true);
+        let mut blocker = simple_definition("Blk");
+        blocker.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        blocker.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+
+        let mut engine = Engine::with_seed(7);
+        let mut landscape = vehicle_grid_landscape(20, 20);
+        landscape.grid_write_byte(10, 10, 1);
+        let original = landscape.pixel_grid().expect("grid set").bytes().to_vec();
+        engine.set_landscape(landscape);
+        engine.register_definition(bar).expect("bar registers");
+        engine
+            .register_definition(blocker)
+            .expect("blocker registers");
+
+        // Blocker puts first: its 1x1 mask owns the Earth backup at (10,10).
+        let blocker_id = engine
+            .spawn_object(SpawnConfig::new("Blk").with_position(Vector2::new(10, 10)))
+            .expect("blocker spawns");
+        let blocker_idx = engine
+            .find_object_index(blocker_id)
+            .expect("blocker exists");
+        engine.objects[blocker_idx].state.position = Vector2::new(10, 10);
+        engine.objects[blocker_idx].fixed_position = FixedVec2::from_ints(10, 10);
+        engine.update_solid_mask(blocker_idx);
+
+        // Rotated bar puts second: vertical bar (10,9),(10,10),(10,11).
+        let bar_id = engine
+            .spawn_object(SpawnConfig::new("Bar").with_position(Vector2::new(10, 10)))
+            .expect("bar spawns");
+        let bar_idx = engine.find_object_index(bar_id).expect("bar exists");
+        engine.objects[bar_idx].state.position = Vector2::new(10, 10);
+        engine.objects[bar_idx].fixed_position = FixedVec2::from_ints(10, 10);
+        engine.objects[bar_idx].state.rotation = 90;
+        engine.objects[bar_idx].fixed_rotation = itofix(90);
+        engine.update_solid_mask(bar_idx);
+        assert_eq!(
+            vehicle_pixels(&engine),
+            vec![(10, 9), (10, 10), (10, 11)],
+            "both masks put; the shared pixel is baked once"
+        );
+
+        // Removing the blocker restores Earth at (10,10) and then the
+        // re-put of the rotated bar must write MCVehic back.
+        engine.remove_solid_mask(blocker_idx);
+        assert_eq!(
+            vehicle_pixels(&engine),
+            vec![(10, 9), (10, 10), (10, 11)],
+            "the rotated mask re-put reclaims the freed shared pixel"
+        );
+
+        // Removing the bar restores the original landscape, including
+        // the Earth byte the re-put refreshed into the bar's buffer.
+        engine.remove_solid_mask(bar_idx);
+        let restored = engine
+            .landscape()
+            .expect("landscape set")
+            .pixel_grid()
+            .expect("grid set")
+            .bytes()
+            .to_vec();
+        assert_eq!(restored, original);
     }
 
     #[test]
