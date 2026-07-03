@@ -421,6 +421,9 @@ impl Scenario {
         let (physics, gravity) = derive_legacy_physics(&manifest)?;
         let environment = derive_legacy_environment(&manifest)?;
         let weather_init = derive_legacy_weather_init(&manifest)?;
+        // C4Sky always initializes for a running game (C4Sky::Init,
+        // C4Sky.cpp:71-152): bitmap sky or fade gradient.
+        let sky = derive_legacy_sky(group, &manifest);
 
         Ok(Self {
             name: manifest.title,
@@ -434,7 +437,7 @@ impl Scenario {
             gravity,
             environment: Some(environment),
             weather_init: Some(weather_init),
-            sky: None,
+            sky: Some(sky),
             script,
             objectives: ScenarioObjectives::from_legacy_game(&manifest.core.game),
             construction_needs_material: manifest.core.game.realism.construction_needs_material,
@@ -3170,6 +3173,124 @@ fn legacy_c4s_value(
         Some(raw) => parse_legacy_c4s_value(key, &raw, defaults),
         None => Ok(defaults),
     }
+}
+
+/// C4Surface::LoadAny extension search order for extension-less names
+/// (C4Surface.cpp:855).
+const LEGACY_SKY_EXTENSIONS: [&str; 4] = ["png", "bmp", "jpeg", "jpg"];
+
+/// The default sky fade when `SkyDefFade` is all zero: game palette
+/// entries CSkyDef1=104 and 104+19 (C4Sky::SetFadePalette,
+/// C4Sky.cpp:56-62; C4Landscape.h:34), scaled `<< 2` at load
+/// (C4GraphicsResource.cpp:183-184). Values read from
+/// planet/Graphics.c4g/C4.PAL.
+const LEGACY_SKY_FADE_TOP_DEFAULT: RgbColor = RgbColor::new(28, 64, 152);
+const LEGACY_SKY_FADE_BOTTOM_DEFAULT: RgbColor = RgbColor::new(192, 196, 252);
+
+/// Mirrors C4Sky::Init for legacy scenario loads (C4Sky.cpp:71-152): the
+/// scenario's `Sky` bitmap becomes the sky surface — white fade
+/// (C4Sky.cpp:109), tiled up to 128x128 (SurfaceEnsureSize,
+/// C4Sky.cpp:28-52,110-111), SkyScrollMode parallax mapping
+/// (C4Sky.cpp:114-125). Without one the sky is the `SkyDefFade` gradient
+/// (SetFadePalette, C4Sky.cpp:54-68).
+///
+/// Gap (presentation only): the `SkyDef` tile list — one entry picked by
+/// SeededRandom and loaded from the scenario or Graphics.c4g
+/// (C4Sky.cpp:88-105) — is not evaluated; such scenarios fall back to the
+/// fade gradient here.
+fn derive_legacy_sky(group: &Group, manifest: &LegacyScenarioManifest) -> SkyConfig {
+    let mut settings = SkySettings::default();
+
+    if let Some((width, height, pixels)) = load_legacy_sky_surface(group) {
+        settings.fade_top = RgbColor::new(255, 255, 255);
+        settings.fade_bottom = RgbColor::new(255, 255, 255);
+        // SkyScrollMode (C4Sky.cpp:114-125): 1 = wind-driven xdir with
+        // stronger y-parallax; 2 = stronger parallax both ways
+        // (ParallaxMode itself stays Fixed in case 2, like C++).
+        match manifest.core.landscape.sky_scroll_mode {
+            1 => {
+                settings.parallax_mode = SkyParallaxMode::Wind;
+                settings.parallax_y = 20;
+            }
+            2 => {
+                settings.parallax_x = 20;
+                settings.parallax_y = 20;
+            }
+            _ => {}
+        }
+        let (width, height, pixels) = ensure_sky_surface_size(width, height, pixels, 128, 128);
+        settings = settings.with_surface(width, height);
+        return SkyConfig {
+            settings,
+            surface: Some(Arc::new(GraphicsImage::new(width, height, pixels))),
+        };
+    }
+
+    // No sky surface: fade gradient (C4Sky.cpp:129-134). All-zero
+    // SkyDefFade selects the palette default (C4Sky.cpp:56-62).
+    let fade = manifest.core.landscape.sky_fade;
+    if fade.iter().sum::<i32>() == 0 {
+        settings.fade_top = LEGACY_SKY_FADE_TOP_DEFAULT;
+        settings.fade_bottom = LEGACY_SKY_FADE_BOTTOM_DEFAULT;
+    } else {
+        let channel = |value: i32| value.clamp(0, 255) as u8;
+        settings.fade_top = RgbColor::new(channel(fade[0]), channel(fade[1]), channel(fade[2]));
+        settings.fade_bottom = RgbColor::new(channel(fade[3]), channel(fade[4]), channel(fade[5]));
+    }
+    SkyConfig {
+        settings,
+        surface: None,
+    }
+}
+
+/// Load `Sky.{png,bmp,jpeg,jpg}` from the scenario group (C4Sky.cpp:84 via
+/// C4Surface::LoadAny, C4Surface.cpp:846-865). Like C++, a missing or
+/// undecodable bitmap yields `None` (the sky falls back to the fade
+/// gradient) instead of an error.
+fn load_legacy_sky_surface(group: &Group) -> Option<(u32, u32, Vec<u8>)> {
+    LEGACY_SKY_EXTENSIONS
+        .iter()
+        .filter_map(|extension| group.read_file(format!("Sky.{extension}")).ok())
+        .find_map(|bytes| load_from_memory(&bytes).ok())
+        .map(|decoded| {
+            let rgba = decoded.to_rgba8();
+            let (width, height) = rgba.dimensions();
+            (width, height, rgba.into_raw())
+        })
+}
+
+/// SurfaceEnsureSize (C4Sky.cpp:28-52): enlarge to at least
+/// `min_width` x `min_height` by whole-tile repetition of the original.
+fn ensure_sky_surface_size(
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    min_width: u32,
+    min_height: u32,
+) -> (u32, u32, Vec<u8>) {
+    if width == 0 || height == 0 {
+        return (width, height, pixels);
+    }
+    let mut dest_width = width;
+    let mut dest_height = height;
+    while dest_width < min_width {
+        dest_width += width;
+    }
+    while dest_height < min_height {
+        dest_height += height;
+    }
+    if dest_width == width && dest_height == height {
+        return (width, height, pixels);
+    }
+    let row_bytes = (width * 4) as usize;
+    let mut enlarged = Vec::with_capacity((dest_width * dest_height * 4) as usize);
+    for y in 0..dest_height {
+        let source_row = &pixels[(y % height) as usize * row_bytes..][..row_bytes];
+        for _ in 0..dest_width / width {
+            enlarged.extend_from_slice(source_row);
+        }
+    }
+    (dest_width, dest_height, enlarged)
 }
 
 fn derive_legacy_physics(
@@ -8074,6 +8195,125 @@ global func Step(state, frame, random)
             .object_snapshot(id)
             .expect("object created from legacy definition");
         assert_eq!(object.definition_id, "FOOO");
+    }
+
+    /// Minimal legacy scenario fixture: one definition pack plus a
+    /// `Scenario.txt` with the given `[Landscape]` section body.
+    fn write_legacy_sky_fixture(dir: &Path, landscape_section: &str) -> PathBuf {
+        let defs_root = dir.join("Defs.c4d");
+        let foo_core = defs_root.join("Foo.c4d");
+        std::fs::create_dir_all(&foo_core).expect("definition dir");
+        std::fs::write(
+            foo_core.join("DefCore.txt"),
+            "[DefCore]\nid=FOOO\nName=Foo\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+
+        let scenario_dir = dir.join("SkyTest.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            format!(
+                "[Head]\nTitle=Sky Test\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Landscape]\n{landscape_section}"
+            ),
+        )
+        .expect("write legacy scenario core");
+        scenario_dir
+    }
+
+    fn load_legacy_sky(dir: &Path, scenario_dir: &Path) -> Scenario {
+        let resolver = FileSystemResolver {
+            roots: vec![dir.to_path_buf()],
+        };
+        Scenario::load_from_path_with(scenario_dir, &resolver).expect("legacy scenario loads")
+    }
+
+    #[test]
+    fn legacy_scenario_loads_sky_bitmap_like_c4sky_init() {
+        // C4Sky::Init loads the scenario's `Sky` bitmap via LoadAny
+        // (C4Sky.cpp:82-84; extension search png/bmp/jpeg/jpg,
+        // C4Surface.cpp:855), sets the fade colors to white (C4Sky.cpp:109),
+        // tiles tiny surfaces up to 128x128 (SurfaceEnsureSize,
+        // C4Sky.cpp:28-52,110-111) and maps SkyScrollMode=2 to
+        // ParX=ParY=20 without touching ParallaxMode (C4Sky.cpp:122-124).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_legacy_sky_fixture(dir.path(), "SkyScrollMode=2\n");
+
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&[80u8, 120, 200, 255].repeat(16), 4, 4, ColorType::Rgba8)
+            .expect("encode sky jpeg");
+        std::fs::write(scenario_dir.join("Sky.jpg"), jpeg).expect("write Sky.jpg");
+
+        let scenario = load_legacy_sky(dir.path(), &scenario_dir);
+        let sky = scenario.sky().expect("legacy sky config present");
+        assert!(sky.settings.has_surface);
+        assert_eq!((sky.settings.width, sky.settings.height), (128, 128));
+        let surface = sky.surface.as_ref().expect("sky surface loaded");
+        assert_eq!((surface.width(), surface.height()), (128, 128));
+        assert_eq!(sky.settings.fade_top, RgbColor::new(255, 255, 255));
+        assert_eq!(sky.settings.fade_bottom, RgbColor::new(255, 255, 255));
+        assert_eq!(sky.settings.parallax_x, 20);
+        assert_eq!(sky.settings.parallax_y, 20);
+        assert_eq!(sky.settings.parallax_mode, SkyParallaxMode::Fixed);
+    }
+
+    #[test]
+    fn legacy_scenario_without_sky_bitmap_falls_back_to_palette_fade() {
+        // No sky bitmap: C4Sky::Init drops the surface and takes the fade
+        // colors from SkyDefFade (C4Sky.cpp:129-134); an all-zero fade
+        // selects game palette entries 104 and 123 — RGB(28,64,152) and
+        // RGB(192,196,252) after the <<2 load scaling (C4Sky.cpp:56-62,
+        // C4GraphicsResource.cpp:183-184, planet/Graphics.c4g/C4.PAL).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_legacy_sky_fixture(dir.path(), "TopOpen=1\n");
+
+        let scenario = load_legacy_sky(dir.path(), &scenario_dir);
+        let sky = scenario.sky().expect("legacy sky config present");
+        assert!(!sky.settings.has_surface);
+        assert!(sky.surface.is_none());
+        assert_eq!(sky.settings.fade_top, RgbColor::new(28, 64, 152));
+        assert_eq!(sky.settings.fade_bottom, RgbColor::new(192, 196, 252));
+        assert_eq!(sky.settings.parallax_x, 10);
+        assert_eq!(sky.settings.parallax_y, 10);
+    }
+
+    #[test]
+    fn legacy_sky_def_fade_overrides_the_palette_default() {
+        // Non-zero SkyDefFade — the `SkyFade` key (C4Scenario.cpp:344) —
+        // is two explicit RGB triplets (C4Sky::SetFadePalette,
+        // C4Sky.cpp:63-68).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_legacy_sky_fixture(dir.path(), "SkyFade=1,2,3,4,5,6\n");
+
+        let scenario = load_legacy_sky(dir.path(), &scenario_dir);
+        let sky = scenario.sky().expect("legacy sky config present");
+        assert_eq!(sky.settings.fade_top, RgbColor::new(1, 2, 3));
+        assert_eq!(sky.settings.fade_bottom, RgbColor::new(4, 5, 6));
+    }
+
+    #[test]
+    fn legacy_sky_scroll_mode_wind_maps_to_wind_parallax() {
+        // SkyScrollMode=1: wind-driven xdir plus ParY=20 (C4Sky.cpp:118-121).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_legacy_sky_fixture(dir.path(), "SkyScrollMode=1\n");
+
+        let mut png = Vec::new();
+        {
+            use image::ImageEncoder as _;
+            image::codecs::png::PngEncoder::new(&mut png)
+                .write_image(&[10u8, 20, 30, 255], 1, 1, ColorType::Rgba8)
+                .expect("encode sky png");
+        }
+        std::fs::write(scenario_dir.join("Sky.png"), png).expect("write Sky.png");
+
+        let scenario = load_legacy_sky(dir.path(), &scenario_dir);
+        let sky = scenario.sky().expect("legacy sky config present");
+        assert_eq!(sky.settings.parallax_mode, SkyParallaxMode::Wind);
+        assert_eq!(sky.settings.parallax_x, 10);
+        assert_eq!(sky.settings.parallax_y, 20);
+        // 1x1 tile enlarged to the 128x128 minimum (C4Sky.cpp:110-111).
+        assert_eq!((sky.settings.width, sky.settings.height), (128, 128));
     }
 
     #[test]
