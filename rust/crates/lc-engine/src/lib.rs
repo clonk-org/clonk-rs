@@ -13395,6 +13395,7 @@ impl Engine {
                 continue;
             }
             self.apply_physics_at_index(idx);
+
             // C4Object::ExecMovement (C4Movement.cpp:553-616): contained
             // objects copy the container's motion (:556-561), C4D_StaticBack
             // never moves (:564, a MASK test unlike Init's equality), only
@@ -13450,6 +13451,7 @@ impl Engine {
                     }
                 }
             }
+
 
             self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
@@ -13721,6 +13723,7 @@ impl Engine {
             self.update_sector_for_index(idx);
 
             self.apply_nested_object_outcomes(other_objects)?;
+
 
             self.trigger_action_callbacks(idx, Some(previous_action_name))?;
             self.update_sector_for_index(idx);
@@ -14157,11 +14160,6 @@ impl Engine {
         function_override: Option<&str>,
         state_override: Option<ObjectState>,
     ) -> Result<(), EngineError> {
-        if std::env::var("LC_DEBUG_WAGON").is_ok()
-            && self.objects.get(index).map(|o| o.id.as_u64()) == Some(1450)
-        {
-            eprintln!("WAGON callback {:?} action={}", kind, action_name);
-        }
         let definition_id = self.objects[index].definition_id.clone();
         let action_library = {
             let definition = self
@@ -17199,9 +17197,6 @@ impl Engine {
         definition_id: &DefinitionId,
         clear_targets: bool,
     ) {
-        if std::env::var("LC_DEBUG_WAGON").is_ok() && self.objects.get(idx).map(|o| o.id.as_u64()) == Some(1450) {
-            eprintln!("WAGON reset_action_to_default");
-        }
         let library = self
             .definitions
             .get(definition_id)
@@ -17372,9 +17367,6 @@ impl Engine {
     }
 
     fn apply_no_attach_action(&mut self, idx: usize, library: &ActionLibrary) {
-        if std::env::var("LC_DEBUG_WAGON").is_ok() && self.objects[idx].id.as_u64() == 1450 {
-            eprintln!("WAGON no_attach_action fires");
-        }
         if idx >= self.objects.len() {
             return;
         }
@@ -17394,11 +17386,14 @@ impl Engine {
             return;
         }
 
-        let next_action = if library.contains("Jump") {
-            "Jump"
-        } else {
-            library.default_action()
-        };
+        // ObjectActionJump is `if (!SetActionByName("Jump")) return false;`
+        // (C4ObjectCom.cpp:54) — a def without a Jump action keeps its
+        // current action untouched (the GoldRush coach stays in Turn even
+        // while its attach probe finds no ground at the map edge).
+        if !library.contains("Jump") {
+            return;
+        }
+        let next_action = "Jump";
 
         let update = ActionUpdate {
             name: Some(next_action.to_string()),
@@ -37023,6 +37018,90 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
     // sets UprightAttach re-arms Mobile every frame while standing within
     // ±StableRange; tilts beyond the range stay demobilized until the
     // Tick10 pulse.
+    // The GoldRush coach: UprightAttach=8, bottom vertices 5px above the
+    // shape bottom, spawned where the attach probe finds NO ground in
+    // range. C++ NoAttachAction falls through to ObjectActionJump, which
+    // is `if (!SetActionByName("Jump")) return false`
+    // (C4ObjectCom.cpp:54) -- a def without a Jump action KEEPS its
+    // current action (the live Idle-vs-Turn class was the rust resetting
+    // to the library default instead).
+    #[test]
+    fn upright_attached_vehicle_on_ground_keeps_its_action_like_cpp() {
+        let mut coach = Definition::from_script("Coch", "Coach", "#strict\n").expect("compiles");
+        coach.set_shape_rect(Some(DefinitionRect::new(-27, -20, 55, 40)));
+        coach.set_shape_vertices(vec![
+            ObjectVertex { x: 0, y: 1, cnat: 0, friction: 100 },
+            ObjectVertex { x: -16, y: 15, cnat: 9, friction: 10 },
+            ObjectVertex { x: 16, y: 15, cnat: 10, friction: 10 },
+        ]);
+        coach.set_upright_attach(CNAT_BOTTOM);
+        coach.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Turn".to_string(),
+                    ActionSpec::default()
+                        .with_delay(2)
+                        .with_length(20)
+                        .with_next("Drive0"),
+                ),
+                (
+                    "Drive0".to_string(),
+                    ActionSpec::default()
+                        .with_delay(10)
+                        .with_length(1)
+                        .with_next("Drive0"),
+                ),
+            ]),
+        );
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(200, 400));
+        engine.set_physics(PhysicsSettings::new(20, 100, -100));
+        engine.register_definition(coach).expect("registers");
+
+        // The DoCon bottom adjust puts the given y=270 center at 250:
+        // bottom vertices sit at 265, the road at 270 - inside the
+        // 5px attach range.
+        let coach_id = engine
+            .spawn_object(
+                SpawnConfig::new("Coch")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(100, 270)),
+            )
+            .expect("spawns");
+        engine
+            .apply_object_update(
+                coach_id,
+                ObjectUpdate {
+                    action: Some(ActionUpdate::default().with_name("Turn").with_force(true)),
+                    ..Default::default()
+                },
+            )
+            .expect("action set");
+
+        for frame in 0..3 {
+            engine.tick().expect("tick");
+            let idx = engine.find_object_index(coach_id).expect("exists");
+            assert_eq!(
+                engine.objects[idx].state.action.name, "Turn",
+                "no Jump in the ActMap: the failed jump keeps Turn (frame {frame})"
+            );
+        }
+        // Gravity still pulls the unattached wagon (DoGravity per exec):
+        // three frames of accumulation stay under two integer pixels.
+        let idx = engine.find_object_index(coach_id).expect("exists");
+        assert_eq!(
+            engine.objects[idx].state.position.x,
+            100,
+            "no horizontal drift"
+        );
+        assert!(
+            (250..=251).contains(&engine.objects[idx].state.position.y),
+            "slow free-fall, not an attach snap: y={}",
+            engine.objects[idx].state.position.y
+        );
+    }
+
     #[test]
     fn upright_attach_rearms_mobile_every_frame_like_cpp() {
         let mut definition = simple_definition("Barrel");
