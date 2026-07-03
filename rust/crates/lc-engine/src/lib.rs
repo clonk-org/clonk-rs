@@ -1896,6 +1896,13 @@ pub struct ObjectState {
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
     pub owner: i32,
+    /// C4Object::Controller (C4Object.h:127): the player whose action
+    /// chain caused this object — kill/cause tracing. NO_OWNER before
+    /// Init (C4Object.cpp:86) and as the Objects.txt compile default
+    /// (C4Object.cpp:2739); Init seeds it from the explicit controller or
+    /// the owner (C4Object.cpp:162).
+    #[serde(default = "default_owner")]
+    pub controller: i32,
     #[serde(default = "default_category")]
     pub category: i32,
     #[serde(default)]
@@ -2032,6 +2039,7 @@ struct ApplyDeltaOutcome {
 pub(crate) fn preview_spawn_state(
     position: Vector2,
     owner: i32,
+    controller: i32,
     category: i32,
     construction: i32,
     vertices: Vec<ObjectVertex>,
@@ -2056,6 +2064,7 @@ pub(crate) fn preview_spawn_state(
         components: HashMap::new(),
         status: ObjectStatus::Normal,
         owner,
+        controller,
         category,
         crew_member: false,
         crew_disabled: false,
@@ -2156,6 +2165,12 @@ impl ObjectState {
         }
         if let Some(owner) = delta.owner {
             self.owner = owner;
+            // SetOwner "automatically updates controller"
+            // (C4Object.cpp:5499-5500); an explicit SetController in the
+            // same batch still wins below.
+            self.controller = delta.controller.unwrap_or(owner);
+        } else if let Some(controller) = delta.controller {
+            self.controller = controller;
         }
         if let Some(category) = delta.category {
             self.category = category;
@@ -2239,6 +2254,9 @@ struct ObjectDelta {
     action: Option<ActionUpdate>,
     status: Option<ObjectStatus>,
     owner: Option<i32>,
+    /// FnSetController (C4Script.cpp:1322-1331) / SetOwner's automatic
+    /// controller update (C4Object.cpp:5499-5500).
+    controller: Option<i32>,
     category: Option<i32>,
     own_mass: Option<i32>,
     crew_member: Option<bool>,
@@ -2300,6 +2318,9 @@ impl ObjectDelta {
         }
         if let Some(owner) = update.owner {
             self.owner = Some(owner);
+        }
+        if let Some(controller) = update.controller {
+            self.controller = Some(controller);
         }
         if let Some(category) = update.category {
             self.category = Some(category);
@@ -2375,6 +2396,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             action: update.action,
             status: update.status,
             owner: update.owner,
+            controller: update.controller,
             category: update.category,
             crew_member: update.crew_member,
             crew_disabled: update.crew_disabled,
@@ -2436,6 +2458,10 @@ pub struct ObjectUpdate {
     pub status: Option<ObjectStatus>,
     #[serde(default)]
     pub owner: Option<i32>,
+    /// FnSetController (C4Script.cpp:1322-1331); also recorded by
+    /// SetOwner's automatic controller update (C4Object.cpp:5499-5500).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<i32>,
     #[serde(default)]
     pub category: Option<i32>,
     /// SetMass (C4Script.cpp:3620-3626): OwnMass = value - Def->Mass.
@@ -2637,6 +2663,7 @@ impl ObjectUpdate {
             && self.action.is_none()
             && self.status.is_none()
             && self.owner.is_none()
+            && self.controller.is_none()
             && self.category.is_none()
             && self.crew_member.is_none()
             && self.alive.is_none()
@@ -3788,6 +3815,7 @@ impl Object {
             components: self.state.components.clone(),
             status: self.state.status,
             owner: self.state.owner,
+            controller: self.state.controller,
             category: self.state.category,
             crew_member: self.state.crew_member,
             alive: self.state.alive,
@@ -4225,6 +4253,13 @@ pub struct SpawnConfig {
     #[serde(default)]
     pub vertices: Vec<ObjectVertex>,
     pub owner: i32,
+    /// Explicit C4Object::Controller: Objects.txt `Controller=` on loads
+    /// (compile default NO_OWNER, C4Object.cpp:2739) or the creating
+    /// controller from script CreateObject/CreateConstruction
+    /// (C4Script.cpp:1905-1906, 1932-1933). None/NO_OWNER = the Init rule
+    /// (owner) for fresh spawns (C4Object.cpp:162).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
     #[serde(default)]
@@ -4304,6 +4339,7 @@ impl SpawnConfig {
             effects: Vec::new(),
             vertices: Vec::new(),
             owner: OWNER_NONE,
+            controller: None,
             crew_member: None,
             status: None,
             container: None,
@@ -4439,6 +4475,11 @@ impl SpawnConfig {
         self
     }
 
+    pub fn with_controller(mut self, controller: i32) -> Self {
+        self.controller = Some(controller);
+        self
+    }
+
     pub fn with_category(mut self, category: i32) -> Self {
         self.category = Some(category);
         self
@@ -4516,6 +4557,10 @@ pub struct ObjectSnapshot {
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
     pub owner: i32,
+    /// C4Object::Controller (persisted like the savegame `Controller`
+    /// field, default NO_OWNER, C4Object.cpp:2739).
+    #[serde(default = "default_owner")]
+    pub controller: i32,
     #[serde(default = "default_category")]
     pub category: i32,
     #[serde(default)]
@@ -6091,6 +6136,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
                 .with_physicals(
@@ -6267,6 +6313,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
                 .with_physicals(
@@ -6435,6 +6482,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
                 .with_physicals(
@@ -6627,6 +6675,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
                 .with_physicals(
@@ -6744,6 +6793,7 @@ impl Definition {
         )
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
+        .with_controller(state.controller)
         .with_in_liquid(state.in_liquid)
         .with_own_mass(state.own_mass)
         .with_physicals(
@@ -6878,6 +6928,7 @@ impl Definition {
         )
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
+        .with_controller(state.controller)
         .with_in_liquid(state.in_liquid)
         .with_own_mass(state.own_mass)
         .with_physicals(
@@ -7005,6 +7056,7 @@ impl Definition {
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
+        .with_controller(state.controller)
         .with_in_liquid(state.in_liquid)
         .with_own_mass(state.own_mass)
         .with_physicals(
@@ -7135,6 +7187,7 @@ impl Definition {
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
+        .with_controller(state.controller)
         .with_in_liquid(state.in_liquid)
         .with_own_mass(state.own_mass)
         .with_physicals(
@@ -7260,6 +7313,7 @@ impl Definition {
         )
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
+        .with_controller(state.controller)
         .with_in_liquid(state.in_liquid)
         .with_own_mass(state.own_mass)
         .with_physicals(
@@ -7725,6 +7779,7 @@ impl Definition {
                 )
                 .with_definition_id(self.id.as_str())
                 .with_alive(state.alive)
+                .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
                 .with_own_mass(state.own_mass)
                 .with_physicals(
@@ -14250,6 +14305,7 @@ impl Engine {
             action,
             status,
             owner,
+            controller,
             crew_member,
             crew_disabled,
             portrait_source,
@@ -14362,6 +14418,12 @@ impl Engine {
             }
             if let Some(owner) = owner {
                 object.state.owner = owner;
+                // SetOwner "automatically updates controller"
+                // (C4Object.cpp:5499-5500); an explicit SetController in
+                // the same batch still wins below.
+                object.state.controller = controller.unwrap_or(owner);
+            } else if let Some(controller) = controller {
+                object.state.controller = controller;
             }
             if let Some(crew_member) = crew_member {
                 object.state.crew_member = crew_member;
@@ -15541,6 +15603,7 @@ impl Engine {
                     components: snapshot.components.clone(),
                     status: snapshot.status,
                     owner: snapshot.owner,
+                    controller: snapshot.controller,
                     category: snapshot.category,
                     crew_member: snapshot.crew_member,
                     crew_disabled: false,
@@ -15602,6 +15665,19 @@ impl Engine {
 
         for (object_id, container) in container_assignments {
             self.apply_container_change(object_id, None, Some(container))?;
+            // Restores denumerate Contained without running Enter — the
+            // snapshot controller stays authoritative (no C4Object.cpp:1582
+            // transfer on load).
+            if let (Some(index), Some(snapshot)) = (
+                self.find_object_index(object_id),
+                state
+                    .objects
+                    .iter()
+                    .find(|persisted| persisted.snapshot.id == object_id)
+                    .map(|persisted| &persisted.snapshot),
+            ) {
+                self.objects[index].state.controller = snapshot.controller;
+            }
         }
 
         // C++ recomputes OCF on load rather than persisting it
@@ -21411,6 +21487,14 @@ impl Engine {
                 }
 
                 self.objects[object_index].state.container = Some(container_id);
+                // "Assume that the new container controls this object, if
+                // it cannot control itself (i.e.: Alive)" — projectile kill
+                // tracing (C4Object::Enter, C4Object.cpp:1579-1582).
+                let container_controller = self.objects[container_index].state.controller;
+                let entering = &mut self.objects[object_index].state;
+                if !(entering.alive && entering.category & CATEGORY_LIVING != 0) {
+                    entering.controller = container_controller;
+                }
                 // Enter refreshes the new container too (C4Object.cpp:1518).
                 self.refresh_object_ocf(container_index);
             }
@@ -23118,6 +23202,7 @@ impl Engine {
             effects,
             vertices,
             owner,
+            controller,
             crew_member,
             status,
             container,
@@ -23194,6 +23279,12 @@ impl Engine {
             .map(|definition| definition.physical().energy)
             .unwrap_or(0);
 
+        // Init: an explicit controller wins, else the owner
+        // (C4Object.cpp:162). Loaded objects skip Init and keep the
+        // compiled value (default NO_OWNER, C4Object.cpp:2739).
+        let initial_controller = controller
+            .filter(|value| *value > OWNER_NONE)
+            .unwrap_or(if loaded { OWNER_NONE } else { owner });
         let owns_vertices = !vertices.is_empty();
         let shape_template = ObjectShapeTemplate::new(
             definition_vertices.clone(),
@@ -23284,6 +23375,7 @@ impl Engine {
                 components: HashMap::new(),
                 status: status.unwrap_or_default(),
                 owner,
+                controller: initial_controller,
                 category: initial_category,
                 crew_member: initial_crew_member,
                 crew_disabled: false,
@@ -23743,6 +23835,12 @@ impl Engine {
         for (previous, new) in container_changes {
             self.apply_container_change(id, previous, new)?;
         }
+        if loaded {
+            // Loaded Contained placement is denumeration, not Enter — the
+            // compiled controller stays (C4Object.cpp:2739), no
+            // C4Object.cpp:1582 transfer.
+            self.objects[index].state.controller = initial_controller;
+        }
         if destroy_requested {
             self.objects[index].mark_destroyed();
         }
@@ -24107,6 +24205,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         components: snapshot.components.clone(),
         status: snapshot.status,
         owner: snapshot.owner,
+        controller: snapshot.controller,
         category: snapshot.category,
         crew_member: snapshot.crew_member,
         crew_disabled: false,
@@ -31495,6 +31594,263 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn definition_call_falls_back_to_global_functions() {
+        // `id->Func(...)` (AB_CALL) resolves via FindSameNameFunc: the
+        // def's own function first, else a GLOBAL script function running
+        // in definition scope (C4AulExec.cpp:1259-1261, C4Aul.cpp:130-148).
+        // System.c4g Explode.c relies on it: the exploding object removes
+        // itself, then runs `exploding_id->DoExplosion(...)`.
+        let def_script = r#"#strict
+local iGot;
+func Trigger() {
+    iGot = GetID()->GlobalHelper(6);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("TSTD", "Test", def_script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let loaded = engine.install_global_scripts(&[(
+            "System.c4g/Test.c".to_string(),
+            "#strict\nglobal func GlobalHelper(n) { return(n * 7); }\n".to_string(),
+        )]);
+        assert_eq!(loaded, 1);
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("TSTD").with_category(CATEGORY_OBJECT))
+            .expect("object spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iGot"),
+            Some(&Value::Int(42)),
+            "the global function runs as a definition call"
+        );
+    }
+
+    // FnIncinerateLandscape (C4Script.cpp:253-261) -> C4Landscape::
+    // Incinerate (C4Landscape.cpp:1430-1441): inflammable material at the
+    // (caller-relative) point spawns one FLAM unless another FLAM already
+    // burns in the (x-4, y-1, 8, 20) rect (C4Game::FindObject range check,
+    // position-in-rect); sky/solid-rock points return false.
+    #[test]
+    fn incinerate_landscape_spawns_one_flam_on_inflammable_material() {
+        let caller_script = r#"#strict
+local iFirst, iSecond, iSky;
+func Trigger() {
+    iFirst = IncinerateLandscape(8 - GetX(), 45 - GetY());
+    iSecond = IncinerateLandscape(8 - GetX(), 45 - GetY());
+    iSky = IncinerateLandscape(8 - GetX(), 2 - GetY());
+    return(1);
+}
+"#;
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Oil]
+            Name=Oil
+            Density=100
+            Friction=25
+            Inflammable=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let oil = materials.id_of("Oil").expect("oil exists");
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(17, 40, Some(oil)));
+        engine
+            .register_definition(
+                Definition::from_script("FLAM", "Fire", "#strict\n").expect("flam compiles"),
+            )
+            .expect("flam registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(id).expect("caller exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(
+            locals.get("iFirst"),
+            Some(&Value::Bool(true)),
+            "inflammable point incinerates"
+        );
+        assert_eq!(
+            locals.get("iSecond"),
+            Some(&Value::Bool(false)),
+            "a FLAM already burning in the rect blocks the second"
+        );
+        assert_eq!(
+            locals.get("iSky"),
+            Some(&Value::Bool(false)),
+            "sky point does not incinerate"
+        );
+        let flams = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "FLAM" && !object.destroyed)
+            .count();
+        assert_eq!(flams, 1, "exactly one FLAM spawned");
+    }
+
+    // FnCreateConstruction takes a C4ID first parameter
+    // (C4Script.cpp:1911-1912) — DoExplosion's `CreateConstruction(FXB1,
+    // x, y+level, cause_plr, level*5)` passes the id value directly.
+    #[test]
+    fn create_construction_accepts_id_values() {
+        let caller_script = r#"#strict
+local aSite;
+func Trigger() {
+    aSite = CreateConstruction(BLST, 0, 0, -1, 50);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("BLST", "Blast", "#strict\n").expect("blast compiles"),
+            )
+            .expect("blast registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let site = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "BLST")
+            .expect("construction site exists");
+        assert_eq!(
+            site.state.construction,
+            FULL_CON / 2,
+            "iCompletion * FullCon / 100 (C4Script.cpp:1930)"
+        );
+    }
+
+    // C4Id2Def failure means NO object and a silent nullptr return:
+    // C4Game::CreateObject (C4Game.cpp:1146), CreateObjectConstruction
+    // (C4Game.cpp:1183). Goldrush's explosion chain hits it - FXB1 is
+    // referenced by System.c4g Explode.c but not loaded by the scenario.
+    #[test]
+    fn create_object_and_construction_return_nil_for_unknown_definitions() {
+        let caller_script = r#"#strict
+local aObj, aSite;
+func Trigger() {
+    aObj = CreateObject(FXB1, 0, 0, -1);
+    aSite = CreateConstruction(FXB1, 0, 0, -1, 50);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(id).expect("caller exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(locals.get("aObj"), Some(&Value::Nil), "CreateObject nil");
+        assert_eq!(
+            locals.get("aSite"),
+            Some(&Value::Nil),
+            "CreateConstruction nil"
+        );
+        assert_eq!(engine.objects.len(), 1, "no spawn registered");
+    }
+
+    // FnDistance (C4Script.cpp:3316-3319) -> Distance (C4Math.cpp:22-31):
+    // integer euclidean distance with the exact post-sqrt adjustment;
+    // FnSetViewOffset (C4Script.cpp:5676-5687): ValidPlr gate, then true
+    // even without a viewport (sync safety — the headless C++ path).
+    // Both run in System.c4g's FxShakeEffectTimer (Explode.c:188-200).
+    #[test]
+    fn distance_and_set_view_offset_match_cpp() {
+        let caller_script = r#"#strict
+local iPyth, iDiag, iZero, iBadPlr, iGoodPlr;
+func Trigger() {
+    iPyth = Distance(0, 0, 3, 4);
+    iDiag = Distance(0, 0, 1, 1);
+    iZero = Distance(-7, 9, -7, 9);
+    iBadPlr = SetViewOffset(9, 5, 5);
+    iGoodPlr = SetViewOffset(1, 5, 5);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(1, "P1"))
+            .expect("player registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(id).expect("caller exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(locals.get("iPyth"), Some(&Value::Int(5)));
+        assert_eq!(
+            locals.get("iDiag"),
+            Some(&Value::Int(1)),
+            "sqrt(2) adjusts down to the floor (C4Math.cpp:28-30)"
+        );
+        assert_eq!(locals.get("iZero"), Some(&Value::Int(0)));
+        assert_eq!(
+            locals.get("iBadPlr"),
+            Some(&Value::Bool(false)),
+            "invalid player rejected"
+        );
+        assert_eq!(
+            locals.get("iGoodPlr"),
+            Some(&Value::Bool(true)),
+            "no viewport is sync-safe true"
+        );
+    }
+
+    #[test]
     fn call_runs_own_def_script_function_like_cpp() {
         // FnCall (C4Script.cpp:3424-3432): Call(name, p0..p8) runs `name` on
         // the calling object itself (C4Object::Call → own def script,
@@ -34720,6 +35076,214 @@ func Trigger() {
             bandit.state.effects.iter().all(|e| e.name != "Life"),
             "RemoveEffect right after CreateObject killed it - and \
              materialization must NOT re-run Initialize (no second Life)"
+        );
+    }
+
+    // FnGetController (C4Script.cpp:1316-1320) reads C4Object::Controller,
+    // which C4Object::Init seeds from the owner when no explicit
+    // controller is handed in (C4Object.cpp:162).
+    #[test]
+    fn get_controller_defaults_to_owner_like_init() {
+        let script = r#"#strict
+local iCtrl;
+func Trigger() {
+    iCtrl = GetController();
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let def = Definition::from_script("CALL", "Caller", script).expect("caller compiles");
+        engine.register_definition(def).expect("caller registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(2),
+            )
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(id).expect("caller exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iCtrl"),
+            Some(&Value::Int(2)),
+            "Controller = Owner at Init (C4Object.cpp:162)"
+        );
+    }
+
+    // FnCreateObject copies the creating object's controller onto the
+    // spawn so cause-effect chains trace back to the causing player
+    // (C4Script.cpp:1905-1906) - even when the new object is ownerless.
+    #[test]
+    fn create_object_inherits_creator_controller() {
+        let bandit_script = "#strict\n";
+        let caller_script = r#"#strict
+local iCtrl;
+func Trigger() {
+    var pObj = CreateObject(BNDT, 0, 0, -1);
+    iCtrl = GetController(pObj);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let bandit =
+            Definition::from_script("BNDT", "Bandit", bandit_script).expect("bandit compiles");
+        engine
+            .register_definition(bandit)
+            .expect("bandit registers");
+        let caller =
+            Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(2),
+            )
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(id).expect("caller exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iCtrl"),
+            Some(&Value::Int(2)),
+            "spawn controller = creator controller (C4Script.cpp:1905-1906)"
+        );
+        let bandit = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "BNDT")
+            .expect("bandit exists");
+        assert_eq!(bandit.state.owner, OWNER_NONE, "owner stays NO_OWNER");
+        assert_eq!(bandit.state.controller, 2, "controller traces the cause");
+    }
+
+    // FnSetController (C4Script.cpp:1322-1331): NO_OWNER always passes,
+    // any other value must be a valid player, and foreign targets are
+    // written directly (the BlastObjects shockwave marks flung
+    // projectiles with the causing player, Explode.c:116).
+    #[test]
+    fn set_controller_validates_player_and_writes_foreign_targets() {
+        let caller_script = r#"#strict
+local iSelf, iInvalid, iForeign, iCleared;
+func Trigger(object pOther) {
+    iInvalid = SetController(9);
+    iSelf = SetController(1);
+    iForeign = SetController(1, pOther);
+    iCleared = SetController(-1);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(1, "P1"))
+            .expect("player registers");
+        let caller =
+            Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        let other = Definition::from_script("OTHR", "Other", "#strict\n").expect("other compiles");
+        engine.register_definition(other).expect("other registers");
+
+        let caller_id = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0),
+            )
+            .expect("caller spawns");
+        let other_id = engine
+            .spawn_object(
+                SpawnConfig::new("OTHR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0),
+            )
+            .expect("other spawns");
+        let idx = engine.find_object_index(caller_id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", vec![Value::Object(other_id.as_u64())])
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(caller_id).expect("caller exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(
+            locals.get("iInvalid"),
+            Some(&Value::Bool(false)),
+            "invalid player rejected (ValidPlr gate)"
+        );
+        assert_eq!(locals.get("iSelf"), Some(&Value::Bool(true)));
+        assert_eq!(locals.get("iForeign"), Some(&Value::Bool(true)));
+        assert_eq!(
+            locals.get("iCleared"),
+            Some(&Value::Bool(true)),
+            "NO_OWNER bypasses the player check"
+        );
+        assert_eq!(
+            engine.objects[idx].state.controller, OWNER_NONE,
+            "self ends cleared"
+        );
+        let other_idx = engine.find_object_index(other_id).expect("other exists");
+        assert_eq!(
+            engine.objects[other_idx].state.controller, 1,
+            "foreign target updated"
+        );
+    }
+
+    // FnGetObjectLayer (C4Script.cpp:5160-5166): the object's pLayer —
+    // nil for the (default) unlayered world, the layer object when set.
+    // System.c4g Explode.c reads it before removing the exploding object.
+    #[test]
+    fn get_object_layer_returns_nil_or_the_layer_object() {
+        let caller_script = r#"#strict
+local aBare, aLayered;
+func Trigger(object pLayered) {
+    aBare = GetObjectLayer();
+    aLayered = GetObjectLayer(pLayered);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let caller =
+            Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        let other = Definition::from_script("OTHR", "Other", "#strict\n").expect("other compiles");
+        engine.register_definition(other).expect("other registers");
+
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let layered_id = engine
+            .spawn_object(
+                SpawnConfig::new("OTHR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_layer(caller_id),
+            )
+            .expect("layered spawns");
+        let idx = engine.find_object_index(caller_id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", vec![Value::Object(layered_id.as_u64())])
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(caller_id).expect("caller exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(locals.get("aBare"), Some(&Value::Nil), "no layer -> nil");
+        assert_eq!(
+            locals.get("aLayered"),
+            Some(&Value::Object(caller_id.as_u64())),
+            "layer object returned"
         );
     }
 

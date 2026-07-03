@@ -343,6 +343,16 @@ impl HostWorldObject {
         self.owner
     }
 
+    /// C4Object::Controller — carried on the full-state snapshot; legacy
+    /// fixture snapshots without one fall back to the owner (the Init
+    /// default, C4Object.cpp:162).
+    pub fn controller(&self) -> i32 {
+        self.state
+            .as_ref()
+            .map(|state| state.controller)
+            .unwrap_or(self.owner)
+    }
+
     pub fn category(&self) -> i32 {
         self.category
     }
@@ -699,6 +709,13 @@ impl HostWorldContext {
     /// `Some(known?)` when a registry is attached, `None` otherwise.
     pub(crate) fn particle_def_known(&self, name: &str) -> Option<bool> {
         self.particle_defs.as_ref().map(|defs| defs.contains(name))
+    }
+
+    /// `C4Id2Def` visibility: `Some(known?)` when the engine attached a
+    /// definition table, `None` for legacy fixture contexts (empty table
+    /// stays permissive like particle_def_known).
+    pub(crate) fn definition_known(&self, id: &str) -> Option<bool> {
+        (!self.definitions.is_empty()).then(|| self.definitions.contains_key(id))
     }
 
     pub(crate) fn get(&self, id: ObjectId) -> Option<&HostWorldObject> {
@@ -3442,7 +3459,11 @@ fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
                 "Definition call: Definition for id {def_id} not found!"
             )));
         };
-        return match call_scoped_script_function(script, name, &pars) {
+        // AB_CALL resolves via FindSameNameFunc: the def's own function
+        // first, else a GLOBAL script function running in definition
+        // scope (C4AulExec.cpp:1259-1261, C4Aul.cpp:130-148) — unlike
+        // FnDefinitionCall's owner-scoped lookup.
+        return match call_scoped_script_function_or_global(script, name, &pars) {
             Some(result) => result,
             None if failsafe => Ok(Value::Nil),
             None => Err(RuntimeError::new(format!(
@@ -3502,7 +3523,31 @@ fn call_scoped_script_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    if !script.has_function(function) {
+    call_scoped_script_function_impl(script, function, args, false)
+}
+
+/// The AB_CALL definition-call variant: FindSameNameFunc also finds
+/// GLOBAL script functions (C4Aul.cpp:130-148) — own functions win.
+fn call_scoped_script_function_or_global(
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_scoped_script_function_impl(script, function, args, true)
+}
+
+fn call_scoped_script_function_impl(
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+    include_globals: bool,
+) -> Option<Result<Value, RuntimeError>> {
+    let resolvable = if include_globals {
+        script.has_function_or_global(function)
+    } else {
+        script.has_function(function)
+    };
+    if !resolvable {
         return None;
     }
     HOST_CONTEXT.with(|cell| {
@@ -3810,10 +3855,16 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetAlive", get_alive);
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
+    script.register_host_function("Distance", distance);
+    script.register_host_function("SetViewOffset", set_view_offset);
+    script.register_host_function("GetController", get_controller);
+    script.register_host_function("SetController", set_controller);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
+    script.register_host_function("GetObjectLayer", get_object_layer);
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("InsertMaterial", insert_material);
+    script.register_host_function("IncinerateLandscape", incinerate_landscape);
     script.register_host_function("OnFire", on_fire);
     script.register_host_function("SetGraphics", set_graphics);
     script.register_host_function("SetObjDrawTransform", set_obj_draw_transform);
@@ -4891,6 +4942,8 @@ pub(crate) struct HostObjectContext<'a> {
     /// C4Object::OwnMass (SetMass leftovers).
     pub own_mass: i32,
     pub owner: i32,
+    /// C4Object::Controller (C4Object.h:127) — cause tracing.
+    pub controller: i32,
     pub category: i32,
     pub ocf: u32,
     pub ocf_base: u32,
@@ -5015,6 +5068,9 @@ impl<'a> HostObjectContext<'a> {
             in_liquid: false,
             own_mass: 0,
             owner,
+            // The Init default (C4Object.cpp:162); real controllers ride
+            // in via with_controller.
+            controller: owner,
             category,
             ocf: ocf::NORMAL,
             ocf_base,
@@ -5046,6 +5102,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_alive(mut self, alive: bool) -> Self {
         self.alive = alive;
+        self
+    }
+
+    pub fn with_controller(mut self, controller: i32) -> Self {
+        self.controller = controller;
         self
     }
 
@@ -9819,8 +9880,7 @@ fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
 // ── C4FindObject / C4SortObject condition trees (C4FindObject.{h,cpp}) ──────
 
 /// C4FO_* constants (C4FindObject.h:27-50) as a parsed condition tree.
-/// Known divergences: `Controller` compares the owner (the engine has no
-/// separate controller); `Layer` is unmodeled on host objects (never
+/// Known divergences: `Layer` is unmodeled on host objects (never
 /// matches); shape tests use the vertices bounding box.
 #[derive(Debug, Clone)]
 enum FindCondition {
@@ -10098,7 +10158,8 @@ impl FindCondition {
             FindCondition::Container(container) => object.container() == *container,
             FindCondition::AnyContainer => object.container().is_some(),
             FindCondition::Owner(owner) => object.owner() == *owner,
-            FindCondition::Controller(controller) => object.owner() == *controller,
+            // C4FindObjectController::Check (C4FindObject.cpp:628-631).
+            FindCondition::Controller(controller) => object.controller() == *controller,
             // C4FindObjectFunc::Check (C4FindObject.cpp:653-662): no
             // overload visible to the object's def → silently false; the
             // result converts with raw C4Value truthiness, not getBool.
@@ -12054,6 +12115,11 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("CreateObject requires an active engine context"))?;
 
+        // C4Id2Def failure: no object, silent nullptr (C4Game.cpp:1146).
+        if context.world.definition_known(&definition) == Some(false) {
+            return Ok(Value::Nil);
+        }
+
         let metadata = context
             .definition_metadata(&definition)
             .cloned()
@@ -12119,6 +12185,16 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_owner(owner)
             .with_category(definition_category)
             .with_id(id);
+        // "Set initial controller to creating controller, so more
+        // complicated cause-effect-chains can be traced back to the
+        // causing player" (FnCreateObject, C4Script.cpp:1905-1906).
+        let creator_controller = context
+            .object_context()
+            .map(ObjectScopeContext::controller)
+            .filter(|value| *value > OWNER_NONE);
+        if let Some(controller) = creator_controller {
+            spawn = spawn.with_controller(controller);
+        }
         // Creation callbacks run synchronously below - materialization
         // must not repeat Initialize (C4Game.cpp:1117-1127).
         spawn.initialized = true;
@@ -12169,6 +12245,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         .with_full_state(Rc::new(crate::preview_spawn_state(
             position,
             owner,
+            creator_controller.unwrap_or(owner),
             definition_category,
             FULL_CON,
             metadata.vertices.clone(),
@@ -12208,12 +12285,15 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
+    // FnCreateConstruction takes a C4ID (C4Script.cpp:1911-1912); our
+    // resources address definitions by their id string, so id values and
+    // strings coincide.
     let definition = match &args[0] {
-        Value::String(name) if !name.is_empty() => name.clone(),
-        Value::String(_) | Value::Nil => return Ok(Value::Nil),
+        Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
+        Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => return Ok(Value::Nil),
         other => {
             return Err(RuntimeError::new(format!(
-                "CreateConstruction: expected string for definition, got {}",
+                "CreateConstruction: expected id for definition, got {}",
                 other.type_name()
             )))
         }
@@ -12293,6 +12373,11 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             RuntimeError::new("CreateConstruction requires an active engine context")
         })?;
 
+        // C4Id2Def failure: no site, silent nullptr (C4Game.cpp:1183).
+        if context.world.definition_known(&definition) == Some(false) {
+            return Ok(Value::Nil);
+        }
+
         let metadata = context
             .definition_metadata(&definition)
             .cloned()
@@ -12345,12 +12430,21 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let id = context.allocate_object_id();
 
-        let spawn = SpawnConfig::new(definition.clone())
+        let mut spawn = SpawnConfig::new(definition.clone())
             .with_position(position)
             .with_owner(owner)
             .with_category(definition_category)
             .with_construction(construction_value)
             .with_id(id);
+        // The creating controller rides onto the site (FnCreateConstruction,
+        // C4Script.cpp:1932-1933).
+        let creator_controller = context
+            .object_context()
+            .map(ObjectScopeContext::controller)
+            .filter(|value| *value > OWNER_NONE);
+        if let Some(controller) = creator_controller {
+            spawn = spawn.with_controller(controller);
+        }
 
         let preview_ocf = ocf::compute(
             metadata.ocf_base,
@@ -12387,6 +12481,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         .with_full_state(Rc::new(crate::preview_spawn_state(
             position,
             owner,
+            creator_controller.unwrap_or(owner),
             definition_category,
             construction_value,
             metadata.vertices.clone(),
@@ -13662,6 +13757,12 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("CreateContents requires an active engine context"))?;
 
+        // CreateContents runs Game.CreateObject too - C4Id2Def failure is
+        // a silent nullptr (C4Object::CreateContents, C4Game.cpp:1146).
+        if context.world.definition_known(&definition) == Some(false) {
+            return Ok(Value::Nil);
+        }
+
         let (container, position, owner) = if let Some(target) = target_id {
             match context.object_context() {
                 Some(object) if target == object.id() => {
@@ -13705,6 +13806,24 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 vertices: Vec::new(),
             });
 
+        // "controller will automatically be set upon entrance"
+        // (FnCreateContents, C4Script.cpp:1944): the preview mirrors the
+        // Enter transfer (C4Object.cpp:1579-1582) — non-living contents
+        // assume the container's controller, the rest keep the Init owner.
+        let preview_controller = if metadata.category & crate::CATEGORY_LIVING != 0 {
+            owner
+        } else {
+            context
+                .object_context()
+                .filter(|object| object.id() == container)
+                .map(ObjectScopeContext::controller)
+                .or_else(|| {
+                    context
+                        .get_world_object(container)
+                        .map(|object| object.controller())
+                })
+                .unwrap_or(owner)
+        };
         let mut last = Value::Nil;
         for _ in 0..count {
             let id = context.allocate_object_id();
@@ -13750,6 +13869,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 let mut state = crate::preview_spawn_state(
                     position,
                     owner,
+                    preview_controller,
                     metadata.category,
                     FULL_CON,
                     metadata.vertices.clone(),
@@ -14370,6 +14490,310 @@ fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         Ok(Value::Int(object.owner()))
+    })
+}
+
+/// FnGetController (C4Script.cpp:1316-1320): the object's Controller,
+/// NO_OWNER without an object.
+fn get_controller(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetController expects at most 1 argument: target",
+        ));
+    }
+
+    let target_id = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "GetController", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Int(OWNER_NONE)),
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    return Ok(Value::Int(object.controller()));
+                }
+            }
+            if let Some(other) = context.get_world_object(target) {
+                return Ok(Value::Int(other.controller()));
+            }
+            return Ok(Value::Int(OWNER_NONE));
+        }
+
+        let controller = context
+            .object_context()
+            .map(|object| object.controller())
+            .unwrap_or(OWNER_NONE);
+        Ok(Value::Int(controller))
+    })
+}
+
+/// FnIncinerateLandscape (C4Script.cpp:253-261) -> C4Landscape::Incinerate
+/// (C4Landscape.cpp:1430-1441): caller-relative point; inflammable
+/// material lights one FLAM unless another already burns in the
+/// (x-4, y-1, 8, 20) rect (C4Game::FindObject center-in-rect range check,
+/// C4Game.cpp: `Inside(cObj->x - iX, 0, iWdt-1)`). C++ creates the FLAM
+/// mid-call (Game.CreateObject); the port registers a pending spawn, so
+/// its creation callbacks run at materialization within the same frame.
+fn incinerate_landscape(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "IncinerateLandscape expects at most 2 arguments: x, y",
+        ));
+    }
+    let mut x = parse_optional_i32(args.first(), "IncinerateLandscape", "x")?.unwrap_or(0);
+    let mut y = parse_optional_i32(args.get(1), "IncinerateLandscape", "y")?.unwrap_or(0);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("IncinerateLandscape requires an active engine context")
+        })?;
+
+        // Local calls offset by the object position (C4Script.cpp:255-259).
+        if let Some(object) = context.object_context() {
+            let position = object.effective_position();
+            x = x.saturating_add(position.x);
+            y = y.saturating_add(position.y);
+        }
+
+        let inflammable = match (context.landscape_ref(), context.world.materials()) {
+            (Some(landscape), Some(materials)) => landscape.can_incinerate(x, y, materials),
+            _ => false,
+        };
+        if !inflammable {
+            return Ok(Value::Bool(false));
+        }
+
+        let Some(metadata) = context.definition_metadata(crate::FIRE_DEFINITION_ID).cloned() else {
+            // Unknown FLAM def: Game.CreateObject returns nullptr.
+            return Ok(Value::Bool(false));
+        };
+
+        // "Not too much FLAMs" (C4Landscape.cpp:1436-1437) — pending
+        // same-call spawns count like the live objects C++ would find.
+        let left = x.saturating_sub(4);
+        let right = left.saturating_add(8);
+        let top = y.saturating_sub(1);
+        let bottom = top.saturating_add(20);
+        let burning = context.world_object_ids().into_iter().any(|id| {
+            context
+                .get_world_object(id)
+                .filter(|object| object.definition_id() == crate::FIRE_DEFINITION_ID)
+                .filter(|object| object.status().is_active())
+                .map(|object| {
+                    let pos = object.position;
+                    pos.x >= left && pos.x < right && pos.y >= top && pos.y < bottom
+                })
+                .unwrap_or(false)
+        });
+        if burning {
+            return Ok(Value::Bool(false));
+        }
+
+        let id = context.allocate_object_id();
+        let spawn = SpawnConfig::new(crate::FIRE_DEFINITION_ID)
+            .with_position(Vector2::new(x, y))
+            .with_category(metadata.category)
+            .with_id(id);
+        let preview_ocf = ocf::compute(
+            metadata.ocf_base,
+            metadata.crew_member,
+            true,
+            ObjectStatus::Normal,
+            false,
+            FULL_CON,
+        );
+        let preview = HostWorldObject::with_category(
+            id,
+            crate::FIRE_DEFINITION_ID,
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            metadata.category,
+            0,
+            FULL_CON,
+            0,
+            Vector2::new(x, y),
+            Vector2::ZERO,
+            0,
+            Vec::new(),
+            0,
+            0,
+            0,
+            None,
+            None,
+        )
+        .with_ocf(preview_ocf)
+        .with_full_state(Rc::new(crate::preview_spawn_state(
+            Vector2::new(x, y),
+            OWNER_NONE,
+            OWNER_NONE,
+            metadata.category,
+            FULL_CON,
+            metadata.vertices.clone(),
+        )));
+        context.register_spawn(spawn, preview);
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnDistance (C4Script.cpp:3316-3319) -> Distance (C4Math.cpp:22-31):
+/// integer euclidean distance; the float sqrt is post-adjusted to the
+/// exact integer floor (++/-- until dist^2 brackets d2). Negative d2
+/// (int64 overflow in C++) returns -1.
+fn distance(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 4 {
+        return Err(RuntimeError::new(
+            "Distance expects at most 4 arguments: x1, y1, x2, y2",
+        ));
+    }
+    let x1 = parse_optional_i32(args.first(), "Distance", "x1")?.unwrap_or(0);
+    let y1 = parse_optional_i32(args.get(1), "Distance", "y1")?.unwrap_or(0);
+    let x2 = parse_optional_i32(args.get(2), "Distance", "x2")?.unwrap_or(0);
+    let y2 = parse_optional_i32(args.get(3), "Distance", "y2")?.unwrap_or(0);
+
+    let dx = i64::from(x1) - i64::from(x2);
+    let dy = i64::from(y1) - i64::from(y2);
+    let d2 = dx.wrapping_mul(dx).wrapping_add(dy.wrapping_mul(dy));
+    if d2 < 0 {
+        return Ok(Value::Int(-1));
+    }
+    let mut dist = (d2 as f64).sqrt() as i64;
+    if dist.wrapping_mul(dist) < d2 {
+        dist += 1;
+    }
+    if dist.wrapping_mul(dist) > d2 {
+        dist -= 1;
+    }
+    Ok(Value::Int(dist as i32))
+}
+
+/// FnSetViewOffset (C4Script.cpp:5676-5687): ValidPlr gate; without a
+/// viewport (the headless/dedicated path) the write is skipped and the
+/// call still succeeds ("sync safety").
+fn set_view_offset(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "SetViewOffset expects at most 3 arguments: player, x, y",
+        ));
+    }
+    let player = parse_optional_i32(args.first(), "SetViewOffset", "player")?.unwrap_or(0);
+    // x/y validate like every int parameter even though no viewport
+    // exists to store them.
+    let _ = parse_optional_i32(args.get(1), "SetViewOffset", "x")?;
+    let _ = parse_optional_i32(args.get(2), "SetViewOffset", "y")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let valid = borrow
+            .as_ref()
+            .map(|context| context.player_state(player).is_some())
+            .unwrap_or(false);
+        Ok(Value::Bool(valid))
+    })
+}
+
+/// FnGetObjectLayer (C4Script.cpp:5160-5166): the object's pLayer — nil
+/// unless a layer was assigned (Objects.txt `Layer=`; SetObjectLayer is
+/// unported). Layers cannot change mid-call, so the world snapshot is
+/// authoritative for the context object too.
+fn get_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetObjectLayer expects at most 1 argument: target",
+        ));
+    }
+
+    let target_id = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "GetObjectLayer", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
+        let layer = target
+            .and_then(|target| context.get_world_object(target))
+            .and_then(|object| object.full_state().and_then(|state| state.layer));
+        Ok(layer.map(object_reference_value).unwrap_or(Value::Nil))
+    })
+}
+
+/// FnSetController (C4Script.cpp:1322-1331): NO_OWNER always passes, any
+/// other value must be a valid player; foreign targets are written via the
+/// nested-call seam like RemoveObject.
+fn set_controller(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(RuntimeError::new(
+            "SetController expects 1 or 2 arguments: controller and optional target",
+        ));
+    }
+
+    let new_controller = value_to_i32(&args[0], "SetController", "controller")?;
+    let target_id = args
+        .get(1)
+        .map(|arg| parse_object_reference_argument(arg, "SetController", "target"))
+        .transpose()?
+        .flatten();
+
+    let (valid_player, active) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref();
+        (
+            context
+                .map(|context| context.player_state(new_controller).is_some())
+                .unwrap_or(false),
+            context
+                .and_then(|context| context.object_context().map(|object| object.id())),
+        )
+    });
+    // validate player (C4Script.cpp:1325)
+    if new_controller != OWNER_NONE && !valid_player {
+        return Ok(Value::Bool(false));
+    }
+
+    if let Some(target) = target_id {
+        if Some(target) != active {
+            return match call_world_object_function(
+                target,
+                "SetController",
+                &[Value::Int(new_controller)],
+            ) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = match borrow.as_mut() {
+            Some(context) => context,
+            None => return Ok(Value::Bool(false)),
+        };
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+        object.set_controller(new_controller);
+        Ok(Value::Bool(true))
     })
 }
 
@@ -15201,6 +15625,7 @@ impl EffectHostContext {
                 in_liquid,
                 own_mass,
                 owner,
+                controller,
                 position,
                 velocity,
                 rotation,
@@ -15240,6 +15665,7 @@ impl EffectHostContext {
                     in_liquid,
                     own_mass,
                     owner,
+                    controller,
                     category,
                     position,
                     velocity,
@@ -15533,6 +15959,7 @@ impl EffectHostContext {
             state.in_liquid,
             state.own_mass,
             state.owner,
+            state.controller,
             state.category,
             state.position,
             state.velocity,
@@ -15981,6 +16408,8 @@ struct ObjectScopeContext {
     current_in_liquid: bool,
     current_own_mass: i32,
     current_owner: i32,
+    /// C4Object::Controller (C4Object.h:127) — cause tracing.
+    current_controller: i32,
     current_category: i32,
     ocf_base: u32,
     crew_member: bool,
@@ -16016,6 +16445,7 @@ impl ObjectScopeContext {
         in_liquid: bool,
         own_mass: i32,
         owner: i32,
+        controller: i32,
         category: i32,
         position: Vector2,
         velocity: Vector2,
@@ -16071,6 +16501,7 @@ impl ObjectScopeContext {
             current_in_liquid: in_liquid,
             current_own_mass: own_mass,
             current_owner: owner,
+            current_controller: controller,
             current_category: category,
             ocf_base,
             crew_member,
@@ -16287,6 +16718,22 @@ impl ObjectScopeContext {
     fn set_owner(&mut self, owner: i32) {
         self.current_owner = owner;
         self.pending_update.owner = Some(owner);
+        // C4Object::SetOwner "automatically updates controller"
+        // (C4Object.cpp:5499-5500).
+        self.set_controller(owner);
+    }
+
+    /// C4Object::Controller (FnGetController, C4Script.cpp:1316-1320).
+    fn controller(&self) -> i32 {
+        self.pending_update
+            .controller
+            .unwrap_or(self.current_controller)
+    }
+
+    /// FnSetController (C4Script.cpp:1322-1331).
+    fn set_controller(&mut self, controller: i32) {
+        self.current_controller = controller;
+        self.pending_update.controller = Some(controller);
     }
 
     /// C4Player::MakeCrewMember adds the object to the crew
@@ -16891,6 +17338,7 @@ mod tests {
         "DefinitionCall",
         "DigFree",
         "DigFreeRect",
+        "Distance",
         "DoCon",
         "DoDamage",
         "DoEnergy",
@@ -16932,6 +17380,7 @@ mod tests {
         "GetComponent",
         "GetCon",
         "GetContact",
+        "GetController",
         "GetCrew",
         "GetCrewCount",
         "GetCursor",
@@ -16953,6 +17402,7 @@ mod tests {
         "GetMaterialVal",
         "GetName",
         "GetOCF",
+        "GetObjectLayer",
         "GetObjectStatus",
         "GetObjectVal",
         "GetOwner",
@@ -16991,6 +17441,7 @@ mod tests {
         "GetYDir",
         "GrabObjectInfo",
         "InLiquid",
+        "IncinerateLandscape",
         "InsertMaterial",
         "Inside",
         "Jump",
@@ -17032,6 +17483,7 @@ mod tests {
         "SetComDir",
         "SetCommand",
         "SetComponent",
+        "SetController",
         "SetCrewEnabled",
         "SetDir",
         "SetEntrance",
@@ -17056,6 +17508,7 @@ mod tests {
         "SetTemperature",
         "SetTransferZone",
         "SetVertex",
+        "SetViewOffset",
         "SetVisibility",
         "SetWealth",
         "SetWind",
