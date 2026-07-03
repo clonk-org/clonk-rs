@@ -3452,7 +3452,11 @@ fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
                 "Definition call: Definition for id {def_id} not found!"
             )));
         };
-        return match call_scoped_script_function(script, name, &pars) {
+        // AB_CALL resolves via FindSameNameFunc: the def's own function
+        // first, else a GLOBAL script function running in definition
+        // scope (C4AulExec.cpp:1259-1261, C4Aul.cpp:130-148) — unlike
+        // FnDefinitionCall's owner-scoped lookup.
+        return match call_scoped_script_function_or_global(script, name, &pars) {
             Some(result) => result,
             None if failsafe => Ok(Value::Nil),
             None => Err(RuntimeError::new(format!(
@@ -3512,7 +3516,31 @@ fn call_scoped_script_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    if !script.has_function(function) {
+    call_scoped_script_function_impl(script, function, args, false)
+}
+
+/// The AB_CALL definition-call variant: FindSameNameFunc also finds
+/// GLOBAL script functions (C4Aul.cpp:130-148) — own functions win.
+fn call_scoped_script_function_or_global(
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_scoped_script_function_impl(script, function, args, true)
+}
+
+fn call_scoped_script_function_impl(
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+    include_globals: bool,
+) -> Option<Result<Value, RuntimeError>> {
+    let resolvable = if include_globals {
+        script.has_function_or_global(function)
+    } else {
+        script.has_function(function)
+    };
+    if !resolvable {
         return None;
     }
     HOST_CONTEXT.with(|cell| {

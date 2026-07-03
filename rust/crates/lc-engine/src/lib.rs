@@ -31244,6 +31244,47 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn definition_call_falls_back_to_global_functions() {
+        // `id->Func(...)` (AB_CALL) resolves via FindSameNameFunc: the
+        // def's own function first, else a GLOBAL script function running
+        // in definition scope (C4AulExec.cpp:1259-1261, C4Aul.cpp:130-148).
+        // System.c4g Explode.c relies on it: the exploding object removes
+        // itself, then runs `exploding_id->DoExplosion(...)`.
+        let def_script = r#"#strict
+local iGot;
+func Trigger() {
+    iGot = GetID()->GlobalHelper(6);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("TSTD", "Test", def_script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let loaded = engine.install_global_scripts(&[(
+            "System.c4g/Test.c".to_string(),
+            "#strict\nglobal func GlobalHelper(n) { return(n * 7); }\n".to_string(),
+        )]);
+        assert_eq!(loaded, 1);
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("TSTD").with_category(CATEGORY_OBJECT))
+            .expect("object spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iGot"),
+            Some(&Value::Int(42)),
+            "the global function runs as a definition call"
+        );
+    }
+
+    #[test]
     fn call_runs_own_def_script_function_like_cpp() {
         // FnCall (C4Script.cpp:3424-3432): Call(name, p0..p8) runs `name` on
         // the calling object itself (C4Object::Call → own def script,
