@@ -1746,6 +1746,54 @@ impl Landscape {
     /// Straight down first, then per `cslide` ring check left before right; a
     /// side is clogged only when both its cells are >= `mdens`; a slide fires
     /// when the side's down-cell is free. Mutates `fx`/`fy` on success.
+    /// C4Landscape::FindMatPath (C4Landscape.cpp:1226-1256): the next pixel
+    /// position toward the desired slide. Unlike FindMatSlide the sideways
+    /// step advances `fx` by exactly ONE pixel and leaves `fy` unchanged.
+    pub fn find_mat_path(
+        &self,
+        fx: &mut i32,
+        fy: &mut i32,
+        ydir: i32,
+        mdens: i32,
+        mslide: i32,
+        materials: &MaterialSet,
+    ) -> bool {
+        // One downwards
+        if self.density_at(*fx, *fy + ydir, materials) < mdens {
+            *fy += ydir;
+            return true;
+        }
+        // Find downwards slide path
+        let (mut left, mut right) = (true, true);
+        let mut cslide = 1;
+        while cslide <= mslide && (left || right) {
+            // Check left
+            if left {
+                if self.density_at(*fx - cslide, *fy, materials) >= mdens {
+                    // Left clogged
+                    left = false;
+                } else if self.density_at(*fx - cslide, *fy + ydir, materials) < mdens {
+                    // Left slide okay
+                    *fx -= 1;
+                    return true;
+                }
+            }
+            // Check right
+            if right {
+                if self.density_at(*fx + cslide, *fy, materials) >= mdens {
+                    // Right clogged
+                    right = false;
+                } else if self.density_at(*fx + cslide, *fy + ydir, materials) < mdens {
+                    // Right slide okay
+                    *fx += 1;
+                    return true;
+                }
+            }
+            cslide += 1;
+        }
+        false
+    }
+
     pub fn find_mat_slide(
         &self,
         fx: &mut i32,
@@ -1907,13 +1955,29 @@ impl Landscape {
         y: i32,
         materials: &MaterialSet,
     ) -> Option<MaterialId> {
+        self.extract_material_probe(x, y, materials)
+            .map(|(material, _, _)| material)
+    }
+
+    /// C4Landscape::ExtractMaterial's landscape half (C4Landscape.cpp:
+    /// 1148-1153): FindMatTop + ClearPix, returning the extracted material
+    /// AND the cleared coordinates — the by-ref `fx`/`fy` the C++ passes on
+    /// to CheckInstabilityRange (:1154). The engine wrapper
+    /// (`Engine::extract_material`) fires the instability probe there.
+    pub fn extract_material_probe(
+        &mut self,
+        x: i32,
+        y: i32,
+        materials: &MaterialSet,
+    ) -> Option<(MaterialId, i32, i32)> {
         if self.pixels.is_some() {
             let material = self.material_at(x, y)?;
             let (top_x, top_y) = self.find_mat_top(material, x, y, materials);
             self.clear_pix(top_x, top_y);
-            return Some(material);
+            return Some((material, top_x, top_y));
         }
         self.extract_material_at(x, y)
+            .map(|material| (material, x, y))
     }
 
     pub fn extract_material_at(&mut self, x: i32, y: i32) -> Option<MaterialId> {

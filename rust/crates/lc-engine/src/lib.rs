@@ -4845,6 +4845,10 @@ pub struct EngineState {
     pub game_over: bool,
     #[serde(default)]
     pub landscape_insert_thrust: bool,
+    /// The persistent C4MassMoverSet slots (MassMover.c4b in C++ saves,
+    /// C4MassMover.cpp:181-217).
+    #[serde(default)]
+    pub mass_movers: MassMoverSet,
     pub rng: LcgRng,
 }
 
@@ -4930,6 +4934,9 @@ impl EngineState {
             messages: Vec::new(),
             game_over: snapshot.game_over,
             landscape_insert_thrust: false,
+            // SimulationSnapshot carries no mover slots (the C++ snapshot
+            // boundary is object-level); the set restores empty.
+            mass_movers: MassMoverSet::new(),
             rng: snapshot.rng.clone(),
         }
     }
@@ -10094,7 +10101,6 @@ impl Engine {
 
     pub fn set_landscape_insert_thrust(&mut self, enabled: bool) {
         self.landscape_insert_thrust = enabled;
-        self.mass_movers.set_landscape_insert_thrust(enabled);
     }
 
     /// Installs the scenario's C4SPlrStart slots (set by `Scenario::apply`;
@@ -12031,13 +12037,9 @@ impl Engine {
                 }
             }
             self.landscape = landscape_slot;
-            if let Some(landscape_ref) = self.landscape.as_ref() {
-                self.mass_movers
-                    .seed_from_landscape(landscape_ref, &self.materials);
-            }
-            if let Some(landscape_mut) = self.landscape.as_mut() {
-                landscape_mut.take_mass_mover_dirty();
-            }
+            // C++ landscape drawing never touches the mass-mover set —
+            // movers pinned to changed pixels die on their next Execute
+            // (C4MassMover.cpp:119).
         }
         self.apply_particle_commands(particles);
         if !transfer_zones.is_empty() {
@@ -15748,6 +15750,7 @@ impl Engine {
             pending_menu_requests: self.pending_menu_requests.clone(),
             game_over: self.game_over_triggered,
             landscape_insert_thrust: self.landscape_insert_thrust,
+            mass_movers: self.mass_movers.clone(),
             rng: self.rng.clone(),
         }
     }
@@ -15769,16 +15772,12 @@ impl Engine {
         self.environment = state.environment;
         self.environment.refresh_runtime_fields();
         self.landscape_insert_thrust = state.landscape_insert_thrust;
-        self.mass_movers
-            .set_landscape_insert_thrust(self.landscape_insert_thrust);
         self.landscape = state.landscape.clone();
-        if let Some(landscape) = self.landscape.as_ref() {
-            self.mass_movers
-                .seed_from_landscape(landscape, &self.materials);
-        }
-        if let Some(landscape) = self.landscape.as_mut() {
-            landscape.take_mass_mover_dirty();
-        } else {
+        // C4MassMoverSet::Load semantics (C4MassMover.cpp:204-217): the
+        // saved slots restore verbatim; nothing is re-derived from the
+        // landscape.
+        self.mass_movers = state.mass_movers.clone();
+        if self.landscape.is_none() {
             self.mass_movers.clear();
         }
         self.rng = state.rng.clone();
@@ -23248,31 +23247,6 @@ impl Engine {
                 let (ix, iy, mat) = (*x, *y, pixel.mat);
                 self.insert_material(mat, ix, iy, 0, 0);
                 true
-            }
-        }
-    }
-
-    /// `C4MassMoverSet::Execute` for the frame. The set is taken OUT of the
-    /// engine for the duration so movers can dispatch `Type=Script` material
-    /// reactions through `&mut Engine` at the exact C++ call position
-    /// (C4MassMover.cpp:163-167 — RNG order). Nothing reaches the empty
-    /// placeholder while the loop runs (no host function creates movers).
-    fn tick_mass_movers(&mut self) {
-        if self.landscape.is_none() {
-            return;
-        }
-        let mut movers = std::mem::take(&mut self.mass_movers);
-        movers.execute(self);
-        self.mass_movers = movers;
-        let dirty = self
-            .landscape
-            .as_mut()
-            .map(Landscape::take_mass_mover_dirty)
-            .unwrap_or(false);
-        if dirty {
-            if let Some(landscape) = self.landscape.as_ref() {
-                self.mass_movers
-                    .seed_from_landscape(landscape, &self.materials);
             }
         }
     }
