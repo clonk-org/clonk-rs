@@ -55,8 +55,9 @@ use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
     ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
-    Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind,
-    MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, PlayerStatus, Recorder,
+    JoinPlayerConfig, Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection,
+    MenuRequestKind, MessageKind, MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate,
+    PlayerConfig, PlayerStatus, Recorder,
     Recording, RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig,
     SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
     FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
@@ -5143,6 +5144,37 @@ impl GameApp {
         Ok(())
     }
 
+    /// `C4Game::JoinPlayer` for the standalone app's local player
+    /// (C4Game.cpp:3511-3534 -> C4PlayerList::Join, C4PlayerList.cpp:
+    /// 271-318): joins through the engine's C4Player::Init/ScenarioInit
+    /// port, so the scenario's [PlayerN] ready crew is placed
+    /// (PlaceReadyCrew, C4Player.cpp:481-570), InitializePlayer is
+    /// broadcast (C4Player.cpp:769-775) and the cursor lands on the
+    /// hi-rank crew member (FinalInit -> AdjustCursorCommand,
+    /// C4Player.cpp:794). The joined number becomes the local owner
+    /// (C4PlayerList::GetFreeNumber, C4PlayerList.cpp:189-201).
+    fn join_local_player(&mut self) -> Result<(), EngineError> {
+        if self.engine.player(self.local_owner).is_some() {
+            return Ok(());
+        }
+        let joined = self.engine.join_player(JoinPlayerConfig {
+            name: self.player_name.clone(),
+            team: None,
+            // Fresh-player defaults (C4PlayerInfoCore::Default,
+            // C4InfoCore.cpp:78-79): PrefColor 0, PrefColorDw 0xff.
+            // An empty crew roster recruits new infos like a brand-new
+            // player file (C4ObjectInfoList::New, C4ObjectInfoList.cpp:
+            // 144-185).
+            color_dw: 0xff,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            startup_player_count: 1,
+        })?;
+        self.local_owner = joined.number;
+        Ok(())
+    }
+
     fn derive_ground_height(engine: &Engine, fallback: i32) -> i32 {
         let fallback = fallback.max(0);
         engine
@@ -8793,12 +8825,12 @@ impl GameApp {
             });
         }
 
-        if let Err(err) = self.ensure_local_player_registered() {
+        if let Err(err) = self.join_local_player() {
             tracing::error!(
                 scenario = %scenario.title,
                 path = %path.display(),
                 error = %err,
-                "failed to register local player"
+                "failed to join local player"
             );
             return Err(format!("Failed to start {}: {err}", scenario.title));
         }
@@ -9111,6 +9143,25 @@ impl GameApp {
     }
 
     fn apply_focus_selection(&mut self) {
+        // A join already selected the hi-rank cursor (AdjustCursorCommand,
+        // C4Player.cpp:1235-1258): adopt it rather than stacking a second
+        // crew selection on top.
+        if let Some(cursor) = self
+            .snapshot
+            .crew_selection
+            .get(&self.local_owner)
+            .and_then(|selection| selection.cursor)
+            .filter(|cursor| {
+                self.snapshot
+                    .object(*cursor)
+                    .map(|object| object.status.is_active())
+                    .unwrap_or(false)
+            })
+        {
+            self.focus_id = Some(cursor);
+            self.focus_snapshot = None;
+            return;
+        }
         if let Some((object_id, owner, crew_member)) =
             select_focus_candidate(&self.snapshot, self.local_owner)
         {
@@ -10602,6 +10653,158 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         panic!("scenario did not enter running mode in time");
+    }
+
+    #[test]
+    fn scenario_join_places_ready_crew_and_selects_cursor() {
+        // C4Player::Join runs ScenarioInit -> PlaceReadyCrew for the
+        // scenario's [PlayerN] Crew= spec (C4Player.cpp:670-777, 528-570)
+        // and FinalInit's AdjustCursorCommand puts the cursor on the
+        // hi-rank crew member (C4Player.cpp:794, 1235-1258). The app join
+        // must go through that path instead of a bare player registration.
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Twonky".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+
+        let mut definition =
+            Definition::from_script("WLKR", "Walker", walker_script()).expect("crew definition");
+        definition.set_crew_member(true);
+        app.engine
+            .register_definition(definition)
+            .expect("register crew definition");
+        let start = lc_engine::scenario::PlayerStart {
+            ready_crew: vec![("WLKR".to_string(), 2)],
+            ..Default::default()
+        };
+        app.engine.set_player_starts(vec![start]);
+
+        app.join_local_player().expect("join local player");
+
+        // C4PlayerList::GetFreeNumber (C4PlayerList.cpp:189-201): the
+        // first joining player takes number 0.
+        assert_eq!(app.local_owner, 0, "local owner adopts the joined number");
+        let snapshot = app.engine.snapshot();
+        let crew: Vec<_> = snapshot
+            .objects
+            .iter()
+            .filter(|object| object.crew_member && object.owner == app.local_owner)
+            .collect();
+        assert_eq!(crew.len(), 2, "Crew=WLKR=2 places two ready crew members");
+        let selection = snapshot
+            .crew_selection
+            .get(&app.local_owner)
+            .expect("crew selection exists after join");
+        assert!(
+            selection.cursor.is_some(),
+            "cursor lands on a crew member at join"
+        );
+
+        // A second call must not join (or place crew) twice.
+        app.join_local_player().expect("idempotent rejoin");
+        assert_eq!(
+            app.engine.players().count(),
+            1,
+            "rejoining does not add a second player"
+        );
+    }
+
+    #[test]
+    fn activating_a_scenario_joins_the_local_player_with_crew() {
+        // The scenario activation path must join like C4Game::InitPlayers ->
+        // C4PlayerList::Join (C4PlayerList.cpp:271-318) so the [Player1]
+        // Crew= spec materialises as crew objects, instead of registering a
+        // crew-less player.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = dir.path().join("JoinTest.c4s");
+        let def_dir = scenario_dir.join("GOOD.c4d");
+        fs::create_dir_all(&def_dir).expect("definition dir");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=1\n",
+        )
+        .expect("write DefCore.txt");
+        fs::write(def_dir.join("Script.c"), "// crew def\n").expect("write def script");
+        fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=JoinTest\n\n[Player1]\nCrew=GOOD=2\nPosition=10,10\n",
+        )
+        .expect("write Scenario.txt");
+
+        let scenario_data = lc_engine::Scenario::load_from_path_with(
+            &scenario_dir,
+            &InstallDefinitionResolver::new(None),
+        )
+        .expect("scenario loads");
+
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Twonky".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+
+        let frontend = FrontendScenario {
+            identifier: "JoinTest.c4s".to_string(),
+            title: "JoinTest".to_string(),
+            description: None,
+            kind: ScenarioKind::Scenario,
+            is_editable: false,
+            is_playable: true,
+            path: Some(scenario_dir.clone()),
+            root_label: None,
+            preview: None,
+            children: Vec::new(),
+            folder_index: None,
+            icon_index: None,
+            difficulty: None,
+        };
+        app.activate_loaded_scenario(frontend, scenario_data)
+            .expect("scenario activates");
+
+        assert_eq!(app.local_owner, 0, "local owner adopts the joined number");
+        let crew: Vec<_> = app
+            .snapshot
+            .objects
+            .iter()
+            .filter(|object| object.crew_member && object.owner == app.local_owner)
+            .collect();
+        assert_eq!(crew.len(), 2, "Crew=GOOD=2 joins with two crew members");
+        let selection = app
+            .snapshot
+            .crew_selection
+            .get(&app.local_owner)
+            .expect("crew selection exists after join");
+        let cursor = selection.cursor.expect("the crew cursor is selected at join");
+        // AdjustCursorCommand selects exactly the cursor (Cursor->DoSelect,
+        // C4Player.cpp:1255-1257) — the app focus must adopt it instead of
+        // stacking a second selection.
+        assert_eq!(
+            selection.selected.as_slice(),
+            &[cursor],
+            "only the cursor is selected at join"
+        );
+        assert_eq!(
+            app.focus_id,
+            Some(cursor),
+            "the app focus adopts the join cursor"
+        );
     }
 
     #[test]
