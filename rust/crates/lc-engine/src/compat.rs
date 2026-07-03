@@ -11853,12 +11853,13 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .object_context()
             .map(|object| object.effective_position())
             .unwrap_or(Vector2::ZERO);
-        let base_owner = context
-            .object_context()
-            .map(|object| object.owner())
-            .unwrap_or(OWNER_NONE);
-
-        let owner = owner_override.unwrap_or(base_owner);
+        // An absent owner argument is the DEFAULTED C4ValueInt 0, not
+        // NO_OWNER — FnCreateObject only substitutes the caller's owner
+        // for NONSTRICT scripts (C4Script.cpp FnCreateObject: `if
+        // (!cthr->Caller || ...Strict == NONSTRICT) iOwner =
+        // cthr->Obj->Owner`); GoldRush's global `CreateObject(NOPC)`
+        // lands on owner 0 in C++.
+        let owner = owner_override.unwrap_or(0);
         // C4Game::NewObject's DoCon(fInitial) bottom-growth adjust runs
         // BEFORE the next script line executes (C4Object.cpp:1401-1470):
         // the created object's center is y - (Shape.Hgt + Shape.y), and
@@ -21916,7 +21917,9 @@ mod tests {
         let spawn = &outcome.spawns[0];
         assert_eq!(spawn.definition_id, "Clonk");
         assert_eq!(spawn.position, Vector2::ZERO);
-        assert_eq!(spawn.owner, OWNER_NONE);
+        // The defaulted C4ValueInt owner is 0 (FnCreateObject substitutes
+        // the caller's owner only for NONSTRICT scripts).
+        assert_eq!(spawn.owner, 0);
         assert_eq!(spawn.id, Some(ObjectId::new(1)));
         assert_eq!(outcome.next_object_id, 2);
     }
