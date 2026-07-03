@@ -25,6 +25,7 @@ pub mod ffi;
 pub mod fixtures;
 mod input;
 mod landscape;
+mod map_creator;
 mod mass_mover;
 mod material;
 mod math;

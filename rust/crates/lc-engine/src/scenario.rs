@@ -417,8 +417,8 @@ impl Scenario {
         }
 
         let script = load_legacy_scenario_script(group)?;
-        let classifier = build_map_pixel_classifier(group, resolver);
-        let landscape = load_legacy_landscape(group, &manifest, classifier.as_ref())?;
+        let mut classifier = build_map_pixel_classifier(group, resolver);
+        let landscape = load_legacy_landscape(group, &manifest, classifier.as_mut())?;
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
@@ -2652,6 +2652,64 @@ fn legacy_map_zoom(section: Option<&Vec<(String, String)>>) -> u32 {
         .max(1) as u32
 }
 
+/// The ChunkOZoom jitter seed: C++ draws `MapSeed = Random(3133700)` at
+/// landscape init (C4Landscape.cpp:563). The shadow bridge hands the C++
+/// value across via env; standalone runs jitter deterministically from 0.
+fn legacy_map_seed() -> i32 {
+    let map_seed = std::env::var("LC_RUST_ENGINE_MAP_SEED")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or(0);
+    if std::env::var("LC_DEBUG_MAP").is_ok() {
+        eprintln!("RUST MAPSEED {map_seed}");
+    }
+    map_seed
+}
+
+/// `Game.FixRandom(Game.Parameters.RandomSeed)` before map creation
+/// (C4Landscape.cpp:578): the map creators draw from a freshly fixed
+/// ledger, and the bracket re-fixes afterwards (C4Landscape.cpp:734), so
+/// map creation never shifts the post-init synced ledger. Standalone runs
+/// use the engine's default seed 0; the shadow bridge can hand the C++
+/// RandomSeed across via env.
+fn legacy_map_creation_rng() -> crate::rng::LcgRng {
+    let seed = std::env::var("LC_RUST_ENGINE_RANDOM_SEED")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    crate::rng::LcgRng::seed_from_u64(seed)
+}
+
+/// `Game.Parameters.StartupPlayerCount` (MapPlayerExtend input,
+/// C4Landscape.cpp:518): the headless harness joins one player.
+fn legacy_startup_player_count() -> i32 {
+    std::env::var("LC_RUST_ENGINE_STARTUP_PLAYERS")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or(1)
+}
+
+/// The C4MapCreator inputs from the parsed `[Landscape]` section.
+fn basic_map_params(landscape: &LegacyLandscape) -> crate::map_creator::BasicMapParams {
+    crate::map_creator::BasicMapParams {
+        map_width: landscape.map_width,
+        map_height: landscape.map_height,
+        map_player_extend: landscape.map_player_extend,
+        amplitude: landscape.amplitude,
+        phase: landscape.phase,
+        period: landscape.period,
+        random: landscape.random,
+        material: landscape.material.clone(),
+        liquid: landscape.liquid.clone(),
+        liquid_level: landscape.liquid_level,
+        layers: landscape
+            .layers
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.count.unwrap_or(0)))
+            .collect(),
+    }
+}
+
 /// Map-pixel material classification (the Pix2Mat/Pix2Dens tables,
 /// C4Wrappers.h:110-145, C4Landscape.cpp:2832-2839): a pixel byte's low 7
 /// bits are the texmap index (bit 0x80 = IFT); index 0, unmapped entries
@@ -3097,7 +3155,7 @@ fn classified_landscape(
 fn load_legacy_landscape(
     group: &Group,
     manifest: &LegacyScenarioManifest,
-    classifier: Option<&MapPixelClassifier>,
+    classifier: Option<&mut MapPixelClassifier>,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let Some(mut landscape) = load_legacy_landscape_body(group, manifest, classifier)? else {
         return Ok(None);
@@ -3120,7 +3178,7 @@ fn load_legacy_landscape(
 fn load_legacy_landscape_body(
     group: &Group,
     manifest: &LegacyScenarioManifest,
-    classifier: Option<&MapPixelClassifier>,
+    classifier: Option<&mut MapPixelClassifier>,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let landscape_section = manifest.sections.get("landscape");
     let map_zoom_u32 = legacy_map_zoom(landscape_section);
@@ -3164,26 +3222,21 @@ fn load_legacy_landscape_body(
         }
     };
 
+    let mut classifier = classifier;
     if let Some(bytes) = map_bytes {
         // Material-classified path: the map's 8-bit palette indices are
         // texmap keys (GroupReadSurface8 keeps the index bytes). Without
         // a TexMap or for non-indexed images, the sky-pixel heuristic
         // below stands in.
-        if let Some(classifier) = classifier {
+        if let Some(classifier) = classifier.take() {
             if let Ok(bitmap) = lc_resources::bitmap::IndexedBitmap::decode(&bytes) {
-                // C++ draws MapSeed = Random(3133700) at landscape init
-                // (C4Landscape.cpp:563); our RNG is not the C++ LCG yet,
-                // so the shadow bridge hands the C++ seed across via env
-                // (standalone runs jitter deterministically from 0).
-                let map_seed = std::env::var("LC_RUST_ENGINE_MAP_SEED")
-                    .ok()
-                    .and_then(|value| value.trim().parse::<i32>().ok())
-                    .unwrap_or(0);
-                if std::env::var("LC_DEBUG_MAP").is_ok() {
-                    eprintln!("RUST MAPSEED {map_seed}");
-                }
-                return classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, map_seed)
-                    .map(Some);
+                return classified_landscape(
+                    &bitmap,
+                    classifier,
+                    map_zoom_u32 as i32,
+                    legacy_map_seed(),
+                )
+                .map(Some);
             }
         }
         let dynamic =
@@ -3237,6 +3290,24 @@ fn load_legacy_landscape_body(
 
     if exact_landscape {
         return Ok(None);
+    }
+
+    // Dynamic map (C4Landscape::Init, C4Landscape.cpp:606-614): the basic
+    // C4MapCreator builds the 8-bit map from the [Landscape] keys; its
+    // draws come from the FixRandom(RandomSeed) bracket
+    // (C4Landscape.cpp:578,734), so they never shift the post-init synced
+    // ledger. Requires a texture map for the material bytes.
+    if let Some(classifier) = classifier.take() {
+        let mut map_rng = legacy_map_creation_rng();
+        let params = basic_map_params(&manifest.core.landscape);
+        let bitmap = crate::map_creator::create_basic_map(
+            &params,
+            classifier,
+            legacy_startup_player_count(),
+            &mut map_rng,
+        );
+        return classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, legacy_map_seed())
+            .map(Some);
     }
 
     let fallback_map_width = map_width_hint.unwrap_or(96);
