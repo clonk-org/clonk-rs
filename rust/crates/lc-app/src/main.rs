@@ -403,6 +403,7 @@ impl FrontendAssets {
                         sprites.insert(
                             "Walker".to_string(),
                             DefinitionSprite {
+                                default_facet: None,
                                 image,
                                 actions: HashMap::new(),
                                 color_mask: None,
@@ -1144,6 +1145,21 @@ fn run_integration_test(
     );
     println!("  Scenario started successfully");
     println!("  Ran {} frames without errors", test_frames);
+
+    // Optional visual check: render the final frame to a PNG
+    // (rendering-parity forensics vs the C++ engine's F9 shots).
+    if let Ok(dump) = std::env::var("LC_APP_DUMP_FRAME") {
+        let (w, h) = {
+            let s = app.graphics.surface();
+            (s.width(), s.height())
+        };
+        let mut frame = vec![0u8; (w as usize) * (h as usize) * 4];
+        app.render(&mut frame).context("render integration frame")?;
+        let png = encode_surface_to_png(app.graphics.surface())
+            .context("encode integration frame")?;
+        std::fs::write(&dump, &png).with_context(|| format!("write {dump}"))?;
+        println!("  wrote {dump} ({w}x{h})");
+    }
 
     Ok(())
 }
@@ -2483,6 +2499,10 @@ struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
     sky: Option<SkyRenderState>,
+    /// Landscape texture pngs + material base colors (re-applied on
+    /// every GraphicsSystem rebuild, like the sky).
+    material_texture_images: Arc<HashMap<String, ImageData>>,
+    material_base_colors: Arc<HashMap<String, [u8; 3]>>,
     /// System.c4g global script sources, loaded once at boot for every
     /// fresh game engine (the C++ `Game.ScriptEngine` scripts).
     system_scripts: Vec<(String, String)>,
@@ -4415,6 +4435,111 @@ fn candidate_material_paths(paths: &AppPaths) -> Vec<PathBuf> {
     candidates
 }
 
+/// Texture pngs from every reachable Material.c4g (planet, content,
+/// scenario) keyed by lowercase basename — the landscape plane samples
+/// them per pixel (C4Landscape::MapToSurface composition).
+/// First Color= triplet per material (lowercase name) across the
+/// scenario-local and shared material groups.
+fn load_material_colors(scenario_path: &Path) -> HashMap<String, [u8; 3]> {
+    let mut colors = HashMap::new();
+    let mut absorb = |group_path: &Path| {
+        let Ok(group) = Group::open(group_path) else {
+            return;
+        };
+        let Ok(library) = lc_resources::MaterialLibrary::from_group(&group) else {
+            return;
+        };
+        for material in library.iter() {
+            let name = material.name().to_ascii_lowercase();
+            if colors.contains_key(&name) {
+                continue;
+            }
+            let triplet = material.int_list("Color").unwrap_or_default();
+            if triplet.len() >= 3 {
+                colors.insert(
+                    name,
+                    [
+                        triplet[0].clamp(0, 255) as u8,
+                        triplet[1].clamp(0, 255) as u8,
+                        triplet[2].clamp(0, 255) as u8,
+                    ],
+                );
+            }
+        }
+    };
+    absorb(&scenario_path.join("Material.c4g"));
+    if let Ok(paths) = AppPaths::discover() {
+        for candidate in candidate_material_paths(&paths) {
+            absorb(&candidate);
+        }
+    }
+    colors
+}
+
+fn load_scenario_material_textures(scenario_path: &Path) -> HashMap<String, ImageData> {
+    let mut textures = HashMap::new();
+    let candidate = scenario_path.join("Material.c4g");
+    if !candidate.exists() {
+        return textures;
+    }
+    let Ok(group) = Group::open(&candidate) else {
+        return textures;
+    };
+    let Ok(entries) = group.entries() else {
+        return textures;
+    };
+    let Ok(resource) = lc_resources::graphics::GraphicsResource::open(&candidate) else {
+        return textures;
+    };
+    for entry in entries {
+        let name = entry.relative_path.to_string_lossy().to_string();
+        let lower = name.to_ascii_lowercase();
+        let Some(stem) = lower.strip_suffix(".png") else {
+            continue;
+        };
+        if let Ok(image) = resource.load_image(&name) {
+            textures.insert(
+                stem.to_string(),
+                ImageData::new(image.width(), image.height(), image.pixels().to_vec()),
+            );
+        }
+    }
+    textures
+}
+
+fn load_material_texture_images(paths: &AppPaths) -> HashMap<String, ImageData> {
+
+    let mut textures = HashMap::new();
+    for candidate in candidate_material_paths(paths) {
+        let Ok(group) = Group::open(&candidate) else {
+            continue;
+        };
+        let Ok(entries) = group.entries() else {
+            continue;
+        };
+        let Ok(resource) = lc_resources::graphics::GraphicsResource::open(&candidate) else {
+            continue;
+        };
+        for entry in entries {
+            let name = entry.relative_path.to_string_lossy().to_string();
+            let lower = name.to_ascii_lowercase();
+            let Some(stem) = lower.strip_suffix(".png") else {
+                continue;
+            };
+            if textures.contains_key(stem) {
+                continue;
+            }
+            if let Ok(image) = resource.load_image(&name) {
+                textures.insert(
+                    stem.to_string(),
+                    ImageData::new(image.width(), image.height(), image.pixels().to_vec()),
+                );
+            }
+        }
+    }
+    textures
+}
+
 fn try_materials_from_path(path: &Path) -> Result<MaterialSet, lc_resources::MaterialError> {
     let group = Group::open(path)?;
     let library = lc_resources::MaterialLibrary::from_group(&group)?;
@@ -4844,6 +4969,8 @@ impl GameApp {
             engine,
             graphics,
             sky: None,
+            material_texture_images: Arc::new(HashMap::new()),
+            material_base_colors: Arc::new(HashMap::new()),
             system_scripts,
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
@@ -4922,6 +5049,10 @@ impl GameApp {
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
         self.graphics.set_sky(self.sky.clone());
+        self.graphics
+            .set_material_textures(Arc::clone(&self.material_texture_images));
+        self.graphics
+            .set_material_colors(Arc::clone(&self.material_base_colors));
 
         if self.mode == AppMode::Menu {
             let width_f = width as f32;
@@ -5012,6 +5143,10 @@ impl GameApp {
                 .unwrap_or_default();
 
             let default_key = sprite_map_key(definition_id, None);
+            let shape_facet = self
+                .engine
+                .definition_shape_rect(definition_id)
+                .map(|rect| (rect.width, rect.height));
             if let Some(image) = self.engine.definition_sprite_image(definition_id, None) {
                 let width = image.width();
                 let height = image.height();
@@ -5022,6 +5157,7 @@ impl GameApp {
                 sprites.insert(
                     default_key.clone(),
                     DefinitionSprite {
+                        default_facet: shape_facet,
                         image: ImageData::from_arc(width, height, pixels),
                         actions: actions.clone(),
                         color_mask: mask,
@@ -5033,6 +5169,7 @@ impl GameApp {
                 sprites.insert(
                     default_key.clone(),
                     DefinitionSprite {
+                        default_facet: shape_facet,
                         image: ImageData::from_arc(width, height, image.into_pixels()),
                         actions: actions.clone(),
                         color_mask: None,
@@ -5057,6 +5194,7 @@ impl GameApp {
                     sprites.insert(
                         key,
                         DefinitionSprite {
+                            default_facet: shape_facet,
                             image: ImageData::from_arc(width, height, pixels),
                             actions: actions.clone(),
                             color_mask: mask,
@@ -8440,6 +8578,10 @@ impl GameApp {
         );
         self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics.set_sky(self.sky.clone());
+        self.graphics
+            .set_material_textures(Arc::clone(&self.material_texture_images));
+        self.graphics
+            .set_material_colors(Arc::clone(&self.material_base_colors));
 
         self.menu_state.set_pointer_position(None);
         self.menu_state.refresh_menu_entries();
@@ -8591,6 +8733,22 @@ impl GameApp {
         self.sky = scenario_data.sky().map(sky_render_state_from_config);
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
+        {
+            // Scenario-local textures first (Wall/Brick in GoldRush's own
+            // Material.c4g), the shared sets after.
+            let mut textures = load_scenario_material_textures(&path);
+            if let Ok(paths) = AppPaths::discover() {
+                for (name, image) in load_material_texture_images(&paths) {
+                    textures.entry(name).or_insert(image);
+                }
+            }
+            self.material_texture_images = Arc::new(textures);
+            self.material_base_colors = Arc::new(load_material_colors(&path));
+            self.graphics
+                .set_material_textures(Arc::clone(&self.material_texture_images));
+            self.graphics
+                .set_material_colors(Arc::clone(&self.material_base_colors));
+        }
 
         let label = scenario_data
             .name()
@@ -8842,6 +9000,10 @@ impl GameApp {
         );
         self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         self.graphics.set_sky(self.sky.clone());
+        self.graphics
+            .set_material_textures(Arc::clone(&self.material_texture_images));
+        self.graphics
+            .set_material_colors(Arc::clone(&self.material_base_colors));
         self.frame_text.clear();
         self.status_text.clear();
         self.energy_fraction = 0.0;

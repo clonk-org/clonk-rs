@@ -12699,6 +12699,15 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    /// The definition Shape rect (frontend idle-facet sizing:
+    /// C4Object::DrawFace draws Shape.Wdt x Shape.Hgt from the graphics
+    /// origin, C4Object.cpp:438-460).
+    pub fn definition_shape_rect(&self, definition_id: &str) -> Option<DefinitionRect> {
+        self.definitions
+            .get(definition_id)
+            .and_then(|definition| definition.shape_rect())
+    }
+
     pub fn definition_action_graphics(
         &self,
         definition_id: &str,
@@ -25276,7 +25285,7 @@ mod tests {
         names[20] = Some("Water".into());
         names[30] = Some("Earth".into());
         // 2x2 world: water in the left column, earth in the right.
-        let grid = landscape::PixelGrid::new(2, 2, vec![20, 30, 20, 30], densities, names);
+        let grid = landscape::PixelGrid::new(2, 2, vec![20, 30, 20, 30], densities, names, vec![None; 128]);
         let mut landscape = Landscape::new(2, vec![0, 0]).expect("landscape builds");
         landscape.set_pixel_grid(grid);
         engine.set_landscape(landscape);

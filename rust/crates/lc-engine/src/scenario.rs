@@ -2637,6 +2637,9 @@ pub(crate) struct MapPixelClassifier {
     /// Material NAME per texmap index — the pixel grid resolves these
     /// into engine MaterialIds once the MaterialSet exists.
     names: Vec<Option<String>>,
+    /// TEXTURE name per texmap index (presentation: the landscape
+    /// renders each pixel from its texture's Material.c4g png).
+    textures: Vec<Option<String>>,
     /// Material MapChunkType per texmap index (`Shape`,
     /// C4Material.cpp:181); None = no material mapped, so ChunkOZoom
     /// draws nothing for the texture (C4Landscape.cpp:342-343).
@@ -2697,11 +2700,15 @@ pub(crate) fn build_map_pixel_classifier(
 
     let mut densities = [0i32; 128];
     let mut names: Vec<Option<String>> = vec![None; 128];
+    let mut grid_textures: Vec<Option<String>> = vec![None; 128];
     let mut shapes: Vec<Option<crate::chunky::ChunkShape>> = vec![None; 128];
     for (index, slot) in densities.iter_mut().enumerate() {
         names[index] = texmap
             .entry(index as u8)
             .map(|entry| entry.material.clone());
+        grid_textures[index] = texmap
+            .entry(index as u8)
+            .map(|entry| entry.texture.clone());
         let material = texmap.entry(index as u8).and_then(|entry| {
             local_library
                 .as_ref()
@@ -2718,6 +2725,15 @@ pub(crate) fn build_map_pixel_classifier(
         *slot = material
             .and_then(|material| material.int("Density"))
             .unwrap_or(0);
+        // "Special, hardcoded crap": liquids render <mat>-Smooth with
+        // the Liquid texture (C4TexMapEntry::Init, C4Texture.cpp:79-82).
+        if (25..50).contains(&*slot)
+            && grid_textures[index]
+                .as_deref()
+                .is_some_and(|texture| texture.eq_ignore_ascii_case("Smooth"))
+        {
+            grid_textures[index] = Some("Liquid".to_string());
+        }
     }
     // Dynamic texmap entries (C4MaterialMap::CrossMapMaterials,
     // C4Material.cpp:345-484): the DefaultMatTex loop registers
@@ -2770,7 +2786,7 @@ pub(crate) fn build_map_pixel_classifier(
             .chain(local_library.iter().flat_map(|library| library.iter()))
             .collect();
 
-        let get_index = |mat_name: &str,
+        let mut get_index = |mat_name: &str,
                              tex_name: Option<&str>,
                              names: &mut Vec<Option<String>>,
                              textures: &mut Vec<Option<String>>,
@@ -2815,6 +2831,7 @@ pub(crate) fn build_map_pixel_classifier(
             };
             names[slot] = Some(mat_name.to_string());
             textures[slot] = tex_name.map(str::to_string);
+            grid_textures[slot] = tex_name.map(str::to_string);
             shapes[slot] = Some(crate::chunky::ChunkShape::from_shape(
                 material.int("Shape").unwrap_or(0),
             ));
@@ -2876,6 +2893,7 @@ pub(crate) fn build_map_pixel_classifier(
     Some(MapPixelClassifier {
         densities,
         names,
+        textures: grid_textures,
         shapes,
     })
 }
@@ -2967,6 +2985,7 @@ fn classified_landscape(
         bytes,
         classifier.densities.to_vec(),
         classifier.names.clone(),
+        classifier.textures.clone(),
     ));
 
     // Loaded water is at rest: C4MassMoverSet starts empty and movers are
@@ -9098,6 +9117,7 @@ global func Step(state, frame, random)
         let classifier = MapPixelClassifier {
             densities,
             names,
+            textures: vec![None; 128],
             shapes,
         };
 
@@ -9156,6 +9176,7 @@ global func Step(state, frame, random)
         let classifier = MapPixelClassifier {
             densities,
             names,
+            textures: vec![None; 128],
             shapes,
         };
 

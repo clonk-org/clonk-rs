@@ -63,6 +63,13 @@ pub struct PixelGrid {
     /// Row-major texmap-index bytes.
     #[serde(with = "hex_bytes")]
     bytes: Vec<u8>,
+    /// TEXTURE name per texmap index (presentation only: the frontend
+    /// samples the texture png per pixel).
+    #[serde(default)]
+    texture_names: Vec<Option<String>>,
+    /// Bumped on every pixel write — the frontend's render cache key.
+    #[serde(default)]
+    revision: u64,
     /// Pix2Dens: density per texmap index (IFT stripped); index 0 and
     /// unmapped entries are sky (density 0).
     densities: Vec<i32>,
@@ -81,6 +88,7 @@ impl PixelGrid {
         bytes: Vec<u8>,
         densities: Vec<i32>,
         material_names: Vec<Option<String>>,
+        texture_names: Vec<Option<String>>,
     ) -> Self {
         debug_assert_eq!(bytes.len(), width as usize * height as usize);
         let materials = vec![None; material_names.len()];
@@ -91,6 +99,8 @@ impl PixelGrid {
             densities,
             material_names,
             materials,
+            texture_names,
+            revision: 0,
         }
     }
 
@@ -113,6 +123,18 @@ impl PixelGrid {
 
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub fn texture_names(&self) -> &[Option<String>] {
+        &self.texture_names
+    }
+
+    pub fn material_names(&self) -> &[Option<String>] {
+        &self.material_names
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn byte_at(&self, x: i32, y: i32) -> Option<u8> {
@@ -167,6 +189,7 @@ impl PixelGrid {
     fn set_byte(&mut self, x: i32, y: i32, byte: u8) {
         if let Some(slot) = self.slot(x, y) {
             self.bytes[slot] = byte;
+            self.revision = self.revision.wrapping_add(1);
         }
     }
 

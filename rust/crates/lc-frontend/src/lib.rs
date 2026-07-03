@@ -96,6 +96,10 @@ pub struct DefinitionSprite {
     pub image: ImageData,
     pub actions: HashMap<String, DefinitionActionGraphics>,
     pub color_mask: Option<ColorByOwnerMask>,
+    /// The def Shape size: idle objects draw Shape.Wdt x Shape.Hgt from
+    /// the graphics origin (C4Object::DrawFace, C4Object.cpp:438-460),
+    /// never the whole sprite sheet.
+    pub default_facet: Option<(i32, i32)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -443,6 +447,17 @@ pub struct GraphicsSystem {
     active_viewports: Vec<ActiveViewport>,
     camera_states: HashMap<CameraKey, CameraState>,
     sky: Option<SkyRenderState>,
+    /// Material texture pngs by lowercase texture name — the landscape
+    /// plane samples them per pixel (C++ builds Surface32 from the same
+    /// Material.c4g textures during MapToSurface).
+    material_textures: Arc<HashMap<String, ImageData>>,
+    /// Material base colors (first Color= triplet): the landscape pixel
+    /// is base x texture, doubled — CPattern::PatternClr's ModulateClrA +
+    /// LightenClr (StdDDraw2.cpp:187-207).
+    material_colors: Arc<HashMap<String, [u8; 3]>>,
+    /// Cached RGBA render of the landscape plane, keyed by the pixel
+    /// grid's revision.
+    landscape_cache: Option<(u64, ImageData)>,
 }
 
 impl GraphicsSystem {
@@ -498,6 +513,9 @@ impl GraphicsSystem {
             active_viewports: Vec::new(),
             camera_states: HashMap::new(),
             sky: None,
+            material_textures: Arc::new(HashMap::new()),
+            material_colors: Arc::new(HashMap::new()),
+            landscape_cache: None,
         }
     }
 
@@ -516,6 +534,16 @@ impl GraphicsSystem {
     pub fn set_world_dimensions(&mut self, world_width: i32, world_height: i32) {
         self.set_world_width(world_width);
         self.set_world_height(world_height);
+    }
+
+    pub fn set_material_textures(&mut self, textures: Arc<HashMap<String, ImageData>>) {
+        self.material_textures = textures;
+        self.landscape_cache = None;
+    }
+
+    pub fn set_material_colors(&mut self, colors: Arc<HashMap<String, [u8; 3]>>) {
+        self.material_colors = colors;
+        self.landscape_cache = None;
     }
 
     pub fn set_sky(&mut self, sky: Option<SkyRenderState>) {
@@ -1576,12 +1604,136 @@ impl GraphicsSystem {
         }
     }
 
+    /// Per-pixel landscape rendering from the sim plane: every pixel
+    /// byte samples its texmap texture png tiled by WORLD coordinates —
+    /// the same composition C4Landscape::MapToSurface bakes into
+    /// Surface32. Returns false when no plane/textures exist (legacy
+    /// column painter takes over).
+    fn draw_ground_textured(&mut self, landscape: Option<&Landscape>) -> bool {
+        let Some(grid) = landscape.and_then(|landscape| landscape.pixel_grid()) else {
+            return false;
+        };
+        if self.material_textures.is_empty() {
+            return false;
+        }
+        let revision = grid.revision();
+        let rebuild = self
+            .landscape_cache
+            .as_ref()
+            .map(|(cached, _)| *cached != revision)
+            .unwrap_or(true);
+        if rebuild {
+            let width = grid.width();
+            let height = grid.height();
+            let bytes = grid.bytes();
+            let textures = grid.texture_names();
+            let materials = grid.material_names();
+            // Per texmap slot: the texture image or a flat fallback color.
+            enum Slot<'a> {
+                Empty,
+                Texture(&'a ImageData, [u8; 3]),
+                Flat([u8; 4]),
+            }
+            let slots: Vec<Slot> = (0..128usize)
+                .map(|index| {
+                    let base = materials
+                        .get(index)
+                        .and_then(|name| name.as_deref())
+                        .and_then(|name| self.material_colors.get(&name.to_ascii_lowercase()))
+                        .copied()
+                        .unwrap_or([255, 255, 255]);
+                    let texture = textures
+                        .get(index)
+                        .and_then(|name| name.as_deref())
+                        .and_then(|name| self.material_textures.get(&name.to_ascii_lowercase()));
+                    if let Some(texture) = texture {
+                        return Slot::Texture(texture, base);
+                    }
+                    if materials.get(index).and_then(|name| name.as_ref()).is_some() {
+                        let flat = if base != [255, 255, 255] {
+                            [base[0], base[1], base[2], 255]
+                        } else {
+                            [120, 92, 56, 255]
+                        };
+                        return Slot::Flat(flat);
+                    }
+                    Slot::Empty
+                })
+                .collect();
+            let mut pixels = vec![0u8; width as usize * height as usize * 4];
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let byte = bytes[y * width as usize + x];
+                    let index = (byte & 0x7f) as usize;
+                    let out = (y * width as usize + x) * 4;
+                    match &slots[index] {
+                        Slot::Empty => {}
+                        Slot::Flat(color) => pixels[out..out + 4].copy_from_slice(color),
+                        Slot::Texture(texture, base) => {
+                            let tw = texture.width().max(1) as usize;
+                            let th = texture.height().max(1) as usize;
+                            let src = ((y % th) * tw + (x % tw)) * 4;
+                            let data = texture.pixels();
+                            if src + 4 <= data.len() {
+                                // ModulateClrA + LightenClr
+                                // (CPattern::PatternClr): base x texture,
+                                // doubled and clamped.
+                                for channel in 0..3 {
+                                    let modulated = (base[channel] as u32
+                                        * data[src + channel] as u32)
+                                        / 255;
+                                    pixels[out + channel] =
+                                        (modulated * 2).min(255) as u8;
+                                }
+                                pixels[out + 3] = 255;
+                            }
+                        }
+                    }
+                }
+            }
+            self.landscape_cache = Some((revision, ImageData::new(width, height, pixels)));
+        }
+        let Some((_, cache)) = &self.landscape_cache else {
+            return false;
+        };
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let cache_width = cache.width() as i32;
+        let cache_height = cache.height() as i32;
+        let cache_pixels = cache.pixels();
+        for screen_y in 0..self.surface_height {
+            let world_y = (self.viewport_y + (screen_y as f32 + 0.5) / zoom).floor() as i32;
+            if world_y < 0 || world_y >= cache_height {
+                continue;
+            }
+            for screen_x in 0..self.surface_width {
+                let world_x = (self.viewport_x + (screen_x as f32 + 0.5) / zoom).floor() as i32;
+                if world_x < 0 || world_x >= cache_width {
+                    continue;
+                }
+                let src = ((world_y * cache_width + world_x) * 4) as usize;
+                if cache_pixels[src + 3] == 0 {
+                    continue;
+                }
+                let color = Color::opaque(
+                    cache_pixels[src],
+                    cache_pixels[src + 1],
+                    cache_pixels[src + 2],
+                );
+                let _ = self.surface.set_pixel(screen_x, screen_y, color);
+            }
+        }
+        true
+    }
+
     fn draw_ground(
         &mut self,
         ambient_temperature: i32,
         landscape: Option<&Landscape>,
         lighting: f32,
     ) {
+        if self.draw_ground_textured(landscape) {
+            return;
+        }
         let ground_color = Self::apply_lighting(
             Self::ground_color_for_temperature(ambient_temperature),
             lighting,
@@ -1819,12 +1971,16 @@ impl GraphicsSystem {
                 );
                 return;
             }
-            let source_rect = SourceRect::new(
-                0,
-                0,
-                sprite.image.width() as i32,
-                sprite.image.height() as i32,
-            );
+            // Idle/base face: Shape.Wdt x Hgt from the graphics origin
+            // (C4Object::DrawFace) — the full sheet only when no shape
+            // is known (loader sprites).
+            let (facet_w, facet_h) = sprite
+                .default_facet
+                .filter(|(w, h)| *w > 0 && *h > 0)
+                .unwrap_or((sprite.image.width() as i32, sprite.image.height() as i32));
+            let facet_w = facet_w.min(sprite.image.width() as i32);
+            let facet_h = facet_h.min(sprite.image.height() as i32);
+            let source_rect = SourceRect::new(0, 0, facet_w, facet_h);
             if !Self::source_within_image(&sprite.image, &source_rect) {
                 return;
             }
@@ -1852,8 +2008,11 @@ impl GraphicsSystem {
             if scale_y < 0.0 {
                 scale_y = -scale_y;
             }
-            let sprite_width = (sprite.image.width() as f32 * zoom * scale_x).max(1.0);
-            let sprite_height = (sprite.image.height() as f32 * zoom * scale_y).max(1.0);
+            // Growth scale: DrawFace stretches by Con (C4Object.cpp:448).
+            let con_scale = (object.construction.max(0) as f32 / 100_000.0).min(1.0);
+            let con_scale = if con_scale > 0.0 { con_scale } else { 1.0 };
+            let sprite_width = (facet_w as f32 * con_scale * zoom * scale_x).max(1.0);
+            let sprite_height = (facet_h as f32 * con_scale * zoom * scale_y).max(1.0);
             if rotation_degrees.abs() <= f32::EPSILON {
                 let rect = GuiRect::from_origin_size(
                     GuiPoint::new(
@@ -2542,6 +2701,13 @@ impl GraphicsSystem {
     }
 
     fn lighting_factor(time_of_day: u16) -> f32 {
+        // C++ CR has no ambient day/night dimming for standard scenarios
+        // (C4Weather adjusts the SKY gamma only) — an unset time-of-day
+        // must render at full brightness, not as midnight. The cycle
+        // stays for sandbox worlds that drive the clock.
+        if time_of_day == 0 {
+            return 1.0;
+        }
         let cycle = EnvironmentSettings::TIME_CYCLE as f32;
         if cycle <= 0.0 {
             return 1.0;
@@ -4174,7 +4340,8 @@ mod tests {
         let day_pixel = day_view.surface().get_pixel(0, 0).unwrap();
 
         let mut nighttime = daytime.clone();
-        nighttime.environment.settings.time_of_day = 0;
+        // 0 means "no day/night cycle" (full daylight); 1 is deepest night.
+        nighttime.environment.settings.time_of_day = 1;
         let mut night_view = GraphicsSystem::new(
             120,
             80,
@@ -4230,7 +4397,8 @@ mod tests {
             .unwrap();
 
         let mut nighttime = daytime.clone();
-        nighttime.environment.settings.time_of_day = 0;
+        // 0 means "no day/night cycle" (full daylight); 1 is deepest night.
+        nighttime.environment.settings.time_of_day = 1;
         let mut night_view = GraphicsSystem::new(
             200,
             150,
