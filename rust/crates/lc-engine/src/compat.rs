@@ -3855,6 +3855,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetAlive", get_alive);
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
+    script.register_host_function("Distance", distance);
+    script.register_host_function("SetViewOffset", set_view_offset);
     script.register_host_function("GetController", get_controller);
     script.register_host_function("SetController", set_controller);
     script.register_host_function("SetObjectStatus", set_object_status);
@@ -14507,6 +14509,62 @@ fn incinerate_landscape(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnDistance (C4Script.cpp:3316-3319) -> Distance (C4Math.cpp:22-31):
+/// integer euclidean distance; the float sqrt is post-adjusted to the
+/// exact integer floor (++/-- until dist^2 brackets d2). Negative d2
+/// (int64 overflow in C++) returns -1.
+fn distance(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 4 {
+        return Err(RuntimeError::new(
+            "Distance expects at most 4 arguments: x1, y1, x2, y2",
+        ));
+    }
+    let x1 = parse_optional_i32(args.first(), "Distance", "x1")?.unwrap_or(0);
+    let y1 = parse_optional_i32(args.get(1), "Distance", "y1")?.unwrap_or(0);
+    let x2 = parse_optional_i32(args.get(2), "Distance", "x2")?.unwrap_or(0);
+    let y2 = parse_optional_i32(args.get(3), "Distance", "y2")?.unwrap_or(0);
+
+    let dx = i64::from(x1) - i64::from(x2);
+    let dy = i64::from(y1) - i64::from(y2);
+    let d2 = dx.wrapping_mul(dx).wrapping_add(dy.wrapping_mul(dy));
+    if d2 < 0 {
+        return Ok(Value::Int(-1));
+    }
+    let mut dist = (d2 as f64).sqrt() as i64;
+    if dist.wrapping_mul(dist) < d2 {
+        dist += 1;
+    }
+    if dist.wrapping_mul(dist) > d2 {
+        dist -= 1;
+    }
+    Ok(Value::Int(dist as i32))
+}
+
+/// FnSetViewOffset (C4Script.cpp:5676-5687): ValidPlr gate; without a
+/// viewport (the headless/dedicated path) the write is skipped and the
+/// call still succeeds ("sync safety").
+fn set_view_offset(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "SetViewOffset expects at most 3 arguments: player, x, y",
+        ));
+    }
+    let player = parse_optional_i32(args.first(), "SetViewOffset", "player")?.unwrap_or(0);
+    // x/y validate like every int parameter even though no viewport
+    // exists to store them.
+    let _ = parse_optional_i32(args.get(1), "SetViewOffset", "x")?;
+    let _ = parse_optional_i32(args.get(2), "SetViewOffset", "y")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let valid = borrow
+            .as_ref()
+            .map(|context| context.player_state(player).is_some())
+            .unwrap_or(false);
+        Ok(Value::Bool(valid))
+    })
+}
+
 /// FnGetObjectLayer (C4Script.cpp:5160-5166): the object's pLayer — nil
 /// unless a layer was assigned (Objects.txt `Layer=`; SetObjectLayer is
 /// unported). Layers cannot change mid-call, so the world snapshot is
@@ -17141,6 +17199,7 @@ mod tests {
         "DefinitionCall",
         "DigFree",
         "DigFreeRect",
+        "Distance",
         "DoCon",
         "DoDamage",
         "DoEnergy",
@@ -17310,6 +17369,7 @@ mod tests {
         "SetTemperature",
         "SetTransferZone",
         "SetVertex",
+        "SetViewOffset",
         "SetVisibility",
         "SetWealth",
         "SetWind",

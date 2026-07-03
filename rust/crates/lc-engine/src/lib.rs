@@ -31443,6 +31443,63 @@ func Trigger() {
         assert_eq!(engine.objects.len(), 1, "no spawn registered");
     }
 
+    // FnDistance (C4Script.cpp:3316-3319) -> Distance (C4Math.cpp:22-31):
+    // integer euclidean distance with the exact post-sqrt adjustment;
+    // FnSetViewOffset (C4Script.cpp:5676-5687): ValidPlr gate, then true
+    // even without a viewport (sync safety — the headless C++ path).
+    // Both run in System.c4g's FxShakeEffectTimer (Explode.c:188-200).
+    #[test]
+    fn distance_and_set_view_offset_match_cpp() {
+        let caller_script = r#"#strict
+local iPyth, iDiag, iZero, iBadPlr, iGoodPlr;
+func Trigger() {
+    iPyth = Distance(0, 0, 3, 4);
+    iDiag = Distance(0, 0, 1, 1);
+    iZero = Distance(-7, 9, -7, 9);
+    iBadPlr = SetViewOffset(9, 5, 5);
+    iGoodPlr = SetViewOffset(1, 5, 5);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(1, "P1"))
+            .expect("player registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(id).expect("caller exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(locals.get("iPyth"), Some(&Value::Int(5)));
+        assert_eq!(
+            locals.get("iDiag"),
+            Some(&Value::Int(1)),
+            "sqrt(2) adjusts down to the floor (C4Math.cpp:28-30)"
+        );
+        assert_eq!(locals.get("iZero"), Some(&Value::Int(0)));
+        assert_eq!(
+            locals.get("iBadPlr"),
+            Some(&Value::Bool(false)),
+            "invalid player rejected"
+        );
+        assert_eq!(
+            locals.get("iGoodPlr"),
+            Some(&Value::Bool(true)),
+            "no viewport is sync-safe true"
+        );
+    }
+
     #[test]
     fn call_runs_own_def_script_function_like_cpp() {
         // FnCall (C4Script.cpp:3424-3432): Call(name, p0..p8) runs `name` on
