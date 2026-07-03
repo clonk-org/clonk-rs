@@ -9298,7 +9298,21 @@ fn set_phase(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
 
-        object.set_action_phase(phase);
+        // C4Object::SetPhase (C4Object.cpp:2205-2211): a no-op on idle
+        // objects; the phase clamps to [0, Length] (BoundBy is INCLUSIVE
+        // of Length — the wrap transition fires at the next ExecAction).
+        let action_name = object.effective_action_name().to_string();
+        if object.action_library.is_idle_action(&action_name) {
+            return Ok(Value::Bool(false));
+        }
+        let length = object
+            .action_library
+            .specs()
+            .get(&action_name)
+            .and_then(|spec| spec.length)
+            .map(|length| i32::try_from(length).unwrap_or(i32::MAX))
+            .unwrap_or(1);
+        object.set_action_phase(phase.clamp(0, length));
         Ok(Value::Bool(true))
     })
 }
@@ -21984,6 +21998,49 @@ mod tests {
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("direction update recorded");
         assert_eq!(update.direction, Some(Direction::Right));
+    }
+
+    #[test]
+    fn set_phase_clamps_to_action_length_inclusive_like_cpp() {
+        // C4Object::SetPhase (C4Object.cpp:2205-2211): idle → false;
+        // BoundBy(iPhase, 0, Length) — INCLUSIVE of Length.
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Walk".to_string(),
+            crate::action::ActionSpec::default().with_length(5),
+        );
+        let library = ActionLibrary::new(Some("Walk".to_string()), specs);
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                None,
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Walk",
+                0,
+                0,
+                library,
+                Direction::Left,
+                CommandDirection::Stop,
+                0,
+                None,
+                None,
+                &[],
+                crate::FULL_CON,
+            )),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || set_phase(&[Value::Int(9)]),
+        );
+        assert_eq!(result.expect("SetPhase runs"), Value::Bool(true));
+        let update = outcome.object_update.expect("phase update recorded");
+        let action = update.action.expect("action update present");
+        assert_eq!(action.phase, Some(5), "9 clamps to Length (5), inclusive");
     }
 
     #[test]
