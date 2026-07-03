@@ -144,10 +144,10 @@
 | Subsystem | Open items |
 |---|---|
 | movement-physics | SetSolidMask update lifetime; attached-object pushback (its DensityProvider reads the put BUFFER for rotated masks, C4SolidMask.cpp:218-227 — the rotated bake buffer already models this); rotated masks stay off in the non-grid mask-rect overlay (fixture worlds only, no C++ counterpart) |
-| landscape | incremental ExecuteScan/DoScan (batch temperature conversion desyncs scan order); PRETTY_TEMP_CONV; map creation beyond ChunkOZoom; pixel-exact DigFree/BlastFree accounting; segment- vs pixel-liquid model |
+| landscape | incremental ExecuteScan/DoScan (batch temperature conversion desyncs scan order) — including DoScan's per-converted-pixel CheckInstabilityRange (C4Landscape.cpp:225): the column conversion has no pixel coordinates to probe; PRETTY_TEMP_CONV; map creation beyond ChunkOZoom; pixel-exact DigFree/BlastFree accounting; blast/shake instability probes run as a post-pass in the C++ scan order (no per-pixel clear/probe interleave until blast/shake are per-pixel); segment- vs pixel-liquid model |
 | effects | Annul/AnnulCalls + FxAdd add-to-other-effect; TempRemove/TempReadd; Fx*Damage DoEnergy modification; builtin fire/helper effects (Splash/Smoke/Explosion/BubbleOut) |
 | commands | Tick2/5/35 throttling; MoveTo flight/swim control; Scale/Hangle let-go thresholds |
-| material | meeMassMove script reactions (mass-mover loop lacks VM access); mass-move Convert→PXS.Create handoff; full Extract/InsertMaterial semantics (Insert is direct-settle, no PXS velocity) |
+| material | column-model fixture worlds keep segment removal where C++ ClearPix/ExtractMaterial act per pixel (grid worlds are C++-faithful) |
 | objects-core | OCF computes a subset of the ~30 C++ checks; C4ObjectInfo permanent training/experience unmodeled; DFA_CONNECT uses direct endpoint assignment (the LineConnect wrapping walker is unported) |
 | findobject-ocf | Layer never matches — C4FindObjectLayer::Check is `pObj->pLayer == pLayer` (C4FindObject.cpp:671-674), so `Find_Layer(nil)` must match every unlayered object; today System.c4g BlastObjects (Explode.c:93-97) finds nothing and explosions neither damage nor fling objects. Fixing it requires the BlastObject host fn (FnBlastObject, C4Script.cpp:2281-2289 -> C4Object::Blast, C4Object.cpp:1389-1399) + DefCore BlastIncinerate ingest first, or the zero-warning gate regresses. Also: sector-bounds FindMany traversal order; cached sort keys i64 vs C++ i32 wrap |
 | game-control-record | control-packet payload serialization; lc-network DoInput/host sync-check broadcast wiring |
@@ -196,4 +196,6 @@ foundations (C4Fixed/LCG/sectors) → CrossCheck/physicals → weather/disasters
 → PXS/mass-mover → host→VM reentrancy + Find_Func → scenario-load epic
 (93/93) → player-join pipeline → startup-menu pixel parity → per-pixel
 landscape → Tick10 mobile gate → frame-1 live-parity epic (393→0, complete
-2026-07-03).
+2026-07-03) → persistent-slot mass mover (incremental CheckInstability
+creation at every C++ call site, no surface re-seek, C++ Count/CreatePtr
+ledger, 2026-07-03).
