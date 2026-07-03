@@ -8,7 +8,7 @@ use crate::command::{
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::material::MaterialSet;
-use crate::math::{fixtoi_prec, integer_distance, itofix_prec, C4Fixed, FixedVec2};
+use crate::math::{fixed100, fixtoi_prec, integer_distance, itofix, itofix_prec, C4Fixed, FixedVec2};
 use crate::message::{
     MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_MULTIPLE,
     HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
@@ -1839,6 +1839,32 @@ fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnLandscapeWidth (C4Script.cpp:3077-3080): GBackWdt.
+fn landscape_width(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        Ok(Value::Int(
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.landscape_ref())
+                .map(|landscape| landscape.width() as i32)
+                .unwrap_or(0),
+        ))
+    })
+}
+
+/// FnLandscapeHeight (C4Script.cpp:3082-3085): GBackHgt.
+fn landscape_height(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        Ok(Value::Int(
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.landscape_ref())
+                .map(|landscape| landscape.estimated_height())
+                .unwrap_or(0),
+        ))
+    })
+}
+
 /// FnFrameCounter (C4Script.cpp): Game.FrameCounter — the current
 /// simulation frame.
 fn frame_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
@@ -1852,15 +1878,589 @@ fn frame_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnCloseMenu (C4Script.cpp:4302-4307): closes the object's menu — the
-/// menu register is frontend-side in this engine (menu_requests flow to
-/// the UI); the comparator does not cover it. Acknowledged.
-fn close_menu(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = args
-        .first()
-        .map(|arg| parse_object_reference_argument(arg, "CloseMenu", "obj"))
-        .transpose()?;
+/// The active object of the executing call (`cthr->Obj`).
+fn active_object_id() -> Option<ObjectId> {
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    })
+}
+
+/// C4IdText (C4Id.cpp:26-45) over a script value: C4ID_None -> "NONE",
+/// numerical ids 0..9999 -> "%04u", literal ids stay as-is.
+fn c4id_text_of(value: &Value) -> String {
+    match value {
+        Value::C4Id(id) | Value::String(id) if !id.is_empty() => id.clone(),
+        Value::Int(raw) => c4id_to_definition(*raw).unwrap_or_else(|| "NONE".to_string()),
+        _ => "NONE".to_string(),
+    }
+}
+
+/// C4ObjectMenu::IsCloseDenied (C4ObjectMenu.cpp:56-75): a USER menu asks
+/// MenuQueryCancel(Selection, ParentObject) on the command object
+/// (CB_Object) or the scenario script (CB_Scenario); a truthy answer keeps
+/// the menu open. The CloseQuerying flag stops recursive queries.
+fn menu_close_denied(menu_object: ObjectId, menu: &crate::ObjectMenuState) -> bool {
+    thread_local! {
+        static CLOSE_QUERYING: RefCell<std::collections::HashSet<ObjectId>> =
+            RefCell::new(std::collections::HashSet::new());
+    }
+    if !menu.user_menu {
+        return false;
+    }
+    let already_querying =
+        CLOSE_QUERYING.with(|cell| !cell.borrow_mut().insert(menu_object));
+    if already_querying {
+        return false;
+    }
+    let pars = [
+        Value::Int(menu.selection),
+        object_reference_value(menu_object),
+    ];
+    // A missing function is a silent miss (the "~" in PSF_MenuQueryCancel);
+    // callee errors fall back to close-OK (C4Object::Call, fPassErrors
+    // defaults false — the error logs and the call yields C4VNull).
+    let denied = match menu.command_object {
+        Some(command_object) => {
+            call_world_object_own_function(command_object, "MenuQueryCancel", &pars)
+        }
+        None => HOST_CONTEXT
+            .with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.world.scenario_script().cloned())
+            })
+            .and_then(|script| call_scoped_script_function(script, "MenuQueryCancel", &pars)),
+    }
+    .map(|result| result.map(|value| value.as_bool()).unwrap_or(false))
+    .unwrap_or(false);
+    CLOSE_QUERYING.with(|cell| {
+        cell.borrow_mut().remove(&menu_object);
+    });
+    denied
+}
+
+/// C4Object::CloseMenu (C4Object.cpp:2009-2017): force skips the
+/// MenuQueryCancel query (C4Menu::TryClose, C4Menu.cpp:317-320); a denied
+/// soft close keeps the menu and fails.
+fn close_object_menu(target: ObjectId, force: bool) -> bool {
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    let Some(menu) = menu else {
+        return true; // no menu -> close OK
+    };
+    if !force && menu_close_denied(target, &menu) {
+        return false;
+    }
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, None))
+            .unwrap_or(false)
+    })
+}
+
+/// FnCreateMenu (C4Script.cpp:1426-1459) → C4ObjectMenu::Init
+/// (C4ObjectMenu.cpp:86-91): closes any old menu (soft — MenuQueryCancel
+/// may deny), then installs a fresh user menu with Identification =
+/// idMenuID ? idMenuID : iSymbol, the given style, and permanence.
+fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
+    let symbol = args.first().cloned().unwrap_or(Value::Nil);
+    let menu_target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "CreateMenu",
+        "menu object",
+    )?;
+    let explicit_command = parse_object_reference_argument(
+        args.get(2).unwrap_or(&Value::Nil),
+        "CreateMenu",
+        "command object",
+    )?;
+    let style = parse_optional_i32(args.get(6), "CreateMenu", "style")?.unwrap_or(0);
+    let permanent = args.get(7).map(value_raw_truthy).unwrap_or(false);
+    let menu_id = args.get(8).cloned().unwrap_or(Value::Nil);
+
+    let active = active_object_id();
+    let Some(target) = menu_target.or(active) else {
+        return Ok(Value::Bool(false)); // !pMenuObj && !cthr->Obj
+    };
+    let command_object = explicit_command.or(active);
+    // Object menu: validate the command object (C4Script.cpp:1433-1436);
+    // no command object is the scenario-script-callback form.
+    if let Some(command_object) = command_object {
+        let command_active = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| context.object_status_active(command_object))
+                .unwrap_or(false)
+        });
+        if !command_active {
+            return Ok(Value::Bool(false));
+        }
+    }
+    // Clear any old menu (C4Script.cpp:1447): a MenuQueryCancel denial
+    // aborts the new menu.
+    if !close_object_menu(target, false) {
+        return Ok(Value::Bool(false));
+    }
+    let identification = if value_raw_truthy(&menu_id) {
+        menu_id
+    } else {
+        symbol
+    };
+    let menu = crate::ObjectMenuState {
+        identification,
+        // Style & C4MN_Style_BaseMask (C4Menu::InitMenu, C4Menu.cpp:359).
+        style: style & 127,
+        permanent,
+        selection: -1,
+        user_menu: true,
+        command_object,
+        items: Vec::new(),
+    };
+    let stored = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu)))
+            .unwrap_or(false)
+    });
+    Ok(Value::Bool(stored))
+}
+
+/// FnGetMenu (C4Script.cpp:1418-1424): the active menu's Identification;
+/// C4MN_None (0) without one; C4ID(-1) without an object.
+fn get_menu(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GetMenu",
+        "obj",
+    )?;
+    let Some(target) = target.or(active_object_id()) else {
+        return Ok(Value::Int(-1));
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    Ok(menu
+        .map(|menu| menu.identification)
+        .unwrap_or(Value::Int(0)))
+}
+
+/// FnPunch (C4Script.cpp:328-332) → ObjectComPunch (C4ObjectCom.cpp:
+/// 735-767): a zero punch derives from the Fight physicals
+/// (BoundBy(5*attacker/target, 0, 10)); QueryCatchBlow on the target
+/// halves punch > 1 and stops the blow; the target loses punch% energy
+/// and its ComDir stops either way; a stopped blow returns false without
+/// a fling; punch >= 10 tries the Tumble action (xdir FIXED100(150)*tdir,
+/// ydir -2), the regular path GetPunched (xdir FIXED100(250)*tdir,
+/// ydir 0) — each firing CatchBlow(punch, attacker) on success.
+/// (LastEnergyLossCausePlayer kill tracing rides the engine's DoEnergy
+/// caused-by, which the scope energy write does not carry yet — the same
+/// gap as the DoEnergy host function.)
+fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(target) =
+        parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "Punch", "target")?
+    else {
+        return Ok(Value::Bool(false)); // !pTarget (C4ObjectCom.cpp:737)
+    };
+    let mut punch = parse_optional_i32(args.get(1), "Punch", "punch")?.unwrap_or(0);
+
+    // Read phase: attacker (cthr->Obj) dir + both Fight physicals.
+    let read = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        let scope = context.object_context()?;
+        let attacker = scope.id();
+        let attacker_fight = scope.resolved_physical(false).fight;
+        // tdir = +1, DIR_Left -> -1 (C4ObjectCom.cpp:745).
+        let tdir = match scope.direction() {
+            Direction::Left => -1,
+            Direction::Right => 1,
+        };
+        if !context.ensure_object_scope(target) {
+            return None;
+        }
+        let target_fight = context
+            .object_scope(target)
+            .map(|scope| scope.resolved_physical(false).fight)
+            .unwrap_or(0);
+        Some((attacker, attacker_fight, tdir, target_fight))
+    });
+    let Some((attacker, attacker_fight, tdir, target_fight)) = read else {
+        return Ok(Value::Bool(false)); // !cthr->Obj / unknown target
+    };
+
+    if punch == 0 && target_fight != 0 {
+        punch = (5 * attacker_fight / target_fight).clamp(0, 10);
+    }
+    if punch == 0 {
+        return Ok(Value::Bool(true)); // nothing to do (C4ObjectCom.cpp:741)
+    }
+
+    // PSF_QueryCatchBlow (fail-safe; callee errors log and read as false,
+    // C4Object::Call fPassErrors=false).
+    let blow_stopped =
+        match call_world_object_own_function(target, "QueryCatchBlow", &[object_reference_value(attacker)]) {
+            Some(Ok(value)) => value.as_bool(),
+            Some(Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    "script error in QueryCatchBlow; continuing like the C++ fail-safe exec"
+                );
+                false
+            }
+            None => false,
+        };
+    if blow_stopped && punch > 1 {
+        punch /= 2; // caught blow halves damage (C4ObjectCom.cpp:743)
+    }
+
+    // DoEnergy(-punch, false) + ComDir stop happen even for stopped blows.
+    let written = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        context
+            .object_scope_mut(target)
+            .map(|scope| {
+                scope.adjust_energy(-punch, false);
+                scope.set_command_direction(CommandDirection::Stop);
+            })
+            .is_some()
+    });
+    if !written {
+        return Ok(Value::Bool(false));
+    }
+    if blow_stopped {
+        return Ok(Value::Bool(false)); // no tumbles for caught blows
+    }
+
+    let try_fling = |action: &str, velocity: FixedVec2| -> bool {
+        let action_set = matches!(
+            call_world_object_function(target, "SetAction", &[Value::String(action.to_string())]),
+            Some(Ok(value)) if value.as_bool()
+        );
+        if !action_set {
+            return false;
+        }
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return false;
+            };
+            context
+                .object_scope_mut(target)
+                .map(|scope| scope.set_fixed_velocity(velocity))
+                .is_some()
+        })
+    };
+    let flung = (punch >= 10
+        && try_fling("Tumble", FixedVec2::new(fixed100(150) * tdir, itofix(-2))))
+        || try_fling("GetPunched", FixedVec2::new(fixed100(250) * tdir, C4Fixed::ZERO));
+    if !flung {
+        return Ok(Value::Bool(false));
+    }
+    // PSF_CatchBlow after a successful fling (C4ObjectCom.cpp:754,762).
+    if let Some(Err(error)) = call_world_object_own_function(
+        target,
+        "CatchBlow",
+        &[Value::Int(punch), object_reference_value(attacker)],
+    ) {
+        tracing::warn!(
+            %error,
+            "script error in CatchBlow; continuing like the C++ fail-safe exec"
+        );
+    }
     Ok(Value::Bool(true))
+}
+
+/// The literal-text half of the FnAddMenuItem sprintf (C4Script.cpp:
+/// 1567-1570, fmt::sprintf(dummy, parameter, 0/1)): specifiers consume the
+/// two arguments positionally — the parameter text first (its slot was
+/// rewritten "%d" -> "%s"), then the left/right-click flag.
+fn sprintf_menu_command(format: &str, parameter: &str, click: i32) -> String {
+    let click_text = click.to_string();
+    let mut arguments = [parameter, click_text.as_str()].into_iter();
+    let mut out = String::with_capacity(format.len());
+    let mut chars = format.chars().peekable();
+    while let Some(current) = chars.next() {
+        if current != '%' {
+            out.push(current);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('%') => {
+                chars.next();
+                out.push('%');
+            }
+            Some('s') | Some('d') => {
+                chars.next();
+                out.push_str(arguments.next().unwrap_or(""));
+            }
+            _ => out.push('%'),
+        }
+    }
+    out
+}
+
+/// FnAddMenuItem (C4Script.cpp:1471-1734): appends one item to the menu
+/// object's OPEN menu. Sim-observable pieces ported: the composed
+/// left/right-click commands (new-style %d sprintf vs old-style
+/// "Fn(ID,param[,click][,value])"), the caption's %s -> def-name splice,
+/// count/no-count, C4MN_Add_PassValue, selectability, and the
+/// first-selectable selection grab (C4Menu::AddItem, C4Menu.cpp:424).
+/// Symbols are presentation, but their argument CHECKS still gate the
+/// return value (:1626,1679,1690-1693,1705-1709).
+fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
+    let caption_arg = parse_optional_string(args.first(), "AddMenuItem", "caption")?;
+    let command_arg =
+        parse_optional_string(args.get(1), "AddMenuItem", "command")?.unwrap_or_default();
+    let item_id = args.get(2).cloned().unwrap_or(Value::Nil);
+    let menu_target = parse_object_reference_argument(
+        args.get(3).unwrap_or(&Value::Nil),
+        "AddMenuItem",
+        "menu object",
+    )?;
+    let mut count = parse_optional_i32(args.get(4), "AddMenuItem", "count")?.unwrap_or(0);
+    let parameter = args.get(5).cloned().unwrap_or(Value::Nil);
+    // args[6] is the info caption — presentation only (item descriptions
+    // are not script-observable).
+    let extra = parse_optional_i32(args.get(7), "AddMenuItem", "extra")?.unwrap_or(0);
+    let xpar = args.get(8).cloned().unwrap_or(Value::Nil);
+    let xpar2 = args.get(9).cloned().unwrap_or(Value::Nil);
+
+    let Some(target) = menu_target.or(active_object_id()) else {
+        return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1474)
+    };
+    let (menu, def_name) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return (None, String::new());
+        };
+        // pDef = C4Id2Def(idItem), falling back to the menu object's own
+        // def (C4Script.cpp:1488-1489).
+        let item_def = match &item_id {
+            Value::C4Id(id) | Value::String(id) if !id.is_empty() => {
+                context.definition_metadata(id).map(|meta| meta.name.clone())
+            }
+            _ => None,
+        };
+        let def_name = item_def
+            .or_else(|| {
+                context.get_world_object(target).and_then(|object| {
+                    context
+                        .definition_metadata(object.definition_id())
+                        .map(|meta| meta.name.clone())
+                })
+            })
+            .unwrap_or_default();
+        (context.object_menu(target), def_name)
+    });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1475)
+    };
+
+    // Compose the caption with the def name (C4Script.cpp:1492-1510).
+    let mut caption = caption_arg
+        .as_deref()
+        .map(|text| text.replacen("%s", &def_name, 1))
+        .unwrap_or_default();
+
+    // Typed parameter -> command text (C4Script.cpp:1513-1546).
+    let parameter_text = match &parameter {
+        Value::Int(value) => value.to_string(),
+        Value::Bool(flag) => if *flag { "true" } else { "false" }.to_string(),
+        Value::C4Id(_) => c4id_text_of(&parameter),
+        Value::Object(number) => format!("Object({number})"),
+        Value::String(text) => format!("\"{text}\""),
+        Value::Nil => "CastAny(0)".to_string(), // C4V_Any raw 0
+        Value::Array(_) => {
+            return Err(RuntimeError::new("array as parameter to AddMenuItem"));
+        }
+        Value::Proplist(_) => {
+            return Err(RuntimeError::new("map as parameter to AddMenuItem"));
+        }
+    };
+
+    // C4MN_Add_PassValue payload (C4Script.cpp:1549-1554).
+    let own_value = (extra & 128 != 0).then(|| xpar2.as_c4_int().unwrap_or(0));
+
+    // New style (any non-IsIdentifier char, C4Strings.cpp:36-45) vs old
+    // style command composition (C4Script.cpp:1556-1597).
+    let is_identifier = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '~' | '+' | '-');
+    let (command, command2) = if command_arg.chars().any(|c| !is_identifier(c)) {
+        let dummy = command_arg.replacen("%d", "%s", 1);
+        (
+            sprintf_menu_command(&dummy, &parameter_text, 0),
+            sprintf_menu_command(&dummy, &parameter_text, 1),
+        )
+    } else if !command_arg.is_empty() {
+        let id_text = c4id_text_of(&item_id);
+        match own_value {
+            Some(value) => (
+                format!("{command_arg}({id_text},{parameter_text},0,{value})"),
+                format!("{command_arg}({id_text},{parameter_text},1,{value})"),
+            ),
+            None => (
+                format!("{command_arg}({id_text},{parameter_text})"),
+                format!("{command_arg}({id_text},{parameter_text},1)"),
+            ),
+        }
+    } else {
+        (String::new(), String::new())
+    };
+
+    // Symbol argument checks that gate the return value; the drawing
+    // itself is presentation (C4Script.cpp:1600-1723).
+    match extra & 127 {
+        // C4MN_Add_ImgObjRank / C4MN_Add_ImgObject need an object XPar.
+        3 | 4 => {
+            if !matches!(xpar, Value::Object(_)) {
+                return Ok(Value::Bool(false));
+            }
+        }
+        // C4MN_Add_ImgTextSpec needs a caption (drawn as the symbol,
+        // clearing the item caption, C4Script.cpp:1688-1697).
+        5 => {
+            if caption_arg.is_none() {
+                return Ok(Value::Bool(false));
+            }
+            caption = String::new();
+        }
+        // C4MN_Add_ImgIndexedColor rejects C4MN_Add_PassValue (:1705-1709).
+        7 => {
+            if extra & 128 != 0 {
+                return Err(RuntimeError::new(
+                    "AddMenuItem: C4MN_Add_ImgIndexedColor can not be used together with C4MN_Add_PassValue!",
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    // Zero count -> no count unless C4MN_Add_ForceCount (C4Script.cpp:1726).
+    if count == 0 && extra & 256 == 0 {
+        count = 12_345_678; // C4MN_Item_NoCount
+    }
+    let selectable = !command.is_empty();
+    // First selectable item takes the selection, WITHOUT callbacks
+    // (C4Menu::AddItem -> SetSelection(ItemCount-1, false, false)).
+    if menu.selection == -1 && selectable {
+        menu.selection = menu.items.len() as i32;
+    }
+    menu.items.push(crate::ObjectMenuItem {
+        caption,
+        command,
+        command2,
+        count,
+        item_id: c4id_text_of(&item_id),
+        selectable,
+        value: own_value,
+    });
+    let stored = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu)))
+            .unwrap_or(false)
+    });
+    Ok(Value::Bool(stored))
+}
+
+/// C4ObjectMenu::OnSelectionChanged (C4ObjectMenu.cpp:93-104): user menus
+/// fire OnMenuSelection(iNewSelection, ParentObject) on the command object
+/// (CB_Object) or the scenario script (CB_Scenario); the result is
+/// discarded, a missing function is a silent miss (PSF_MenuSelection is
+/// "~"-prefixed), and callee errors log-and-continue (fPassErrors=false).
+fn menu_selection_changed(menu_object: ObjectId, menu: &crate::ObjectMenuState) {
+    if !menu.user_menu {
+        return;
+    }
+    let pars = [
+        Value::Int(menu.selection),
+        object_reference_value(menu_object),
+    ];
+    let result = match menu.command_object {
+        Some(command_object) => {
+            call_world_object_own_function(command_object, "OnMenuSelection", &pars)
+        }
+        None => HOST_CONTEXT
+            .with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.world.scenario_script().cloned())
+            })
+            .and_then(|script| call_scoped_script_function(script, "OnMenuSelection", &pars)),
+    };
+    if let Some(Err(error)) = result {
+        tracing::warn!(
+            %error,
+            "script error in OnMenuSelection; continuing like the C++ fail-safe exec"
+        );
+    }
+}
+
+/// FnSelectMenuItem (C4Script.cpp:1736-1741) → C4Menu::SetSelection
+/// (C4Menu.cpp:557-594): moves the selection only onto SELECTABLE items
+/// (or clears it on -1 in an empty menu), returns true whenever a menu is
+/// active, and always runs the selection callback with the FINAL selection
+/// (fDoCalls=true).
+fn select_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
+    let item = parse_optional_i32(args.first(), "SelectMenuItem", "item")?.unwrap_or(0);
+    let target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SelectMenuItem",
+        "menu object",
+    )?;
+    let Some(target) = target.or(active_object_id()) else {
+        return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1738)
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1739)
+    };
+    let selectable = usize::try_from(item)
+        .ok()
+        .and_then(|index| menu.items.get(index))
+        .map(|entry| entry.selectable)
+        .unwrap_or(false);
+    if (item == -1 && menu.items.is_empty()) || selectable {
+        menu.selection = item;
+    }
+    let stored = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu.clone())))
+            .unwrap_or(false)
+    });
+    if stored {
+        menu_selection_changed(target, &menu);
+    }
+    Ok(Value::Bool(true))
+}
+
+/// FnCloseMenu (C4Script.cpp:4309-4314): pObj->CloseMenu(true) — the
+/// forced close never asks MenuQueryCancel and always reports success.
+fn close_menu(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "CloseMenu",
+        "obj",
+    )?;
+    let Some(target) = target.or(active_object_id()) else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(close_object_menu(target, true)))
 }
 
 /// FnSetPlrView (C4Script.cpp:2545-2550): the player's view target —
@@ -3733,9 +4333,15 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPortrait", get_portrait);
     script.register_host_function("SetVisibility", set_visibility);
     script.register_host_function("SetPlrViewRange", set_plr_view_range);
+    script.register_host_function("AddMenuItem", add_menu_item);
     script.register_host_function("CloseMenu", close_menu);
+    script.register_host_function("CreateMenu", create_menu);
+    script.register_host_function("GetMenu", get_menu);
+    script.register_host_function("SelectMenuItem", select_menu_item);
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("FrameCounter", frame_counter);
+    script.register_host_function("LandscapeWidth", landscape_width);
+    script.register_host_function("LandscapeHeight", landscape_height);
     script.register_host_function("SetSolidMask", set_solid_mask);
     script.register_host_function("ChangeDef", change_def);
     script.register_host_function("GetPlrDownDouble", get_plr_down_double);
@@ -3772,6 +4378,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetCursor", set_cursor_host);
     script.register_host_function("Fling", fling);
     script.register_host_function("Jump", jump);
+    script.register_host_function("Punch", punch);
     script.register_host_function("EnergyCheck", energy_check);
     script.register_host_function("GetContact", get_contact);
     script.register_host_function("PathFree", path_free);
@@ -11360,11 +11967,12 @@ fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
-    // C++ FnSetCommand leads with the object slot (pObj, szCommand, ...);
-    // 0/nil means the calling object. The name-first form stays for the
-    // command-DSL fixtures. Only the SELF form is dispatchable today —
-    // foreign command stacks live on the engine side of the seam, so a
-    // foreign target warns and reports false (documented gap).
+    // C++ FnSetCommand leads with the object slot (pObj, szCommand, ...;
+    // C4Script.cpp:840-844); 0/nil means the calling object. The
+    // name-first form stays for the command-DSL fixtures. A FOREIGN
+    // target re-dispatches through the reentrancy seam so the command
+    // stack write folds with the target's own nested outcome (GoldRush's
+    // StopClonk drives other clonks, Helpers.c:94).
     let mut args = args;
     let mut leading_target: Option<ObjectId> = None;
     let leads_with_object_slot = matches!(
@@ -11381,6 +11989,14 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
             "SetCommand expects at least 1 argument: command name",
         ));
     }
+    if let Some(target) = leading_target {
+        if active_object_id() != Some(target) {
+            return match call_world_object_function(target, "SetCommand", args) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -11391,15 +12007,6 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
         };
-        if let Some(target) = leading_target {
-            if target != object.id() {
-                tracing::warn!(
-                    ?target,
-                    "SetCommand on a FOREIGN object is not dispatchable yet; ignoring"
-                );
-                return Ok(Value::Bool(false));
-            }
-        }
 
         let command_name = match &args[0] {
             Value::String(name) if !name.is_empty() => name.clone(),
@@ -16196,6 +16803,101 @@ impl EffectHostContext {
         }
     }
 
+    /// The scope currently holding `target`'s pending writes: the active
+    /// scope, a dormant (in-flight outer) scope, or a completed nested one.
+    fn object_scope(&self, target: ObjectId) -> Option<&ObjectScopeContext> {
+        self.object
+            .as_ref()
+            .filter(|scope| scope.id == target)
+            .or_else(|| {
+                self.dormant_scopes
+                    .iter()
+                    .flatten()
+                    .find(|scope| scope.id == target)
+            })
+            .or_else(|| self.nested_objects.get(&target).map(|state| &state.scope))
+    }
+
+    fn object_scope_mut(&mut self, target: ObjectId) -> Option<&mut ObjectScopeContext> {
+        if self.object.as_ref().map(ObjectScopeContext::id) == Some(target) {
+            return self.object.as_mut();
+        }
+        if self
+            .dormant_scopes
+            .iter()
+            .flatten()
+            .any(|scope| scope.id == target)
+        {
+            return self
+                .dormant_scopes
+                .iter_mut()
+                .flatten()
+                .find(|scope| scope.id == target);
+        }
+        self.nested_objects
+            .get_mut(&target)
+            .map(|state| &mut state.scope)
+    }
+
+    /// Materializes a nested scope for `target` so per-object writes (menus)
+    /// can fold through the standard nested-outcome pipeline even when no
+    /// script call ever ran on the target this session. False for unknown
+    /// objects and same-call pending spawns (no full-state snapshot yet).
+    fn ensure_object_scope(&mut self, target: ObjectId) -> bool {
+        if self.object_scope(target).is_some() {
+            return true;
+        }
+        let Some(world_object) = self.get_world_object(target) else {
+            return false;
+        };
+        let Some((scope, local_vars)) = self.nested_scope_for(&world_object) else {
+            return false;
+        };
+        if !self.nested_order.contains(&target) {
+            self.nested_order.push(target);
+        }
+        self.nested_objects
+            .insert(target, NestedScopeState { scope, local_vars });
+        true
+    }
+
+    /// The freshest menu state known for `target` mid-call: a pending write
+    /// in any scope wins over the world snapshot (C++ mutates the live
+    /// C4Object::Menu).
+    fn object_menu(&self, target: ObjectId) -> Option<crate::ObjectMenuState> {
+        match self
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.menu.clone())
+        {
+            Some(menu) => menu,
+            None => self
+                .get_world_object(target)
+                .and_then(|object| object.full_state().and_then(|state| state.menu.clone())),
+        }
+    }
+
+    /// Records a menu write for `target` (Some = open/replace, None =
+    /// closed). False when no scope can be materialized for the target.
+    fn set_object_menu(&mut self, target: ObjectId, menu: Option<crate::ObjectMenuState>) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        self.object_scope_mut(target)
+            .map(|scope| scope.pending_update.menu = Some(menu))
+            .is_some()
+    }
+
+    /// C4Object::Status of `target` as the current call sees it.
+    fn object_status_active(&self, target: ObjectId) -> bool {
+        self.object_scope(target)
+            .map(|scope| scope.status().is_active())
+            .unwrap_or_else(|| {
+                self.get_world_object(target)
+                    .map(|object| object.status().is_active())
+                    .unwrap_or(false)
+            })
+    }
+
     /// Whether a nested call removed the object — the C++ Status re-check
     /// after `Check` (C4FindObject.cpp:186-199) against the deferred-destroy
     /// model.
@@ -17499,6 +18201,7 @@ mod tests {
         "ActIdle",
         "AddCommand",
         "AddEffect",
+        "AddMenuItem",
         "AddMessage",
         "AnyContainer",
         "AppendCommand",
@@ -17518,6 +18221,7 @@ mod tests {
         "CreateArray",
         "CreateConstruction",
         "CreateContents",
+        "CreateMenu",
         "CreateObject",
         "CreateParticle",
         "CustomMessage",
@@ -17590,6 +18294,7 @@ mod tests {
         "GetMass",
         "GetMaterial",
         "GetMaterialVal",
+        "GetMenu",
         "GetName",
         "GetOCF",
         "GetObjectLayer",
@@ -17635,6 +18340,8 @@ mod tests {
         "InsertMaterial",
         "Inside",
         "Jump",
+        "LandscapeHeight",
+        "LandscapeWidth",
         "Log",
         "MakeCrewMember",
         "Material",
@@ -17655,12 +18362,14 @@ mod tests {
         "Pow",
         "PrivateCall",
         "ProtectedCall",
+        "Punch",
         "PushParticles",
         "Random",
         "RemoveEffect",
         "RemoveObject",
         "ResetPhysical",
         "ScriptGo",
+        "SelectMenuItem",
         "SetAction",
         "SetActionData",
         "SetActionTargets",
