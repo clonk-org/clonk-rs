@@ -1861,6 +1861,53 @@ fn default_construction() -> i32 {
     FULL_CON
 }
 
+/// One menu entry (C4MenuItem, C4Menu.h:60-101) — the sim-observable core:
+/// the composed left/right-click commands (FnAddMenuItem, C4Script.cpp:
+/// 1556-1597), count, item id, selectability (= command non-empty,
+/// C4Script.cpp:1729) and the C4MN_Add_PassValue payload. Symbols and
+/// captions are presentation; the caption is kept for the menu UI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectMenuItem {
+    pub caption: String,
+    pub command: String,
+    pub command2: String,
+    /// C4MN_Item_NoCount (12345678) when the script passed no count
+    /// (C4Script.cpp:1726).
+    pub count: i32,
+    /// C4IdText of idItem ("NONE" for no id).
+    pub item_id: String,
+    pub selectable: bool,
+    /// Some(value) iff C4MN_Add_PassValue was set (C4Script.cpp:1549-1554).
+    pub value: Option<i32>,
+}
+
+/// A script-created object menu (C4ObjectMenu; FnCreateMenu →
+/// C4ObjectMenu::Init, C4ObjectMenu.cpp:86-91): the minimal state scripts
+/// can observe — GetMenu reads `identification`, SelectMenuItem moves
+/// `selection`, MenuQueryCancel/OnMenuSelection dispatch on
+/// `command_object` (CB_Object) or the scenario script (CB_Scenario).
+/// C++ never persists menus in Objects.txt, so this state is runtime-only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectMenuState {
+    /// C4Menu::Identification: idMenuID if given, else the symbol id
+    /// (C4Script.cpp:1452). Kept as the raw script value (C4ID or int)
+    /// so GetMenu returns exactly what the script compares against.
+    pub identification: Value,
+    /// C4Menu::Style (& C4MN_Style_BaseMask, C4Menu.cpp:359).
+    pub style: i32,
+    /// C4Menu::Permanent (SetPermanent, C4Menu.cpp:942-945).
+    pub permanent: bool,
+    /// C4Menu::Selection (-1 = none, C4Menu.cpp:284).
+    pub selection: i32,
+    /// C4ObjectMenu::UserMenu — script menus always pass fUserMenu=true
+    /// (C4Script.cpp:1451), enabling MenuQueryCancel/OnMenuSelection.
+    pub user_menu: bool,
+    /// C4ObjectMenu::Object — the callback target (CB_Object); None =
+    /// CB_Scenario (C4ObjectMenu::LocalInit, C4ObjectMenu.cpp:78-84).
+    pub command_object: Option<ObjectId>,
+    pub items: Vec<ObjectMenuItem>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectState {
     pub position: Vector2,
@@ -1994,6 +2041,11 @@ pub struct ObjectState {
     /// EntranceStatus flag toggled by SetEntrance (C4Script.cpp:690-695).
     #[serde(default)]
     pub entrance_status: bool,
+    /// The object's script menu (C4Object::Menu; FnCreateMenu,
+    /// C4Script.cpp:1426-1459). None = no menu. Runtime-only in C++ too
+    /// (Objects.txt has no menu section).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu: Option<ObjectMenuState>,
     /// Object color from SetColorDw (C4Script.cpp:3661-3668, C4Object Color).
     #[serde(default)]
     pub color: u32,
@@ -2087,6 +2139,7 @@ pub(crate) fn preview_spawn_state(
         physical_changes: Vec::new(),
         breath: 0,
         entrance_status: false,
+        menu: None,
         color: 0,
         shape_override: None,
         ocf: OCF_NORMAL,
@@ -2190,6 +2243,9 @@ impl ObjectState {
         if let Some(rect) = delta.solid_mask_override {
             self.solid_mask_override = Some(rect);
         }
+        if let Some(menu) = &delta.menu {
+            self.menu = menu.clone();
+        }
         if let Some(alive) = delta.alive {
             self.alive = alive;
         }
@@ -2233,6 +2289,9 @@ impl ObjectState {
 struct ObjectDelta {
     portrait_source: Option<String>,
     solid_mask_override: Option<DefinitionTargetRect>,
+    /// Script menu write-through (FnCreateMenu/FnCloseMenu et al.):
+    /// Some(None) = closed, Some(Some(_)) = open/replaced.
+    menu: Option<Option<ObjectMenuState>>,
     position: Option<Vector2>,
     velocity: Option<Vector2>,
     /// Sub-pixel velocity in 16.16 fixed-point. When present, this takes
@@ -2349,6 +2408,9 @@ impl ObjectDelta {
         if let Some(rect) = update.solid_mask_override {
             self.solid_mask_override = Some(rect);
         }
+        if let Some(menu) = update.menu {
+            self.menu = Some(menu);
+        }
 
         if let Some(alive) = update.alive {
             self.alive = Some(alive);
@@ -2416,6 +2478,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             crew_disabled: update.crew_disabled,
             portrait_source: update.portrait_source,
             solid_mask_override: update.solid_mask_override,
+            menu: update.menu,
             alive: update.alive,
             container: update.container,
             vertices: update.vertices,
@@ -2510,6 +2573,11 @@ pub struct ObjectUpdate {
     /// SetEntrance (C4Script.cpp:690-695).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrance_status: Option<bool>,
+    /// Script menu write: Some(Some(_)) = CreateMenu/AddMenuItem/
+    /// SelectMenuItem left this state, Some(None) = CloseMenu
+    /// (C4Object::CloseMenu, C4Object.cpp:2009-2017).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu: Option<Option<ObjectMenuState>>,
     /// SetColorDw (C4Script.cpp:3661-3668).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<u32>,
@@ -2694,6 +2762,7 @@ impl ObjectUpdate {
             && self.components.is_none()
             && self.physicals.is_none()
             && self.contents_front.is_none()
+            && self.menu.is_none()
     }
 }
 
@@ -14395,6 +14464,7 @@ impl Engine {
             entrance_status: update_entrance_status,
             color: update_color,
             shape_override: update_shape_override,
+            menu: update_menu,
             ..
         } = update;
 
@@ -14522,6 +14592,9 @@ impl Engine {
             }
             if let Some(entrance_status) = update_entrance_status {
                 object.state.entrance_status = entrance_status;
+            }
+            if let Some(menu) = update_menu {
+                object.state.menu = menu;
             }
             if let Some(color) = update_color {
                 object.state.color = color;
@@ -15702,6 +15775,7 @@ impl Engine {
                     physical_changes: snapshot.physical_changes.clone(),
                     breath: snapshot.breath,
                     entrance_status: false,
+                    menu: None,
                     color: 0,
                     shape_override: None,
                     ocf: OCF_NORMAL,
@@ -21120,6 +21194,15 @@ impl Engine {
             })
     }
 
+    /// Debug/test helper: the object's script menu state (outer None =
+    /// object missing; inner None = no menu open).
+    pub fn debug_object_menu(&self, id: u64) -> Option<Option<ObjectMenuState>> {
+        self.objects
+            .iter()
+            .find(|object| object.id.as_u64() == id)
+            .map(|object| object.state.menu.clone())
+    }
+
     /// Debug/test helper: a clone of the synced RNG for ledger-position
     /// assertions.
     pub fn debug_rng_clone(&self) -> crate::rng::LcgRng {
@@ -23496,6 +23579,7 @@ impl Engine {
                 physical_changes: Vec::new(),
                 breath: 0,
                 entrance_status: false,
+                menu: None,
                 color: 0,
                 shape_override: None,
                 ocf: OCF_NORMAL,
@@ -24323,6 +24407,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         physical_changes: snapshot.physical_changes.clone(),
         breath: snapshot.breath,
         entrance_status: false,
+        menu: None,
         color: 0,
         shape_override: None,
         ocf: OCF_NORMAL,
@@ -32350,6 +32435,86 @@ func Trigger() {
             None,
             "plain-category objects are not part of the broadcast"
         );
+    }
+
+    #[test]
+    fn create_menu_opens_a_script_menu_and_get_menu_reads_it_like_cpp() {
+        // FnCreateMenu (C4Script.cpp:1426-1459): inits the object's menu with
+        // Identification = idMenuID ? idMenuID : iSymbol (C4Menu::InitMenu,
+        // C4Menu.cpp:355). FnGetMenu (C4Script.cpp:1418-1424): an ACTIVE
+        // menu returns that Identification, no menu returns C4MN_None (0).
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func OpenAliased() { return CreateMenu(WIPF, this(), this(), 0, "Choose", 0, 1, 0, MENU); }
+        func ReadMenu() { return GetMenu(this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "ReadMenu", Vec::new())
+                .expect("ReadMenu succeeds"),
+            Value::Int(0),
+            "no menu -> C4MN_None (C4Script.cpp:1423)"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(idx, "OpenMenu", Vec::new())
+                .expect("OpenMenu succeeds"),
+            Value::Bool(true),
+            "FnCreateMenu returns true on success"
+        );
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "ReadMenu", Vec::new())
+                .expect("ReadMenu succeeds"),
+            Value::C4Id("WIPF".into()),
+            "active menu -> its Identification (the symbol id by default)"
+        );
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu is open");
+        assert_eq!(menu.style, 0, "C4MN_Style_Normal");
+        assert!(!menu.permanent, "fPermanent defaults false");
+        assert_eq!(menu.selection, -1, "C4Menu::Default Selection (-1)");
+        assert_eq!(
+            menu.command_object,
+            Some(clonk),
+            "pCommandObj -> CB_Object callbacks"
+        );
+
+        // idMenuID overrides the symbol as Identification (C4Script.cpp:1452).
+        assert_eq!(
+            engine
+                .call_object_function(idx, "OpenAliased", Vec::new())
+                .expect("OpenAliased succeeds"),
+            Value::Bool(true)
+        );
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "ReadMenu", Vec::new())
+                .expect("ReadMenu succeeds"),
+            Value::C4Id("MENU".into()),
+            "idMenuID wins over the symbol id"
+        );
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu is open");
+        assert_eq!(menu.style, 1, "iStyle stored (C4MN_Style_Context)");
     }
 
     #[test]

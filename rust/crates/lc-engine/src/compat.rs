@@ -1852,15 +1852,192 @@ fn frame_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnCloseMenu (C4Script.cpp:4302-4307): closes the object's menu — the
-/// menu register is frontend-side in this engine (menu_requests flow to
-/// the UI); the comparator does not cover it. Acknowledged.
+/// The active object of the executing call (`cthr->Obj`).
+fn active_object_id() -> Option<ObjectId> {
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    })
+}
+
+/// C4IdText (C4Id.cpp:26-45) over a script value: C4ID_None -> "NONE",
+/// numerical ids 0..9999 -> "%04u", literal ids stay as-is.
+fn c4id_text_of(value: &Value) -> String {
+    match value {
+        Value::C4Id(id) | Value::String(id) if !id.is_empty() => id.clone(),
+        Value::Int(raw) => c4id_to_definition(*raw).unwrap_or_else(|| "NONE".to_string()),
+        _ => "NONE".to_string(),
+    }
+}
+
+/// C4ObjectMenu::IsCloseDenied (C4ObjectMenu.cpp:56-75): a USER menu asks
+/// MenuQueryCancel(Selection, ParentObject) on the command object
+/// (CB_Object) or the scenario script (CB_Scenario); a truthy answer keeps
+/// the menu open. The CloseQuerying flag stops recursive queries.
+fn menu_close_denied(menu_object: ObjectId, menu: &crate::ObjectMenuState) -> bool {
+    thread_local! {
+        static CLOSE_QUERYING: RefCell<std::collections::HashSet<ObjectId>> =
+            RefCell::new(std::collections::HashSet::new());
+    }
+    if !menu.user_menu {
+        return false;
+    }
+    let already_querying =
+        CLOSE_QUERYING.with(|cell| !cell.borrow_mut().insert(menu_object));
+    if already_querying {
+        return false;
+    }
+    let pars = [
+        Value::Int(menu.selection),
+        object_reference_value(menu_object),
+    ];
+    // A missing function is a silent miss (the "~" in PSF_MenuQueryCancel);
+    // callee errors fall back to close-OK (C4Object::Call, fPassErrors
+    // defaults false — the error logs and the call yields C4VNull).
+    let denied = match menu.command_object {
+        Some(command_object) => {
+            call_world_object_own_function(command_object, "MenuQueryCancel", &pars)
+        }
+        None => HOST_CONTEXT
+            .with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.world.scenario_script().cloned())
+            })
+            .and_then(|script| call_scoped_script_function(script, "MenuQueryCancel", &pars)),
+    }
+    .map(|result| result.map(|value| value.as_bool()).unwrap_or(false))
+    .unwrap_or(false);
+    CLOSE_QUERYING.with(|cell| {
+        cell.borrow_mut().remove(&menu_object);
+    });
+    denied
+}
+
+/// C4Object::CloseMenu (C4Object.cpp:2009-2017): force skips the
+/// MenuQueryCancel query (C4Menu::TryClose, C4Menu.cpp:317-320); a denied
+/// soft close keeps the menu and fails.
+fn close_object_menu(target: ObjectId, force: bool) -> bool {
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    let Some(menu) = menu else {
+        return true; // no menu -> close OK
+    };
+    if !force && menu_close_denied(target, &menu) {
+        return false;
+    }
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, None))
+            .unwrap_or(false)
+    })
+}
+
+/// FnCreateMenu (C4Script.cpp:1426-1459) → C4ObjectMenu::Init
+/// (C4ObjectMenu.cpp:86-91): closes any old menu (soft — MenuQueryCancel
+/// may deny), then installs a fresh user menu with Identification =
+/// idMenuID ? idMenuID : iSymbol, the given style, and permanence.
+fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
+    let symbol = args.first().cloned().unwrap_or(Value::Nil);
+    let menu_target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "CreateMenu",
+        "menu object",
+    )?;
+    let explicit_command = parse_object_reference_argument(
+        args.get(2).unwrap_or(&Value::Nil),
+        "CreateMenu",
+        "command object",
+    )?;
+    let style = parse_optional_i32(args.get(6), "CreateMenu", "style")?.unwrap_or(0);
+    let permanent = args.get(7).map(value_raw_truthy).unwrap_or(false);
+    let menu_id = args.get(8).cloned().unwrap_or(Value::Nil);
+
+    let active = active_object_id();
+    let Some(target) = menu_target.or(active) else {
+        return Ok(Value::Bool(false)); // !pMenuObj && !cthr->Obj
+    };
+    let command_object = explicit_command.or(active);
+    // Object menu: validate the command object (C4Script.cpp:1433-1436);
+    // no command object is the scenario-script-callback form.
+    if let Some(command_object) = command_object {
+        let command_active = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| context.object_status_active(command_object))
+                .unwrap_or(false)
+        });
+        if !command_active {
+            return Ok(Value::Bool(false));
+        }
+    }
+    // Clear any old menu (C4Script.cpp:1447): a MenuQueryCancel denial
+    // aborts the new menu.
+    if !close_object_menu(target, false) {
+        return Ok(Value::Bool(false));
+    }
+    let identification = if value_raw_truthy(&menu_id) {
+        menu_id
+    } else {
+        symbol
+    };
+    let menu = crate::ObjectMenuState {
+        identification,
+        // Style & C4MN_Style_BaseMask (C4Menu::InitMenu, C4Menu.cpp:359).
+        style: style & 127,
+        permanent,
+        selection: -1,
+        user_menu: true,
+        command_object,
+        items: Vec::new(),
+    };
+    let stored = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu)))
+            .unwrap_or(false)
+    });
+    Ok(Value::Bool(stored))
+}
+
+/// FnGetMenu (C4Script.cpp:1418-1424): the active menu's Identification;
+/// C4MN_None (0) without one; C4ID(-1) without an object.
+fn get_menu(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GetMenu",
+        "obj",
+    )?;
+    let Some(target) = target.or(active_object_id()) else {
+        return Ok(Value::Int(-1));
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    Ok(menu
+        .map(|menu| menu.identification)
+        .unwrap_or(Value::Int(0)))
+}
+
+/// FnCloseMenu (C4Script.cpp:4309-4314): pObj->CloseMenu(true) — the
+/// forced close never asks MenuQueryCancel and always reports success.
 fn close_menu(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = args
-        .first()
-        .map(|arg| parse_object_reference_argument(arg, "CloseMenu", "obj"))
-        .transpose()?;
-    Ok(Value::Bool(true))
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "CloseMenu",
+        "obj",
+    )?;
+    let Some(target) = target.or(active_object_id()) else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(close_object_menu(target, true)))
 }
 
 /// FnSetPlrView (C4Script.cpp:2545-2550): the player's view target —
@@ -3734,6 +3911,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetVisibility", set_visibility);
     script.register_host_function("SetPlrViewRange", set_plr_view_range);
     script.register_host_function("CloseMenu", close_menu);
+    script.register_host_function("CreateMenu", create_menu);
+    script.register_host_function("GetMenu", get_menu);
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("SetSolidMask", set_solid_mask);
@@ -16196,6 +16375,101 @@ impl EffectHostContext {
         }
     }
 
+    /// The scope currently holding `target`'s pending writes: the active
+    /// scope, a dormant (in-flight outer) scope, or a completed nested one.
+    fn object_scope(&self, target: ObjectId) -> Option<&ObjectScopeContext> {
+        self.object
+            .as_ref()
+            .filter(|scope| scope.id == target)
+            .or_else(|| {
+                self.dormant_scopes
+                    .iter()
+                    .flatten()
+                    .find(|scope| scope.id == target)
+            })
+            .or_else(|| self.nested_objects.get(&target).map(|state| &state.scope))
+    }
+
+    fn object_scope_mut(&mut self, target: ObjectId) -> Option<&mut ObjectScopeContext> {
+        if self.object.as_ref().map(ObjectScopeContext::id) == Some(target) {
+            return self.object.as_mut();
+        }
+        if self
+            .dormant_scopes
+            .iter()
+            .flatten()
+            .any(|scope| scope.id == target)
+        {
+            return self
+                .dormant_scopes
+                .iter_mut()
+                .flatten()
+                .find(|scope| scope.id == target);
+        }
+        self.nested_objects
+            .get_mut(&target)
+            .map(|state| &mut state.scope)
+    }
+
+    /// Materializes a nested scope for `target` so per-object writes (menus)
+    /// can fold through the standard nested-outcome pipeline even when no
+    /// script call ever ran on the target this session. False for unknown
+    /// objects and same-call pending spawns (no full-state snapshot yet).
+    fn ensure_object_scope(&mut self, target: ObjectId) -> bool {
+        if self.object_scope(target).is_some() {
+            return true;
+        }
+        let Some(world_object) = self.get_world_object(target) else {
+            return false;
+        };
+        let Some((scope, local_vars)) = self.nested_scope_for(&world_object) else {
+            return false;
+        };
+        if !self.nested_order.contains(&target) {
+            self.nested_order.push(target);
+        }
+        self.nested_objects
+            .insert(target, NestedScopeState { scope, local_vars });
+        true
+    }
+
+    /// The freshest menu state known for `target` mid-call: a pending write
+    /// in any scope wins over the world snapshot (C++ mutates the live
+    /// C4Object::Menu).
+    fn object_menu(&self, target: ObjectId) -> Option<crate::ObjectMenuState> {
+        match self
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.menu.clone())
+        {
+            Some(menu) => menu,
+            None => self
+                .get_world_object(target)
+                .and_then(|object| object.full_state().and_then(|state| state.menu.clone())),
+        }
+    }
+
+    /// Records a menu write for `target` (Some = open/replace, None =
+    /// closed). False when no scope can be materialized for the target.
+    fn set_object_menu(&mut self, target: ObjectId, menu: Option<crate::ObjectMenuState>) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        self.object_scope_mut(target)
+            .map(|scope| scope.pending_update.menu = Some(menu))
+            .is_some()
+    }
+
+    /// C4Object::Status of `target` as the current call sees it.
+    fn object_status_active(&self, target: ObjectId) -> bool {
+        self.object_scope(target)
+            .map(|scope| scope.status().is_active())
+            .unwrap_or_else(|| {
+                self.get_world_object(target)
+                    .map(|object| object.status().is_active())
+                    .unwrap_or(false)
+            })
+    }
+
     /// Whether a nested call removed the object — the C++ Status re-check
     /// after `Check` (C4FindObject.cpp:186-199) against the deferred-destroy
     /// model.
@@ -17518,6 +17792,7 @@ mod tests {
         "CreateArray",
         "CreateConstruction",
         "CreateContents",
+        "CreateMenu",
         "CreateObject",
         "CreateParticle",
         "CustomMessage",
@@ -17590,6 +17865,7 @@ mod tests {
         "GetMass",
         "GetMaterial",
         "GetMaterialVal",
+        "GetMenu",
         "GetName",
         "GetOCF",
         "GetObjectLayer",
