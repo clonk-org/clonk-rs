@@ -19525,6 +19525,16 @@ impl Engine {
     /// creation is NOT modeled yet), Lightning, then the Disasters
     /// (Meteorite/Volcano/Earthquake). Replaying these keeps the whole
     /// ledger aligned with C++ from frame 0.
+    /// C4Landscape::ScenarioInit's Gravity draw (C4Landscape.cpp:66):
+    /// `Gravity = FIXED100(Gravity.Evaluate()) / 5` — one synced ledger
+    /// draw that precedes Weather.Init's evaluates.
+    pub(crate) fn evaluate_scenario_gravity(
+        &mut self,
+        gravity: crate::scenario::LegacyC4SVal,
+    ) -> i32 {
+        gravity.evaluate(&mut self.rng)
+    }
+
     pub(crate) fn apply_weather_init(&mut self, init: &crate::scenario::LegacyWeatherInit) {
         let season = init.season.evaluate(&mut self.rng);
         let year_speed = init.year_speed.evaluate(&mut self.rng);

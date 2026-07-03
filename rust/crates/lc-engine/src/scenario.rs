@@ -162,6 +162,9 @@ pub struct Scenario {
     initial_spawns: Vec<ScenarioSpawn>,
     landscape: Option<Landscape>,
     physics: Option<PhysicsSettings>,
+    /// The `[Landscape] Gravity` C4SVal — evaluated through the synced
+    /// ledger at apply time (C4Landscape::ScenarioInit, C4Landscape.cpp:66).
+    gravity: LegacyC4SVal,
     environment: Option<EnvironmentSettings>,
     sky: Option<SkyConfig>,
     script: Option<ScenarioScriptSource>,
@@ -414,7 +417,7 @@ impl Scenario {
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
         let initial_spawns = collect_legacy_objects(group, &collected)?;
-        let physics = derive_legacy_physics(&manifest)?;
+        let (physics, gravity) = derive_legacy_physics(&manifest)?;
         let environment = derive_legacy_environment(&manifest)?;
         let weather_init = derive_legacy_weather_init(&manifest)?;
 
@@ -427,6 +430,7 @@ impl Scenario {
             initial_spawns,
             landscape,
             physics,
+            gravity,
             environment: Some(environment),
             weather_init: Some(weather_init),
             sky: None,
@@ -523,16 +527,28 @@ impl Scenario {
             engine.clear_landscape();
         }
 
-        if let Some(physics) = self.physics {
+        // C4Landscape::ScenarioInit evaluates Gravity through the synced
+        // ledger (C4Landscape.cpp:66) BEFORE Weather.Init's draws —
+        // probe-verified: the C++ pre-wind sequence is [Gravity r=1,
+        // Season r=1, YearSpeed r=1, Climate r=1, Wind r=151]. C4S always
+        // has a Landscape block (defaults), so the draw is unconditional
+        // on the legacy path; skipping it shifted every weather value by
+        // one ledger position (the 402 Breeze/Still wind class).
+        let scenario_gravity = self
+            .weather_init
+            .is_some()
+            .then(|| engine.evaluate_scenario_gravity(self.gravity));
+        if let Some(mut physics) = self.physics {
+            if let Some(gravity) = scenario_gravity {
+                physics.gravity = gravity;
+            }
             engine.set_physics(physics);
         }
 
         engine.set_environment(self.environment.unwrap_or_default());
         if let Some(weather_init) = self.weather_init {
-            // C4Weather::Init runs at the END of C4Game::InitGame with the
-            // ledger freshly FixRandom'd after landscape creation
-            // (C4Landscape.cpp:734) — the Rust apply draws nothing before
-            // this point, so the ledger positions line up.
+            // C4Weather::Init runs at the END of C4Game::InitGame after
+            // Landscape.ScenarioInit's Gravity draw.
             engine.apply_weather_init(&weather_init);
         }
         if let Some(sky) = &self.sky {
@@ -1053,6 +1069,7 @@ impl Scenario {
             initial_spawns: spawns,
             landscape,
             physics,
+            gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment,
             weather_init: None,
             sky,
@@ -2977,16 +2994,16 @@ fn legacy_c4s_value(
 
 fn derive_legacy_physics(
     manifest: &LegacyScenarioManifest,
-) -> Result<Option<PhysicsSettings>, ScenarioError> {
+) -> Result<(Option<PhysicsSettings>, LegacyC4SVal), ScenarioError> {
+    let gravity_defaults = LegacyC4SVal::new(100, 0, 10, 200);
     let entries = manifest.sections.get("landscape");
     if entries.is_none() {
-        return Ok(None);
+        return Ok((None, gravity_defaults));
     }
-    let gravity_defaults = LegacyC4SVal::new(100, 0, 10, 200);
     let gravity = legacy_c4s_value(entries, "gravity", gravity_defaults)?;
     let mut physics = PhysicsSettings::default();
     physics.gravity = gravity.base();
-    Ok(Some(physics))
+    Ok((Some(physics), gravity))
 }
 
 /// The C4SVals C4Weather::Init evaluates at scenario start
@@ -6175,6 +6192,7 @@ global func Step(state, frame, random)
             }],
             landscape: None,
             physics: None,
+            gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment: None,
             weather_init: None,
             sky: None,
@@ -6266,6 +6284,7 @@ global func Step(state, frame, random)
             }],
             landscape: None,
             physics: None,
+            gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment: None,
             weather_init: None,
             sky: None,
@@ -8478,6 +8497,9 @@ global func Step(state, frame, random)
 
         // Replay the exact C++ draw order on a twin RNG.
         let mut replay = crate::rng::LcgRng::seed_from_u64(7);
+        // Landscape.ScenarioInit's Gravity draw precedes the weather
+        // evaluates (C4Landscape.cpp:66).
+        let _gravity = LegacyC4SVal::new(100, 0, 10, 200).evaluate(&mut replay);
         let season = LegacyC4SVal::new(44, 0, 0, 100).evaluate(&mut replay);
         let year_speed = LegacyC4SVal::new(0, 0, 0, 100).evaluate(&mut replay);
         let climate = 100 - LegacyC4SVal::new(10, 0, 0, 100).evaluate(&mut replay) - 50;
@@ -9189,6 +9211,9 @@ global func Step(state, frame, random)
         // C4SVal base (C4Weather.cpp:47) — replay the init ledger to the
         // wind draw: Season, YearSpeed, Climate precede it.
         let mut replay = crate::rng::LcgRng::seed_from_u64(0);
+        // Landscape.ScenarioInit's Gravity draw precedes the weather
+        // evaluates (C4Landscape.cpp:66); this scenario's Gravity=120.
+        LegacyC4SVal::new(120, 0, 10, 200).evaluate(&mut replay);
         LegacyC4SVal::new(30, 10, 0, 100).evaluate(&mut replay);
         LegacyC4SVal::new(45, 0, 0, 100).evaluate(&mut replay);
         LegacyC4SVal::new(60, 10, 0, 100).evaluate(&mut replay);
