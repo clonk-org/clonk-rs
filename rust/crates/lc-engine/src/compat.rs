@@ -3821,6 +3821,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPhysical", set_physical);
     script.register_host_function("TrainPhysical", train_physical);
     script.register_host_function("ResetPhysical", reset_physical);
+    script.register_host_function("GetBreath", get_breath);
     script.register_host_function("GetCon", get_con);
     script.register_host_function("DoCon", do_con);
     script.register_host_function("DoDamage", do_damage);
@@ -7327,6 +7328,35 @@ fn get_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         Ok(Value::Int(energy_to_script_value(object.energy())))
+    })
+}
+
+/// FnGetBreath (C4Script.cpp:1142-1146): `100 * Breath / C4MaxPhysical`.
+/// Breath ticks in ExecLife; the world snapshot (pre-frame) stands in for
+/// the live value — the scaled result changes at 1/1000th granularity.
+fn get_breath(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "GetBreath", "target")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+        let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(target) = target else {
+            return Ok(Value::Nil);
+        };
+        match context
+            .get_world_object(target)
+            .and_then(|object| object.full_state().map(|state| state.breath))
+        {
+            Some(breath) => Ok(Value::Int(
+                (100i64 * i64::from(breath) / i64::from(LEGACY_MAX_PHYSICAL)) as i32,
+            )),
+            None => Ok(Value::Nil),
+        }
     })
 }
 
@@ -16689,6 +16719,7 @@ mod tests {
         "GetActionData",
         "GetActionTarget",
         "GetAlive",
+        "GetBreath",
         "GetCategory",
         "GetClimate",
         "GetComDir",

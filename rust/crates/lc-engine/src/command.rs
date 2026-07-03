@@ -6701,6 +6701,20 @@ impl CommandStack {
         self.entries.is_empty()
     }
 
+    /// The front command's kind name, if any (ObjectComStopDig's
+    /// C4CMD_Dig check, C4ObjectCom.cpp:776-784).
+    pub fn front_command_name(&self) -> Option<&'static str> {
+        self.entries
+            .front()
+            .and_then(|entry| entry.state.id())
+            .map(CommandId::to_name)
+    }
+
+    /// Drops the front command (ClearCommand on the stack top).
+    pub fn clear_front(&mut self) {
+        self.entries.pop_front();
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
     }

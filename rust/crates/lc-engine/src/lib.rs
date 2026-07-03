@@ -3233,6 +3233,7 @@ impl Object {
             return Ok(MovementStepOutcome {
                 no_attach: false,
                 any_contact: false,
+                contact_cnat: 0,
                 solid_mask_removed: self.state.position != previous_position,
             });
         };
@@ -3271,6 +3272,7 @@ impl Object {
             );
             if contact.is_contact() {
                 outcome.any_contact = true;
+                outcome.contact_cnat |= contact.contact_cnat;
                 on_contact(self, contact.contact_cnat)?;
                 self.fixed_position.x = itofix(self.state.position.x);
                 redirect_force(&mut self.fixed_velocity.x, &mut self.fixed_velocity.y, -1);
@@ -3299,6 +3301,7 @@ impl Object {
             );
             if contact.is_contact() {
                 outcome.any_contact = true;
+                outcome.contact_cnat |= contact.contact_cnat;
                 on_contact(self, contact.contact_cnat)?;
                 self.fixed_position.y = itofix(self.state.position.y);
                 apply_contact_friction(&mut self.fixed_velocity.x, contact.first_friction());
@@ -3444,6 +3447,7 @@ impl Object {
         Ok(MovementStepOutcome {
             no_attach,
             any_contact,
+            contact_cnat: 0,
             solid_mask_removed,
         })
     }
@@ -8469,6 +8473,9 @@ impl SolidMaskRect {
 struct MovementStepOutcome {
     no_attach: bool,
     any_contact: bool,
+    /// The frame's accumulated contact CNAT bits (C++ `iContacts`,
+    /// C4Movement.cpp:358) — ContactAction dispatches on them.
+    contact_cnat: u32,
     solid_mask_removed: bool,
 }
 
@@ -16488,6 +16495,21 @@ impl Engine {
                 state.in_liquid = false;
             }
         }
+        // Contact Action, then Attachment Loss Action, then the Hit
+        // script calls (C4Movement.cpp:463-478).
+        if movement_outcome.any_contact {
+            self.exec_contact_action(
+                idx,
+                movement_outcome.contact_cnat,
+                definition_id,
+                solid_mask_indices,
+            );
+            if self.objects[idx].destroyed
+                || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
+            {
+                return Ok(false);
+            }
+        }
         if movement_outcome.no_attach {
             self.apply_no_attach_action(idx, action_library);
         }
@@ -17630,16 +17652,21 @@ impl Engine {
     /// action when the def has it, resyncs the fixed coords
     /// (C4Object.cpp:4144) and records the transition event so the
     /// StartCall/AbortCall pair fires from the drain.
-    fn force_action_with_calls(&mut self, idx: usize, definition_id: &DefinitionId, name: &str) {
+    fn force_action_with_calls(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        name: &str,
+    ) -> bool {
         let Some(library) = self
             .definitions
             .get(definition_id)
             .map(|definition| definition.action_library().clone())
         else {
-            return;
+            return false;
         };
         if !library.contains(name) {
-            return;
+            return false;
         }
         let previous = self.objects[idx].state.action.clone();
         let update = ActionUpdate {
@@ -17663,7 +17690,469 @@ impl Engine {
             if previous.name != object.state.action.name {
                 object.record_action_event(previous, ActionTransitionKind::Forced);
             }
+            return true;
         }
+        false
+    }
+
+    /// C4Object::ContactAction (C4Object.cpp:4307-4520): the hardcoded
+    /// per-procedure contact transitions, dispatched on the frame's
+    /// accumulated t_contact bits right after DoMovement
+    /// (C4Movement.cpp:463-467). ObjectAction* helpers per
+    /// C4ObjectCom.cpp:34-232.
+    fn exec_contact_action(
+        &mut self,
+        idx: usize,
+        t_contact: u32,
+        definition_id: &DefinitionId,
+        solid_mask_indices: &[usize],
+    ) {
+        let Some(definition) = self.definitions.get(definition_id) else {
+            return;
+        };
+        let library = definition.action_library().clone();
+        let action_name = self.objects[idx].state.action.name.clone();
+        if library.is_idle_action(&action_name) {
+            return;
+        }
+        let procedure = library.procedure_for_action(&action_name);
+        let physical = self.object_physical(idx);
+        let ocf = self.objects[idx].state.ocf;
+        let com_dir = self.objects[idx].state.command_direction;
+        let direction = self.objects[idx].state.direction;
+        let can_scale = physical.can_scale != 0;
+        let can_hangle = physical.can_hangle != 0;
+
+        let com_dir_like = |com: CommandDirection, sample: CommandDirection| -> bool {
+            // ComDirLike (C4ObjectCom.cpp:922-928): the two COMD ring
+            // neighbours count as "like".
+            let com = com as i32;
+            let sample = sample as i32;
+            com == sample || com % 8 + 1 == sample || com == sample % 8 + 1
+        };
+
+        // Hit Bottom (C4Object.cpp:4321-4367)
+        if t_contact & CNAT_BOTTOM != 0 {
+            match procedure {
+                ActionProcedure::Flight => {
+                    if self.objects[idx].fixed_velocity.y >= C4Fixed::ZERO {
+                        // FlatHit / HardHit / Walk
+                        if ocf & crate::ocf::HIT_SPEED4 != 0
+                            && self.object_action_flat(idx, definition_id, direction)
+                        {
+                            return;
+                        }
+                        if ocf & crate::ocf::HIT_SPEED3 != 0
+                            && self.force_action_with_calls(idx, definition_id, "KneelDown")
+                        {
+                            let object = &mut self.objects[idx];
+                            object.fixed_velocity = FixedVec2::ZERO;
+                            object.state.velocity = Vector2::ZERO;
+                            return;
+                        }
+                        // Walk keeping horizontal momentum
+                        // (C4Object.cpp:4330-4338).
+                        let last_xdir = self.objects[idx].fixed_velocity.x;
+                        self.force_action_with_calls(idx, definition_id, "Walk");
+                        let object = &mut self.objects[idx];
+                        object.fixed_velocity = FixedVec2::new(last_xdir, C4Fixed::ZERO);
+                        object.state.velocity = object.velocity_pixels();
+                        return;
+                    }
+                }
+                ActionProcedure::Scale => {
+                    if !com_dir_like(com_dir, CommandDirection::Down) {
+                        let _ = self.object_action_corner_scale(
+                            idx,
+                            definition_id,
+                            procedure,
+                            solid_mask_indices,
+                        );
+                        return;
+                    }
+                    self.object_action_stand(idx, definition_id);
+                    return;
+                }
+                ActionProcedure::Dig => {
+                    match com_dir {
+                        CommandDirection::DownLeft => {
+                            self.objects[idx].state.command_direction = CommandDirection::Left;
+                        }
+                        CommandDirection::DownRight => {
+                            self.objects[idx].state.command_direction = CommandDirection::Right;
+                        }
+                        _ => {
+                            self.object_com_stop_dig(idx, definition_id);
+                            return;
+                        }
+                    }
+                }
+                ActionProcedure::Swim => {
+                    let above_liquid = {
+                        let position = self.objects[idx].state.position;
+                        self.landscape
+                            .as_ref()
+                            .map(|landscape| landscape.is_liquid_at(position.x, position.y - 1))
+                            .unwrap_or(false)
+                    };
+                    if !above_liquid {
+                        let _ = self.object_action_corner_scale(
+                            idx,
+                            definition_id,
+                            procedure,
+                            solid_mask_indices,
+                        );
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Hit Ceiling (C4Object.cpp:4369-4404)
+        if t_contact & CNAT_TOP != 0 {
+            match procedure {
+                ActionProcedure::Walk => {
+                    self.object_action_stand(idx, definition_id);
+                    return;
+                }
+                ActionProcedure::Scale => {
+                    if com_dir_like(com_dir, CommandDirection::Up) {
+                        if can_hangle {
+                            let new_dir = if direction == Direction::Left {
+                                Direction::Right
+                            } else {
+                                Direction::Left
+                            };
+                            self.object_action_hangle(idx, definition_id, new_dir);
+                            return;
+                        }
+                        self.objects[idx].state.command_direction = CommandDirection::Stop;
+                    }
+                }
+                ActionProcedure::Flight => {
+                    if ocf & crate::ocf::HIT_SPEED3 != 0 {
+                        self.object_action_tumble(
+                            idx,
+                            definition_id,
+                            direction,
+                            C4Fixed::ZERO,
+                            C4Fixed::ZERO,
+                        );
+                    } else if can_hangle {
+                        self.object_action_hangle(idx, definition_id, direction);
+                        return;
+                    }
+                }
+                ActionProcedure::Dig => {
+                    self.object_com_stop_dig(idx, definition_id);
+                    return;
+                }
+                ActionProcedure::Hang => {
+                    self.objects[idx].state.command_direction = CommandDirection::Stop;
+                }
+                _ => {}
+            }
+        }
+
+        // Hit Left / Right Walls (C4Object.cpp:4406-4520)
+        for (cnat, wall_direction, tumble_x) in [
+            (CNAT_LEFT, Direction::Left, math::fixed100(150)),
+            (CNAT_RIGHT, Direction::Right, -math::fixed100(150)),
+        ] {
+            if t_contact & cnat == 0 {
+                continue;
+            }
+            let toward = if wall_direction == Direction::Left {
+                CommandDirection::Left
+            } else {
+                CommandDirection::Right
+            };
+            let away = if wall_direction == Direction::Left {
+                CommandDirection::Right
+            } else {
+                CommandDirection::Left
+            };
+            match procedure {
+                ActionProcedure::Flight => {
+                    if ocf & crate::ocf::HIT_SPEED3 != 0 {
+                        self.object_action_tumble(
+                            idx,
+                            definition_id,
+                            wall_direction,
+                            tumble_x,
+                            C4Fixed::ZERO,
+                        );
+                    } else if can_scale {
+                        self.object_action_scale(idx, definition_id, wall_direction);
+                        return;
+                    }
+                }
+                ActionProcedure::Walk => {
+                    if com_dir_like(com_dir, toward) {
+                        if can_scale {
+                            self.object_action_scale(idx, definition_id, wall_direction);
+                            return;
+                        }
+                        self.objects[idx].state.command_direction = CommandDirection::Stop;
+                    }
+                    if com_dir_like(self.objects[idx].state.command_direction, away) {
+                        // Slide off (C4Object.cpp:4437/4491).
+                        let xdir = self.objects[idx].fixed_velocity.x / 2;
+                        let ydir = self.objects[idx].fixed_velocity.y;
+                        if self.force_action_with_calls(idx, definition_id, "Jump") {
+                            let object = &mut self.objects[idx];
+                            object.fixed_velocity = FixedVec2::new(xdir, ydir);
+                            object.state.velocity = object.velocity_pixels();
+                            object.state.mobile = true;
+                        }
+                    }
+                    return;
+                }
+                ActionProcedure::Swim => {
+                    if com_dir_like(com_dir, toward) && can_scale {
+                        self.object_action_scale(idx, definition_id, wall_direction);
+                        return;
+                    }
+                    let _ = self.object_action_corner_scale(
+                        idx,
+                        definition_id,
+                        procedure,
+                        solid_mask_indices,
+                    );
+                    return;
+                }
+                ActionProcedure::Hang => {
+                    if can_scale
+                        && self.object_action_scale(idx, definition_id, wall_direction)
+                    {
+                        return;
+                    }
+                    self.objects[idx].state.command_direction = CommandDirection::Stop;
+                    return;
+                }
+                ActionProcedure::Dig => {
+                    self.object_com_stop_dig(idx, definition_id);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Flight stuck: enforce slide free (C4Object.cpp:4524-4546).
+        if matches!(procedure, ActionProcedure::Flight) {
+            let velocity = self.objects[idx].fixed_velocity;
+            if !velocity.y.is_nonzero() {
+                let allow_down = i32::from(t_contact & CNAT_BOTTOM == 0);
+                let position = self.objects[idx].state.position;
+                if t_contact & CNAT_RIGHT != 0 {
+                    self.force_object_position(
+                        idx,
+                        Vector2::new(position.x - 1, position.y + allow_down),
+                    );
+                }
+                if t_contact & CNAT_LEFT != 0 {
+                    self.force_object_position(
+                        idx,
+                        Vector2::new(position.x + 1, position.y + allow_down),
+                    );
+                }
+            }
+            let velocity = self.objects[idx].fixed_velocity;
+            if !velocity.x.is_nonzero() && t_contact & CNAT_TOP != 0 {
+                let position = self.objects[idx].state.position;
+                self.force_object_position(idx, Vector2::new(position.x, position.y + 1));
+            }
+        }
+    }
+
+    /// C4Object::ForcePosition (C4Movement.cpp:531-539): fix always
+    /// resyncs; movement zeroed by the callers that need it.
+    fn force_object_position(&mut self, idx: usize, target: Vector2) {
+        let object = &mut self.objects[idx];
+        object.fixed_position = FixedVec2::from_ints(target.x, target.y);
+        object.state.position = target;
+        object.fixed_velocity = FixedVec2::ZERO;
+        object.state.velocity = Vector2::ZERO;
+        let object_id = object.id;
+        let _ = object_id;
+        self.update_sector_for_index(idx);
+    }
+
+    /// ObjectActionStand (C4ObjectCom.cpp:41-46): ComDir Stop then Walk.
+    fn object_action_stand(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
+        self.objects[idx].state.command_direction = CommandDirection::Stop;
+        if self.force_action_with_calls(idx, definition_id, "Walk") {
+            let object = &mut self.objects[idx];
+            object.fixed_velocity = FixedVec2::ZERO;
+            object.state.velocity = Vector2::ZERO;
+            return true;
+        }
+        false
+    }
+
+    /// ObjectActionFlat (C4ObjectCom.cpp:96-102): "FlatUp", dirs zeroed.
+    fn object_action_flat(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        direction: Direction,
+    ) -> bool {
+        if self.force_action_with_calls(idx, definition_id, "FlatUp") {
+            let object = &mut self.objects[idx];
+            object.fixed_velocity = FixedVec2::ZERO;
+            object.state.velocity = Vector2::ZERO;
+            object.state.direction = direction;
+            return true;
+        }
+        false
+    }
+
+    /// ObjectActionScale (C4ObjectCom.cpp:104-110).
+    fn object_action_scale(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        direction: Direction,
+    ) -> bool {
+        if self.force_action_with_calls(idx, definition_id, "Scale") {
+            let object = &mut self.objects[idx];
+            object.fixed_velocity = FixedVec2::ZERO;
+            object.state.velocity = Vector2::ZERO;
+            object.state.direction = direction;
+            return true;
+        }
+        false
+    }
+
+    /// ObjectActionHangle (C4ObjectCom.cpp:112-118).
+    fn object_action_hangle(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        direction: Direction,
+    ) -> bool {
+        if self.force_action_with_calls(idx, definition_id, "Hangle") {
+            let object = &mut self.objects[idx];
+            object.fixed_velocity = FixedVec2::ZERO;
+            object.state.velocity = Vector2::ZERO;
+            object.state.direction = direction;
+            return true;
+        }
+        false
+    }
+
+    /// ObjectActionTumble (C4ObjectCom.cpp:74-80).
+    fn object_action_tumble(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        direction: Direction,
+        xdir: C4Fixed,
+        ydir: C4Fixed,
+    ) -> bool {
+        if self.force_action_with_calls(idx, definition_id, "Tumble") {
+            let object = &mut self.objects[idx];
+            object.state.direction = direction;
+            object.fixed_velocity = FixedVec2::new(xdir, ydir);
+            object.state.velocity = object.velocity_pixels();
+            return true;
+        }
+        false
+    }
+
+    /// ObjectComStopDig (C4ObjectCom.cpp:776-784): Stand + clear a Dig
+    /// command at the stack top.
+    fn object_com_stop_dig(&mut self, idx: usize, definition_id: &DefinitionId) {
+        self.object_action_stand(idx, definition_id);
+        let object = &mut self.objects[idx];
+        if object.commands.front_command_name() == Some("Dig") {
+            object.commands.clear_front();
+        }
+    }
+
+    /// ObjectActionCornerScale (C4ObjectCom.cpp:167-217): probe a free
+    /// spot up-and-sideways, then KneelUp (Walk fallback) with the fixed
+    /// coords shifted.
+    fn object_action_corner_scale(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        procedure: ActionProcedure,
+        solid_mask_indices: &[usize],
+    ) -> bool {
+        const CORNER_RANGE: i32 = ATTACH_RANGE + 2;
+        let corner_okay = |engine: &Engine, range_x: i32, range_y: i32| -> bool {
+            let object = &engine.objects[idx];
+            let cty = object.state.position.y - range_y;
+            let ctx = if object.state.direction == Direction::Left {
+                object.state.position.x - range_x
+            } else {
+                object.state.position.x + range_x
+            };
+            let Some(landscape) = engine.landscape.as_ref() else {
+                return false;
+            };
+            let masks = engine.solid_masks_for_movement(solid_mask_indices);
+            let contact = shape_contact_check(
+                &object.state.vertices,
+                Vector2::new(ctx, cty),
+                landscape,
+                &engine.materials,
+                &masks,
+                Some(object.id),
+                engine
+                    .definitions
+                    .get(definition_id)
+                    .map(|definition| definition.contact_density())
+                    .unwrap_or(50),
+            );
+            contact.contact_cnat == 0
+        };
+        let (range_x, range_y) = if matches!(procedure, ActionProcedure::Scale) {
+            // Scaling: range max to min (CheckCornerScale).
+            let mut found = None;
+            'outer: for range_x in (1..=CORNER_RANGE).rev() {
+                for range_y in (1..=CORNER_RANGE).rev() {
+                    if corner_okay(self, range_x, range_y) {
+                        found = Some((range_x, range_y));
+                        break 'outer;
+                    }
+                }
+            }
+            match found {
+                Some(ranges) => ranges,
+                None => return false,
+            }
+        } else {
+            // Swimming: range min to max.
+            let mut range = 2;
+            while !corner_okay(self, range, range) {
+                range += 1;
+                if range > CORNER_RANGE {
+                    return false;
+                }
+            }
+            (range, range)
+        };
+        if !self.force_action_with_calls(idx, definition_id, "KneelUp") {
+            self.force_action_with_calls(idx, definition_id, "Walk");
+        }
+        let object = &mut self.objects[idx];
+        object.fixed_velocity = FixedVec2::ZERO;
+        object.state.velocity = Vector2::ZERO;
+        if object.state.direction == Direction::Left {
+            object.fixed_position.x -= itofix(range_x);
+        } else {
+            object.fixed_position.x += itofix(range_x);
+        }
+        object.fixed_position.y -= itofix(range_y);
+        object.state.position = Vector2::new(
+            fixtoi(object.fixed_position.x),
+            fixtoi(object.fixed_position.y),
+        );
+        self.update_sector_for_index(idx);
+        true
     }
 
     fn apply_no_attach_action(&mut self, idx: usize, library: &ActionLibrary) {
