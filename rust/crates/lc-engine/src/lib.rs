@@ -13341,20 +13341,30 @@ impl Engine {
                 pre_phase_state = Some(self.objects[idx].state.clone());
             }
 
+            let physical_for_advance = self.object_physical(idx);
             let advance_outcome = {
                 let object = &mut self.objects[idx];
-                // iPhaseAdvance: WALK animates at fixtoi(|xdir| * 10),
-                // SCALE at fixtoi(|ydir| * 14), everything else 1
-                // (C4Object.cpp:4696,4787-4789,4830-4832).
+                // iPhaseAdvance (C4Object.cpp:4696): WALK fixtoi(|xdir|*10)
+                // (:4787-4789), SCALE fixtoi(|ydir|*14) (:4830-4832),
+                // HANGLE fixtoi(|xdir|*10) (:4867-4869), SWIM
+                // fixtoi(swimlimit*10) with the PHYSICAL limit, not the
+                // velocity (:5010-ish "iPhaseAdvance = fixtoi(lLimit*10)"),
+                // DIG fixtoi(diglimit*40) (:4894-4895); everything else 1.
                 let phase_advance = match action_library
                     .procedure_for_action(&object.state.action.name)
                 {
-                    ActionProcedure::Walk => {
+                    ActionProcedure::Walk | ActionProcedure::Hang => {
                         math::fixtoi(object.fixed_velocity.x.abs() * 10)
                     }
                     ActionProcedure::Scale => {
                         math::fixtoi(object.fixed_velocity.y.abs() * 14)
                     }
+                    ActionProcedure::Swim => math::fixtoi(
+                        math::val_by_physical(160, physical_for_advance.swim) * 10,
+                    ),
+                    ActionProcedure::Dig => math::fixtoi(
+                        math::val_by_physical(125, physical_for_advance.dig) * 40,
+                    ),
                     _ => 1,
                 };
                 object
@@ -30694,6 +30704,47 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .info_physical
             .expect("at-limit Tick5 training clones the physicals");
         assert_eq!(trained.hangle, 40_001);
+    }
+
+    // DFA_SWIM animates at fixtoi(swim-limit * 10) — the PHYSICAL limit
+    // (ValByPhysical(160, Swim)), not the velocity: a drifting fish with
+    // xdir 0 still flips through its Turn phases (probe-verified: FISH
+    // adv=16, WIPF adv=10 at frame 1).
+    #[test]
+    fn swim_phase_advances_by_the_physical_limit_like_cpp() {
+        let mut fish = Definition::from_script("Fish", "Fish", "#strict\n").expect("compiles");
+        fish.set_physical(PhysicalInfo {
+            swim: 100_000,
+            ..PhysicalInfo::default()
+        });
+        fish.configure_actions(
+            None,
+            HashMap::from([(
+                "Turn".to_string(),
+                ActionSpec::default()
+                    .with_procedure("SWIM")
+                    .with_delay(3)
+                    .with_length(15)
+                    .with_next("Turn"),
+            )]),
+        );
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(50, 50));
+        engine.register_definition(fish).expect("registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Fish")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_action(ActionState::new("Turn")),
+            )
+            .expect("spawns");
+        engine.tick().expect("tick");
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(
+            engine.objects[idx].state.action.phase, 1,
+            "PhaseDelay += fixtoi(ValByPhysical(160,100000)*10)=16 >= Delay 3 on the first exec"
+        );
     }
 
     #[test]
