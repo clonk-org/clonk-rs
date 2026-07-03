@@ -22887,10 +22887,13 @@ impl Engine {
         }
     }
 
+    /// `GBackMat` (C4Wrappers.h:164-167): the PXS step loop and reaction
+    /// lookups read materials through the GetPix border rules — a closed
+    /// side/bottom answers the Vehicle material, not sky.
     fn landscape_material(&self, x: i32, y: i32) -> Option<MaterialId> {
         self.landscape
             .as_ref()
-            .and_then(|landscape| landscape.material_at(x, y))
+            .and_then(|landscape| landscape.border_material_at(x, y))
     }
 
     /// `C4PXS::Execute` (C4PXS.cpp:28-127). Returns the surviving PXS, or
@@ -27671,7 +27674,12 @@ mod tests {
 
         let mut engine = Engine::with_seed(21);
         engine.set_materials(materials);
-        engine.set_landscape(Landscape::flat_with_material(5, 10, Some(earth)));
+        // World bottom below the ground surface: the y=10 contact row is
+        // EARTH — at the world bottom it would be the closed border, which
+        // reads Vehicle in C++ (GetPix, C4Landscape.h:157-159).
+        let mut world = Landscape::flat_with_material(5, 10, Some(earth));
+        world.set_world_height(20);
+        engine.set_landscape(world);
         let mirror = engine.rng.clone();
         assert!(engine.pxs_system.create(
             slime,
@@ -27687,6 +27695,89 @@ mod tests {
         assert_eq!(survivors[0].xdir, math::C4Fixed::ZERO);
         assert_eq!(survivors[0].ydir, math::C4Fixed::ZERO);
         assert_eq!(engine.rng, mirror, "no draws on the conversion path");
+    }
+
+    #[test]
+    fn pxs_reacts_with_the_vehicle_border_at_closed_sides_like_cpp() {
+        // GBackMat reads MCVehic → Vehicle past a closed side
+        // (C4Landscape.h:144-161, GetMat :173-176), so a PXS pushing into
+        // the border hits DefReactInsert vs Vehicle (liquid density 25 <=
+        // vehicle 100 → mrfInsert, C4Material.cpp:773-798): mrfInsertCheck
+        // finds no slide against the wall and InsertMaterial deactivates
+        // the PXS in place — it must NOT walk out of bounds and die
+        // draw-free like against sky.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+            SplashRate=0
+            MaxSlide=3
+
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            Friction=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(9);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(6, 6, Some(earth)));
+
+        // Per-pixel world: earth from y=6 down, sky above (the audit bug
+        // lives on the grid path — material_at answers None past the
+        // sides there).
+        let mut densities = vec![0i32; 128];
+        densities[20] = 25;
+        densities[30] = 100;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[20] = Some("Water".into());
+        names[30] = Some("Earth".into());
+        let mut bytes = vec![0u8; 6 * 12];
+        for y in 6..12 {
+            for x in 0..6 {
+                bytes[y * 6 + x] = 30;
+            }
+        }
+        let grid = landscape::PixelGrid::new(6, 12, bytes, densities, names, vec![None; 128]);
+        let mut world =
+            Landscape::with_default_material(6, vec![6; 6], Some(earth)).expect("builds");
+        world.set_world_height(12);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        // Sitting on the ground in the border column, pushing left.
+        let mirror = engine.rng.clone();
+        assert!(engine.pxs_system.create(
+            water,
+            math::itofix(0),
+            math::itofix(5),
+            -math::itofix(2),
+            math::C4Fixed::ZERO,
+        ));
+        engine.tick_pxs();
+        assert_eq!(
+            engine.pxs_system.iter().count(),
+            0,
+            "border contact inserts and deactivates the PXS"
+        );
+        let landscape = engine.landscape().expect("landscape set");
+        assert_eq!(
+            landscape.material_at(0, 5),
+            Some(water),
+            "InsertMaterial landed the pixel against the border"
+        );
+        assert_eq!(engine.rng, mirror, "no synced draws on this path");
     }
 
     #[test]
@@ -27734,7 +27825,12 @@ mod tests {
 
         let mut engine = Engine::with_seed(21);
         engine.set_materials(materials);
-        engine.set_landscape(Landscape::flat_with_material(5, 10, Some(earth)));
+        // World bottom below the ground surface: the y=10 contact row is
+        // EARTH — at the world bottom it would be the closed border, which
+        // reads Vehicle in C++ (GetPix, C4Landscape.h:157-159).
+        let mut world = Landscape::flat_with_material(5, 10, Some(earth));
+        world.set_world_height(20);
+        engine.set_landscape(world);
         // The reaction function records its parameters in a global effect
         // variable store via AddEffect... keep it simpler: return the kill
         // flag computed from the parameters so the call is observable both
@@ -27829,7 +27925,12 @@ mod tests {
 
         let mut engine = Engine::with_seed(21);
         engine.set_materials(materials);
-        engine.set_landscape(Landscape::flat_with_material(5, 10, Some(earth)));
+        // World bottom below the ground surface: the y=10 contact row is
+        // EARTH — at the world bottom it would be the closed border, which
+        // reads Vehicle in C++ (GetPix, C4Landscape.h:157-159).
+        let mut world = Landscape::flat_with_material(5, 10, Some(earth));
+        world.set_world_height(20);
+        engine.set_landscape(world);
         engine
             .install_scenario_script(
                 "Scenario",
