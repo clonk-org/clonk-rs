@@ -31403,6 +31403,46 @@ func Trigger() {
         );
     }
 
+    // C4Id2Def failure means NO object and a silent nullptr return:
+    // C4Game::CreateObject (C4Game.cpp:1146), CreateObjectConstruction
+    // (C4Game.cpp:1183). Goldrush's explosion chain hits it - FXB1 is
+    // referenced by System.c4g Explode.c but not loaded by the scenario.
+    #[test]
+    fn create_object_and_construction_return_nil_for_unknown_definitions() {
+        let caller_script = r#"#strict
+local aObj, aSite;
+func Trigger() {
+    aObj = CreateObject(FXB1, 0, 0, -1);
+    aSite = CreateConstruction(FXB1, 0, 0, -1, 50);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(id).expect("caller exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(locals.get("aObj"), Some(&Value::Nil), "CreateObject nil");
+        assert_eq!(
+            locals.get("aSite"),
+            Some(&Value::Nil),
+            "CreateConstruction nil"
+        );
+        assert_eq!(engine.objects.len(), 1, "no spawn registered");
+    }
+
     #[test]
     fn call_runs_own_def_script_function_like_cpp() {
         // FnCall (C4Script.cpp:3424-3432): Call(name, p0..p8) runs `name` on

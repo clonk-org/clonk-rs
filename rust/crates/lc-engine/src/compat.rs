@@ -711,6 +711,13 @@ impl HostWorldContext {
         self.particle_defs.as_ref().map(|defs| defs.contains(name))
     }
 
+    /// `C4Id2Def` visibility: `Some(known?)` when the engine attached a
+    /// definition table, `None` for legacy fixture contexts (empty table
+    /// stays permissive like particle_def_known).
+    pub(crate) fn definition_known(&self, id: &str) -> Option<bool> {
+        (!self.definitions.is_empty()).then(|| self.definitions.contains_key(id))
+    }
+
     pub(crate) fn get(&self, id: ObjectId) -> Option<&HostWorldObject> {
         self.objects.get(&id)
     }
@@ -11967,6 +11974,11 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("CreateObject requires an active engine context"))?;
 
+        // C4Id2Def failure: no object, silent nullptr (C4Game.cpp:1146).
+        if context.world.definition_known(&definition) == Some(false) {
+            return Ok(Value::Nil);
+        }
+
         let metadata = context
             .definition_metadata(&definition)
             .cloned()
@@ -12219,6 +12231,11 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow.as_mut().ok_or_else(|| {
             RuntimeError::new("CreateConstruction requires an active engine context")
         })?;
+
+        // C4Id2Def failure: no site, silent nullptr (C4Game.cpp:1183).
+        if context.world.definition_known(&definition) == Some(false) {
+            return Ok(Value::Nil);
+        }
 
         let metadata = context
             .definition_metadata(&definition)
@@ -13598,6 +13615,12 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("CreateContents requires an active engine context"))?;
+
+        // CreateContents runs Game.CreateObject too - C4Id2Def failure is
+        // a silent nullptr (C4Object::CreateContents, C4Game.cpp:1146).
+        if context.world.definition_known(&definition) == Some(false) {
+            return Ok(Value::Nil);
+        }
 
         let (container, position, owner) = if let Some(target) = target_id {
             match context.object_context() {
