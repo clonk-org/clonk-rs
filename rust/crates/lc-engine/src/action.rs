@@ -32,6 +32,14 @@ pub struct ActionSpec {
     /// it while InLiquid with an early return (C4Object.cpp:4749-4753).
     #[serde(default)]
     pub in_liquid_action: Option<String>,
+    /// `Directions` (C4ActionDef, default 1): SetDir rejects out-of-range
+    /// directions (C4Object.cpp:4230).
+    #[serde(default)]
+    pub directions: Option<u32>,
+    /// `TurnAction`: fired by SetDir on a direction change
+    /// (C4Object.cpp:4233-4237).
+    #[serde(default)]
+    pub turn_action: Option<String>,
     #[serde(default)]
     pub dig_free: Option<i32>,
     #[serde(default)]
@@ -51,6 +59,8 @@ impl ActionSpec {
             end_call: None,
             abort_call: None,
             in_liquid_action: None,
+            directions: None,
+            turn_action: None,
             no_other_action: false,
             dig_free: None,
             attach: 0,
@@ -104,6 +114,16 @@ impl ActionSpec {
 
     pub fn with_no_other_action(mut self, enabled: bool) -> Self {
         self.no_other_action = enabled;
+        self
+    }
+
+    pub fn with_directions(mut self, directions: u32) -> Self {
+        self.directions = Some(directions);
+        self
+    }
+
+    pub fn with_turn_action(mut self, action: impl Into<String>) -> Self {
+        self.turn_action = Some(action.into());
         self
     }
 
@@ -344,6 +364,19 @@ impl ActionLibrary {
         self.specs
             .get(action)
             .and_then(|spec| spec.procedure.as_deref())
+    }
+
+    pub fn directions_for(&self, action: &str) -> u32 {
+        self.specs
+            .get(action)
+            .and_then(|spec| spec.directions)
+            .unwrap_or(1)
+    }
+
+    pub fn turn_action_for(&self, action: &str) -> Option<&str> {
+        self.specs
+            .get(action)
+            .and_then(|spec| spec.turn_action.as_deref())
     }
 
     pub fn in_liquid_action_for(&self, action: &str) -> Option<&str> {

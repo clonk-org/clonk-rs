@@ -1527,6 +1527,12 @@ fn runtime_snapshot_mismatch(
                         id, expected_object.action.phase, actual_object.action.phase
                     ));
                 }
+                if expected_object.direction != actual_object.direction {
+                    problems.push(format!(
+                        "object {} direction rust {:?}, cpp {:?}",
+                        id, expected_object.direction, actual_object.direction
+                    ));
+                }
                 if expected_object.command_direction != actual_object.command_direction {
                     problems.push(format!(
                         "object {} command direction rust {:?}, cpp {:?}",

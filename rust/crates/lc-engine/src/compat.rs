@@ -8426,25 +8426,6 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
-    if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
-        let frame = ENVIRONMENT_CONTEXT.with(|cell| {
-            cell.borrow().as_ref().map(|context| context.frame).unwrap_or(0)
-        });
-        if (16..=18).contains(&frame) {
-            let info = HOST_CONTEXT.with(|cell| {
-                cell.borrow().as_ref().and_then(|context| {
-                    context.object_context().map(|object| {
-                        (object.id().as_u64(), object.effective_action_name().to_string())
-                    })
-                })
-            });
-            if let Some((id, action)) = info {
-                if matches!(id, 578 | 579) {
-                    tracing::warn!(?args, id, %action, frame, "GETACTION");
-                }
-            }
-        }
-    }
     let mut index = 0;
     let target_id =
         consume_optional_object_reference_argument(args, &mut index, "GetAction", "target")?;
@@ -9110,16 +9091,60 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
             };
         }
     }
+    // FnJump → ObjectComJump runs SYNCHRONOUSLY (C4Script.cpp:358-363,
+    // C4ObjectCom.cpp:280-312): the snake's Activity jump takes effect
+    // THIS frame, before its movement — a queued command would lag one
+    // frame. Gates: only while the WALK procedure runs.
+    let launch = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return None;
+        };
+        let object = context.object_context_mut()?;
+        let action_name = object.effective_action_name().to_string();
+        if !matches!(
+            object.action_library.procedure_for_action(&action_name),
+            crate::action::ActionProcedure::Walk
+        ) {
+            return None;
+        }
+        let walk = object.get_physical("Walk", PHYS_CURRENT).unwrap_or(0);
+        let jump_physical = object.get_physical("Jump", PHYS_CURRENT).unwrap_or(0);
+        let con_scale = itofix_prec(object.construction(), crate::FULL_CON);
+        let physical_walk = crate::math::val_by_physical(280, walk) * con_scale;
+        let physical_jump = crate::math::val_by_physical(1000, jump_physical) * con_scale;
+        let txdir = match object.command_direction() {
+            CommandDirection::Left | CommandDirection::UpLeft => -physical_walk,
+            CommandDirection::Right | CommandDirection::UpRight => physical_walk,
+            _ => match object.direction() {
+                Direction::Left => -physical_walk,
+                Direction::Right => physical_walk,
+            },
+        };
+        // The dive branch (SimFlightHitsLiquid → ObjectActionDive,
+        // C4ObjectCom.cpp:301-305) is a documented PORT_STATUS gap.
+        Some((txdir, -physical_jump))
+    });
+    let Some((txdir, tydir)) = launch else {
+        return Ok(Value::Bool(false));
+    };
+    // ObjectActionJump (C4ObjectCom.cpp:48-61): SetActionByName("Jump")
+    // with its Abort/Start calls, then the launch velocities. A failed
+    // SetAction (no Jump in the ActMap) returns false without touching
+    // the dirs.
+    let set = set_action(&[Value::String("Jump".to_string())])?;
+    if !matches!(set, Value::Bool(true)) {
+        return Ok(Value::Bool(false));
+    }
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
+            return Ok(Value::Bool(true));
         };
-        let Some(object) = context.object_context_mut() else {
-            return Ok(Value::Bool(false));
-        };
-        let pushed = object.push_command_front(CommandRequest::new(CommandId::Jump));
-        Ok(Value::Bool(pushed))
+        if let Some(object) = context.object_context_mut() {
+            object.set_fixed_velocity(FixedVec2::new(txdir, tydir));
+        }
+        Ok(Value::Bool(true))
     })
 }
 
@@ -10840,19 +10865,104 @@ fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetDir requires an active engine context"))?;
+        // FnSetDir works on ANY object (`if (!pObj) pObj = cthr->Obj`) —
+        // GoldRush's init calls SetDir(1, pHorse) from the scenario
+        // scope. Foreign writes stage into the target's nested scope.
+        let active = context.object_context().map(|object| object.id());
+        if let Some(target) = target_id {
+            if Some(target) != active {
+                if !context.nested_objects.contains_key(&target) {
+                    let Some(world_object) = context.get_world_object(target) else {
+                        return Ok(Value::Bool(false));
+                    };
+                    let Some((scope, local_vars)) = context.nested_scope_for(&world_object)
+                    else {
+                        return Ok(Value::Bool(false));
+                    };
+                    context
+                        .nested_objects
+                        .insert(target, NestedScopeState { scope, local_vars });
+                }
+                if !context.nested_order.contains(&target) {
+                    context.nested_order.push(target);
+                }
+                let state = context
+                    .nested_objects
+                    .get_mut(&target)
+                    .expect("scope just ensured");
+                let scope = &mut state.scope;
+                // The same C4Object::SetDir gates as the self path; the
+                // TurnAction fires through the staged action update.
+                let action_name = scope.effective_action_name().to_string();
+                if scope.action_library.is_idle_action(&action_name) {
+                    return Ok(Value::Bool(false));
+                }
+                let directions = scope.action_library.directions_for(&action_name) as i32;
+                if direction.to_script_value() < 0
+                    || direction.to_script_value() >= directions
+                {
+                    return Ok(Value::Bool(false));
+                }
+                if scope.direction() != direction {
+                    if let Some(turn_action) = scope
+                        .action_library
+                        .turn_action_for(&action_name)
+                        .map(str::to_string)
+                    {
+                        if scope.action_library.contains(&turn_action) {
+                            let update = scope
+                                .pending_update
+                                .action
+                                .get_or_insert_with(ActionUpdate::default);
+                            update.set_name(turn_action.clone());
+                            update.set_force(false);
+                            scope.update_effective_action(&turn_action);
+                        }
+                    }
+                }
+                scope.set_direction(direction);
+                return Ok(Value::Bool(true));
+            }
+        }
         let object = match context.object_context_mut() {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
         };
 
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        // C4Object::SetDir (C4Object.cpp:4225-4245): a no-op on idle
+        // objects and out-of-range directions (Directions defaults 1 —
+        // single-direction actions reject SetDir(1)); a CHANGE fires the
+        // action's TurnAction through SetActionByName first.
+        let action_name = object.effective_action_name().to_string();
+        if object.action_library.is_idle_action(&action_name) {
+            return Ok(Value::Bool(false));
         }
-
-        object.set_direction(direction);
-        Ok(Value::Bool(true))
+        let directions = object.action_library.directions_for(&action_name) as i32;
+        if direction.to_script_value() < 0 || direction.to_script_value() >= directions {
+            return Ok(Value::Bool(false));
+        }
+        let turn_action = (object.direction() != direction)
+            .then(|| {
+                object
+                    .action_library
+                    .turn_action_for(&action_name)
+                    .map(str::to_string)
+            })
+            .flatten();
+        drop(borrow);
+        if let Some(turn_action) = turn_action {
+            let _ = set_action(&[Value::String(turn_action)])?;
+        }
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let context = borrow
+                .as_mut()
+                .ok_or_else(|| RuntimeError::new("SetDir requires an active engine context"))?;
+            if let Some(object) = context.object_context_mut() {
+                object.set_direction(direction);
+            }
+            Ok(Value::Bool(true))
+        })
     })
 }
 
@@ -20472,9 +20582,51 @@ mod tests {
         assert_eq!(value, Value::Nil);
     }
 
+    fn with_walking_host_context<F, T>(func: F) -> (Result<T, RuntimeError>, EffectContextOutcome)
+    where
+        F: FnOnce() -> Result<T, RuntimeError>,
+    {
+        // A two-direction active action: SetDir is gated on
+        // `Action.Act > ActIdle` and `Inside(iDir, 0, Directions-1)`
+        // (C4Object.cpp:4228-4230).
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Walk".to_string(),
+            crate::action::ActionSpec::default().with_directions(2),
+        );
+        let library = ActionLibrary::new(Some("Walk".to_string()), specs);
+        with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                None,
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Walk",
+                0,
+                0,
+                library,
+                Direction::Left,
+                CommandDirection::Stop,
+                0,
+                None,
+                None,
+                &[],
+                crate::FULL_CON,
+            )),
+            &[],
+            HostWorldContext::default(),
+            1,
+            func,
+        )
+    }
+
     #[test]
     fn set_dir_records_direction_update() {
-        let (result, outcome) = with_object_host_context(|| set_dir(&[Value::Int(1)]));
+        let (result, outcome) = with_walking_host_context(|| set_dir(&[Value::Int(1)]));
         let value = result.expect("SetDir succeeds");
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("direction update recorded");
@@ -20482,8 +20634,20 @@ mod tests {
     }
 
     #[test]
+    fn set_dir_is_a_no_op_on_idle_objects() {
+        // C4Object::SetDir bails on `Action.Act <= ActIdle`
+        // (C4Object.cpp:4228).
+        let (result, outcome) = with_object_host_context(|| set_dir(&[Value::Int(1)]));
+        assert_eq!(result.expect("SetDir runs"), Value::Bool(false));
+        assert!(outcome
+            .object_update
+            .map(|update| update.direction.is_none())
+            .unwrap_or(true));
+    }
+
+    #[test]
     fn get_dir_observes_effective_direction() {
-        let (result, outcome) = with_object_host_context(|| {
+        let (result, outcome) = with_walking_host_context(|| {
             set_dir(&[Value::Int(1)])?;
             get_dir(&[])
         });

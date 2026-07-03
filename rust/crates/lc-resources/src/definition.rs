@@ -346,6 +346,9 @@ pub struct ActionDefinition {
     pub dig_free: Option<i32>,
     pub attach: u32,
     pub directions: Option<u32>,
+    /// `TurnAction` (C4ActionDef): SetDir fires it on direction change
+    /// (C4Object.cpp:4225-4240).
+    pub turn_action: Option<String>,
     pub flip_dir: Option<u32>,
     pub facet: Option<ActionFacet>,
     pub reverse: bool,
@@ -374,6 +377,7 @@ impl Default for ActionDefinition {
             no_other_action: false,
             dig_free: None,
             attach: 0,
+            turn_action: None,
             directions: None,
             flip_dir: None,
             facet: None,
@@ -997,6 +1001,11 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
             }
             "attach" => {
                 current_definition.attach = parse_i32(value).unwrap_or(0).max(0) as u32;
+            }
+            "turnaction" => {
+                if !value.is_empty() {
+                    current_definition.turn_action = Some(value.to_string());
+                }
             }
             "directions" => {
                 current_definition.directions = parse_u32(value);
