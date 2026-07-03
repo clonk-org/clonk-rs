@@ -534,9 +534,11 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         }
     }
     if std::env::var("LC_XTASK_PROBE_SOLID").is_ok() {
-        for y in 618..=635 {
-            let solid = engine.debug_landscape_is_solid(3925, y);
-            println!("SOLID 3925,{y} = {solid}");
+        for y in 255..=272 {
+            println!(
+                "SOLID 1171,{y} = {}",
+                engine.debug_landscape_is_solid(1171, y)
+            );
         }
     }
     if std::env::var("LC_XTASK_PROBE_SHAPE").is_ok() {

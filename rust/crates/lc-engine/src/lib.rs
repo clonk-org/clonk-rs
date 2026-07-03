@@ -5086,6 +5086,9 @@ pub struct Definition {
     /// the movement loop reads them per masked object per moving object per
     /// tick, and re-scanning the sprite there dominated the loop.
     solid_mask_pixels: SolidMaskPixels,
+    /// Per-override-rect pixel cache (Objects.txt SolidMask= picks its
+    /// own sprite region).
+    solid_mask_rect_cache: std::cell::RefCell<HashMap<(i32, i32, i32, i32), SolidMaskPixels>>,
 }
 
 /// Precomputed solid-mask pixel data for `solid_masks_for_movement`.
@@ -5205,6 +5208,7 @@ impl Definition {
             physical: PhysicalInfo::default(),
             c4_callback_args: false,
             solid_mask_pixels: SolidMaskPixels::default(),
+            solid_mask_rect_cache: std::cell::RefCell::new(HashMap::new()),
         })
     }
 
@@ -5694,9 +5698,56 @@ impl Definition {
         self.rebuild_solid_mask_pixels();
     }
 
+    /// Per-pixel decode for an ARBITRARY mask rect — Objects.txt
+    /// SolidMask= overrides pick a different sprite region per object
+    /// (C4Object::SolidMask; the CTWR platform has NO DefCore mask at
+    /// all). Cached per rect.
+    fn solid_mask_pixels_for_rect(&self, mask: DefinitionTargetRect) -> SolidMaskPixels {
+        if Some(mask) == self.solid_mask {
+            return self.solid_mask_pixels.clone();
+        }
+        let key = (mask.x, mask.y, mask.width, mask.height);
+        if let Some(cached) = self.solid_mask_rect_cache.borrow().get(&key) {
+            return cached.clone();
+        }
+        let computed = self.compute_solid_mask_pixels(mask);
+        self.solid_mask_rect_cache
+            .borrow_mut()
+            .insert(key, computed.clone());
+        computed
+    }
+
+    fn compute_solid_mask_pixels(&self, mask: DefinitionTargetRect) -> SolidMaskPixels {
+        let Some(image) = self.sprite_image.as_ref() else {
+            return SolidMaskPixels::Rectangle;
+        };
+        let image_width = image.width as i32;
+        let image_height = image.height as i32;
+        if mask.x < 0
+            || mask.y < 0
+            || mask.x.saturating_add(mask.width) > image_width
+            || mask.y.saturating_add(mask.height) > image_height
+        {
+            return SolidMaskPixels::OutOfBounds;
+        }
+        let source = image.pixels.as_ref();
+        let stride = image.width as usize * 4;
+        let mut pixels = Vec::with_capacity((mask.width * mask.height) as usize);
+        for y in 0..mask.height {
+            let source_y = (mask.y + y) as usize;
+            for x in 0..mask.width {
+                let source_x = (mask.x + x) as usize;
+                let alpha_index = source_y * stride + source_x * 4 + 3;
+                pixels.push(u8::from(source.get(alpha_index).copied().unwrap_or(0) != 0));
+            }
+        }
+        SolidMaskPixels::Alpha(Rc::new(pixels))
+    }
+
     /// Extract the SolidMask alpha pixels from the sprite (alpha != 0 =
     /// solid), mirroring the per-tick scan this replaces.
     fn rebuild_solid_mask_pixels(&mut self) {
+        self.solid_mask_rect_cache.borrow_mut().clear();
         let Some(mask) = self.solid_mask else {
             self.solid_mask_pixels = SolidMaskPixels::default();
             return;
@@ -13068,9 +13119,17 @@ impl Engine {
             .iter()
             .enumerate()
             .filter(|(_, object)| {
-                self.definitions
-                    .get(&object.definition_id)
-                    .is_some_and(|definition| definition.solid_mask().is_some())
+                // An Objects.txt/SetSolidMask override carries a mask even
+                // when the DEFINITION has none (the CTWR platform's DefCore
+                // has no SolidMask line at all).
+                object
+                    .state
+                    .solid_mask_override
+                    .is_some_and(|rect| rect.width > 0 && rect.height > 0)
+                    || self
+                        .definitions
+                        .get(&object.definition_id)
+                        .is_some_and(|definition| definition.solid_mask().is_some())
             })
             .map(|(index, _)| index)
             .collect();
@@ -19920,10 +19979,13 @@ impl Engine {
                     None => continue,
                 },
             };
-            let mask_pixels = match &definition.solid_mask_pixels {
+            // The pixel decode follows the EFFECTIVE rect: an Objects.txt
+            // override reads its own sprite region (C4SolidMask::Put uses
+            // the object's SolidMask, not the def's).
+            let mask_pixels = match definition.solid_mask_pixels_for_rect(mask) {
                 SolidMaskPixels::OutOfBounds => continue,
                 SolidMaskPixels::Rectangle => None,
-                SolidMaskPixels::Alpha(pixels) => Some(Rc::clone(pixels)),
+                SolidMaskPixels::Alpha(pixels) => Some(Rc::clone(&pixels)),
             };
             let shape_offset = definition
                 .shape_rect()
