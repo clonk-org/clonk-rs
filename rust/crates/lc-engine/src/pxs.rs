@@ -110,16 +110,18 @@ impl PxsSystem {
     }
 
     /// Slot accessors for the engine-driven execute loop. The engine walks
-    /// chunk-major slot order like `C4PXSSystem::Execute` (C4PXS.cpp:212-234),
-    /// taking each live PXS, running `C4PXS::Execute` against engine state,
-    /// and writing back the survivor (or dropping it: Mat = MNone +
-    /// chunk-count decrement, C4PXS.cpp:420-430).
-    pub fn take_slot(&mut self, chunk: usize, slot: usize) -> Option<Pxs> {
+    /// chunk-major slot order like `C4PXSSystem::Execute` (C4PXS.cpp:212-234)
+    /// and runs each live PXS IN PLACE: `peek_slot` copies the pixel while
+    /// the slot keeps carrying it (Mat != MNone for the whole execution, so
+    /// `New()` — C4PXS.cpp:195-202 — never hands the executing slot to a
+    /// PXS created inside a reaction). The survivor writes back via
+    /// `put_slot`; a death clears via `clear_slot`.
+    pub fn peek_slot(&self, chunk: usize, slot: usize) -> Option<Pxs> {
         self.chunks
-            .get_mut(chunk)
-            .and_then(|chunk| chunk.as_mut())
-            .and_then(|slots| slots.get_mut(slot))
-            .and_then(|entry| entry.take())
+            .get(chunk)
+            .and_then(|chunk| chunk.as_ref())
+            .and_then(|slots| slots.get(slot))
+            .and_then(|entry| *entry)
     }
 
     pub fn put_slot(&mut self, chunk: usize, slot: usize, pxs: Pxs) {
@@ -128,9 +130,20 @@ impl PxsSystem {
         }
     }
 
-    pub fn release_slot(&mut self, chunk: usize) {
-        if let Some(count) = self.chunk_counts.get_mut(chunk) {
-            *count = count.saturating_sub(1);
+    /// `C4PXS::Deactivate` (C4PXS.cpp:139-149): Mat = MNone plus the chunk
+    /// count decrement (`C4PXSSystem::Delete`, C4PXS.cpp:426-437).
+    pub fn clear_slot(&mut self, chunk: usize, slot: usize) {
+        let cleared = self
+            .chunks
+            .get_mut(chunk)
+            .and_then(|chunk| chunk.as_mut())
+            .and_then(|slots| slots.get_mut(slot))
+            .and_then(|entry| entry.take())
+            .is_some();
+        if cleared {
+            if let Some(count) = self.chunk_counts.get_mut(chunk) {
+                *count = count.saturating_sub(1);
+            }
         }
     }
 
@@ -158,6 +171,36 @@ impl PxsSystem {
             .iter()
             .flatten()
             .flat_map(|slots| slots.iter().flatten())
+    }
+
+    /// Live PXS with their SAVED slot coordinates: `C4PXSSystem::Save`
+    /// writes every allocated chunk consecutively — gaps included
+    /// (C4PXS.cpp:346-349) — so the saved chunk index is the chunk's rank
+    /// among allocated chunks and slots keep their in-chunk position.
+    pub fn iter_slots(&self) -> impl Iterator<Item = (usize, usize, &Pxs)> {
+        self.chunks
+            .iter()
+            .filter_map(|chunk| chunk.as_ref())
+            .enumerate()
+            .flat_map(|(chunk_rank, slots)| {
+                slots.iter().enumerate().filter_map(move |(slot, entry)| {
+                    entry.as_ref().map(|pxs| (chunk_rank, slot, pxs))
+                })
+            })
+    }
+
+    /// Place a loaded PXS at its saved slot (`C4PXSSystem::Load` reads
+    /// chunks verbatim and counts pixels in place, C4PXS.cpp:383-397).
+    pub fn create_at(&mut self, chunk: usize, slot: usize, pxs: Pxs) -> bool {
+        if chunk >= PXS_MAX_CHUNK || slot >= PXS_CHUNK_SIZE {
+            return false;
+        }
+        self.ensure_layout();
+        let slots = self.chunks[chunk].get_or_insert_with(|| vec![None; PXS_CHUNK_SIZE]);
+        if slots[slot].replace(pxs).is_none() {
+            self.chunk_counts[chunk] += 1;
+        }
+        true
     }
 
     pub fn clear(&mut self) {
@@ -193,8 +236,8 @@ mod tests {
         assert_eq!(system.count(), 3);
 
         // free the middle slot (slot 1)
-        let removed = system.take_slot(0, 1).expect("slot 1 live");
-        system.release_slot(0);
+        let removed = system.peek_slot(0, 1).expect("slot 1 live");
+        system.clear_slot(0, 1);
         assert_eq!(fixtoi(removed.x), 1);
         assert_eq!(system.count(), 2);
 
@@ -231,8 +274,7 @@ mod tests {
         // (C4PXS.cpp:218-222).
         let mut system = PxsSystem::default();
         assert!(system.create(mat(0), fixed(0), fixed(0), fixed(0), fixed(0)));
-        system.take_slot(0, 0).expect("live");
-        system.release_slot(0);
+        system.clear_slot(0, 0);
         assert!(system.chunk_allocated(0));
         system.free_empty_chunks();
         assert!(!system.chunk_allocated(0));

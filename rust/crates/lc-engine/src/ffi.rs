@@ -1121,6 +1121,7 @@ unsafe fn make_snapshot(
             parameter_b: entry.parameter_b,
             // Not carried by the C ABI snapshot yet (task #22).
             pxs_fixed: None,
+            pxs_slot: None,
             layer,
         });
     }

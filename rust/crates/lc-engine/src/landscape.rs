@@ -301,12 +301,47 @@ pub struct Landscape {
     /// maintained as the approximation legacy helpers consume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pixels: Option<PixelGrid>,
+    /// Border-open state (C4Landscape.h:64-65): LeftOpen/RightOpen are y
+    /// thresholds (`y < LeftOpen` reads sky beyond the side), Top/BottomOpen
+    /// are flags. Defaults mirror C4SLandscape::Default
+    /// (C4Scenario.cpp:295-296): sides/bottom closed, top open.
+    #[serde(default)]
+    left_open: i32,
+    #[serde(default)]
+    right_open: i32,
+    #[serde(default = "default_top_open")]
+    top_open: bool,
+    #[serde(default)]
+    bottom_open: bool,
+    /// `MVehic` (C4Game.cpp:1669): the material a closed border's MCVehic
+    /// pixel maps to through Pix2Mat. Resolved when the engine materials
+    /// exist (Engine::set_landscape).
+    #[serde(default)]
+    vehicle_material: Option<MaterialId>,
+}
+
+fn default_top_open() -> bool {
+    true
+}
+
+/// What `C4Landscape::GetPix` (C4Landscape.h:144-161) reads beyond the
+/// landscape bounds: pix 0 (sky) past an open border, MCVehic past a
+/// closed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BorderPixel {
+    Sky,
+    Vehicle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BlastResult {
     pub removed_by_material: HashMap<MaterialId, i32>,
     pub affected_columns: Vec<(i32, i32)>,
+    /// `BlastMatCount` (C4Landscape::BlastFree, C4Landscape.cpp:1044-1055):
+    /// in-circle pixels per material counted BEFORE removal, including
+    /// materials that neither BlastFree nor BlastShiftTo. The cast
+    /// amounts (:1066-1079) and the BlastShiftTo probability
+    /// (BlastFreePix, :964-970) derive from this count.
     pub pixel_count_by_material: HashMap<MaterialId, i32>,
     pub shift_candidates: Vec<BlastShiftCandidate>,
 }
@@ -462,6 +497,11 @@ impl Landscape {
             tunnels: HashMap::new(),
             world_height: None,
             pixels: None,
+            left_open: 0,
+            right_open: 0,
+            top_open: true,
+            bottom_open: false,
+            vehicle_material: None,
         })
     }
 
@@ -939,21 +979,51 @@ impl Landscape {
         }
     }
 
-    pub fn density_at(&self, x: i32, y: i32, materials: &MaterialSet) -> i32 {
+    /// The GetPix border rules (C4Landscape.h:144-161), checked in the C++
+    /// branch order (x before y). `None` = in bounds, read the landscape.
+    fn border_pixel(&self, x: i32, y: i32) -> Option<BorderPixel> {
+        let open = |open: bool| {
+            if open {
+                BorderPixel::Sky
+            } else {
+                BorderPixel::Vehicle
+            }
+        };
+        if x < 0 {
+            return Some(open(y < self.left_open));
+        }
+        if x as u32 >= self.width {
+            return Some(open(y < self.right_open));
+        }
         if y < 0 {
-            return C4M_BACKGROUND;
+            return Some(open(self.top_open));
         }
-        if x < 0 || x as u32 >= self.width {
-            return C4M_VEHICLE;
-        }
-        // BottomOpen defaults to false (C4SLandscape::Default): below the
-        // landscape the border reads vehicle-solid like the closed sides
-        // (the C++ GetPix border rules, C4Landscape.h:144-161). Without
-        // this, content loops that walk downward until solid never end.
         if y >= self.estimated_height() {
-            return C4M_VEHICLE;
+            return Some(open(self.bottom_open));
         }
-        // GBackDensity = Pix2Dens[pix] (C4Wrappers.h:169-172).
+        None
+    }
+
+    /// `GBackMat` (C4Wrappers.h:164-167 → GetMat → GetPix): material lookup
+    /// with the closed-border MCVehic mapping — past a closed side/bottom
+    /// the landscape answers the Vehicle material instead of sky, so PXS
+    /// and material reactions interact with the border like C++.
+    pub fn border_material_at(&self, x: i32, y: i32) -> Option<MaterialId> {
+        match self.border_pixel(x, y) {
+            Some(BorderPixel::Sky) => None,
+            Some(BorderPixel::Vehicle) => self.vehicle_material,
+            None => self.material_at(x, y),
+        }
+    }
+
+    pub fn density_at(&self, x: i32, y: i32, materials: &MaterialSet) -> i32 {
+        // GBackDensity = Pix2Dens[GetPix] (C4Wrappers.h:169-172) with the
+        // GetPix border rules (C4Landscape.h:144-161).
+        match self.border_pixel(x, y) {
+            Some(BorderPixel::Sky) => return C4M_BACKGROUND,
+            Some(BorderPixel::Vehicle) => return C4M_VEHICLE,
+            None => {}
+        }
         if let Some(grid) = &self.pixels {
             return grid.density_at(x, y).unwrap_or(C4M_BACKGROUND);
         }
@@ -964,6 +1034,61 @@ impl Landscape {
                 .unwrap_or(C4M_BACKGROUND),
             None => C4M_BACKGROUND,
         }
+    }
+
+    /// C4Landscape::ScenarioInit border-open assignment
+    /// (C4Landscape.cpp:67-71) from the Scenario.txt keys.
+    pub fn set_border_open(&mut self, left_open: i32, right_open: i32, top_open: bool, bottom_open: bool) {
+        self.left_open = left_open;
+        self.right_open = right_open;
+        self.top_open = top_open;
+        self.bottom_open = bottom_open;
+    }
+
+    pub fn left_open(&self) -> i32 {
+        self.left_open
+    }
+
+    pub fn right_open(&self) -> i32 {
+        self.right_open
+    }
+
+    pub fn top_open(&self) -> bool {
+        self.top_open
+    }
+
+    pub fn bottom_open(&self) -> bool {
+        self.bottom_open
+    }
+
+    /// `MVehic` resolution (C4Game::InitMaterialTexture, C4Game.cpp:1669).
+    pub fn set_vehicle_material(&mut self, material: Option<MaterialId>) {
+        self.vehicle_material = material;
+    }
+
+    /// C4Landscape::ScanSideOpen (C4Landscape.cpp:231-238): LeftOpen /
+    /// RightOpen become the first y whose border-column pixel is non-zero
+    /// (non-sky). Runs when the scenario sets AutoScanSideOpen
+    /// (C4Landscape::ScenarioInit, C4Landscape.cpp:72-73).
+    pub fn scan_side_open(&mut self) {
+        if self.width == 0 {
+            self.left_open = 0;
+            self.right_open = 0;
+            return;
+        }
+        let height = self.estimated_height();
+        let first_non_sky = |x: i32| {
+            (0..height)
+                .find(|&y| match &self.pixels {
+                    Some(grid) => grid.byte_at(x, y).map(|byte| byte != 0).unwrap_or(false),
+                    None => self.material_at(x, y).is_some(),
+                })
+                .unwrap_or(height)
+        };
+        let left = first_non_sky(0);
+        let right = first_non_sky(self.width as i32 - 1);
+        self.left_open = left;
+        self.right_open = right;
     }
 
     pub fn find_liquid_surface(
@@ -1120,6 +1245,26 @@ impl Landscape {
 
         self.ensure_material_capacity();
 
+        // BlastMatCount (C4Landscape::BlastFree, C4Landscape.cpp:1044-1055):
+        // count every valid in-circle material pixel BEFORE removal — the
+        // C++ loop shape (ycnt -rad..=rad, lwdt = sqrt(rad²-ycnt²), xcnt
+        // -lwdt..lwdt + the lwdt==0 extension). BlastShiftTo evaluation and
+        // the Blast2Object/Blast2PXS cast amounts derive from this count,
+        // so inert materials count too.
+        for y_offset in -radius..=radius {
+            let remaining =
+                i64::from(radius) * i64::from(radius) - i64::from(y_offset) * i64::from(y_offset);
+            let line_width = (remaining.max(0) as f64).sqrt() as i32;
+            let y = center.y.saturating_add(y_offset);
+            let extend = i32::from(line_width == 0);
+            for x_offset in -line_width..line_width + extend {
+                let x = center.x.saturating_add(x_offset);
+                if let Some(material_id) = self.material_at(x, y) {
+                    *result.pixel_count_by_material.entry(material_id).or_insert(0) += 1;
+                }
+            }
+        }
+
         let width = self.width as i32;
         let radius_sq = i64::from(radius) * i64::from(radius);
         let mut column_targets: Vec<Option<i32>> = vec![None; self.surface.len()];
@@ -1194,11 +1339,6 @@ impl Landscape {
             if !material.blast_free() {
                 if let Some(target) = material.blast_shift_to_target() {
                     if target != material_id {
-                        result
-                            .pixel_count_by_material
-                            .entry(material_id)
-                            .and_modify(|count| *count += removed_height)
-                            .or_insert(removed_height);
                         result.shift_candidates.push(BlastShiftCandidate {
                             column,
                             material: material_id,
@@ -2403,6 +2543,16 @@ impl<'de> Deserialize<'de> for Landscape {
             world_height: Option<i32>,
             #[serde(default)]
             pixels: Option<PixelGrid>,
+            #[serde(default)]
+            left_open: i32,
+            #[serde(default)]
+            right_open: i32,
+            #[serde(default = "default_top_open")]
+            top_open: bool,
+            #[serde(default)]
+            bottom_open: bool,
+            #[serde(default)]
+            vehicle_material: Option<MaterialId>,
         }
 
         let mut data = LandscapeData::deserialize(deserializer)?;
@@ -2440,6 +2590,11 @@ impl<'de> Deserialize<'de> for Landscape {
         landscape.tunnels = data.tunnels;
         landscape.world_height = data.world_height;
         landscape.pixels = data.pixels;
+        landscape.left_open = data.left_open;
+        landscape.right_open = data.right_open;
+        landscape.top_open = data.top_open;
+        landscape.bottom_open = data.bottom_open;
+        landscape.vehicle_material = data.vehicle_material;
         Ok(landscape)
     }
 }
@@ -3176,5 +3331,156 @@ mod tests {
 
         let landscape_non_flammable = Landscape::flat_with_material(5, 60, Some(stone));
         assert!(!landscape_non_flammable.can_incinerate(2, 65, &materials));
+    }
+
+    #[test]
+    fn blast_circle_precounts_in_circle_pixels_per_material_like_cpp() {
+        // C4Landscape::BlastFree counts every valid in-circle material
+        // pixel BEFORE removal (C4Landscape.cpp:1048-1055) — including
+        // materials that neither BlastFree nor BlastShiftTo — and the
+        // cast amounts derive from that count (:1066-1079). Circle loop:
+        // ycnt -rad..=rad, lwdt = sqrt(rad²-ycnt²), xcnt -lwdt..lwdt with
+        // the lwdt==0 single-pixel extension.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+            BlastFree=1
+
+            [Material Granite]
+            Name=Granite
+            Density=150
+            Friction=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let granite = materials.id_of("Granite").expect("granite exists");
+
+        let mut landscape =
+            Landscape::with_default_material(17, vec![40; 17], Some(earth)).expect("builds");
+        landscape.set_world_height(80);
+        for column in 9..17 {
+            landscape.set_solid_material(column, Some(granite));
+        }
+
+        let result = landscape.blast_circle(Vector2::new(8, 40), 4, &materials);
+        // Solid half of the r=4 circle at the surface row 40: earth
+        // pixels x∈4..=8 (rows 40..44), granite x∈9..=11.
+        assert_eq!(result.pixel_count_by_material.get(&earth), Some(&17));
+        assert_eq!(result.pixel_count_by_material.get(&granite), Some(&8));
+        // Granite neither BlastFrees nor shifts: nothing removed.
+        assert_eq!(result.removed_by_material.get(&granite), None);
+    }
+
+    fn vehicle_earth_materials() -> (MaterialSet, MaterialId, MaterialId) {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            Friction=100
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let vehicle = materials.id_of("Vehicle").expect("vehicle exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+        (materials, vehicle, earth)
+    }
+
+    #[test]
+    fn border_material_reads_vehicle_at_closed_edges_like_get_pix() {
+        // C4Landscape::GetPix border rules (C4Landscape.h:144-161) through
+        // Pix2Mat (GetMat, C4Landscape.h:173-176): a closed border reads
+        // MCVehic, which GBackMat maps to the Vehicle material; an open
+        // border reads pix 0 (sky → MNone). Scenario defaults are
+        // TopOpen=1, BottomOpen=0, LeftOpen=RightOpen=0
+        // (C4Scenario.cpp:295-296).
+        let (_materials, vehicle, earth) = vehicle_earth_materials();
+        let mut landscape = Landscape::flat_with_material(10, 5, Some(earth));
+        landscape.set_world_height(20);
+        landscape.set_vehicle_material(Some(vehicle));
+
+        // In bounds: the normal material lookup answers.
+        assert_eq!(landscape.border_material_at(4, 10), Some(earth));
+        assert_eq!(landscape.border_material_at(4, 2), None, "sky above");
+        // Sides closed (LeftOpen/RightOpen = 0).
+        assert_eq!(landscape.border_material_at(-1, 10), Some(vehicle));
+        assert_eq!(landscape.border_material_at(10, 10), Some(vehicle));
+        // Top open by default.
+        assert_eq!(landscape.border_material_at(4, -1), None);
+        // Bottom closed by default.
+        assert_eq!(landscape.border_material_at(4, 20), Some(vehicle));
+    }
+
+    #[test]
+    fn border_material_honours_open_flags_and_cpp_branch_order() {
+        // GetPix checks x before y (C4Landscape.h:148-159): beyond a side,
+        // LeftOpen/RightOpen are y thresholds (`y < LeftOpen` reads sky)
+        // and the Top/BottomOpen flags never apply.
+        let (_materials, vehicle, earth) = vehicle_earth_materials();
+        let mut landscape = Landscape::flat_with_material(10, 5, Some(earth));
+        landscape.set_world_height(20);
+        landscape.set_vehicle_material(Some(vehicle));
+        landscape.set_border_open(8, 12, false, true);
+
+        // Left side: open above y=8, closed from there down.
+        assert_eq!(landscape.border_material_at(-1, 7), None);
+        assert_eq!(landscape.border_material_at(-1, 8), Some(vehicle));
+        // Right side: open above y=12.
+        assert_eq!(landscape.border_material_at(10, 11), None);
+        assert_eq!(landscape.border_material_at(10, 12), Some(vehicle));
+        // x precedence: (-1,-5) takes the LEFT branch (y < LeftOpen →
+        // sky), even though the top is closed.
+        assert_eq!(landscape.border_material_at(-1, -5), None);
+        // Top closed, bottom open.
+        assert_eq!(landscape.border_material_at(4, -1), Some(vehicle));
+        assert_eq!(landscape.border_material_at(4, 20), None);
+    }
+
+    #[test]
+    fn density_at_follows_the_same_border_rules() {
+        // GBackDensity = Pix2Dens[GetPix] (C4Wrappers.h:169-172): the same
+        // border pixel that GetMat maps to Vehicle reads as vehicle-solid
+        // density; open borders read sky density 0.
+        let (materials, vehicle, earth) = vehicle_earth_materials();
+        let mut landscape = Landscape::flat_with_material(10, 5, Some(earth));
+        landscape.set_world_height(20);
+        landscape.set_vehicle_material(Some(vehicle));
+        landscape.set_border_open(8, 0, false, true);
+
+        assert_eq!(landscape.density_at(-1, 7, &materials), 0, "left open");
+        assert_eq!(landscape.density_at(-1, 8, &materials), 100, "left shut");
+        assert_eq!(landscape.density_at(4, -1, &materials), 100, "top shut");
+        assert_eq!(landscape.density_at(4, 20, &materials), 0, "bottom open");
+        // Defaults keep the previous behavior: side/bottom vehicle, top sky.
+        let default = Landscape::flat_with_material(10, 5, Some(earth));
+        assert_eq!(default.density_at(-1, 2, &materials), 100);
+        assert_eq!(default.density_at(4, -1, &materials), 0);
+        assert_eq!(default.density_at(4, 5, &materials), 100, "in-ground");
+    }
+
+    #[test]
+    fn scan_side_open_finds_first_non_sky_pixel_like_cpp() {
+        // C4Landscape::ScanSideOpen (C4Landscape.cpp:231-238): LeftOpen /
+        // RightOpen become the first y with a non-zero pixel in columns 0
+        // and Width-1 (AutoScanSideOpen, C4Landscape::ScenarioInit
+        // C4Landscape.cpp:72-73).
+        let (_materials, _vehicle, earth) = vehicle_earth_materials();
+        let mut landscape =
+            Landscape::with_default_material(3, vec![6, 9, 4], Some(earth)).expect("builds");
+        landscape.set_world_height(12);
+        landscape.scan_side_open();
+        assert_eq!(landscape.left_open(), 6, "column 0 solid from y=6");
+        assert_eq!(landscape.right_open(), 4, "column 2 solid from y=4");
     }
 }

@@ -808,6 +808,12 @@ pub struct ParticleSnapshot {
     /// sync-relevant state; the float fields above are lossy projections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pxs_fixed: Option<[i32; 4]>,
+    /// Saved chunk/slot position (`chunk * PXS_CHUNK_SIZE + slot`) of a
+    /// C4PXS pixel sprite: C4PXSSystem::Save/Load keep the whole chunk
+    /// layout, MNone gaps included (C4PXS.cpp:346-349, 383-397), so
+    /// restore must place each pixel back in its slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pxs_slot: Option<u32>,
 }
 
 impl PartialEq for ParticleSnapshot {
@@ -820,6 +826,7 @@ impl PartialEq for ParticleSnapshot {
             && self.parameter_b == other.parameter_b
             && self.layer == other.layer
             && self.pxs_fixed == other.pxs_fixed
+            && self.pxs_slot == other.pxs_slot
     }
 }
 
@@ -915,6 +922,7 @@ impl ActiveParticle {
             parameter_b,
             layer,
             pxs_fixed: None,
+            pxs_slot: None,
         };
         Self {
             snapshot,
@@ -960,13 +968,16 @@ fn system_particle_snapshot(particle: &particles::Particle) -> ParticleSnapshot 
         parameter_b: particle.b,
         layer: particle.layer.clone(),
         pxs_fixed: None,
+        pxs_slot: None,
     }
 }
 
 /// Snapshot form of a C4PXS pixel sprite. The float position/velocity are
 /// `fixtof` projections for display; `pxs_fixed` carries the raw sync-relevant
-/// `C4Fixed` state for lossless save/load.
-fn pxs_snapshot(pxs: &pxs::Pxs, materials: &MaterialSet) -> ParticleSnapshot {
+/// `C4Fixed` state for lossless save/load. `slot` is the saved chunk-major
+/// slot position (C4PXSSystem::Save keeps the chunk layout verbatim,
+/// C4PXS.cpp:346-349); presentation snapshots pass `None`.
+fn pxs_snapshot(pxs: &pxs::Pxs, materials: &MaterialSet, slot: Option<u32>) -> ParticleSnapshot {
     let definition_id = materials
         .get_by_id(pxs.mat)
         .map(|material| format!("material/pxs/{}", material.normalized_name()))
@@ -980,6 +991,7 @@ fn pxs_snapshot(pxs: &pxs::Pxs, materials: &MaterialSet) -> ParticleSnapshot {
         parameter_b: pxs.mat.index() as i32,
         layer: ParticleLayer::Global,
         pxs_fixed: Some([pxs.x.val(), pxs.y.val(), pxs.xdir.val(), pxs.ydir.val()]),
+        pxs_slot: slot,
     }
 }
 
@@ -11295,6 +11307,9 @@ impl Engine {
         // texmap material names into engine ids now that both exist.
         let materials = &self.materials;
         landscape.resolve_grid_materials(|name| materials.id_of(name));
+        // MVehic (C4Game::InitMaterialTexture, C4Game.cpp:1669): the
+        // closed-border material for GetPix's MCVehic reads.
+        landscape.set_vehicle_material(materials.id_of("Vehicle"));
         self.landscape = Some(landscape);
         self.reset_sectors_from_landscape();
     }
@@ -11331,7 +11346,9 @@ impl Engine {
                 self.check_instability_range(center.x + xcnt, dpy);
             }
         }
-        if !result.removed_by_material.is_empty() {
+        // The evaluate loop keys on the PRE-blast BlastMatCount, not on
+        // what was removed (C4Landscape.cpp:1065-1079).
+        if !result.pixel_count_by_material.is_empty() {
             self.process_blast_reactions(center, controller, &result);
         }
         Some(result)
@@ -15524,7 +15541,7 @@ impl Engine {
         particles.extend(
             self.pxs_system
                 .iter()
-                .map(|pixel| pxs_snapshot(pixel, &self.materials)),
+                .map(|pixel| pxs_snapshot(pixel, &self.materials, None)),
         );
         particles.extend(
             self.particle_system
@@ -15824,11 +15841,13 @@ impl Engine {
             .iter()
             .map(ActiveParticle::snapshot)
             .collect();
-        particles.extend(
-            self.pxs_system
-                .iter()
-                .map(|pixel| pxs_snapshot(pixel, &self.materials)),
-        );
+        particles.extend(self.pxs_system.iter_slots().map(|(chunk, slot, pixel)| {
+            pxs_snapshot(
+                pixel,
+                &self.materials,
+                Some((chunk * pxs::PXS_CHUNK_SIZE + slot) as u32),
+            )
+        }));
         let mut players: Vec<_> = self.players.values().map(Player::to_state).collect();
         players.sort_unstable_by_key(|player| player.id);
 
@@ -15899,13 +15918,35 @@ impl Engine {
                         math::ftofix(snapshot.velocity.x).val(),
                         math::ftofix(snapshot.velocity.y).val(),
                     ]);
-                    self.pxs_system.create(
-                        material,
-                        C4Fixed::from_raw(x),
-                        C4Fixed::from_raw(y),
-                        C4Fixed::from_raw(xdir),
-                        C4Fixed::from_raw(ydir),
-                    );
+                    let pixel = pxs::Pxs {
+                        mat: material,
+                        x: C4Fixed::from_raw(x),
+                        y: C4Fixed::from_raw(y),
+                        xdir: C4Fixed::from_raw(xdir),
+                        ydir: C4Fixed::from_raw(ydir),
+                    };
+                    // Saved slot position: C4PXSSystem::Load keeps the
+                    // chunk layout verbatim (C4PXS.cpp:383-397). Legacy
+                    // snapshots without one fall back to New()-style fill.
+                    match snapshot.pxs_slot {
+                        Some(index) => {
+                            let index = index as usize;
+                            self.pxs_system.create_at(
+                                index / pxs::PXS_CHUNK_SIZE,
+                                index % pxs::PXS_CHUNK_SIZE,
+                                pixel,
+                            );
+                        }
+                        None => {
+                            self.pxs_system.create(
+                                material,
+                                pixel.x,
+                                pixel.y,
+                                pixel.xdir,
+                                pixel.ydir,
+                            );
+                        }
+                    }
                 }
                 continue;
             }
@@ -22758,85 +22799,80 @@ impl Engine {
         }
     }
 
+    /// C4Landscape::BlastFree evaluate loop (C4Landscape.cpp:1065-1079):
+    /// materials in INDEX order, gated on the pre-blast BlastMatCount;
+    /// within one material BlastCastObjects runs BEFORE PXS.Cast, and each
+    /// object is created inline between its draws and the next.
     fn process_blast_reactions(
         &mut self,
         center: Vector2,
         controller: Option<i32>,
         result: &BlastResult,
     ) {
-        let mut spawn_requests = Vec::new();
+        let material_casts: Vec<(MaterialId, Option<String>, Option<i32>, Option<i32>)> = self
+            .materials
+            .iter()
+            .map(|material| {
+                (
+                    material.id(),
+                    material.blast_to_object_name().map(str::to_string),
+                    material.blast_to_object_ratio(),
+                    material.blast_to_pxs_ratio(),
+                )
+            })
+            .collect();
 
-        for (material_id, removed) in &result.removed_by_material {
-            if *removed <= 0 {
+        for (material_id, object_name, object_ratio, pxs_ratio) in material_casts {
+            let count = result
+                .pixel_count_by_material
+                .get(&material_id)
+                .copied()
+                .unwrap_or(0);
+            // `if (BlastMatCount[cnt])` (C4Landscape.cpp:1067)
+            if count == 0 {
                 continue;
             }
 
-            let (
-                material_id_value,
-                splash_rate,
-                blast_to_pxs_ratio,
-                blast_to_object_name,
-                blast_to_object_ratio,
-            ) = match self.materials.get_by_id(*material_id) {
-                Some(material) => (
-                    material.id(),
-                    material.splash_rate(),
-                    material.blast_to_pxs_ratio(),
-                    material.blast_to_object_name().map(|name| name.to_string()),
-                    material.blast_to_object_ratio(),
-                ),
-                None => continue,
-            };
+            // Blast2Object → C4Game::BlastCastObjects (C4Game.cpp:1723-1735):
+            // per object 4 draws in argument-evaluation order — rdir =
+            // itofix(Random(3) + 1), ydir = FIXED10(Random(61) - 40),
+            // xdir = FIXED10(Random(61) - 30), angle = Random(360) — then
+            // CreateObject(id, nullptr, NO_OWNER, tx, ty, …, iByPlayer).
+            // The draws happen BEFORE C4Id2Def, so an unloaded definition
+            // still consumes them (C4Game.cpp:1142-1148).
+            if let (Some(definition_id), Some(ratio)) = (object_name, object_ratio) {
+                if ratio != 0 {
+                    let num = count / ratio;
+                    for _ in 0..num {
+                        let rdir = itofix(self.rng.random(3) + 1);
+                        let ydir = fixed10(self.rng.random(61) - 40);
+                        let xdir = fixed10(self.rng.random(61) - 30);
+                        let rotation = self.rng.random(360);
+                        let config = SpawnConfig::new(definition_id.clone())
+                            .with_position(center)
+                            .with_rotation(rotation)
+                            .with_fixed_velocity(FixedVec2::new(xdir, ydir))
+                            .with_rotation_velocity(rdir)
+                            .with_owner(OWNER_NONE)
+                            .with_controller(controller.unwrap_or(OWNER_NONE));
+                        // Unknown definition: C4Id2Def → nullptr, no object.
+                        let _ = self.spawn_object(config);
+                    }
+                }
+            }
 
-            if let Some(ratio) = blast_to_pxs_ratio {
-                if ratio > 0 {
-                    // BlastFree → PXS.Cast(mat, count, tx, ty, 60)
-                    // (C4Landscape.cpp:1075-1078)
-                    let pxs_count = (*removed / ratio).max(0);
+            // Blast2PXSRatio → PXS.Cast(mat, BlastMatCount/ratio, tx, ty, 60)
+            // (C4Landscape.cpp:1075-1078)
+            if let Some(ratio) = pxs_ratio {
+                if ratio != 0 {
                     self.pxs_system.cast(
                         &mut self.rng,
-                        material_id_value,
-                        pxs_count,
+                        material_id,
+                        count / ratio,
                         center.x,
                         center.y,
                         60,
                     );
-                }
-            }
-
-            if let (Some(definition_id), Some(ratio)) =
-                (blast_to_object_name.as_ref(), blast_to_object_ratio)
-            {
-                if ratio <= 0 {
-                    continue;
-                }
-                if !self.definitions.contains_key(definition_id) {
-                    continue;
-                }
-                let spawn_count = (*removed / ratio).max(0);
-                if spawn_count <= 0 {
-                    continue;
-                }
-                let owner = controller.unwrap_or(OWNER_NONE);
-                for _ in 0..spawn_count {
-                    let rotation = self.rng.gen_range(0..360);
-                    let velocity =
-                        Vector2::new(self.rng.gen_range(-30..=30), self.rng.gen_range(-40..=20));
-                    spawn_requests.push(
-                        SpawnConfig::new(definition_id.clone())
-                            .with_position(center)
-                            .with_velocity(velocity)
-                            .with_rotation(rotation)
-                            .with_owner(owner),
-                    );
-                }
-            }
-        }
-
-        if !spawn_requests.is_empty() {
-            for config in spawn_requests {
-                if let Err(err) = self.spawn_object(config) {
-                    let _ = err;
                 }
             }
         }
@@ -23032,7 +23068,10 @@ impl Engine {
     }
 
     /// `C4PXSSystem::Execute` (C4PXS.cpp:212-234): free empty chunks, then
-    /// run every live PXS in chunk-major slot order.
+    /// run every live PXS in chunk-major slot order, IN PLACE — the slot
+    /// stays occupied while its PXS executes, so a PXS created inside a
+    /// reaction can never be handed the executing slot (New(),
+    /// C4PXS.cpp:195-202).
     fn tick_pxs(&mut self) {
         self.pxs_system.free_empty_chunks();
         for chunk in 0..pxs::PXS_MAX_CHUNK {
@@ -23040,21 +23079,24 @@ impl Engine {
                 continue;
             }
             for slot in 0..pxs::PXS_CHUNK_SIZE {
-                let Some(pixel) = self.pxs_system.take_slot(chunk, slot) else {
+                let Some(pixel) = self.pxs_system.peek_slot(chunk, slot) else {
                     continue;
                 };
                 match self.execute_pxs(pixel) {
                     Some(updated) => self.pxs_system.put_slot(chunk, slot, updated),
-                    None => self.pxs_system.release_slot(chunk),
+                    None => self.pxs_system.clear_slot(chunk, slot),
                 }
             }
         }
     }
 
+    /// `GBackMat` (C4Wrappers.h:164-167): the PXS step loop and reaction
+    /// lookups read materials through the GetPix border rules — a closed
+    /// side/bottom answers the Vehicle material, not sky.
     fn landscape_material(&self, x: i32, y: i32) -> Option<MaterialId> {
         self.landscape
             .as_ref()
-            .and_then(|landscape| landscape.material_at(x, y))
+            .and_then(|landscape| landscape.border_material_at(x, y))
     }
 
     /// `C4PXS::Execute` (C4PXS.cpp:28-127). Returns the surviving PXS, or
@@ -26526,6 +26568,196 @@ mod tests {
     }
 
     #[test]
+    fn blast_cast_amounts_derive_from_the_pre_blast_circle_count() -> Result<(), EngineError> {
+        // C4Landscape::BlastFree computes cast amounts from BlastMatCount —
+        // the PRE-removal in-circle pixel count (C4Landscape.cpp:1048-1055,
+        // 1066-1079) — not from what was actually cleared. A material with
+        // BlastFree=0 still casts BlastMatCount/Blast2PXSRatio particles.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Rock]
+            Name=Rock
+            Density=150
+            Friction=100
+            Blast2PXSRatio=2
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let rock = materials.id_of("Rock").expect("rock exists");
+        let mut engine = Engine::with_seed(7);
+        engine.set_materials(materials);
+        let mut world = Landscape::flat_with_material(17, 40, Some(rock));
+        world.set_world_height(80);
+        engine.set_landscape(world);
+
+        let result = engine
+            .blast_circle(Vector2::new(8, 40), 4, None)
+            .expect("blast applies");
+        assert!(
+            result.removed_by_material.is_empty(),
+            "BlastFree=0 removes nothing"
+        );
+        let pre_count = result
+            .pixel_count_by_material
+            .get(&rock)
+            .copied()
+            .unwrap_or_default();
+        assert_eq!(pre_count, 25, "solid half circle of r=4");
+        assert_eq!(
+            engine.pxs_system.count() as i32,
+            pre_count / 2,
+            "PXS.Cast(mat, BlastMatCount/Blast2PXSRatio) (C4Landscape.cpp:1075-1078)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn blast_cast_fan_out_matches_the_cpp_evaluate_loop() -> Result<(), EngineError> {
+        // C4Landscape::BlastFree evaluate loop (C4Landscape.cpp:1065-1079):
+        // materials in INDEX order; within a material BlastCastObjects runs
+        // BEFORE PXS.Cast. BlastCastObjects (C4Game.cpp:1723-1735) draws 4
+        // per object in argument-evaluation order — rdir = itofix(Random(3)
+        // + 1), ydir = FIXED10(Random(61) - 40), xdir = FIXED10(Random(61)
+        // - 30), angle = Random(360) — creating each object INLINE with
+        // owner NO_OWNER and the blast controller.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Dust]
+            Name=Dust
+            Density=100
+            Friction=25
+            BlastFree=1
+            Blast2PXSRatio=5
+
+            [Material Ruby]
+            Name=Ruby
+            Density=120
+            Friction=40
+            BlastFree=1
+            Blast2Object=GEM0
+            Blast2ObjectRatio=4
+            Blast2PXSRatio=5
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let dust = materials.id_of("Dust").expect("dust exists");
+        let ruby = materials.id_of("Ruby").expect("ruby exists");
+        let mut engine = Engine::with_seed(13);
+        engine.set_materials(materials);
+        // Script-less rotateable def: no callback draws disturb the stream.
+        let mut gem = Definition::from_script("GEM0", "GEM0", "").expect("compiles");
+        gem.set_rotateable(1);
+        engine.register_definition(gem).expect("gem registers");
+        let mut world = Landscape::flat_with_material(17, 40, Some(dust));
+        world.set_world_height(80);
+        for column in 9..17 {
+            world.set_solid_material(column, Some(ruby));
+        }
+        engine.set_landscape(world);
+
+        let mut mirror = engine.rng.clone();
+        let controller = 3;
+        let result = engine
+            .blast_circle(Vector2::new(8, 40), 4, Some(controller))
+            .expect("blast applies");
+        // Pre-blast counts: dust x∈4..=8 → 17, ruby x∈9..=11 → 8.
+        assert_eq!(result.pixel_count_by_material.get(&dust), Some(&17));
+        assert_eq!(result.pixel_count_by_material.get(&ruby), Some(&8));
+
+        // Dust (index 0): no Blast2Object → PXS.Cast(dust, 17/5 = 3, …, 60)
+        // draws Random(61) twice per particle (C4PXS.cpp:309-322).
+        for _ in 0..3 {
+            mirror.random(61);
+            mirror.random(61);
+        }
+        // Ruby (index 1): 8/4 = 2 objects FIRST, 4 draws each…
+        let mut expected_objects = Vec::new();
+        for _ in 0..2 {
+            let r4 = mirror.random(3);
+            let r3 = mirror.random(61);
+            let r2 = mirror.random(61);
+            let r1 = mirror.random(360);
+            expected_objects.push((r1, r2, r3, r4));
+        }
+        // …then PXS.Cast(ruby, 8/5 = 1, …).
+        mirror.random(61);
+        mirror.random(61);
+        assert_eq!(engine.rng, mirror, "synced draw stream matches C++");
+
+        let gems: Vec<&Object> = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "GEM0")
+            .collect();
+        assert_eq!(gems.len(), 2);
+        for (object, (r1, r2, r3, r4)) in gems.iter().zip(expected_objects) {
+            assert_eq!(object.state.rotation, r1.rem_euclid(360));
+            assert_eq!(object.fixed_velocity.x, math::fixed10(r2 - 30), "xdir");
+            assert_eq!(object.fixed_velocity.y, math::fixed10(r3 - 40), "ydir");
+            assert_eq!(object.rotation_velocity, math::itofix(r4 + 1), "rdir");
+            assert_eq!(object.state.owner, OWNER_NONE, "CreateObject NO_OWNER");
+            assert_eq!(object.state.controller, controller, "iByPlayer");
+        }
+        assert_eq!(engine.pxs_system.count(), 4, "3 dust + 1 ruby particles");
+        Ok(())
+    }
+
+    #[test]
+    fn blast_object_cast_consumes_draws_for_unknown_definitions() -> Result<(), EngineError> {
+        // C4Game::BlastCastObjects evaluates the 4 Random draws as call
+        // ARGUMENTS before CreateObject's C4Id2Def check (C4Game.cpp:
+        // 1726-1733, 1142-1148): an unloaded id spawns nothing but the
+        // stream advances — and the following PXS cast still lines up.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Emerald]
+            Name=Emerald
+            Density=120
+            Friction=40
+            BlastFree=1
+            Blast2Object=MISS
+            Blast2ObjectRatio=4
+            Blast2PXSRatio=5
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let emerald = materials.id_of("Emerald").expect("emerald exists");
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        let mut world = Landscape::flat_with_material(17, 40, Some(emerald));
+        world.set_world_height(80);
+        engine.set_landscape(world);
+
+        let mut mirror = engine.rng.clone();
+        let result = engine
+            .blast_circle(Vector2::new(8, 40), 4, None)
+            .expect("blast applies");
+        assert_eq!(result.pixel_count_by_material.get(&emerald), Some(&25));
+        // 25/4 = 6 objects worth of draws, definition never loaded…
+        for _ in 0..6 {
+            mirror.random(3);
+            mirror.random(61);
+            mirror.random(61);
+            mirror.random(360);
+        }
+        // …then PXS.Cast(emerald, 25/5 = 5).
+        for _ in 0..5 {
+            mirror.random(61);
+            mirror.random(61);
+        }
+        assert_eq!(engine.rng, mirror, "unknown-def draws are consumed");
+        assert!(
+            engine.objects.is_empty(),
+            "C4Id2Def null spawns no objects"
+        );
+        assert_eq!(engine.pxs_system.count(), 5);
+        Ok(())
+    }
+
+    #[test]
     fn set_landscape_resolves_pixel_grid_materials_like_update_pix_maps() {
         // UpdatePixMaps fills Pix2Mat by resolving each texmap entry's
         // material NAME against the loaded material map
@@ -26577,6 +26809,41 @@ mod tests {
     }
 
     #[test]
+    fn set_landscape_resolves_the_vehicle_border_material_like_mvehic() {
+        // MVehic = Material.Get("Vehicle") (C4Game::InitMaterialTexture,
+        // C4Game.cpp:1669); GetPix's closed borders read MCVehic which
+        // GBackMat maps back to that material (C4Landscape.h:144-161,
+        // 173-176).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            Friction=100
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let vehicle = materials.id_of("Vehicle").expect("vehicle exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(1);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(10, 5, Some(earth)));
+        let landscape = engine.landscape().expect("landscape set");
+        assert_eq!(
+            landscape.border_material_at(-1, 3),
+            Some(vehicle),
+            "closed side reads the Vehicle material"
+        );
+        assert_eq!(landscape.border_material_at(4, -1), None, "top open");
+    }
+
+    #[test]
     fn blast_circle_spawns_objects_for_material_reactions() -> Result<(), EngineError> {
         let library = MaterialLibrary::parse(
             r#"
@@ -26609,18 +26876,18 @@ mod tests {
         let result = engine
             .blast_circle(Vector2::new(8, 40), 4, Some(controller))
             .expect("blast applies");
-        let removed = result
-            .removed_by_material
+        let pre_count = result
+            .pixel_count_by_material
             .get(&rock)
             .copied()
             .unwrap_or_default();
-        assert!(removed > 0, "expected blast to remove rock material");
+        assert!(pre_count > 0, "expected in-circle rock pixels");
 
         let ratio = 2;
-        let expected_spawns = (removed / ratio).max(0);
+        let expected_spawns = pre_count / ratio;
         assert!(
             expected_spawns > 0,
-            "expected blast to spawn objects when material is removed"
+            "expected blast to spawn objects for the counted material"
         );
         let after_snapshot = engine.snapshot();
         let new_objects: Vec<_> = after_snapshot
@@ -26631,7 +26898,7 @@ mod tests {
         assert_eq!(
             new_objects.len() as i32,
             expected_spawns,
-            "blast should spawn one object per {:?} removed pixels",
+            "blast should spawn one object per {:?} counted pixels",
             ratio
         );
 
@@ -26640,21 +26907,27 @@ mod tests {
                 object.definition_id, "GEM0",
                 "blast should spawn configured definition"
             );
+            // FIXED10(Random(61)-30) / FIXED10(Random(61)-40)
+            // (C4Game.cpp:1730-1731): ±3.0 / -4.0..+2.0 as integers.
             assert!(
-                (-30..=30).contains(&object.velocity.x),
-                "expected horizontal velocity to follow legacy FIXED10 distribution"
+                (-3..=3).contains(&object.velocity.x),
+                "expected horizontal velocity to follow the FIXED10 range"
             );
             assert!(
-                (-40..=20).contains(&object.velocity.y),
-                "expected vertical velocity to follow legacy FIXED10 distribution"
+                (-4..=2).contains(&object.velocity.y),
+                "expected vertical velocity to follow the FIXED10 range"
             );
             assert!(
                 (0..360).contains(&object.rotation),
                 "expected rotation to be normalised"
             );
+            // CreateObject(id, nullptr, NO_OWNER, …, iByPlayer)
+            // (C4Game.cpp:1733): the blast controller is the CONTROLLER,
+            // not the owner.
+            assert_eq!(object.owner, OWNER_NONE, "owner is NO_OWNER");
             assert_eq!(
-                object.owner, controller,
-                "expected spawned object owner to match controller"
+                object.controller, controller,
+                "controller carries the blasting player"
             );
         }
         Ok(())
@@ -27802,7 +28075,12 @@ mod tests {
 
         let mut engine = Engine::with_seed(21);
         engine.set_materials(materials);
-        engine.set_landscape(Landscape::flat_with_material(5, 10, Some(earth)));
+        // World bottom below the ground surface: the y=10 contact row is
+        // EARTH — at the world bottom it would be the closed border, which
+        // reads Vehicle in C++ (GetPix, C4Landscape.h:157-159).
+        let mut world = Landscape::flat_with_material(5, 10, Some(earth));
+        world.set_world_height(20);
+        engine.set_landscape(world);
         let mirror = engine.rng.clone();
         assert!(engine.pxs_system.create(
             slime,
@@ -27818,6 +28096,225 @@ mod tests {
         assert_eq!(survivors[0].xdir, math::C4Fixed::ZERO);
         assert_eq!(survivors[0].ydir, math::C4Fixed::ZERO);
         assert_eq!(engine.rng, mirror, "no draws on the conversion path");
+    }
+
+    #[test]
+    fn pxs_reacts_with_the_vehicle_border_at_closed_sides_like_cpp() {
+        // GBackMat reads MCVehic → Vehicle past a closed side
+        // (C4Landscape.h:144-161, GetMat :173-176), so a PXS pushing into
+        // the border hits DefReactInsert vs Vehicle (liquid density 25 <=
+        // vehicle 100 → mrfInsert, C4Material.cpp:773-798): mrfInsertCheck
+        // finds no slide against the wall and InsertMaterial deactivates
+        // the PXS in place — it must NOT walk out of bounds and die
+        // draw-free like against sky.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+            SplashRate=0
+            MaxSlide=3
+
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            Friction=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(9);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(6, 6, Some(earth)));
+
+        // Per-pixel world: earth from y=6 down, sky above (the audit bug
+        // lives on the grid path — material_at answers None past the
+        // sides there).
+        let mut densities = vec![0i32; 128];
+        densities[20] = 25;
+        densities[30] = 100;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[20] = Some("Water".into());
+        names[30] = Some("Earth".into());
+        let mut bytes = vec![0u8; 6 * 12];
+        for y in 6..12 {
+            for x in 0..6 {
+                bytes[y * 6 + x] = 30;
+            }
+        }
+        let grid = landscape::PixelGrid::new(6, 12, bytes, densities, names, vec![None; 128]);
+        let mut world =
+            Landscape::with_default_material(6, vec![6; 6], Some(earth)).expect("builds");
+        world.set_world_height(12);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        // Sitting on the ground in the border column, pushing left.
+        let mirror = engine.rng.clone();
+        assert!(engine.pxs_system.create(
+            water,
+            math::itofix(0),
+            math::itofix(5),
+            -math::itofix(2),
+            math::C4Fixed::ZERO,
+        ));
+        engine.tick_pxs();
+        assert_eq!(
+            engine.pxs_system.iter().count(),
+            0,
+            "border contact inserts and deactivates the PXS"
+        );
+        let landscape = engine.landscape().expect("landscape set");
+        assert_eq!(
+            landscape.material_at(0, 5),
+            Some(water),
+            "InsertMaterial landed the pixel against the border"
+        );
+        assert_eq!(engine.rng, mirror, "no synced draws on this path");
+    }
+
+    #[test]
+    fn pxs_created_mid_execute_never_takes_the_executing_slot() {
+        // C4PXSSystem::Execute runs each PXS IN PLACE (C4PXS.cpp:218-240):
+        // while a PXS executes, its slot still carries Mat != MNone, so a
+        // PXS created inside a reaction (InsertMaterial's slide loop
+        // re-creates the droplet, C4Landscape.cpp:1192-1196) can never be
+        // handed that slot by New() (C4PXS.cpp:195-202). Only after the
+        // reaction kills the pixel does Deactivate free it — the droplet
+        // must land in the NEXT slot, keeping the deterministic
+        // chunk-major execution order.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+            SplashRate=0
+            MaxSlide=10
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let mut engine = Engine::with_seed(3);
+        engine.set_materials(materials);
+
+        // Pixel world 12x12: a water pool in columns 0..=6 (rows 6..11)
+        // with a step down to open air at column 7 — the insert slide
+        // finds the ledge and re-creates the pixel as a droplet there.
+        let mut densities = vec![0i32; 128];
+        densities[20] = 25;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[20] = Some("Water".into());
+        let mut bytes = vec![0u8; 12 * 12];
+        for y in 6..12 {
+            for x in 0..=6 {
+                bytes[y * 12 + x] = 20;
+            }
+        }
+        let grid = landscape::PixelGrid::new(12, 12, bytes, densities, names, vec![None; 128]);
+        let mut world =
+            Landscape::with_default_material(12, vec![6; 12], Some(water)).expect("builds");
+        world.set_world_height(12);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        // Slot 0: a submerged water PXS moving down — the water-vs-water
+        // move contact inserts (killing it) and the insert slides to the
+        // ledge, creating the droplet DURING slot 0's execution.
+        assert!(engine.pxs_system.create(
+            water,
+            math::itofix(3),
+            math::itofix(7),
+            math::C4Fixed::ZERO,
+            math::itofix(1),
+        ));
+        engine.tick_pxs();
+
+        let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
+        assert_eq!(survivors.len(), 1, "only the droplet survives");
+        assert_eq!(fixtoi(survivors[0].x), 7, "droplet sits on the ledge");
+        assert_eq!(
+            engine.pxs_system.count(),
+            1,
+            "chunk counts stay exact through the mid-execute create"
+        );
+
+        // The executing slot 0 freed on death; the droplet occupies slot 1
+        // (C++ New() skipped the still-live slot 0). The next create must
+        // reuse slot 0 and execute BEFORE the droplet.
+        assert!(engine.pxs_system.create(
+            water,
+            math::itofix(9),
+            math::itofix(2),
+            math::C4Fixed::ZERO,
+            math::C4Fixed::ZERO,
+        ));
+        let order: Vec<i32> = engine.pxs_system.iter().map(|pxs| fixtoi(pxs.x)).collect();
+        assert_eq!(
+            order,
+            [9, 7],
+            "slot 0 was free during the droplet's creation only in C++ terms — \
+             the droplet must sit in slot 1"
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_preserves_pxs_slot_layout_verbatim() {
+        // C4PXSSystem::Save writes whole chunks including their MNone gaps
+        // (C4PXS.cpp:346-349) and Load re-counts them in place
+        // (C4PXS.cpp:383-397): slot POSITIONS survive save/load, so slot
+        // reuse — and with it the deterministic execution order — stays
+        // lockstep across a save/load boundary. Compacting the layout on
+        // restore hands later creates different slots than C++.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let mut engine = Engine::with_seed(5);
+        engine.set_materials(materials);
+
+        for x in 0..3 {
+            assert!(engine.pxs_system.create(
+                water,
+                math::itofix(x),
+                math::itofix(0),
+                math::C4Fixed::ZERO,
+                math::C4Fixed::ZERO,
+            ));
+        }
+        // Kill the middle pixel: slot 1 becomes an MNone gap.
+        engine.pxs_system.clear_slot(0, 1);
+
+        let state = engine.capture_state();
+        engine.restore_state(&state).expect("state restores");
+
+        // The gap must survive: the next create reuses slot 1, keeping
+        // chunk-major order [slot0, slot1, slot2] = [0, 9, 2].
+        assert!(engine.pxs_system.create(
+            water,
+            math::itofix(9),
+            math::itofix(0),
+            math::C4Fixed::ZERO,
+            math::C4Fixed::ZERO,
+        ));
+        let order: Vec<i32> = engine.pxs_system.iter().map(|pxs| fixtoi(pxs.x)).collect();
+        assert_eq!(order, [0, 9, 2], "restore keeps the MNone gap at slot 1");
     }
 
     #[test]
@@ -27865,7 +28362,12 @@ mod tests {
 
         let mut engine = Engine::with_seed(21);
         engine.set_materials(materials);
-        engine.set_landscape(Landscape::flat_with_material(5, 10, Some(earth)));
+        // World bottom below the ground surface: the y=10 contact row is
+        // EARTH — at the world bottom it would be the closed border, which
+        // reads Vehicle in C++ (GetPix, C4Landscape.h:157-159).
+        let mut world = Landscape::flat_with_material(5, 10, Some(earth));
+        world.set_world_height(20);
+        engine.set_landscape(world);
         // The reaction function records its parameters in a global effect
         // variable store via AddEffect... keep it simpler: return the kill
         // flag computed from the parameters so the call is observable both
@@ -27960,7 +28462,12 @@ mod tests {
 
         let mut engine = Engine::with_seed(21);
         engine.set_materials(materials);
-        engine.set_landscape(Landscape::flat_with_material(5, 10, Some(earth)));
+        // World bottom below the ground surface: the y=10 contact row is
+        // EARTH — at the world bottom it would be the closed border, which
+        // reads Vehicle in C++ (GetPix, C4Landscape.h:157-159).
+        let mut world = Landscape::flat_with_material(5, 10, Some(earth));
+        world.set_world_height(20);
+        engine.set_landscape(world);
         engine
             .install_scenario_script(
                 "Scenario",
