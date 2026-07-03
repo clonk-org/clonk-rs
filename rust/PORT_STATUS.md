@@ -665,6 +665,24 @@ full-scenario shadow-diff (see Parity harnesses).
   (b) set Music=false in ~/Library/Preferences/legacyclonk.config to
   silence it (kills music for real play sessions too).
 
+- **2026-07-03 FRAME-1 PARITY COMPLETE (393 -> 0):** the live shadow
+  comparator passes frame 1 entirely and first diverges at FRAME 2.
+  The final waves: SWIM/HANGLE/DIG phase-advance scaling; same-name
+  NextAction EndCall+StartCall; InsertMaterial/OnFire host fns;
+  CreateObject owner default 0; Find_InRect point-in-rect; preview
+  scopes carry def vertices; Landscape.ScenarioInit Gravity ledger
+  draw; per-object SolidMask overrides decode their own sprite region
+  (+ carrier filter includes overrides); C4ObjectList exec order
+  (ascending sort-category, exec_seq within); phase advance AFTER
+  procedure steering; legacy ActMap converter carries Attach/DigFree;
+  SetVertex foreign-target staging; join AdjustCursorCommand + crew
+  order per-surface (engine newest-first, HUD ascending = bridge
+  std::sort artifact); TargetBounds clamps the INT step target only
+  (the rider x/fix split at the map edge, probe-verified); comparator
+  normalizes bridge asymmetries (messages, surfaces). FRAME-2 wall: 6
+  objects (1450 vertices + subpix/action/position/mobile classes) —
+  the next epic.
+
 ## Gates
 
 - **`cargo test --workspace`: GREEN** (~1240 pass, cargo exit 0). The old
