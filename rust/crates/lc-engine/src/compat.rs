@@ -6524,7 +6524,7 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
 
     if idx < len {
         match &args[idx] {
-            Value::String(_) | Value::Nil => {
+            Value::C4Id(_) | Value::String(_) | Value::Nil => {
                 command_target_id = parse_command_target_id(&args[idx])?;
                 idx += 1;
             }
@@ -16395,11 +16395,13 @@ fn parse_command_target(value: &Value) -> Result<Option<i32>, RuntimeError> {
 
 fn parse_command_target_id(value: &Value) -> Result<Option<String>, RuntimeError> {
     match value {
-        Value::String(id) if !id.is_empty() => Ok(Some(id.clone())),
-        Value::String(_) | Value::Nil => Ok(None),
+        // FnAddEffect's idCmdTarget IS a C4ID (C4Script.cpp:5450); real
+        // content passes id literals.
+        Value::C4Id(id) | Value::String(id) if !id.is_empty() => Ok(Some(id.clone())),
+        Value::C4Id(_) | Value::String(_) | Value::Nil => Ok(None),
         Value::Int(value) if *value == 0 => Ok(None),
         other => Err(RuntimeError::new(format!(
-            "AddEffect: expected string or nil for command target id, got {}",
+            "AddEffect: expected id or nil for command target id, got {}",
             other.type_name()
         ))),
     }
@@ -23203,6 +23205,32 @@ mod tests {
                 Value::Int(1),
                 target.clone(),
                 Value::String("BARL".into()),
+            ])?;
+            get_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(0),
+                Value::Int(5),
+            ])
+        });
+        let value = result.expect("GetEffect command id succeeds");
+        assert_eq!(value, Value::String("BARL".into()));
+    }
+
+    #[test]
+    fn add_effect_accepts_c4id_command_target_id_like_cpp() {
+        // FnAddEffect's idCmdTarget parameter IS a C4ID
+        // (C4Script.cpp:5450) — real content passes id literals
+        // (`AddEffect(..., 0, SWRD)`), never strings.
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(100),
+                Value::Int(1),
+                Value::Nil,
+                Value::C4Id("BARL".into()),
             ])?;
             get_effect(&[
                 Value::String("Glow".into()),
