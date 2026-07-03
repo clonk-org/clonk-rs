@@ -7445,11 +7445,12 @@ fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnGrabObjectInfo (C4Script.cpp:2170-2176) -> C4Object::GrabInfo
 /// (C4Object.cpp:5696-5726): `pTo` (default: the caller) takes pFrom's
 /// info section, retires its own, and re-registers as crew. The port
-/// keys "has an info" off the crew flag; the name/rank payload of
-/// C4ObjectInfo is not modeled (documented gap) — the observable
-/// effects are the return value, the grabber's crew registration and
-/// the donor losing its crew slot (GoldRush TRPR Recruitment,
-/// Trapper.c4d/Script.c:19-25).
+/// keys "has an info" off the crew flag; the transferred payload is the
+/// crew flag, the donor's portrait source and the info's permanent
+/// physicals (the GetPhysical info fallback, C4Object.cpp:2118-2134).
+/// The name/rank/experience payload of C4ObjectInfo is not modeled
+/// (documented gap: GetName reads definition metadata) — GoldRush TRPR
+/// Recruitment, Trapper.c4d/Script.c:19-25.
 fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
     let from = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
@@ -7477,30 +7478,17 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
             // own info: success (C4Object.cpp:5701)
             return Ok(Value::Bool(true));
         }
-        // only if the other object has an info (C4Object.cpp:5703)
-        let from_has_info = if Some(from) == active {
-            context
-                .object_context()
-                .map(|object| object.crew_member)
-                .unwrap_or(false)
-        } else if let Some(state) = context.nested_objects.get(&from) {
-            state.scope.crew_member
-        } else {
-            context
-                .get_world_object(from)
-                .and_then(|object| object.full_state().map(|state| state.crew_member))
-                .unwrap_or(false)
-        };
-        if !from_has_info {
+        // Materialize scopes for both sides (C++ mutates the live objects).
+        if !context.ensure_object_scope(from) || !context.ensure_object_scope(to) {
             return Ok(Value::Bool(false));
         }
-        // the donor loses its info/crew slot (C4Object.cpp:5710-5714)
-        if Some(from) == active {
-            if let Some(object) = context.object_context_mut() {
-                object.set_crew_member(false);
-            }
-        } else if let Some(state) = context.nested_objects.get_mut(&from) {
-            state.scope.set_crew_member(false);
+        // only if the other object has an info (C4Object.cpp:5703)
+        let (from_has_info, donor_physical) = context
+            .object_scope(from)
+            .map(|scope| (scope.crew_member, scope.info_physical))
+            .unwrap_or((false, None));
+        if !from_has_info {
+            return Ok(Value::Bool(false));
         }
         // the grabbed info carries the donor's portrait
         // (C4Object.cpp:5715 Info transfer; portrait rides the info)
@@ -7517,29 +7505,27 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                     .get_world_object(from)
                     .map(|object| object.definition_id().to_string())
             });
-        // the grabber recruits into its owner's crew (C4Object.cpp:5720-5723)
-        if Some(to) == active {
-            if let Some(object) = context.object_context_mut() {
-                object.set_crew_member(true);
-                if let Some(portrait) = donor_portrait {
-                    object.set_portrait_source(portrait);
-                }
-            }
-            Ok(Value::Bool(true))
-        } else if let Some(state) = context.nested_objects.get_mut(&to) {
-            state.scope.set_crew_member(true);
-            if let Some(portrait) = donor_portrait {
-                state.scope.set_portrait_source(portrait);
-            }
-            Ok(Value::Bool(true))
-        } else {
-            tracing::warn!(
-                from = from.as_u64(),
-                to = to.as_u64(),
-                "GrabObjectInfo: target outside the active/nested scopes; info transfer skipped"
-            );
-            Ok(Value::Bool(false))
+        // the donor loses its info/crew slot — and with it the info's
+        // permanent physicals (`pFrom->ClearInfo(pFrom->Info)`,
+        // C4Object.cpp:5710-5715)
+        if let Some(scope) = context.object_scope_mut(from) {
+            scope.set_crew_member(false);
+            scope.info_physical = None;
+            scope.record_physicals();
         }
+        // the grabber takes the info wholesale: crew registration, the
+        // donor's portrait and its permanent physicals
+        // (C4Object.cpp:5715-5723; GetPhysical's info fallback,
+        // C4Object.cpp:2118-2134)
+        if let Some(scope) = context.object_scope_mut(to) {
+            scope.set_crew_member(true);
+            scope.info_physical = donor_physical;
+            scope.record_physicals();
+            if let Some(portrait) = donor_portrait {
+                scope.set_portrait_source(portrait);
+            }
+        }
+        Ok(Value::Bool(true))
     })
 }
 

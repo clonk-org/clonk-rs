@@ -37315,6 +37315,85 @@ func Recruit() {
         );
     }
 
+    // C4Object::GrabInfo moves the WHOLE info section (C4Object.cpp:5715:
+    // `Info = pFrom->Info; pFrom->ClearInfo(pFrom->Info);`) — the
+    // C4ObjectInfo carries the crew's permanent physicals
+    // (C4ObjectInfoCore Physical, read by GetPhysical's info fallback,
+    // C4Object.cpp:2118-2134), so the grabber takes the donor's trained
+    // physicals and the donor falls back to its definition's.
+    #[test]
+    fn grab_object_info_transfers_the_info_physicals_like_cpp() {
+        let script = r#"#strict
+local iGrabbed;
+func Grab() { iGrabbed = GrabObjectInfo(FindObject(HAND)); return 1; }
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut trapper =
+            Definition::from_script("TRAP", "Trapper", script).expect("script compiles");
+        trapper.set_crew_member(true);
+        engine
+            .register_definition(trapper)
+            .expect("trapper registers");
+        let mut hand = simple_definition("HAND");
+        hand.set_crew_member(true);
+        engine.register_definition(hand).expect("hand registers");
+
+        let grabber = engine
+            .spawn_object(
+                SpawnConfig::new("TRAP")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0)
+                    .with_crew_member(true),
+            )
+            .expect("trapper spawns");
+        let donor = engine
+            .spawn_object(
+                SpawnConfig::new("HAND")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0)
+                    .with_crew_member(true),
+            )
+            .expect("hand spawns");
+
+        let trained = PhysicalInfo {
+            energy: 77_000,
+            fight: 12_000,
+            ..PhysicalInfo::default()
+        };
+        let donor_idx = engine.find_object_index(donor).expect("donor exists");
+        engine.objects[donor_idx].state.info_physical = Some(trained);
+        let grabber_idx = engine.find_object_index(grabber).expect("grabber exists");
+        engine.objects[grabber_idx].state.info_physical = Some(PhysicalInfo {
+            energy: 11_000,
+            ..PhysicalInfo::default()
+        });
+
+        engine
+            .call_object_function(grabber_idx, "Grab", Vec::new())
+            .expect("grab runs");
+
+        let grabber_idx = engine.find_object_index(grabber).expect("grabber exists");
+        assert_eq!(
+            engine.objects[grabber_idx].state.local_vars.get("iGrabbed"),
+            Some(&Value::Bool(true)),
+            "GrabObjectInfo succeeds for a crew donor (C4Object.cpp:5703)"
+        );
+        assert_eq!(
+            engine.objects[grabber_idx].state.info_physical,
+            Some(trained),
+            "the grabber takes the donor's info physicals (C4Object.cpp:5715)"
+        );
+        let donor_idx = engine.find_object_index(donor).expect("donor exists");
+        assert_eq!(
+            engine.objects[donor_idx].state.info_physical, None,
+            "ClearInfo leaves the donor without info physicals (C4Object.cpp:5715)"
+        );
+        assert!(
+            !engine.objects[donor_idx].state.crew_member,
+            "the donor loses its crew slot (Game.Players.ClearPointers, C4Object.cpp:5711-5713)"
+        );
+    }
+
     // C4Effect's constructor runs Fx*Start SYNCHRONOUSLY inside
     // FnAddEffect (C4Effect.cpp:96-152: insert, check chain, then
     // pFnStart->Exec before the ctor returns) — so objects the Start
