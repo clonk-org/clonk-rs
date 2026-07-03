@@ -5486,7 +5486,7 @@ impl GameApp {
         }
         if self.mode == AppMode::Running {
             let consumed = if let ControlEvent::Command { command, kind } = event {
-                self.handle_menu_command(command, kind)?
+                self.handle_menu_command_failsafe(command, kind)?
             } else {
                 false
             };
@@ -5512,7 +5512,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         if owner == self.local_owner {
             if let ControlEvent::Command { command, kind } = event {
-                if self.handle_menu_command(command, kind)? {
+                if self.handle_menu_command_failsafe(command, kind)? {
                     return Ok(());
                 }
             }
@@ -5526,6 +5526,23 @@ impl GameApp {
             self.status_text = status;
         }
         Ok(())
+    }
+
+    /// Menu commands on the key-input path share the control fail-safe:
+    /// a script error inside a menu action logs, becomes a status line and
+    /// counts as menu-consumed — C++ shows the error and keeps the session
+    /// alive (C4AulExec.cpp:1345-1361); only engine-model errors stay fatal.
+    fn handle_menu_command_failsafe(
+        &mut self,
+        command: ControlCommand,
+        kind: CommandKind,
+    ) -> Result<bool, EngineError> {
+        self.handle_menu_command(command, kind).or_else(|err| {
+            let status = control_script_error_to_status(err)?;
+            tracing::error!(status, "control script error (non-fatal like C++)");
+            self.status_text = status;
+            Ok(true)
+        })
     }
 
     fn menu_controls_active(&self) -> bool {
@@ -9784,10 +9801,14 @@ fn is_focusable(object: &ObjectSnapshot) -> bool {
 
 /// Script errors raised while executing a control are shown and survived in
 /// C++ (ErrorOrWarning → C4AulExecError::show, C4AulExec.cpp:1345-1361); only
-/// engine-model errors stay fatal. Returns the status-line message to show.
+/// engine-model errors stay fatal. InvalidScriptOutput is script-caused too:
+/// C++ coerces whatever a control/menu script returns
+/// (static_cast<bool>, C4Object.cpp:3300,3736) and never aborts over it.
+/// Returns the status-line message to show.
 fn control_script_error_to_status(err: EngineError) -> Result<String, EngineError> {
     match err {
         EngineError::Script { ref source, .. } => Ok(format!("Script error: {err}: {source}")),
+        EngineError::InvalidScriptOutput { .. } => Ok(format!("Script error: {err}")),
         other => Err(other),
     }
 }
@@ -10829,6 +10850,26 @@ mod tests {
             detail: "broken".into(),
         };
         control_script_error_to_status(fatal).expect_err("engine-model errors stay fatal");
+    }
+
+    #[test]
+    fn invalid_script_output_in_controls_is_non_fatal_like_cpp() {
+        // Whatever a control script RETURNS is script-caused: C++ coerces
+        // every result (static_cast<bool>, C4Object.cpp:3300) and never
+        // aborts the input path over it. The Rust-only InvalidScriptOutput
+        // class must not kill the window event loop either — it downgrades
+        // to a status message exactly like Script errors.
+        let output_error = EngineError::InvalidScriptOutput {
+            definition: "COWB".into(),
+            function: "Control".to_string(),
+            detail: "control function `ControlDig` returned garbage".into(),
+        };
+        let status = control_script_error_to_status(output_error)
+            .expect("script-output errors downgrade to a status message");
+        assert!(
+            status.contains("COWB"),
+            "status names the definition: {status}"
+        );
     }
 
     fn write_preview_png(path: &Path, pixel: [u8; 4]) {
