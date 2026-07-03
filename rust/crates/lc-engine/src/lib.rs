@@ -2310,6 +2310,8 @@ struct ObjectDelta {
     /// `SetRDir`. Mirrors C++ `pObj->rdir = itofix(n, prec)` (`C4Script.cpp:710`).
     rotation_velocity: Option<C4Fixed>,
     energy: Option<i32>,
+    /// Kill-trace mark riding an energy write (C4Object.cpp:1351-1353).
+    energy_loss_cause: Option<i32>,
     damage: Option<i32>,
     magic_energy: Option<i32>,
     magic_capacity: Option<i32>,
@@ -2368,6 +2370,9 @@ impl ObjectDelta {
         }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
+        }
+        if let Some(cause) = update.energy_loss_cause {
+            self.energy_loss_cause = Some(cause);
         }
         if let Some(construction) = update.construction {
             self.construction = Some(construction);
@@ -2463,6 +2468,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             rotation: update.rotation,
             rotation_velocity: update.rotation_velocity,
             energy: update.energy,
+            energy_loss_cause: update.energy_loss_cause,
             construction: update.construction,
             damage: update.damage,
             magic_energy: update.magic_energy,
@@ -2521,6 +2527,12 @@ pub struct ObjectUpdate {
     #[serde(default)]
     pub rotation: Option<i32>,
     pub energy: Option<i32>,
+    /// C4Object::DoEnergy's kill-trace mark (C4Object.cpp:1351-1353),
+    /// staged with the UpdatLastEnergyLossCause guard (:1369-1378) already
+    /// applied at call time — the fold writes it through unconditionally
+    /// (Punch's post-fling write is unguarded too, C4ObjectCom.cpp:755,762).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub energy_loss_cause: Option<i32>,
     #[serde(default)]
     pub damage: Option<i32>,
     #[serde(default)]
@@ -2741,6 +2753,7 @@ impl ObjectUpdate {
             && self.rotation.is_none()
             && self.rotation_velocity.is_none()
             && self.energy.is_none()
+            && self.energy_loss_cause.is_none()
             && self.construction.is_none()
             && self.damage.is_none()
             && self.magic_energy.is_none()
@@ -3281,6 +3294,11 @@ impl Object {
         let previous_construction = self.state.construction;
         let shape_changed =
             delta.construction.is_some() || delta.rotation.is_some() || delta.vertices.is_some();
+        // Kill-trace mark BEFORE the energy write (C4Object.cpp:1351-1361)
+        // so AssignDeath credits the new cause.
+        if let Some(cause) = delta.energy_loss_cause {
+            self.last_energy_loss_cause = cause;
+        }
         let outcome = self.state.apply_delta(delta, action_library);
         if let Some(position) = delta.position {
             self.fixed_position = FixedVec2::from_ints(position.x, position.y);
@@ -11624,6 +11642,7 @@ impl Engine {
                 .with_ocf(ocf)
                 .with_command_names(object.commands.command_names())
                 .with_full_state(Rc::new(object.state.clone()))
+                .with_last_energy_loss_cause(object.last_energy_loss_cause)
             }),
             landscape,
             definition_metadata,
@@ -14638,6 +14657,7 @@ impl Engine {
             rotation,
             rotation_velocity,
             energy,
+            energy_loss_cause,
             construction,
             damage,
             magic_energy,
@@ -14713,6 +14733,11 @@ impl Engine {
             }
             if let Some(rotation_velocity) = rotation_velocity {
                 object.rotation_velocity = rotation_velocity;
+            }
+            if let Some(cause) = energy_loss_cause {
+                // Kill-trace mark BEFORE the energy write
+                // (C4Object.cpp:1351-1361) so AssignDeath credits it.
+                object.last_energy_loss_cause = cause;
             }
             if let Some(energy) = energy {
                 // AssignDeath below when a nonzero energy reaches 0
@@ -15319,12 +15344,14 @@ impl Engine {
                 (object.state.owner, object.state.crew_member)
             };
             let mut nested_change_def = None;
+            let mut energy_died = false;
             {
                 let object = &mut self.objects[index];
                 if let Some(update) = outcome.update {
                     nested_change_def = update.change_def.clone();
                     let delta: ObjectDelta = update.into();
                     let apply_outcome = object.apply_delta(&delta, &action_library);
+                    energy_died = apply_outcome.energy_died;
                     if let Some(change) = apply_outcome.action_change {
                         object.record_action_event(change.previous, ActionTransitionKind::Forced);
                     }
@@ -15351,6 +15378,12 @@ impl Engine {
                 self.change_object_def(index, &new_def);
             }
             self.update_sector_for_index(index);
+            if energy_died {
+                // C4Object::DoEnergy kills synchronously when a nonzero
+                // energy reaches 0 (C4Object.cpp:1363) — foreign writes
+                // (Punch, DoEnergy on a named target) included.
+                self.assign_death(index, false)?;
+            }
 
             let (new_owner, new_crew_member) = {
                 let object = &self.objects[index];
@@ -20785,7 +20818,7 @@ impl Engine {
         let change = change.saturating_mul(C4_MAX_PHYSICAL / 100);
         // Mark the damage-causing player first (C4Object.cpp:1351-1353).
         if change < 0 || cause == C4FX_CALL_ENG_OBJ_HIT {
-            self.objects[idx].last_energy_loss_cause = caused_by;
+            self.update_last_energy_loss_cause(idx, caused_by);
         }
         // Living things: ask effects for change first (C4Object.cpp:1355-1359).
         let change = if self.objects[idx].state.alive && !self.objects[idx].state.effects.is_empty()
@@ -20811,6 +20844,16 @@ impl Engine {
         };
         if self.objects[idx].state.alive && self.objects[idx].state.energy == 0 && !was_zero {
             let _ = self.assign_death(idx, false);
+        }
+    }
+
+    /// `C4Object::UpdatLastEnergyLossCause` (C4Object.cpp:1369-1378):
+    /// self-administered damage does not steal an already-tracked killer —
+    /// only a DIFFERENT player (or an empty slot) updates the kill trace.
+    fn update_last_energy_loss_cause(&mut self, idx: usize, new_cause_player: i32) {
+        let object = &mut self.objects[idx];
+        if new_cause_player != object.state.controller || object.last_energy_loss_cause < 0 {
+            object.last_energy_loss_cause = new_cause_player;
         }
     }
 
@@ -25070,6 +25113,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             // cannon's Initialize from InitializePlayer
             // (Goldrush.c4s/Script.c:262 → pObj->~Initialize()).
             .with_full_state(Rc::new(object_state_from_snapshot(object)))
+            .with_last_energy_loss_cause(object.last_energy_loss_cause)
         }),
         snapshot.landscape.clone(),
         definition_metadata,
@@ -37429,6 +37473,85 @@ func Recruit() {
         );
     }
 
+    // C4Object::GrabInfo moves the WHOLE info section (C4Object.cpp:5715:
+    // `Info = pFrom->Info; pFrom->ClearInfo(pFrom->Info);`) — the
+    // C4ObjectInfo carries the crew's permanent physicals
+    // (C4ObjectInfoCore Physical, read by GetPhysical's info fallback,
+    // C4Object.cpp:2118-2134), so the grabber takes the donor's trained
+    // physicals and the donor falls back to its definition's.
+    #[test]
+    fn grab_object_info_transfers_the_info_physicals_like_cpp() {
+        let script = r#"#strict
+local iGrabbed;
+func Grab() { iGrabbed = GrabObjectInfo(FindObject(HAND)); return 1; }
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut trapper =
+            Definition::from_script("TRAP", "Trapper", script).expect("script compiles");
+        trapper.set_crew_member(true);
+        engine
+            .register_definition(trapper)
+            .expect("trapper registers");
+        let mut hand = simple_definition("HAND");
+        hand.set_crew_member(true);
+        engine.register_definition(hand).expect("hand registers");
+
+        let grabber = engine
+            .spawn_object(
+                SpawnConfig::new("TRAP")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0)
+                    .with_crew_member(true),
+            )
+            .expect("trapper spawns");
+        let donor = engine
+            .spawn_object(
+                SpawnConfig::new("HAND")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0)
+                    .with_crew_member(true),
+            )
+            .expect("hand spawns");
+
+        let trained = PhysicalInfo {
+            energy: 77_000,
+            fight: 12_000,
+            ..PhysicalInfo::default()
+        };
+        let donor_idx = engine.find_object_index(donor).expect("donor exists");
+        engine.objects[donor_idx].state.info_physical = Some(trained);
+        let grabber_idx = engine.find_object_index(grabber).expect("grabber exists");
+        engine.objects[grabber_idx].state.info_physical = Some(PhysicalInfo {
+            energy: 11_000,
+            ..PhysicalInfo::default()
+        });
+
+        engine
+            .call_object_function(grabber_idx, "Grab", Vec::new())
+            .expect("grab runs");
+
+        let grabber_idx = engine.find_object_index(grabber).expect("grabber exists");
+        assert_eq!(
+            engine.objects[grabber_idx].state.local_vars.get("iGrabbed"),
+            Some(&Value::Bool(true)),
+            "GrabObjectInfo succeeds for a crew donor (C4Object.cpp:5703)"
+        );
+        assert_eq!(
+            engine.objects[grabber_idx].state.info_physical,
+            Some(trained),
+            "the grabber takes the donor's info physicals (C4Object.cpp:5715)"
+        );
+        let donor_idx = engine.find_object_index(donor).expect("donor exists");
+        assert_eq!(
+            engine.objects[donor_idx].state.info_physical, None,
+            "ClearInfo leaves the donor without info physicals (C4Object.cpp:5715)"
+        );
+        assert!(
+            !engine.objects[donor_idx].state.crew_member,
+            "the donor loses its crew slot (Game.Players.ClearPointers, C4Object.cpp:5711-5713)"
+        );
+    }
+
     // C4Effect's constructor runs Fx*Start SYNCHRONOUSLY inside
     // FnAddEffect (C4Effect.cpp:96-152: insert, check chain, then
     // pFnStart->Exec before the ctor returns) — so objects the Start
@@ -37719,6 +37842,495 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             vec![revolver_a, revolver_b],
             "a uniform stack keeps its order"
         );
+    }
+
+    // FnShiftContents' pObj parameter (C4Script.cpp:1786) targets ANOTHER
+    // object: `if (!pObj) pObj = cthr->Obj` is only the local-call default
+    // — a foreign container's contents rotate just the same.
+    #[test]
+    fn shift_contents_operates_on_a_foreign_container_like_cpp() {
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func Poke() { return ShiftContents(FindObject(CHES)); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("CHES"))
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("SWRD"))
+            .expect("sword registers");
+        engine
+            .register_definition(simple_definition("REVR"))
+            .expect("revolver registers");
+
+        let actor = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let sword = engine
+            .spawn_object(
+                SpawnConfig::new("SWRD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("sword spawns");
+        let revolver = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver spawns");
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        let result = engine
+            .call_object_function(actor_idx, "Poke", Vec::new())
+            .expect("poke runs");
+        assert_eq!(result, Value::Bool(true));
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![revolver, sword],
+            "the foreign chest rotated (C4Object.cpp:5730-5752)"
+        );
+    }
+
+    // DirectComContents with fDoCalls (C4Object.cpp:5760-5763): the
+    // container's ~ControlContents(idNewFront) runs FIRST and a truthy
+    // return takes over — the default rotation is skipped, yet
+    // C4Object::ShiftContents still reports true.
+    #[test]
+    fn shift_contents_do_calls_control_contents_veto_like_cpp() {
+        let script = r#"#strict
+local iSeen;
+func Cycle() { return ShiftContents(0, 0, 0, 1); }
+func ControlContents(id) { iSeen = id; return 1; }
+"#;
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(
+                Definition::from_script("CHES", "Chest", script).expect("script compiles"),
+            )
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("SWRD"))
+            .expect("sword registers");
+        engine
+            .register_definition(simple_definition("REVR"))
+            .expect("revolver registers");
+
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let sword = engine
+            .spawn_object(
+                SpawnConfig::new("SWRD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("sword spawns");
+        let revolver = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver spawns");
+
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        let result = engine
+            .call_object_function(chest_idx, "Cycle", Vec::new())
+            .expect("cycle runs");
+        assert_eq!(
+            result,
+            Value::Bool(true),
+            "the veto path still reports true (C4Object.cpp:5745-5746)"
+        );
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![sword, revolver],
+            "a truthy ~ControlContents vetoes the rotation (C4Object.cpp:5762)"
+        );
+        assert_eq!(
+            engine.objects[chest_idx].state.local_vars.get("iSeen"),
+            Some(&Value::C4Id("REVR".into())),
+            "~ControlContents receives the new front's id (C4VID(pTarget->id))"
+        );
+    }
+
+    // DirectComContents' selection tail (C4Object.cpp:5765-5767): after the
+    // relink the NEW front gets ~Selection(container); only a falsy return
+    // plays the Grab sound on the container.
+    #[test]
+    fn shift_contents_do_calls_selection_and_grab_sound_like_cpp() {
+        let chest_script = r#"#strict
+func Cycle() { return ShiftContents(0, 0, 0, 1); }
+"#;
+        let sword_script = r#"#strict
+local iSel;
+func Selection(pFrom) { iSel = 1; return 1; }
+"#;
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(
+                Definition::from_script("CHES", "Chest", chest_script).expect("script compiles"),
+            )
+            .expect("chest registers");
+        engine
+            .register_definition(
+                Definition::from_script("SWRD", "Sword", sword_script).expect("script compiles"),
+            )
+            .expect("sword registers");
+        engine
+            .register_definition(simple_definition("REVR"))
+            .expect("revolver registers");
+
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let revolver = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver spawns");
+        let sword = engine
+            .spawn_object(
+                SpawnConfig::new("SWRD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("sword spawns");
+
+        // First shift: SWRD comes to the front, its Selection returns 1 —
+        // no Grab sound (C4Object.cpp:5767).
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        let result = engine
+            .call_object_function(chest_idx, "Cycle", Vec::new())
+            .expect("cycle runs");
+        assert_eq!(result, Value::Bool(true));
+        let sword_idx = engine.find_object_index(sword).expect("sword exists");
+        assert_eq!(
+            engine.objects[sword_idx].state.local_vars.get("iSel"),
+            Some(&Value::Int(1)),
+            "the new front got ~Selection (C4Object.cpp:5767)"
+        );
+        assert!(
+            !engine
+                .pending_audio
+                .iter()
+                .any(|command| matches!(command, AudioCommand::PlaySound { name, .. } if name == "Grab")),
+            "a truthy Selection suppresses the Grab sound"
+        );
+
+        // Second shift: REVR (no Selection handler -> falsy) comes to the
+        // front — the Grab sound plays on the container.
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        let result = engine
+            .call_object_function(chest_idx, "Cycle", Vec::new())
+            .expect("cycle runs");
+        assert_eq!(result, Value::Bool(true));
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![revolver, sword],
+            "the second shift rotated back to the revolver"
+        );
+        assert!(
+            engine.pending_audio.iter().any(|command| matches!(
+                command,
+                AudioCommand::PlaySound { name, target, looped: false, .. }
+                    if name == "Grab" && *target == Some(chest)
+            )),
+            "a falsy Selection plays Grab on the container (StartSoundEffect, C4Object.cpp:5767)"
+        );
+    }
+
+    // FnDoEnergy's pObj (C4Script.cpp:492-499): `if (!pObj) pObj = cthr->Obj`
+    // is only the local-call default — a named FOREIGN target takes the
+    // change (C4Object::DoEnergy percent scale, C4Object.cpp:1345-1365).
+    #[test]
+    fn do_energy_reaches_a_foreign_target_like_cpp() {
+        let script = r#"#strict
+func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
+"#;
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(SpawnConfig::new("VCTM").with_category(CATEGORY_OBJECT))
+            .expect("victim spawns");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 50_000;
+        engine.objects[victim_idx].state.alive = true;
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        let result = engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        assert_eq!(result, Value::Bool(true));
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.energy,
+            40_000,
+            "-10% of C4MaxPhysical lands on the foreign target (C4Object.cpp:1347,1361)"
+        );
+    }
+
+    // C4Object::DoEnergy kills when a nonzero energy reaches zero
+    // (C4Object.cpp:1363) — on FOREIGN targets too: the nested-outcome
+    // fold must fire AssignDeath like the local fold does.
+    #[test]
+    fn do_energy_kills_a_foreign_target_at_zero_like_cpp() {
+        let script = r#"#strict
+func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
+"#;
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("victim spawns");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 10_000;
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(engine.objects[victim_idx].state.energy, 0);
+        assert!(
+            !engine.objects[victim_idx].state.alive,
+            "a nonzero energy reaching 0 assigns death (C4Object.cpp:1363)"
+        );
+    }
+
+    // FnDoEnergy's caused-by (C4Script.cpp:496-497): iCausedByPlusOne - 1,
+    // or the CALLER's controller when unset — marked on the target's
+    // LastEnergyLossCausePlayer kill trace for negative changes
+    // (C4Object.cpp:1351-1353).
+    #[test]
+    fn do_energy_threads_the_caused_by_player_like_cpp() {
+        let script = r#"#strict
+func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
+func ZapAs() { return DoEnergy(-10, FindObject(VCTM), 0, 0, 8); }
+"#;
+        let mut engine = Engine::with_seed(29);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("victim spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_idx].state.controller = 5;
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 90_000;
+
+        engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].last_energy_loss_cause, 5,
+            "unset caused-by falls back to the caller's controller (C4Script.cpp:497)"
+        );
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_idx, "ZapAs", Vec::new())
+            .expect("zap-as runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].last_energy_loss_cause, 7,
+            "an explicit plus-one caused-by decodes to player 7 (C4Script.cpp:496)"
+        );
+    }
+
+    // FnDoDamage (C4Script.cpp:508-515) -> C4Object::DoDamage
+    // (C4Object.cpp:1279-1291): the change lands on a FOREIGN target too,
+    // and the Damage script callback fires with (iChange, iCausedBy) —
+    // the caused-by defaulting to the CALLER's controller.
+    #[test]
+    fn do_damage_reaches_a_foreign_target_and_fires_damage_like_cpp() {
+        let actor_script = r#"#strict
+func Zap() { return DoDamage(3, FindObject(VCTM)); }
+"#;
+        let victim_script = r#"#strict
+local iSaw;
+local iBy;
+func Damage(iChange, iCausedBy) { iSaw = iChange; iBy = iCausedBy; return 1; }
+"#;
+        let mut engine = Engine::with_seed(31);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", actor_script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(
+                Definition::from_script("VCTM", "Victim", victim_script).expect("script compiles"),
+            )
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(SpawnConfig::new("VCTM").with_category(CATEGORY_OBJECT))
+            .expect("victim spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_idx].state.controller = 5;
+
+        let result = engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        assert_eq!(result, Value::Bool(true));
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.damage,
+            3,
+            "the foreign target takes the damage (C4Object.cpp:1288)"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].state.local_vars.get("iSaw"),
+            Some(&Value::Int(3)),
+            "the Damage callback fires with the change (C4Object.cpp:1290)"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].state.local_vars.get("iBy"),
+            Some(&Value::Int(5)),
+            "caused-by defaults to the caller's controller (C4Script.cpp:511)"
+        );
+    }
+
+    // ObjectComPunch routes the energy loss through DoEnergy with the
+    // ATTACKER's controller (C4ObjectCom.cpp:749: DoEnergy(-punch, false,
+    // C4FxCall_EngGetPunched, cObj->Controller)) — punching an enemy off
+    // a cliff must credit the puncher's kill.
+    #[test]
+    fn punch_marks_the_attackers_controller_on_the_kill_trace_like_cpp() {
+        let script = r#"#strict
+func Hit() { return Punch(FindObject(VCTM), 5); }
+"#;
+        let mut engine = Engine::with_seed(37);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("victim spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_idx].state.controller = 4;
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 50_000;
+
+        engine
+            .call_object_function(actor_idx, "Hit", Vec::new())
+            .expect("hit runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.energy,
+            45_000,
+            "the victim loses punch% energy (C4ObjectCom.cpp:749)"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].last_energy_loss_cause, 4,
+            "the punch energy loss carries the attacker's controller (C4ObjectCom.cpp:749)"
+        );
+    }
+
+    // C4Object::UpdatLastEnergyLossCause (C4Object.cpp:1369-1378):
+    // self-administered damage (cause == own Controller) does not steal an
+    // already-tracked killer — "stop-stop-throw while falling into teh
+    // abyss" keeps the pusher's kill credit.
+    #[test]
+    fn update_last_energy_loss_cause_keeps_the_tracked_killer_like_cpp() {
+        let mut engine = Engine::with_seed(19);
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true)
+                    .with_energy(50_000),
+            )
+            .expect("victim spawns");
+        let idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[idx].state.controller = 3;
+
+        // An enemy (player 5) hits first: tracked.
+        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 5);
+        assert_eq!(engine.objects[idx].last_energy_loss_cause, 5);
+        // Self-administered damage does not steal the kill
+        // (iNewCausePlr == Controller and a tracked player >= 0).
+        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 3);
+        assert_eq!(
+            engine.objects[idx].last_energy_loss_cause, 5,
+            "the tracked killer survives self-damage (C4Object.cpp:1373-1377)"
+        );
+        // A DIFFERENT player always updates.
+        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 6);
+        assert_eq!(engine.objects[idx].last_energy_loss_cause, 6);
     }
 
     // FnGetCommand (C4Script.cpp:918-945): element 0 returns the C++
