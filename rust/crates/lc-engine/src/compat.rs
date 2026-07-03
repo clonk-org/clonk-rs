@@ -8592,9 +8592,14 @@ fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
+    let mut caused_by_plus_one = 0;
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::Int(_) | Value::Nil => {
+            Value::Int(value) => {
+                caused_by_plus_one = *value;
+                index += 1;
+            }
+            Value::Nil => {
                 index += 1;
             }
             other => {
@@ -8612,25 +8617,55 @@ fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
+    let staged = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("DoDamage requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
+        // (C4Script.cpp:511) — resolved in the caller's scope.
+        let caused_by = if caused_by_plus_one != 0 {
+            caused_by_plus_one - 1
+        } else {
+            context
+                .object_context()
+                .map(|object| object.controller())
+                .unwrap_or(OWNER_NONE)
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        // `if (!pObj) pObj = cthr->Obj` is only the local-call default
+        // (C4Script.cpp:510) — a named target may be FOREIGN.
+        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
+            return Ok(None);
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(None);
         }
-
-        object.adjust_damage(change);
-        Ok(Value::Bool(true))
-    })
+        let Some(scope) = context.object_scope_mut(target) else {
+            return Ok(None);
+        };
+        // Damage = max(Damage + iChange, 0) (C4Object.cpp:1288).
+        scope.adjust_damage(change);
+        Ok(Some((target, caused_by)))
+    })?;
+    let Some((target, caused_by)) = staged else {
+        return Ok(Value::Bool(false));
+    };
+    // The Damage engine call after the stat write (PSF_Damage "~Damage",
+    // C4Object.cpp:1290 — fail-safe exec, errors log and continue).
+    // NOT modeled: the non-living Fx*Damage effects-first hook
+    // (C4Object.cpp:1282-1286) — the host scope path has no effect
+    // DoDamage dispatch (same gap as DoEnergy's living hook).
+    if let Some(Err(error)) = call_world_object_own_function(
+        target,
+        "Damage",
+        &[Value::Int(change), Value::Int(caused_by)],
+    ) {
+        tracing::warn!(
+            %error,
+            "script error in Damage; continuing like the C++ fail-safe exec"
+        );
+    }
+    Ok(Value::Bool(true))
 }
 
 fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {

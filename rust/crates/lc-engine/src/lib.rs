@@ -38079,6 +38079,62 @@ func ZapAs() { return DoEnergy(-10, FindObject(VCTM), 0, 0, 8); }
         );
     }
 
+    // FnDoDamage (C4Script.cpp:508-515) -> C4Object::DoDamage
+    // (C4Object.cpp:1279-1291): the change lands on a FOREIGN target too,
+    // and the Damage script callback fires with (iChange, iCausedBy) —
+    // the caused-by defaulting to the CALLER's controller.
+    #[test]
+    fn do_damage_reaches_a_foreign_target_and_fires_damage_like_cpp() {
+        let actor_script = r#"#strict
+func Zap() { return DoDamage(3, FindObject(VCTM)); }
+"#;
+        let victim_script = r#"#strict
+local iSaw;
+local iBy;
+func Damage(iChange, iCausedBy) { iSaw = iChange; iBy = iCausedBy; return 1; }
+"#;
+        let mut engine = Engine::with_seed(31);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", actor_script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(
+                Definition::from_script("VCTM", "Victim", victim_script).expect("script compiles"),
+            )
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(SpawnConfig::new("VCTM").with_category(CATEGORY_OBJECT))
+            .expect("victim spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_idx].state.controller = 5;
+
+        let result = engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        assert_eq!(result, Value::Bool(true));
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.damage,
+            3,
+            "the foreign target takes the damage (C4Object.cpp:1288)"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].state.local_vars.get("iSaw"),
+            Some(&Value::Int(3)),
+            "the Damage callback fires with the change (C4Object.cpp:1290)"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].state.local_vars.get("iBy"),
+            Some(&Value::Int(5)),
+            "caused-by defaults to the caller's controller (C4Script.cpp:511)"
+        );
+    }
+
     // C4Object::UpdatLastEnergyLossCause (C4Object.cpp:1369-1378):
     // self-administered damage (cause == own Controller) does not steal an
     // already-tracked killer — "stop-stop-throw while falling into teh
