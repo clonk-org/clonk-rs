@@ -402,13 +402,20 @@ impl ActionLibrary {
             .map(|length| i32::try_from(length).unwrap_or(i32::MAX))
             .unwrap_or(1);
         if state.phase >= length {
-            Self::transition(state, spec, library, length);
+            // C++ runs the phase-end transition through
+            // SetAction(NextAction, SAC_StartCall | SAC_EndCall)
+            // (C4Object.cpp:5462) — EndCall + StartCall fire even when
+            // NextAction chains the SAME action (the palm's Breeze
+            // StartCall re-evaluates the wind every cycle). Hold clamps
+            // without a transition.
+            outcome.wrapped = Self::transition(state, spec, library, length);
         }
 
         outcome
     }
 
-    fn transition(state: &mut ActionState, spec: &ActionSpec, library: &ActionLibrary, length: i32) {
+    /// Returns true when the NextAction transition ran (false for Hold).
+    fn transition(state: &mut ActionState, spec: &ActionSpec, library: &ActionLibrary, length: i32) -> bool {
         // NextAction=Hold clamps at the last phase and keeps the action
         // (ActHold, C4Def.cpp:786-787; C4Object.cpp:5457-5459).
         if spec
@@ -417,7 +424,7 @@ impl ActionLibrary {
             .is_some_and(|next| next.eq_ignore_ascii_case("Hold"))
         {
             state.phase = (length - 1).max(0);
-            return;
+            return false;
         }
         // An absent NextAction is ActIdle (C4Def.h:154), and an unresolved
         // NextActionName stays ActIdle too (the C4Def::Load mapping loop,
@@ -437,6 +444,7 @@ impl ActionLibrary {
         }
         state.phase = 0;
         state.ticks = 0;
+        true
     }
 }
 
@@ -449,6 +457,10 @@ impl Default for ActionLibrary {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ActionAdvanceOutcome {
     pub phase_event: Option<ActionPhaseEvent>,
+    /// The phase-end NextAction transition ran (C4Object.cpp:5462) —
+    /// the caller owes an EndCall+StartCall pair even for a same-name
+    /// chain.
+    pub wrapped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

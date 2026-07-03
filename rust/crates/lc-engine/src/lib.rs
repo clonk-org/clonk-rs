@@ -13375,6 +13375,18 @@ impl Engine {
                     .advance_with_library_by(&action_library, phase_advance)
             };
 
+            // A same-name NextAction chain still owes its EndCall+StartCall
+            // pair (SetAction with SAC_StartCall|SAC_EndCall,
+            // C4Object.cpp:5462); name-changing wraps are recorded by the
+            // block below.
+            if advance_outcome.wrapped
+                && self.objects[idx].state.action.name == previous_action_state.name
+            {
+                self.objects[idx].record_action_event(
+                    previous_action_state.clone(),
+                    ActionTransitionKind::Natural,
+                );
+            }
             if self.objects[idx].state.action.name != previous_action_state.name {
                 self.objects[idx]
                     .record_action_event(previous_action_state, ActionTransitionKind::Natural);
@@ -20379,6 +20391,14 @@ impl Engine {
                 } => self.execute_blast_circle_operation(center, radius, controller),
                 LandscapeOperation::ShakeCircle { center, radius } => {
                     self.execute_shake_circle_operation(center, radius)
+                }
+                LandscapeOperation::InsertMaterial { material, position } => {
+                    if let (Some(landscape), Some(material_id)) = (
+                        self.landscape.as_mut(),
+                        usize::try_from(material).ok().and_then(MaterialId::new),
+                    ) {
+                        landscape.insert_material_at(position.x, position.y, material_id);
+                    }
                 }
             }
         }

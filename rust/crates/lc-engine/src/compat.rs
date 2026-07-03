@@ -3807,6 +3807,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetOCF", get_ocf);
+    script.register_host_function("InsertMaterial", insert_material);
+    script.register_host_function("OnFire", on_fire);
     script.register_host_function("SetGraphics", set_graphics);
     script.register_host_function("SetObjDrawTransform", set_obj_draw_transform);
     script.register_host_function("SetObjDrawTransform2", set_obj_draw_transform2);
@@ -5416,6 +5418,13 @@ pub(crate) enum LandscapeOperation {
     ShakeCircle {
         center: Vector2,
         radius: i32,
+    },
+    /// FnInsertMaterial -> Landscape::InsertMaterial
+    /// (C4Script.cpp:2207-2211): caller-relative coordinates, material by
+    /// number.
+    InsertMaterial {
+        material: i32,
+        position: Vector2,
     },
 }
 
@@ -13806,6 +13815,67 @@ fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FindObject container sentinels (C4Object.h:83-84): `NoContainer()` = 124,
 /// `AnyContainer()` = 123 (FnNoContainer/FnAnyContainer,
 /// C4Script.cpp:6731-6732).
+/// FnInsertMaterial (C4Script.cpp:2207-2211): insert one material pixel
+/// at caller-relative coordinates. The vx/vy PXS velocity is accepted and
+/// dropped (the rust landscape settles inserted material directly;
+/// PORT_STATUS: no PXS particle sim).
+fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
+    let material = value_to_i32(args.first().unwrap_or(&Value::Nil), "InsertMaterial", "mat")?;
+    let x = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "InsertMaterial", "x")?;
+    let y = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "InsertMaterial", "y")?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = match borrow.as_mut() {
+            Some(context) => context,
+            None => return Ok(Value::Bool(false)),
+        };
+        let mut position = Vector2::new(x, y);
+        if let Some(object) = context.object_context() {
+            let base = object.current_position;
+            position = Vector2::new(base.x + x, base.y + y);
+        }
+        context.register_landscape_operation(LandscapeOperation::InsertMaterial {
+            material,
+            position,
+        });
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnOnFire (C4Script.cpp:1870-1877): burning when the fire flag is set or
+/// any *Fire* effect (C4Fx_AnyFire) sits on the object; nil without one.
+fn on_fire(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "OnFire", "target")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+        if let Some(object) = context.object_context() {
+            if target_id.is_none() || target_id == Some(object.id()) {
+                let burning = object
+                    .effects
+                    .snapshot()
+                    .iter()
+                    .any(|effect| effect.name.contains("Fire"));
+                return Ok(Value::Bool(burning));
+            }
+        }
+        let Some(target) = target_id else {
+            return Ok(Value::Nil);
+        };
+        match context.get_world_object(target) {
+            Some(other) => Ok(Value::Bool(other.full_state().is_some_and(|state| {
+                state.effects.iter().any(|effect| effect.name.contains("Fire"))
+            }))),
+            None => Ok(Value::Nil),
+        }
+    })
+}
+
 fn no_container(_args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(124))
 }
@@ -16641,6 +16711,7 @@ mod tests {
         "GetYDir",
         "GrabObjectInfo",
         "InLiquid",
+        "InsertMaterial",
         "Inside",
         "Jump",
         "Log",
@@ -16656,6 +16727,7 @@ mod tests {
         "ObjectCount2",
         "ObjectDistance",
         "ObjectSetAction",
+        "OnFire",
         "PathFree",
         "PlayerMessage",
         "PlrMessage",
