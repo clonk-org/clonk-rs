@@ -31284,6 +31284,81 @@ func Trigger() {
         );
     }
 
+    // FnIncinerateLandscape (C4Script.cpp:253-261) -> C4Landscape::
+    // Incinerate (C4Landscape.cpp:1430-1441): inflammable material at the
+    // (caller-relative) point spawns one FLAM unless another FLAM already
+    // burns in the (x-4, y-1, 8, 20) rect (C4Game::FindObject range check,
+    // position-in-rect); sky/solid-rock points return false.
+    #[test]
+    fn incinerate_landscape_spawns_one_flam_on_inflammable_material() {
+        let caller_script = r#"#strict
+local iFirst, iSecond, iSky;
+func Trigger() {
+    iFirst = IncinerateLandscape(8 - GetX(), 45 - GetY());
+    iSecond = IncinerateLandscape(8 - GetX(), 45 - GetY());
+    iSky = IncinerateLandscape(8 - GetX(), 2 - GetY());
+    return(1);
+}
+"#;
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Oil]
+            Name=Oil
+            Density=100
+            Friction=25
+            Inflammable=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let oil = materials.id_of("Oil").expect("oil exists");
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(17, 40, Some(oil)));
+        engine
+            .register_definition(
+                Definition::from_script("FLAM", "Fire", "#strict\n").expect("flam compiles"),
+            )
+            .expect("flam registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let idx = engine.find_object_index(id).expect("caller exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(
+            locals.get("iFirst"),
+            Some(&Value::Bool(true)),
+            "inflammable point incinerates"
+        );
+        assert_eq!(
+            locals.get("iSecond"),
+            Some(&Value::Bool(false)),
+            "a FLAM already burning in the rect blocks the second"
+        );
+        assert_eq!(
+            locals.get("iSky"),
+            Some(&Value::Bool(false)),
+            "sky point does not incinerate"
+        );
+        let flams = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "FLAM" && !object.destroyed)
+            .count();
+        assert_eq!(flams, 1, "exactly one FLAM spawned");
+    }
+
     #[test]
     fn call_runs_own_def_script_function_like_cpp() {
         // FnCall (C4Script.cpp:3424-3432): Call(name, p0..p8) runs `name` on

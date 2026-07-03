@@ -3855,6 +3855,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetObjectLayer", get_object_layer);
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("InsertMaterial", insert_material);
+    script.register_host_function("IncinerateLandscape", incinerate_landscape);
     script.register_host_function("OnFire", on_fire);
     script.register_host_function("SetGraphics", set_graphics);
     script.register_host_function("SetObjDrawTransform", set_obj_draw_transform);
@@ -14367,6 +14368,119 @@ fn get_controller(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnIncinerateLandscape (C4Script.cpp:253-261) -> C4Landscape::Incinerate
+/// (C4Landscape.cpp:1430-1441): caller-relative point; inflammable
+/// material lights one FLAM unless another already burns in the
+/// (x-4, y-1, 8, 20) rect (C4Game::FindObject center-in-rect range check,
+/// C4Game.cpp: `Inside(cObj->x - iX, 0, iWdt-1)`). C++ creates the FLAM
+/// mid-call (Game.CreateObject); the port registers a pending spawn, so
+/// its creation callbacks run at materialization within the same frame.
+fn incinerate_landscape(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "IncinerateLandscape expects at most 2 arguments: x, y",
+        ));
+    }
+    let mut x = parse_optional_i32(args.first(), "IncinerateLandscape", "x")?.unwrap_or(0);
+    let mut y = parse_optional_i32(args.get(1), "IncinerateLandscape", "y")?.unwrap_or(0);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("IncinerateLandscape requires an active engine context")
+        })?;
+
+        // Local calls offset by the object position (C4Script.cpp:255-259).
+        if let Some(object) = context.object_context() {
+            let position = object.effective_position();
+            x = x.saturating_add(position.x);
+            y = y.saturating_add(position.y);
+        }
+
+        let inflammable = match (context.landscape_ref(), context.world.materials()) {
+            (Some(landscape), Some(materials)) => landscape.can_incinerate(x, y, materials),
+            _ => false,
+        };
+        if !inflammable {
+            return Ok(Value::Bool(false));
+        }
+
+        let Some(metadata) = context.definition_metadata(crate::FIRE_DEFINITION_ID).cloned() else {
+            // Unknown FLAM def: Game.CreateObject returns nullptr.
+            return Ok(Value::Bool(false));
+        };
+
+        // "Not too much FLAMs" (C4Landscape.cpp:1436-1437) — pending
+        // same-call spawns count like the live objects C++ would find.
+        let left = x.saturating_sub(4);
+        let right = left.saturating_add(8);
+        let top = y.saturating_sub(1);
+        let bottom = top.saturating_add(20);
+        let burning = context.world_object_ids().into_iter().any(|id| {
+            context
+                .get_world_object(id)
+                .filter(|object| object.definition_id() == crate::FIRE_DEFINITION_ID)
+                .filter(|object| object.status().is_active())
+                .map(|object| {
+                    let pos = object.position;
+                    pos.x >= left && pos.x < right && pos.y >= top && pos.y < bottom
+                })
+                .unwrap_or(false)
+        });
+        if burning {
+            return Ok(Value::Bool(false));
+        }
+
+        let id = context.allocate_object_id();
+        let spawn = SpawnConfig::new(crate::FIRE_DEFINITION_ID)
+            .with_position(Vector2::new(x, y))
+            .with_category(metadata.category)
+            .with_id(id);
+        let preview_ocf = ocf::compute(
+            metadata.ocf_base,
+            metadata.crew_member,
+            true,
+            ObjectStatus::Normal,
+            false,
+            FULL_CON,
+        );
+        let preview = HostWorldObject::with_category(
+            id,
+            crate::FIRE_DEFINITION_ID,
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            metadata.category,
+            0,
+            FULL_CON,
+            0,
+            Vector2::new(x, y),
+            Vector2::ZERO,
+            0,
+            Vec::new(),
+            0,
+            0,
+            0,
+            None,
+            None,
+        )
+        .with_ocf(preview_ocf)
+        .with_full_state(Rc::new(crate::preview_spawn_state(
+            Vector2::new(x, y),
+            OWNER_NONE,
+            OWNER_NONE,
+            metadata.category,
+            FULL_CON,
+            metadata.vertices.clone(),
+        )));
+        context.register_spawn(spawn, preview);
+        Ok(Value::Bool(true))
+    })
+}
+
 /// FnGetObjectLayer (C4Script.cpp:5160-5166): the object's pLayer — nil
 /// unless a layer was assigned (Objects.txt `Layer=`; SetObjectLayer is
 /// unported). Layers cannot change mid-call, so the world snapshot is
@@ -17103,6 +17217,7 @@ mod tests {
         "GetYDir",
         "GrabObjectInfo",
         "InLiquid",
+        "IncinerateLandscape",
         "InsertMaterial",
         "Inside",
         "Jump",
