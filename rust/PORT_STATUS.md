@@ -7,14 +7,20 @@
 
 ## Current status
 
-- **Live parity through frame 16 (2026-07-03, pinned seed).** The
-  frame-1 epic (393→0) and every wall from frame 2 to 16 fell in one
-  arc: swim exits, ContactAction, target-preserving SetAction, the
-  material overload chain, per-pixel digging, effect numbering +
-  global-aware effect callbacks, Recruitment/GetPortrait, Splash/
-  BubbleOut with FindMatTop extraction. Current wall: **frame 17**,
-  ~10 objects (an animal Jump-vs-Walk class at x≈4118 plus subpix
-  echoes) — deep-gameplay butterfly, next forensic target.
+- **Live parity through frame 19 (2026-07-03, pinned seed).** Frames
+  1-16 fell in the first arc (see git log); frames 17-19 fell with:
+  the exact script PathFree (ForLine Bresenham + GBackSolid), the
+  C4SolidMask BAKE-IN (masks live as MCVehic pixels in the plane —
+  plane diff 0.34%→0.05%), SetDir gates + TurnAction + foreign
+  SetDir, the synchronous FnJump (ObjectComJump), the per-ExecAction
+  t_attach latch (phase wraps cannot retro-attach), component-only
+  SetXDir/SetYDir fixed writes, and the comparator now checking
+  DIRECTION. Current wall: **frame 20**, the intro cutscene machinery
+  (StartMovie→Talker→MovIntroStart): def-script `global func`s,
+  persisting marker effects, the post-object Script%d phase and LIVE
+  in-flight object locals (lc-script LocalCells) are done; the menu
+  subsystem (CreateMenu/AddMenuItem/GetMenu) is the active gap
+  (worktree agent grinding the remaining unknown host fns).
   Debug: pin runs with `LC_PIN_SEED=424242` (C4GameParameters.cpp,
   env-gated) so C++ runs are reproducible; get the map seed from
   `LC_DEBUG_MAP=1` (rust prints `RUST MAPSEED n`); replay headless with
