@@ -2856,6 +2856,12 @@ struct Object {
     destroyed: bool,
     /// The baked solid mask (grid worlds only; C4Object::pSolidMaskData).
     solid_mask_bake: Option<SolidMaskBake>,
+    /// This frame's latched Action.t_attach (C4Object.cpp:4692 + the
+    /// per-procedure assignments): ExecAction computes it BEFORE the
+    /// phase-wrap SetAction — the movement that follows runs with the
+    /// OLD action's attach (the wrapping HeadUp bison free-falls its
+    /// wrap frame instead of snapping to a floor 5px down).
+    frame_t_attach: u32,
     /// This frame's UprightAttach bits (C4Object.cpp:4698-4705): the
     /// per-frame `Action.t_attach |= Def->UprightAttach` OR that feeds the
     /// movement config. Transient — recomputed at every ExecAction, never
@@ -2975,6 +2981,7 @@ impl Object {
             fixed_rotation,
             rotation_velocity: C4Fixed::ZERO,
             destroyed: matches!(state.status, ObjectStatus::Deleted),
+            frame_t_attach: 0,
             solid_mask_bake: None,
             state,
             upright_t_attach: 0,
@@ -16484,19 +16491,13 @@ impl Engine {
             shape_rect,
             // Action.t_attach per the ExecAction procedure map
             // (C4Object.cpp:4690-5437; upright-attach OR :4703).
+            // The LATCHED Action.t_attach from this frame's ExecAction
+            // (pre-wrap; CNAT_None on the swim-exit/InLiquidAction early
+            // returns, C4Object.cpp:4692,4956).
             attach: if self.objects[idx].swim_exit_this_frame {
-                // The free-fall swim exit returned before ExecAction's
-                // t_attach assignments (C4Object.cpp:4692,4956) — this
-                // frame's movement is unattached.
                 CNAT_NONE
             } else {
-                procedure_t_attach(
-                    action_procedure,
-                    action_library.is_idle_action(&action_name),
-                    self.objects[idx].state.direction,
-                    attach,
-                    self.objects[idx].upright_t_attach,
-                )
+                self.objects[idx].frame_t_attach
             },
             rotateable,
             action_procedure,
@@ -16762,6 +16763,10 @@ impl Engine {
         if idx >= self.objects.len() {
             return false;
         }
+        // Action.t_attach resets each ExecAction (C4Object.cpp:4692);
+        // early returns below leave it CNAT_None for this frame's
+        // movement.
+        self.objects[idx].frame_t_attach = CNAT_NONE;
         // InLiquidAction check (C4Object.cpp:4749-4753): an InLiquid
         // object whose action declares one switches THROUGH
         // SetActionByName (Abort+Start calls, fix resync) and returns
@@ -16840,6 +16845,18 @@ impl Engine {
                 }
             }
         }
+
+        // Latch this frame's Action.t_attach from the PRE-wrap action
+        // (C4Object.cpp:4692 + per-procedure assignments): the phase-wrap
+        // SetAction at ExecAction's end must not retroactively attach
+        // this frame's movement.
+        self.objects[idx].frame_t_attach = procedure_t_attach(
+            procedure,
+            is_idle,
+            self.objects[idx].state.direction,
+            action_attach,
+            self.objects[idx].upright_t_attach,
+        );
 
         if matches!(procedure, ActionProcedure::Dig) {
             self.apply_dig_procedure(idx, &definition_id);
