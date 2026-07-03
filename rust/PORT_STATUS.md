@@ -7,11 +7,16 @@
 
 ## Current status
 
-- **Frame-1 live parity: COMPLETE (2026-07-03).** The live shadow comparator
-  (GoldRush + Tyler.c4p on the native arm64 build) passes frame 1 entirely —
-  393 divergent objects at the epic's start, 0 now. First divergence is at
-  **frame 2** (6 distinct objects: 1450 wagon vertices + subpix/action/
-  position/mobile classes) — the active epic.
+- **Live parity through frame 9 (2026-07-03).** Frame-1 epic complete
+  (393→0); the frame-2..9 classes fell same-day (DFA_SWIM out-of-liquid
+  exit + unattached exit frame, PhaseCall post-advance phase, phase-wrap
+  fix resync, full C4Object::ContactAction port, GetBreath). First
+  divergence now at **frame 10**: the CHBM connect beam's Connecting()
+  EndCall removes it in rust because the SYNTHESIZED LANDSCAPE diverges
+  from C++'s ChunkOZoom output (the horse falls off a road C++ has;
+  ponds lack water — the pond columns read tunnel-over-solid). ACTIVE
+  EPIC: exact map-zoom parity — dump the C++ Surface8 bytes via a
+  bridge probe and pixel-diff against the rust plane.
 - The two original foundational breaks (C4Fixed positions, ChaCha RNG) are
   long fixed: positions/velocities are 16.16 `C4Fixed`, `Random()` is the C++
   LCG with a shared ledger, and the join/init draw sequences are
