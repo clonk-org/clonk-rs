@@ -1,3 +1,5 @@
+mod audit;
+
 use anyhow::{anyhow, bail, Context, Result};
 use lc_engine::fixtures::SNAPSHOT_SCENARIOS;
 use lc_engine::{Playback, Recording};
@@ -47,13 +49,17 @@ fn main() -> Result<()> {
             let tail: Vec<String> = args.collect();
             scenario_errors_command(&tail)
         }
+        Some("scenario-audit") => {
+            let tail: Vec<String> = args.collect();
+            audit::scenario_audit_command(&tail)
+        }
         Some(cmd) => bail!("unknown command `{}` (try `cargo xtask --help`)", cmd),
     }
 }
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask ffi [options]           Build staticlib/cdylib artifacts for C++ integration.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard."
+        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask ffi [options]           Build staticlib/cdylib artifacts for C++ integration.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
     );
 }
 
@@ -64,8 +70,8 @@ fn print_usage() {
 // reached when every scenario the C++ engine can start also loads+applies
 // here.
 
-struct SweepResolver {
-    roots: Vec<PathBuf>,
+pub(crate) struct SweepResolver {
+    pub(crate) roots: Vec<PathBuf>,
 }
 
 impl lc_engine::scenario::LegacyDefinitionResolver for SweepResolver {
