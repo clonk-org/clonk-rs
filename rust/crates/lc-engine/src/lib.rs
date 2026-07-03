@@ -2310,6 +2310,8 @@ struct ObjectDelta {
     /// `SetRDir`. Mirrors C++ `pObj->rdir = itofix(n, prec)` (`C4Script.cpp:710`).
     rotation_velocity: Option<C4Fixed>,
     energy: Option<i32>,
+    /// Kill-trace mark riding an energy write (C4Object.cpp:1351-1353).
+    energy_loss_cause: Option<i32>,
     damage: Option<i32>,
     magic_energy: Option<i32>,
     magic_capacity: Option<i32>,
@@ -2368,6 +2370,9 @@ impl ObjectDelta {
         }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
+        }
+        if let Some(cause) = update.energy_loss_cause {
+            self.energy_loss_cause = Some(cause);
         }
         if let Some(construction) = update.construction {
             self.construction = Some(construction);
@@ -2463,6 +2468,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             rotation: update.rotation,
             rotation_velocity: update.rotation_velocity,
             energy: update.energy,
+            energy_loss_cause: update.energy_loss_cause,
             construction: update.construction,
             damage: update.damage,
             magic_energy: update.magic_energy,
@@ -2521,6 +2527,12 @@ pub struct ObjectUpdate {
     #[serde(default)]
     pub rotation: Option<i32>,
     pub energy: Option<i32>,
+    /// C4Object::DoEnergy's kill-trace mark (C4Object.cpp:1351-1353),
+    /// staged with the UpdatLastEnergyLossCause guard (:1369-1378) already
+    /// applied at call time — the fold writes it through unconditionally
+    /// (Punch's post-fling write is unguarded too, C4ObjectCom.cpp:755,762).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub energy_loss_cause: Option<i32>,
     #[serde(default)]
     pub damage: Option<i32>,
     #[serde(default)]
@@ -2741,6 +2753,7 @@ impl ObjectUpdate {
             && self.rotation.is_none()
             && self.rotation_velocity.is_none()
             && self.energy.is_none()
+            && self.energy_loss_cause.is_none()
             && self.construction.is_none()
             && self.damage.is_none()
             && self.magic_energy.is_none()
@@ -3281,6 +3294,11 @@ impl Object {
         let previous_construction = self.state.construction;
         let shape_changed =
             delta.construction.is_some() || delta.rotation.is_some() || delta.vertices.is_some();
+        // Kill-trace mark BEFORE the energy write (C4Object.cpp:1351-1361)
+        // so AssignDeath credits the new cause.
+        if let Some(cause) = delta.energy_loss_cause {
+            self.last_energy_loss_cause = cause;
+        }
         let outcome = self.state.apply_delta(delta, action_library);
         if let Some(position) = delta.position {
             self.fixed_position = FixedVec2::from_ints(position.x, position.y);
@@ -11602,6 +11620,7 @@ impl Engine {
                 .with_ocf(ocf)
                 .with_command_names(object.commands.command_names())
                 .with_full_state(Rc::new(object.state.clone()))
+                .with_last_energy_loss_cause(object.last_energy_loss_cause)
             }),
             landscape,
             definition_metadata,
@@ -14620,6 +14639,7 @@ impl Engine {
             rotation,
             rotation_velocity,
             energy,
+            energy_loss_cause,
             construction,
             damage,
             magic_energy,
@@ -14695,6 +14715,11 @@ impl Engine {
             }
             if let Some(rotation_velocity) = rotation_velocity {
                 object.rotation_velocity = rotation_velocity;
+            }
+            if let Some(cause) = energy_loss_cause {
+                // Kill-trace mark BEFORE the energy write
+                // (C4Object.cpp:1351-1361) so AssignDeath credits it.
+                object.last_energy_loss_cause = cause;
             }
             if let Some(energy) = energy {
                 // AssignDeath below when a nonzero energy reaches 0
@@ -24974,6 +24999,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             // cannon's Initialize from InitializePlayer
             // (Goldrush.c4s/Script.c:262 → pObj->~Initialize()).
             .with_full_state(Rc::new(object_state_from_snapshot(object)))
+            .with_last_energy_loss_cause(object.last_energy_loss_cause)
         }),
         snapshot.landscape.clone(),
         definition_metadata,
@@ -37996,6 +38022,60 @@ func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
         assert!(
             !engine.objects[victim_idx].state.alive,
             "a nonzero energy reaching 0 assigns death (C4Object.cpp:1363)"
+        );
+    }
+
+    // FnDoEnergy's caused-by (C4Script.cpp:496-497): iCausedByPlusOne - 1,
+    // or the CALLER's controller when unset — marked on the target's
+    // LastEnergyLossCausePlayer kill trace for negative changes
+    // (C4Object.cpp:1351-1353).
+    #[test]
+    fn do_energy_threads_the_caused_by_player_like_cpp() {
+        let script = r#"#strict
+func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
+func ZapAs() { return DoEnergy(-10, FindObject(VCTM), 0, 0, 8); }
+"#;
+        let mut engine = Engine::with_seed(29);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("victim spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_idx].state.controller = 5;
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 90_000;
+
+        engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].last_energy_loss_cause, 5,
+            "unset caused-by falls back to the caller's controller (C4Script.cpp:497)"
+        );
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_idx, "ZapAs", Vec::new())
+            .expect("zap-as runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].last_energy_loss_cause, 7,
+            "an explicit plus-one caused-by decodes to player 7 (C4Script.cpp:496)"
         );
     }
 

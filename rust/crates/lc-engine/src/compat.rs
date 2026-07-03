@@ -104,6 +104,9 @@ pub(crate) struct HostWorldObject {
     /// GameCall): lets host functions build a complete object scope for
     /// another object mid-VM-call. `None` in legacy fixture contexts.
     state: Option<Rc<ObjectState>>,
+    /// C4Object::LastEnergyLossCausePlayer (kill trace) — carried beside
+    /// the state snapshot because it lives on the engine object wrapper.
+    pub last_energy_loss_cause: i32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -280,6 +283,7 @@ impl HostWorldObject {
             draw_transform,
             command_names: Vec::new(),
             state: None,
+            last_energy_loss_cause: OWNER_NONE,
         }
     }
 
@@ -305,6 +309,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_full_state(mut self, state: Rc<ObjectState>) -> Self {
         self.state = Some(state);
+        self
+    }
+
+    pub(crate) fn with_last_energy_loss_cause(mut self, cause: i32) -> Self {
+        self.last_energy_loss_cause = cause;
         self
     }
 
@@ -8363,9 +8372,14 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
+    let mut eng_type = 0;
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::Int(_) | Value::Nil => {
+            Value::Int(value) => {
+                eng_type = *value;
+                index += 1;
+            }
+            Value::Nil => {
                 index += 1;
             }
             other => {
@@ -8376,10 +8390,19 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
     }
+    // C4FxCall_EngScript default (C4Script.cpp:495).
+    if eng_type == 0 {
+        eng_type = crate::C4FX_CALL_ENG_SCRIPT;
+    }
 
+    let mut caused_by_plus_one = 0;
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::Int(_) | Value::Nil => {
+            Value::Int(value) => {
+                caused_by_plus_one = *value;
+                index += 1;
+            }
+            Value::Nil => {
                 index += 1;
             }
             other => {
@@ -8402,6 +8425,16 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("DoEnergy requires an active engine context"))?;
+        // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
+        // (C4Script.cpp:496-497) — resolved in the caller's scope.
+        let caused_by = if caused_by_plus_one != 0 {
+            caused_by_plus_one - 1
+        } else {
+            context
+                .object_context()
+                .map(|object| object.controller())
+                .unwrap_or(OWNER_NONE)
+        };
         // `if (!pObj) pObj = cthr->Obj` is only the local-call default
         // (C4Script.cpp:494) — a named target may be FOREIGN.
         let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
@@ -8410,12 +8443,47 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         if !context.ensure_object_scope(target) {
             return Ok(Value::Bool(false));
         }
+        stage_energy_loss_cause(context, target, change, eng_type, caused_by);
         let Some(scope) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
         scope.adjust_energy(change, exact);
         Ok(Value::Bool(true))
     })
+}
+
+/// The kill-trace mark of C4Object::DoEnergy (C4Object.cpp:1351-1353):
+/// negative changes (and object hits even at zero) record the causing
+/// player, with the UpdatLastEnergyLossCause guard (:1369-1378) applied
+/// at call time against the freshest tracked value.
+fn stage_energy_loss_cause(
+    context: &mut EffectHostContext,
+    target: ObjectId,
+    change: i32,
+    eng_type: i32,
+    caused_by: i32,
+) {
+    if change >= 0 && eng_type != crate::C4FX_CALL_ENG_OBJ_HIT {
+        return;
+    }
+    let tracked = context
+        .object_scope(target)
+        .and_then(|scope| scope.pending_update.energy_loss_cause)
+        .or_else(|| {
+            context
+                .get_world_object(target)
+                .map(|object| object.last_energy_loss_cause)
+        })
+        .unwrap_or(OWNER_NONE);
+    let controller = context
+        .object_scope(target)
+        .map(|scope| scope.controller())
+        .unwrap_or(OWNER_NONE);
+    if caused_by != controller || tracked < 0 {
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.pending_update.energy_loss_cause = Some(caused_by);
+        }
+    }
 }
 
 fn do_con(args: &[Value]) -> Result<Value, RuntimeError> {
