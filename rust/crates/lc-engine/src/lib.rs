@@ -3016,11 +3016,6 @@ struct Object {
     command_queue: VecDeque<QueuedCommand>,
     commands: CommandStack,
     pending_action_events: VecDeque<ActionTransitionEvent>,
-    /// Monotonic creation sequence for the C4ObjectList exec order:
-    /// within a sort-category block, loaded objects exec in file order
-    /// and later creations exec after them (Add inserts at the block
-    /// head; ExecObjects iterates BeginLast, C4Game.cpp:1572).
-    exec_seq: u64,
     /// The DFA_SWIM free-fall exit `return`ed out of ExecAction this
     /// frame BEFORE any t_attach assignment — the frame's movement runs
     /// unattached (C4Object.cpp:4692,4956).
@@ -3132,7 +3127,6 @@ impl Object {
             command_queue: VecDeque::new(),
             commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
-            exec_seq: 0,
             swim_exit_this_frame: false,
             material_contents: Vec::new(),
             shape_template,
@@ -8094,6 +8088,7 @@ impl ScenarioScript {
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
+        engine_next_object_id: u64,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_initialize {
             return Ok((ScenarioBatch::default(), audio, rng));
@@ -8118,6 +8113,7 @@ impl ScenarioScript {
             particle_defs,
             definition_scripts,
             definition_metadata,
+            engine_next_object_id,
         ) {
             Ok((batch, audio, rng, None)) => Ok((batch, audio, rng)),
             // Strict wrappers surface the script error (fixtures assert
@@ -8141,6 +8137,7 @@ impl ScenarioScript {
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
+        engine_next_object_id: u64,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_step {
             return Ok((ScenarioBatch::default(), audio, rng));
@@ -8167,6 +8164,7 @@ impl ScenarioScript {
             particle_defs,
             definition_scripts,
             definition_metadata,
+            engine_next_object_id,
         ) {
             Ok((batch, audio, rng, None)) => Ok((batch, audio, rng)),
             // Strict wrappers surface the script error (fixtures assert
@@ -8195,6 +8193,7 @@ impl ScenarioScript {
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
+        engine_next_object_id: u64,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng, Option<EngineError>), EngineError> {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
@@ -8205,11 +8204,17 @@ impl ScenarioScript {
         // The snapshot world's metadata table only knows categories — the
         // ENGINE's full table (shapes, physicals, ActMaps) rides along so
         // CreateObject applies the DoCon bottom adjust and OCF correctly.
+        // The snapshot world derives max(live ids)+1 — that RE-MINTS the
+        // number of any object created and removed earlier this frame.
+        // C4Game::NewObj's ObjectEnumerationIndex only ever increments, so
+        // the engine's persistent allocator is authoritative (the GoldRush
+        // intro _TLK collided with a burned same-frame FXU1 id here).
         let world = host_world_context_from_snapshot(snapshot)
             .with_definition_metadata(definition_metadata)
             .with_particle_defs(particle_defs)
             .with_definition_scripts(definition_scripts);
-        let next_object_id = world.next_object_id();
+        let next_object_id = world.next_object_id().max(engine_next_object_id);
+        let world = world.with_next_object_id(next_object_id);
         let audio_guard = enter_audio_context(audio);
         let (result, host_effects) = compat::with_effect_context_with_state(
             None,
@@ -8548,15 +8553,13 @@ pub struct Engine {
     /// Game.Parameters.RandomSeed - kept for the game-start re-fix
     /// (C4Game::Synchronize, C4Game.cpp:3695).
     random_seed: u64,
-    exec_seq_counter: u64,
-    /// Objects that EXITED a container this frame: C4Object::Exit re-adds
-    /// to the exec list (newest cluster position). Deferred past the
-    /// frame's spawn materialization so a create-then-exit sequence in one
-    /// script call keeps the C++ relative order (the intro Talker is
-    /// created before the player's Exit re-add). Limitation: an exit
-    /// followed by a create in the SAME frame would order the create
-    /// first here, unlike C++.
-    pending_exit_reorders: Vec<ObjectId>,
+    /// The C++ master object list (`::Objects`) kept in EXEC order:
+    /// C4Game::ExecObjects walks the list from the BACK (C4Game.cpp:1582),
+    /// so this vec is the C4ObjectList REVERSED — index 0 executes first.
+    /// Maintained by `insert_into_exec_list` (C4ObjectList::Add stMain
+    /// semantics) on spawn and pruned of removed ids each tick. Enter/Exit
+    /// never touch it (C4Object.cpp:1513-1615 only move Contents).
+    exec_list: Vec<ObjectId>,
     frame: u64,
     landscape: Option<Landscape>,
     sectors: Option<SectorMap>,
@@ -10087,8 +10090,7 @@ impl Engine {
             scenario_script_go: false,
             scenario_script_counter: 0,
             random_seed: seed,
-            exec_seq_counter: 0,
-            pending_exit_reorders: Vec::new(),
+            exec_list: Vec::new(),
             frame: 0,
             landscape: None,
             sectors: None,
@@ -11775,6 +11777,7 @@ impl Engine {
             self.particle_system.def_names(),
             self.definition_script_table(),
             definition_metadata_table,
+            self.next_object_id,
         );
         // Initialize is a game call: a script error logs and the scenario
         // still runs WITH its script installed (C++ fail-safe exec,
@@ -11912,6 +11915,7 @@ impl Engine {
         let particle_defs = self.particle_system.def_names();
         let definition_scripts = self.definition_script_table();
         let definition_metadata_for_call = self.definition_metadata_table();
+        let engine_next_object_id = self.next_object_id;
         let script = match self.scenario_script.as_mut() {
             Some(script) if script.has_function(function) => script,
             Some(_) => return Ok(()),
@@ -11930,6 +11934,7 @@ impl Engine {
             particle_defs,
             definition_scripts,
             definition_metadata_for_call,
+            engine_next_object_id,
         )?;
         self.rng = new_rng;
         self.audio_registry = audio_state;
@@ -13663,6 +13668,7 @@ impl Engine {
             let global_effects = self.global_effects.clone();
             let particle_defs = self.particle_system.def_names();
             let definition_metadata_table = self.definition_metadata_table();
+            let engine_next_object_id = self.next_object_id;
             let (batch, audio_state, new_rng) = {
                 let definition_scripts = self.definition_script_table();
                 let script = self
@@ -13681,6 +13687,7 @@ impl Engine {
                     particle_defs,
                     definition_scripts,
                     definition_metadata_table.clone(),
+                    engine_next_object_id,
                 )?
             };
             self.rng = new_rng;
@@ -13850,30 +13857,31 @@ impl Engine {
         // effect-callback paths below keep using self.rng directly.
         let command_rng = std::cell::RefCell::new(LcgRng::default());
         // C4Game::ExecObjects iterates the main list from the BACK
-        // (BeginLast, C4Game.cpp:1572); the list is category-DESCENDING
-        // with insert-at-block-head (C4ObjectList::Add:165-180), so the
-        // effective exec order is ASCENDING sort-category, file order
-        // within a loaded block, later creations after them. Unsorted
-        // objects (Line defs) sit at the list end -> exec first. The
-        // GoldRush wagon (a script-created vehicle) must exec BEFORE the
-        // joined crew it contains: CopyMotion reads its post-move state.
-        let mut exec_order: Vec<usize> = (0..self.objects.len()).collect();
-        exec_order.sort_by_key(|&idx| {
-            let object = &self.objects[idx];
-            let unsorted = self
-                .definitions
-                .get(&object.definition_id)
-                .map(|definition| definition.line() != 0)
-                .unwrap_or(false);
-            if unsorted {
-                (-1, std::cmp::Reverse(object.exec_seq))
-            } else {
-                (
-                    object.state.category & CATEGORY_SORT_LIMIT,
-                    std::cmp::Reverse(u64::MAX - object.exec_seq),
-                )
+        // (BeginLast, C4Game.cpp:1582); `exec_list` IS that list kept
+        // reversed (see the field docs and `insert_into_exec_list`).
+        // Prune ids whose objects were removed since the last frame, then
+        // map to indices. Any live object missing from the list would be
+        // a missed insertion site — execute it last and say so loudly.
+        let mut exec_list = std::mem::take(&mut self.exec_list);
+        exec_list.retain(|&id| self.find_object_index(id).is_some());
+        self.exec_list = exec_list;
+        let mut exec_order: Vec<usize> = self
+            .exec_list
+            .iter()
+            .filter_map(|&id| self.find_object_index(id))
+            .collect();
+        if exec_order.len() < self.objects.len() {
+            let listed: HashSet<usize> = exec_order.iter().copied().collect();
+            for idx in 0..self.objects.len() {
+                if !listed.contains(&idx) {
+                    tracing::warn!(
+                        object = self.objects[idx].id.as_u64(),
+                        "object missing from exec_list; appending"
+                    );
+                    exec_order.push(idx);
+                }
             }
-        });
+        }
         for idx in exec_order {
             // UpdateOCF runs first in C4Object::Execute (C4Object.cpp:1058).
             self.refresh_object_ocf(idx);
@@ -14003,7 +14011,7 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
-                self.next_object_id = effect_next_object_id;
+                self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
                 }
@@ -14097,7 +14105,7 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
-                self.next_object_id = effect_next_object_id;
+                self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
                 }
@@ -14384,7 +14392,7 @@ impl Engine {
                     )?
                 };
                 self.rng = new_rng;
-                self.next_object_id = next_object_id;
+                self.sync_next_object_id(next_object_id);
                 self.audio_registry = audio_state;
                 command
             } else {
@@ -14540,7 +14548,7 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
-                self.next_object_id = effect_next_object_id;
+                self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
                 }
@@ -14710,12 +14718,6 @@ impl Engine {
         self.transfer_zones.retain_existing(&alive);
         self.prune_selection();
         self.process_spawn_queue(spawn_requests)?;
-        for exited in std::mem::take(&mut self.pending_exit_reorders) {
-            if let Some(index) = self.find_object_index(exited) {
-                self.objects[index].exec_seq = self.exec_seq_counter;
-                self.exec_seq_counter += 1;
-            }
-        }
         self.refresh_elimination_state();
         self.check_game_over()?;
         // Control.DoSyncCheck() closes the frame (C4Game.cpp:829)
@@ -15216,7 +15218,7 @@ impl Engine {
             self.apply_physics_delta(delta);
         }
 
-        self.next_object_id = next_object_id;
+        self.sync_next_object_id(next_object_id);
         if !spawns.is_empty() {
             self.process_spawn_queue(spawns)?;
         }
@@ -15366,7 +15368,7 @@ impl Engine {
             )?;
             self.rng = new_rng;
             self.audio_registry = audio_state;
-            self.next_object_id = effect_next_object_id;
+            self.sync_next_object_id(effect_next_object_id);
             if !effect_spawns.is_empty() {
                 self.process_spawn_queue(effect_spawns)?;
             }
@@ -15541,7 +15543,7 @@ impl Engine {
                 )?;
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
-                self.next_object_id = effect_next_object_id;
+                self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
                 }
@@ -15986,6 +15988,7 @@ impl Engine {
         }
         self.rng = state.rng.clone();
         self.objects.clear();
+        self.exec_list.clear();
         self.note_objects_changed();
         self.global_effects = state.global_effects.clone();
         self.particles.clear();
@@ -16157,8 +16160,12 @@ impl Engine {
             object
                 .commands
                 .restore_from_snapshot(&persisted.command_stack);
+            let restored_id = object.id;
             self.objects.push(object);
             self.note_objects_changed();
+            // State restores rebuild the list verbatim like a compiled
+            // load (C4ObjectList::CompileFunc, C4ObjectList.cpp:508-530).
+            self.insert_into_exec_list(restored_id, true);
             if let Some(container) = snapshot.container {
                 container_assignments.push((snapshot.id, container));
             }
@@ -17231,7 +17238,7 @@ impl Engine {
         };
         self.rng = contact_rng;
         self.audio_registry = contact_audio;
-        self.next_object_id = contact_next_object_id;
+        self.sync_next_object_id(contact_next_object_id);
         for (changed_object_id, previous_owner, new_owner, new_crew_member) in
             contact_selection_changes
         {
@@ -21249,6 +21256,15 @@ impl Engine {
         ObjectId::new(id)
     }
 
+    /// Fold a script-world snapshot's id counter back into the engine.
+    /// C4Game::NewObj mints strictly increasing numbers
+    /// (`Number = ++ObjectEnumerationIndex`) — the allocator never
+    /// rewinds within a session, so a snapshot counter that fell behind
+    /// an interleaved engine-side spawn is stale and must be ignored.
+    fn sync_next_object_id(&mut self, reported: u64) {
+        self.next_object_id = self.next_object_id.max(reported);
+    }
+
     /// C4Weather::Init's scenario evaluates (C4Weather.cpp:36-70): the
     /// synced-RNG init draws in exact order — Season, YearSpeed, Climate
     /// (100 - value - 50), Wind (= TargetWind), the NoInitialize-gated
@@ -21679,6 +21695,75 @@ impl Engine {
             .collect();
         rows.sort();
         rows
+    }
+
+    /// C4ObjectList::Add stMain insertion (C4ObjectList.cpp:110-216) kept
+    /// in EXEC order (the C++ list reversed — see the `exec_list` docs).
+    /// - Line defs skip sorting (`fUnsorted`, :148): forward-list end =
+    ///   exec HEAD (a new line executes first, like today's beams).
+    /// - Pass 1 (:150-162, skipped for C4D_StaticBack "to allow
+    ///   multiobject outside structure"): insert before the forward-FIRST
+    ///   live link with the same sorted category AND the same def = exec
+    ///   right AFTER the def cluster's last-executing member.
+    /// - Pass 2 (:164-173): insert before the forward-first live link
+    ///   with sorted category <= own = exec at the END of the category
+    ///   bracket; with no such link the object lands at the forward end =
+    ///   exec head.
+    /// Loaded objects bypass Add: Objects.txt is saved back-to-front and
+    /// re-added with stReverse (C4ObjectList.cpp:508-530), so a loaded
+    /// object's exec position is its file position — plain append.
+    fn insert_into_exec_list(&mut self, id: ObjectId, loaded: bool) {
+        if loaded {
+            self.exec_list.push(id);
+            return;
+        }
+        let Some(index) = self.find_object_index(id) else {
+            return;
+        };
+        let is_line = |engine: &Self, idx: usize| {
+            engine
+                .definitions
+                .get(&engine.objects[idx].definition_id)
+                .map(|definition| definition.line() != 0)
+                .unwrap_or(false)
+        };
+        if is_line(self, index) {
+            self.exec_list.insert(0, id);
+            return;
+        }
+        let category = self.objects[index].state.category;
+        let sort_category = category & CATEGORY_SORT_LIMIT;
+        let definition_id = self.objects[index].definition_id.clone();
+        // The scans consider live sorted links only (Status && !Unsorted,
+        // :156,:168); rust prunes removed objects from the list, and the
+        // transient Unsorted resort flag is not modeled.
+        let live_index = |engine: &Self, other: ObjectId| {
+            (other != id)
+                .then(|| engine.find_object_index(other))
+                .flatten()
+        };
+        if category & CATEGORY_STATIC_BACK == 0 {
+            let cluster_position = self.exec_list.iter().rposition(|&other| {
+                live_index(self, other).is_some_and(|other_index| {
+                    let object = &self.objects[other_index];
+                    object.state.category & CATEGORY_SORT_LIMIT == sort_category
+                        && object.definition_id == definition_id
+                })
+            });
+            if let Some(position) = cluster_position {
+                self.exec_list.insert(position + 1, id);
+                return;
+            }
+        }
+        let bracket_position = self.exec_list.iter().rposition(|&other| {
+            live_index(self, other).is_some_and(|other_index| {
+                self.objects[other_index].state.category & CATEGORY_SORT_LIMIT <= sort_category
+            })
+        });
+        match bracket_position {
+            Some(position) => self.exec_list.insert(position + 1, id),
+            None => self.exec_list.insert(0, id),
+        }
     }
 
     fn find_object_index(&self, id: ObjectId) -> Option<usize> {
@@ -22293,14 +22378,9 @@ impl Engine {
                 // (C4Object.cpp:1527-1528).
                 self.objects[object_index].state.in_liquid = false;
                 self.objects[object_index].state.mobile = true;
-                // Exit re-sorts the object to the NEWEST position of its
-                // category cluster in the exec list (live-oracle probe:
-                // after MovIntroStart's Exit(pPlayer) at f20 the player
-                // execs AFTER the just-created Talker — C++ EXECORD
-                // f22: coach, horse, talker, player). Deferred past this
-                // frame's spawn materialization (see field docs).
-                let exited = self.objects[object_index].id;
-                self.pending_exit_reorders.push(exited);
+                // C4Object::Exit does NOT touch the master object list
+                // (C4Object.cpp:1513-1545 only moves Contents) — the
+                // exec position never changes on exit.
             }
         }
         // The moved object's own SetOCF (C4Object.cpp:1531,1570).
@@ -24575,7 +24655,7 @@ impl Engine {
                 }
             };
             self.rng = new_rng;
-            self.next_object_id = next_object_id;
+            self.sync_next_object_id(next_object_id);
             self.audio_registry = audio_state;
             if let Some(go) = script_go {
                 self.scenario_script_go = go;
@@ -24710,7 +24790,7 @@ impl Engine {
                 }
             };
             self.rng = new_rng;
-            self.next_object_id = next_object_id;
+            self.sync_next_object_id(next_object_id);
             self.audio_registry = audio_state;
             if let Some(go) = script_go {
                 self.scenario_script_go = go;
@@ -24809,7 +24889,7 @@ impl Engine {
             )?;
             self.rng = new_rng;
             self.audio_registry = audio_state;
-            self.next_object_id = effect_next_object_id;
+            self.sync_next_object_id(effect_next_object_id);
             if !effect_spawns.is_empty() {
                 self.process_spawn_queue(effect_spawns)?;
             }
@@ -24852,10 +24932,10 @@ impl Engine {
         // GoldRush wagon (CreateObject(COAC,28,270) -> center 250, 20px
         // above the road) FLOATS at first; snapping it to the surface
         // displaced it and its 30+ contents (the (0,-20) live class).
-        object.exec_seq = self.exec_seq_counter;
-        self.exec_seq_counter += 1;
+        let new_id = object.id;
         self.objects.push(object);
         self.note_objects_changed();
+        self.insert_into_exec_list(new_id, loaded);
         let index = self.objects.len() - 1;
         self.update_sector_for_index(index);
         self.update_solid_mask(index);
@@ -43141,6 +43221,161 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
         assert!(
             !mobile_of(&engine, tilted),
             "a 340-degree tilt is outside ±StableRange (C4Object.cpp:4701)"
+        );
+    }
+
+    // C4Game::NewObj mints strictly increasing object numbers
+    // (`Number = ++ObjectEnumerationIndex`); the counter never rewinds
+    // within a session. A script-world snapshot's counter written back
+    // after an interleaved engine-side spawn is STALE — taking it
+    // verbatim re-mints a used id (the GoldRush intro _TLK collided
+    // with a same-frame FXU1 and executed twice through the exec list).
+    #[test]
+    fn stale_script_world_counter_never_rewinds_object_ids() {
+        let mut engine = Engine::with_seed(0);
+        engine.next_object_id = 100;
+        engine.sync_next_object_id(90);
+        assert_eq!(
+            engine.next_object_id, 100,
+            "a stale snapshot counter must not rewind the allocator"
+        );
+        engine.sync_next_object_id(120);
+        assert_eq!(
+            engine.next_object_id, 120,
+            "world-side allocations advance the engine counter"
+        );
+    }
+
+    // The GoldRush intro wall (f22 talker x 30-vs-28): C4ObjectList::Add
+    // stMain pass 1 (C4ObjectList.cpp:150-162) inserts a new object BEFORE
+    // the first same-sorted-category, same-def link — and ExecObjects walks
+    // the list BACKWARDS (C4Game.cpp:1582), so a runtime spawn of an
+    // existing def executes right AFTER the last-executing member of its
+    // def cluster, NOT at the end of its category bracket. The intro _TLK
+    // talker therefore execs BEFORE the later-joined TRPR player and its
+    // DFA_ATTACH reads the player's PREVIOUS-frame position (one-frame
+    // lag); rust's global-creation order read the same-frame position.
+    #[test]
+    fn runtime_spawn_clusters_with_existing_def_in_exec_order_like_cpp() {
+        let mut mover = Definition::from_script("Wagn", "Wagon", "#strict\n").expect("compiles");
+        mover.set_shape_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+        let mut crew = Definition::from_script("Crew", "Crew", "#strict\n").expect("compiles");
+        crew.configure_actions(
+            None,
+            HashMap::from([(
+                "Ride".to_string(),
+                ActionSpec::default().with_procedure("ATTACH"),
+            )]),
+        );
+        let mut talk = Definition::from_script("Talk", "Talker", "#strict\n").expect("compiles");
+        talk.configure_actions(
+            None,
+            HashMap::from([(
+                "Attach".to_string(),
+                ActionSpec::default().with_procedure("ATTACH"),
+            )]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_physics(PhysicsSettings::new(0, 100, -100));
+        engine.register_definition(mover).expect("registers");
+        engine.register_definition(crew).expect("registers");
+        engine.register_definition(talk).expect("registers");
+
+        // Creation order mirrors GoldRush: pre-placed talker cluster,
+        // then the player, then the intro talker.
+        let talker_zero = engine
+            .spawn_object(
+                SpawnConfig::new("Talk")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(300, 50)),
+            )
+            .expect("cluster ancestor spawns");
+        let rider = engine
+            .spawn_object(
+                SpawnConfig::new("Crew")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(100, 50)),
+            )
+            .expect("rider spawns");
+        let vehicle = engine
+            .spawn_object(
+                SpawnConfig::new("Wagn")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(100, 50)),
+            )
+            .expect("vehicle spawns");
+        let intro_talker = engine
+            .spawn_object(
+                SpawnConfig::new("Talk")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(100, 50)),
+            )
+            .expect("intro talker spawns");
+        let _ = talker_zero;
+
+        engine
+            .apply_object_update(
+                rider,
+                ObjectUpdate {
+                    action: Some(
+                        ActionUpdate::default()
+                            .with_name("Ride")
+                            .with_force(true)
+                            .with_target(Some(vehicle)),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .expect("rider mounts");
+        engine
+            .apply_object_update(
+                intro_talker,
+                ObjectUpdate {
+                    action: Some(
+                        ActionUpdate::default()
+                            .with_name("Attach")
+                            .with_force(true)
+                            .with_target(Some(rider)),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .expect("talker attaches");
+
+        // The horse's pull, reduced to a plain 2px/frame roll.
+        let vehicle_idx = engine.find_object_index(vehicle).expect("exists");
+        engine.objects[vehicle_idx].fixed_velocity.x = itofix(2);
+        engine.objects[vehicle_idx].state.mobile = true;
+
+        let x_of = |engine: &Engine, id| {
+            engine
+                .find_object_index(id)
+                .map(|idx| engine.objects[idx].state.position.x)
+                .expect("object exists")
+        };
+
+        engine.tick().expect("tick");
+        assert_eq!(x_of(&engine, vehicle), 102, "vehicle rolls 2px");
+        assert_eq!(
+            x_of(&engine, rider),
+            102,
+            "rider execs after the vehicle: attach reads the post-move x"
+        );
+        assert_eq!(
+            x_of(&engine, intro_talker),
+            100,
+            "clustered talker execs BEFORE the rider (C4ObjectList.cpp:150-162 \
+             + reverse exec, C4Game.cpp:1582): reads the PRE-exec rider x"
+        );
+
+        engine.tick().expect("tick");
+        assert_eq!(x_of(&engine, vehicle), 104);
+        assert_eq!(x_of(&engine, rider), 104);
+        assert_eq!(
+            x_of(&engine, intro_talker),
+            102,
+            "one-frame lag persists while the vehicle moves"
         );
     }
 

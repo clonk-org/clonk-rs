@@ -125,11 +125,24 @@
 
 ## Load-bearing engine semantics (discovered the hard way; easy to regress)
 
-- **Exec order** = the C++ main list REVERSED (`Objects.BeginLast`):
-  ascending sort-category (StaticBack→Structure→Vehicle→Living→Object), file
-  order within a loaded block, later creations after (engine `exec_seq`);
-  Line defs exec first. Containers must exec before their contained crew
-  (CopyMotion reads post-move state).
+- **Exec order** = the C++ main list REVERSED (`Objects.BeginLast`), kept as
+  a persistent `exec_list` maintained by `insert_into_exec_list`
+  (C4ObjectList::Add stMain, C4ObjectList.cpp:110-216): ascending
+  sort-category (StaticBack→Structure→Vehicle→Living→Object), file order
+  within a loaded block (the save is written back-to-front and re-added
+  stReverse); a runtime creation of an EXISTING def executes right after
+  the last-executing member of its same-category def CLUSTER (Add pass 1 —
+  the GoldRush intro _TLK execs before the later-joined player and reads
+  its previous-frame ride position), a new def at its bracket's end;
+  StaticBack skips clustering; Line defs exec first, newest first.
+  Enter/Exit never reorder (C4Object.cpp:1513-1615 only move Contents).
+  Containers must exec before their contained crew (CopyMotion reads
+  post-move state).
+- **Object ids never rewind**: C4Game::NewObj's `++ObjectEnumerationIndex`
+  is strictly monotonic. Script-world counters written back from snapshots
+  fold through `sync_next_object_id` (max), and snapshot-built worlds seed
+  from the engine allocator, never `max(live ids)+1` — a burned same-frame
+  id (GoldRush FXU1 flash) must not be re-minted for the next creation.
 - **x/fix splits are legitimate**: DoCon's initial adjust writes int y only;
   `TargetBounds` clamps the int step target only (map-edge objects keep the
   outside fixed coord); `SetAction` resyncs fix (C4Object.cpp:4144);
