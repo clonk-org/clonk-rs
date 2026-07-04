@@ -13865,6 +13865,12 @@ impl Engine {
         let mut exec_list = std::mem::take(&mut self.exec_list);
         exec_list.retain(|&id| self.find_object_index(id).is_some());
         self.exec_list = exec_list;
+        // Enforce the master-list category invariant every tick: the C++
+        // list is maintained sorted by Add/Resort; a stable bracket sort
+        // is idempotent for rule-inserted entries and repairs loaded
+        // appends that arrive after the load-time FixObjectOrder (the
+        // bridge streams Objects.txt objects in phases).
+        self.fix_exec_list_order();
         let mut exec_order: Vec<usize> = self
             .exec_list
             .iter()
@@ -13879,6 +13885,17 @@ impl Engine {
                         "object missing from exec_list; appending"
                     );
                     exec_order.push(idx);
+                }
+            }
+        }
+        if std::env::var("LC_EXECDBG").is_ok() && (1..=2).contains(&frame) {
+            for &idx in &exec_order {
+                let id = self.objects[idx].id.as_u64();
+                if (1449..=1460).contains(&id) {
+                    crate::rng::rng_trace_line(&format!(
+                        "REXEC f{frame} {id} {}",
+                        self.objects[idx].definition_id.as_str()
+                    ));
                 }
             }
         }
@@ -16253,6 +16270,7 @@ impl Engine {
             }
         }
 
+        self.fix_exec_list_order();
         Ok(())
     }
 
@@ -21388,6 +21406,10 @@ impl Engine {
     /// synced RNG re-fixes to the seed (C4Game.cpp:3695), erasing the
     /// weather-init draws' ledger offset (their VALUES stay).
     pub(crate) fn game_start_synchronize(&mut self) {
+        // Loaded objects appended in file order get their category
+        // brackets fixed before the first tick (FixObjectOrder runs
+        // right after Objects.txt load, C4GameObjects.cpp:663).
+        self.fix_exec_list_order();
         for object in &mut self.objects {
             object.fixed_position = crate::math::FixedVec2 {
                 x: itofix(object.state.position.x),
@@ -21712,6 +21734,48 @@ impl Engine {
     /// Loaded objects bypass Add: Objects.txt is saved back-to-front and
     /// re-added with stReverse (C4ObjectList.cpp:508-530), so a loaded
     /// object's exec position is its file position — plain append.
+    /// C4GameObjects::FixObjectOrder (C4GameObjects.cpp:773-830, called
+    /// after Objects.txt load :663): normalizes each object's sort
+    /// category to exactly one bit (lowest set; missing -> StaticBack,
+    /// persisted into Category) and re-establishes the master-list
+    /// category order. The master list is category-DESCENDING front to
+    /// back and ExecObjects walks it in reverse (C4Game.cpp:1582), so the
+    /// exec view sorts category-ASCENDING; the bubble pass preserves
+    /// relative order within a bracket (Objects.txt file order). Loaded
+    /// entries append in file order and are bracket-sorted here; runtime
+    /// Add-rule inserts never violate bracket order, so re-running this
+    /// is idempotent for them.
+    fn fix_exec_list_order(&mut self) {
+        if std::env::var("LC_EXECDBG").is_ok() {
+            crate::rng::rng_trace_line(&format!(
+                "FIXORDER len={}",
+                self.exec_list.len()
+            ));
+        }
+        let mut keyed: Vec<(i32, usize, ObjectId)> = Vec::with_capacity(self.exec_list.len());
+        for (position, &id) in self.exec_list.iter().enumerate() {
+            let Some(index) = self.find_object_index(id) else {
+                continue;
+            };
+            let raw = self.objects[index].state.category;
+            let masked = raw & CATEGORY_SORT_LIMIT;
+            let sort_bit = if masked == 0 {
+                self.objects[index].state.category = raw + 1;
+                1
+            } else {
+                let lowest = masked & masked.wrapping_neg();
+                if lowest != masked {
+                    self.objects[index].state.category =
+                        (raw & !CATEGORY_SORT_LIMIT) | lowest;
+                }
+                lowest
+            };
+            keyed.push((sort_bit, position, id));
+        }
+        keyed.sort_by_key(|&(sort_bit, position, _)| (sort_bit, position));
+        self.exec_list = keyed.into_iter().map(|(_, _, id)| id).collect();
+    }
+
     fn insert_into_exec_list(&mut self, id: ObjectId, loaded: bool) {
         if loaded {
             self.exec_list.push(id);
