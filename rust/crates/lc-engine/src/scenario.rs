@@ -196,6 +196,34 @@ pub struct Scenario {
     /// present only for legacy scenario loads — `apply` replays the
     /// synced-RNG init draws so the ledger matches C++ from frame 0.
     pub(crate) weather_init: Option<LegacyWeatherInit>,
+    /// The C4Game::InitGame environment placements (C4Game.cpp:2493-2503);
+    /// present only for legacy scenario loads.
+    pub(crate) init_placement: Option<LegacyInitPlacement>,
+}
+
+/// The C4Game::InitGame environment-placement inputs (C4Game.cpp:
+/// 2493-2503): Scenario.txt `[Landscape] Vegetation=/InEarth=`,
+/// `[Animals]`, `[Environment] Objects=` and `[Game] Goals=/Rules=`,
+/// plus the NoInitialize gate and the MEarth material name.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LegacyInitPlacement {
+    pub no_initialize: bool,
+    pub vegetation: Vec<(String, i32)>,
+    pub vegetation_level: LegacyC4SVal,
+    pub in_earth: Vec<(String, i32)>,
+    pub in_earth_level: LegacyC4SVal,
+    pub animals: Vec<(String, i32)>,
+    pub nests: Vec<(String, i32)>,
+    pub environment: Vec<(String, i32)>,
+    pub goals: Vec<(String, i32)>,
+    pub rules: Vec<(String, i32)>,
+    pub earth_material: String,
+}
+
+impl Default for LegacyC4SVal {
+    fn default() -> Self {
+        Self::new(0, 0, 0, 100)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -417,8 +445,8 @@ impl Scenario {
         }
 
         let script = load_legacy_scenario_script(group)?;
-        let classifier = build_map_pixel_classifier(group, resolver);
-        let landscape = load_legacy_landscape(group, &manifest, classifier.as_ref())?;
+        let mut classifier = build_map_pixel_classifier(group, resolver);
+        let landscape = load_legacy_landscape(group, &manifest, classifier.as_mut())?;
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
@@ -461,6 +489,19 @@ impl Scenario {
                 .ok()
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
             map_zoom: manifest.core.landscape.map_zoom,
+            init_placement: Some(LegacyInitPlacement {
+                no_initialize: manifest.core.head.no_initialize,
+                vegetation: id_list_pairs(&manifest.core.landscape.vegetation),
+                vegetation_level: manifest.core.landscape.vegetation_level,
+                in_earth: id_list_pairs(&manifest.core.landscape.in_earth),
+                in_earth_level: manifest.core.landscape.in_earth_level,
+                animals: id_list_pairs(&manifest.core.animals.free_life),
+                nests: id_list_pairs(&manifest.core.animals.earth_nest),
+                environment: id_list_pairs(&manifest.core.environment.objects),
+                goals: id_list_pairs(&manifest.core.game.goals),
+                rules: id_list_pairs(&manifest.core.game.rules),
+                earth_material: manifest.core.landscape.material.clone(),
+            }),
         })
     }
 
@@ -555,11 +596,9 @@ impl Scenario {
         }
 
         engine.set_environment(self.environment.unwrap_or_default());
-        if let Some(weather_init) = self.weather_init {
-            // C4Weather::Init runs at the END of C4Game::InitGame after
-            // Landscape.ScenarioInit's Gravity draw.
-            engine.apply_weather_init(&weather_init);
-        }
+        // Weather.Init's draws happen AFTER the definitions, the loaded
+        // objects and the InitVegetation→InitGoals placements — see the
+        // block below the spawn loop (C4Game.cpp:2496-2507).
         if let Some(sky) = &self.sky {
             engine.set_sky(sky.settings.clone());
         } else {
@@ -785,6 +824,25 @@ impl Scenario {
                     }
                 }
             }
+        }
+
+        // C4Game::InitGame environment placements (C4Game.cpp:2493-2503):
+        // InitVegetation/InitInEarth/InitAnimals/InitEnvironment/InitRules/
+        // InitGoals run after the loaded objects, gated on
+        // `!C4S.Head.NoInitialize && LandscapeLoaded`, drawing from the
+        // synced ledger BETWEEN the Gravity draw and Weather.Init's.
+        if let Some(placement) = self
+            .init_placement
+            .as_ref()
+            .filter(|placement| !placement.no_initialize && self.landscape.is_some())
+        {
+            engine.run_legacy_init_placements(placement);
+        }
+        if let Some(weather_init) = self.weather_init {
+            // C4Weather::Init runs at the END of C4Game::InitGame after
+            // Landscape.ScenarioInit's Gravity draw and the placements
+            // (C4Game.cpp:2507).
+            engine.apply_weather_init(&weather_init);
         }
 
         if let Some(script) = &self.script {
@@ -1114,6 +1172,7 @@ impl Scenario {
             player_starts: PlayerStart::slots_from_legacy(&[]),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
+            init_placement: None,
         })
     }
 }
@@ -1557,6 +1616,14 @@ fn parse_bool_field(field: &str, raw: &str) -> Result<bool, ScenarioError> {
             "invalid boolean for `{field}`: {err}"
         ))),
     }
+}
+
+/// C4IDList entries as (id, count) pairs — a bare id compiles count 0
+/// (mkDefaultAdapt(count, 0), C4IDList.cpp:252).
+fn id_list_pairs(list: &LegacyIdList) -> Vec<(String, i32)> {
+    list.iter()
+        .map(|entry| (entry.id.clone(), entry.count.unwrap_or(0)))
+        .collect()
 }
 
 fn parse_legacy_id_list(field: &str, raw: &str) -> Result<LegacyIdList, ScenarioError> {
@@ -2428,9 +2495,15 @@ fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, Scen
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let section = current_section
-            .clone()
-            .unwrap_or_else(|| "head".to_string());
+        // Values before the first section header are ROOT-level in the
+        // C++ INI tree (StdCompilerINIRead::CreateNameTree,
+        // StdCompiler.cpp:794-860) — invisible to the [Head] naming.
+        // Shipped content depends on it: Tournament.c4s's mangled `Head]`
+        // line makes C++ compile a DEFAULT head (NoInitialize=0), so its
+        // goal/rule/vegetation placements DO run.
+        let Some(section) = current_section.clone() else {
+            continue;
+        };
         sections
             .entry(section)
             .or_default()
@@ -2652,6 +2725,64 @@ fn legacy_map_zoom(section: Option<&Vec<(String, String)>>) -> u32 {
         .max(1) as u32
 }
 
+/// The ChunkOZoom jitter seed: C++ draws `MapSeed = Random(3133700)` at
+/// landscape init (C4Landscape.cpp:563). The shadow bridge hands the C++
+/// value across via env; standalone runs jitter deterministically from 0.
+fn legacy_map_seed() -> i32 {
+    let map_seed = std::env::var("LC_RUST_ENGINE_MAP_SEED")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or(0);
+    if std::env::var("LC_DEBUG_MAP").is_ok() {
+        eprintln!("RUST MAPSEED {map_seed}");
+    }
+    map_seed
+}
+
+/// `Game.FixRandom(Game.Parameters.RandomSeed)` before map creation
+/// (C4Landscape.cpp:578): the map creators draw from a freshly fixed
+/// ledger, and the bracket re-fixes afterwards (C4Landscape.cpp:734), so
+/// map creation never shifts the post-init synced ledger. Standalone runs
+/// use the engine's default seed 0; the shadow bridge can hand the C++
+/// RandomSeed across via env.
+fn legacy_map_creation_rng() -> crate::rng::LcgRng {
+    let seed = std::env::var("LC_RUST_ENGINE_RANDOM_SEED")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    crate::rng::LcgRng::seed_from_u64(seed)
+}
+
+/// `Game.Parameters.StartupPlayerCount` (MapPlayerExtend input,
+/// C4Landscape.cpp:518): the headless harness joins one player.
+fn legacy_startup_player_count() -> i32 {
+    std::env::var("LC_RUST_ENGINE_STARTUP_PLAYERS")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or(1)
+}
+
+/// The C4MapCreator inputs from the parsed `[Landscape]` section.
+fn basic_map_params(landscape: &LegacyLandscape) -> crate::map_creator::BasicMapParams {
+    crate::map_creator::BasicMapParams {
+        map_width: landscape.map_width,
+        map_height: landscape.map_height,
+        map_player_extend: landscape.map_player_extend,
+        amplitude: landscape.amplitude,
+        phase: landscape.phase,
+        period: landscape.period,
+        random: landscape.random,
+        material: landscape.material.clone(),
+        liquid: landscape.liquid.clone(),
+        liquid_level: landscape.liquid_level,
+        layers: landscape
+            .layers
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.count.unwrap_or(0)))
+            .collect(),
+    }
+}
+
 /// Map-pixel material classification (the Pix2Mat/Pix2Dens tables,
 /// C4Wrappers.h:110-145, C4Landscape.cpp:2832-2839): a pixel byte's low 7
 /// bits are the texmap index (bit 0x80 = IFT); index 0, unmapped entries
@@ -2668,9 +2799,65 @@ pub(crate) struct MapPixelClassifier {
     /// C4Material.cpp:181); None = no material mapped, so ChunkOZoom
     /// draws nothing for the texture (C4Landscape.cpp:342-343).
     shapes: Vec<Option<crate::chunky::ChunkShape>>,
+    /// Raw TEXTURE name per texmap index used for `GetIndex` pair
+    /// matching (C4Texture.cpp:319-345) — unlike [`Self::textures`] this
+    /// keeps liquids' `Smooth` instead of the presentation `Liquid`.
+    match_textures: Vec<Option<String>>,
+    /// The material groups behind the slots — `GetIndex` adds
+    /// (fAddIfNotExist) resolve Density/Shape through them.
+    local_library: Option<lc_resources::MaterialLibrary>,
+    global_library: Option<lc_resources::MaterialLibrary>,
+    /// Image basenames in the material groups: `AddEntry` validates the
+    /// texture exists (C4Texture.cpp:116-131).
+    texture_inventory: Vec<String>,
 }
 
 impl MapPixelClassifier {
+    /// Bare-slot constructor for unit tests (no material groups behind
+    /// the slots — `get_index` adds fail like a full C++ texture map).
+    #[cfg(test)]
+    pub(crate) fn from_slots(
+        densities: [i32; 128],
+        names: Vec<Option<String>>,
+        textures: Vec<Option<String>>,
+        shapes: Vec<Option<crate::chunky::ChunkShape>>,
+    ) -> Self {
+        Self {
+            densities,
+            names,
+            match_textures: textures.clone(),
+            textures,
+            shapes,
+            local_library: None,
+            global_library: None,
+            texture_inventory: Vec::new(),
+        }
+    }
+
+    /// Test constructor with a material library and texture inventory so
+    /// `mat=`/`tex=` validation and `GetIndex` adds behave like a real
+    /// scenario load.
+    #[cfg(test)]
+    pub(crate) fn from_slots_with_library(
+        densities: [i32; 128],
+        names: Vec<Option<String>>,
+        textures: Vec<Option<String>>,
+        shapes: Vec<Option<crate::chunky::ChunkShape>>,
+        library: lc_resources::MaterialLibrary,
+        texture_inventory: Vec<String>,
+    ) -> Self {
+        Self {
+            densities,
+            names,
+            match_textures: textures.clone(),
+            textures,
+            shapes,
+            local_library: None,
+            global_library: Some(library),
+            texture_inventory,
+        }
+    }
+
     /// DensitySolid: density >= C4M_Solid=50 (C4Wrappers.h:68-71).
     fn is_solid(&self, pixel: u8) -> bool {
         self.density(pixel) >= 50
@@ -2683,6 +2870,105 @@ impl MapPixelClassifier {
 
     fn density(&self, pixel: u8) -> i32 {
         self.densities[(pixel & 0x7F) as usize]
+    }
+
+    /// C4TextureMap::CheckTexture (the map creators validate `tex=`
+    /// fields against the loaded texture inventory).
+    pub(crate) fn texture_exists(&self, name: &str) -> bool {
+        self.texture_inventory
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(name))
+    }
+
+    /// The material definition behind a name, scenario-local first
+    /// (C4MaterialMap::Get order after the prepending loads).
+    pub(crate) fn material(&self, name: &str) -> Option<&lc_resources::MaterialDefinition> {
+        self.local_library
+            .as_ref()
+            .and_then(|library| library.get(name))
+            .or_else(|| {
+                self.global_library
+                    .as_ref()
+                    .and_then(|library| library.get(name))
+            })
+    }
+
+    /// C4TextureMap::GetIndex (C4Texture.cpp:319-345): the existing
+    /// (material, texture) slot — material match, texture match when
+    /// given — else the first free slot when `add_if_not_exist`. 0 = fail.
+    pub(crate) fn get_index(
+        &mut self,
+        mat_name: &str,
+        tex_name: Option<&str>,
+        add_if_not_exist: bool,
+    ) -> u8 {
+        for slot in 1..128usize {
+            if let Some(existing) = &self.names[slot] {
+                if existing.eq_ignore_ascii_case(mat_name)
+                    && tex_name
+                        .map(|tex| {
+                            self.match_textures[slot]
+                                .as_deref()
+                                .is_some_and(|t| t.eq_ignore_ascii_case(tex))
+                        })
+                        .unwrap_or(true)
+                {
+                    return slot as u8;
+                }
+            }
+        }
+        if !add_if_not_exist {
+            return 0;
+        }
+        let Some(material) = self.material(mat_name) else {
+            return 0;
+        };
+        let shape = crate::chunky::ChunkShape::from_shape(material.int("Shape").unwrap_or(0));
+        let density = material.int("Density").unwrap_or(0);
+        if let Some(tex) = tex_name {
+            if !self.texture_exists(tex) {
+                return 0;
+            }
+        }
+        let Some(slot) = (1..128usize).find(|&slot| self.names[slot].is_none()) else {
+            return 0;
+        };
+        self.names[slot] = Some(mat_name.to_string());
+        self.match_textures[slot] = tex_name.map(str::to_string);
+        self.textures[slot] = tex_name.map(str::to_string);
+        self.shapes[slot] = Some(shape);
+        self.densities[slot] = density;
+        slot as u8
+    }
+
+    /// C4TextureMap::GetIndexMatTex (C4Texture.cpp:346-367): split the
+    /// `Material-Texture` pair, try the exact pair, then the default
+    /// texture; final fallback is the material's default entry
+    /// (DefaultMatTex — the first slot carrying the material).
+    pub(crate) fn get_index_mat_tex(
+        &mut self,
+        material_texture: &str,
+        default_texture: Option<&str>,
+    ) -> u8 {
+        let (material, texture) = match material_texture.split_once('-') {
+            Some((material, texture)) => (material, Some(texture)),
+            None => (material_texture, None),
+        };
+        if let Some(texture) = texture {
+            let index = self.get_index(material, Some(texture), true);
+            if index != 0 {
+                return index;
+            }
+        }
+        if let Some(default) = default_texture {
+            let index = self.get_index(material, Some(default), true);
+            if index != 0 {
+                return index;
+            }
+        }
+        // Game.Material.Map[iMaterial].DefaultMatTex (the CrossMapMaterials
+        // default entry): the first slot carrying the material.
+        self.get_index(material, None, false)
     }
 }
 
@@ -2759,6 +3045,67 @@ pub(crate) fn build_map_pixel_classifier(
             grid_textures[index] = Some("Liquid".to_string());
         }
     }
+    // Raw texmap textures for GetIndex pair matching.
+    let mut match_textures: Vec<Option<String>> = vec![None; 128];
+    for (index, slot) in match_textures.iter_mut().enumerate() {
+        *slot = texmap
+            .entry(index as u8)
+            .map(|entry| entry.texture.clone());
+    }
+    // The texture inventory: image basenames in the material groups
+    // (AddEntry validates the texture exists, C4Texture.cpp:116-131).
+    let mut texture_inventory: Vec<String> = Vec::new();
+    for group in [local.as_ref(), global.as_ref()].into_iter().flatten() {
+        for entry in group.entries().unwrap_or_default() {
+            let lower = entry.relative_path.to_string_lossy().to_ascii_lowercase();
+            if let Some(stem) = lower
+                .strip_suffix(".png")
+                .or_else(|| lower.strip_suffix(".bmp"))
+            {
+                texture_inventory.push(stem.to_string());
+            }
+        }
+    }
+
+    // The C++ material-map order: each load PREPENDS new names
+    // (scenario loads first, global after — C4Material.cpp:263-299)
+    // → [global-uniques…, scenario…], scenario winning collisions.
+    // Collected as owned (name, overlay, cross-specs) rows so the loops
+    // below can mutate the classifier slots.
+    let ordered: Vec<(String, Option<String>, Vec<String>)> = global_library
+        .iter()
+        .flat_map(|library| library.iter())
+        .filter(|definition| {
+            local_library
+                .as_ref()
+                .map(|local| local.get(definition.name()).is_none())
+                .unwrap_or(true)
+        })
+        .chain(local_library.iter().flat_map(|library| library.iter()))
+        .map(|material| {
+            (
+                material.value("Name").unwrap_or_default().to_string(),
+                material.value("TextureOverlay").map(str::to_string),
+                ["BlastShiftTo", "BelowTempConvertTo", "AboveTempConvertTo"]
+                    .iter()
+                    .filter_map(|key| material.strings(key).first().cloned())
+                    .filter(|spec| !spec.is_empty())
+                    .collect(),
+            )
+        })
+        .collect();
+
+    let mut classifier = MapPixelClassifier {
+        densities,
+        names,
+        textures: grid_textures,
+        shapes,
+        match_textures,
+        local_library,
+        global_library,
+        texture_inventory,
+    };
+
     // Dynamic texmap entries (C4MaterialMap::CrossMapMaterials,
     // C4Material.cpp:345-484): the DefaultMatTex loop registers
     // (MaterialName, TextureOverlay-or-"Smooth") for EVERY material with
@@ -2769,157 +3116,40 @@ pub(crate) fn build_map_pixel_classifier(
     // are byte 3 = the third add, Vehicle-Smooth (live-probe-verified
     // slots: [Ice-Sponge, FlyAshes-Spots, Vehicle-Smooth, Ashes-Spots,
     // Ore-Structure, Tunnel-Smooth2, Brick-Brick, Rock2-Rough]).
-    // Material order mirrors the C++ material map: GLOBAL materials
-    // first, the scenario's own after.
-    {
-        let mut textures: Vec<Option<String>> = vec![None; 128];
-        for index in 0..128usize {
-            textures[index] = texmap
-                .entry(index as u8)
-                .map(|entry| entry.texture.clone());
+    // First loop: DefaultMatTex (C4Material.cpp:349-370).
+    for (name, overlay, _) in &ordered {
+        if name.is_empty() {
+            continue;
         }
-        // The texture inventory: image basenames in the material groups
-        // (AddEntry validates the texture exists, C4Texture.cpp:116-131).
-        let mut texture_names: Vec<String> = Vec::new();
-        for group in [local.as_ref(), global.as_ref()].into_iter().flatten() {
-            for entry in group.entries().unwrap_or_default() {
-                let lower = entry.relative_path.to_string_lossy().to_ascii_lowercase();
-                if let Some(stem) = lower
-                    .strip_suffix(".png")
-                    .or_else(|| lower.strip_suffix(".bmp"))
-                {
-                    texture_names.push(stem.to_string());
-                }
-            }
-        }
-        let texture_exists =
-            |name: &str| texture_names.iter().any(|t| t.eq_ignore_ascii_case(name));
-
-        // The C++ material-map order: each load PREPENDS new names
-        // (scenario loads first, global after — C4Material.cpp:263-299)
-        // → [global-uniques…, scenario…], scenario winning collisions.
-        let ordered: Vec<&lc_resources::MaterialDefinition> = global_library
-            .iter()
-            .flat_map(|library| library.iter())
-            .filter(|definition| {
-                local_library
-                    .as_ref()
-                    .map(|local| local.get(definition.name()).is_none())
-                    .unwrap_or(true)
-            })
-            .chain(local_library.iter().flat_map(|library| library.iter()))
-            .collect();
-
-        let mut get_index = |mat_name: &str,
-                             tex_name: Option<&str>,
-                             names: &mut Vec<Option<String>>,
-                             textures: &mut Vec<Option<String>>,
-                             shapes: &mut Vec<Option<crate::chunky::ChunkShape>>,
-                             densities: &mut [i32; 128]|
-         -> bool {
-            // Existing entry: material match, texture match when given
-            // (C4Texture.cpp:320-345).
-            for slot in 1..128usize {
-                if let Some(existing) = &names[slot] {
-                    if existing.eq_ignore_ascii_case(mat_name)
-                        && tex_name
-                            .map(|tex| {
-                                textures[slot]
-                                    .as_deref()
-                                    .is_some_and(|t| t.eq_ignore_ascii_case(tex))
-                            })
-                            .unwrap_or(true)
-                    {
-                        return true;
-                    }
-                }
-            }
-            let material = local_library
-                .as_ref()
-                .and_then(|library| library.get(mat_name))
-                .or_else(|| {
-                    global_library
-                        .as_ref()
-                        .and_then(|library| library.get(mat_name))
-                });
-            let Some(material) = material else {
-                return false;
+        let overlay = overlay
+            .as_deref()
+            .filter(|overlay| classifier.texture_exists(overlay))
+            .unwrap_or("Smooth")
+            .to_string();
+        classifier.get_index(name, Some(&overlay), true);
+    }
+    // Second loop: the cross-ref specs (C4Material.cpp:474-484).
+    for (_, _, specs) in &ordered {
+        for spec in specs {
+            let (mat_name, tex_name) = match spec.split_once('-') {
+                Some((mat, tex)) => (mat, Some(tex.to_string())),
+                None => (spec.as_str(), None),
             };
-            if let Some(tex) = tex_name {
-                if !texture_exists(tex) {
-                    return false;
-                }
-            }
-            let Some(slot) = (1..128usize).find(|&slot| names[slot].is_none()) else {
-                return false;
-            };
-            names[slot] = Some(mat_name.to_string());
-            textures[slot] = tex_name.map(str::to_string);
-            grid_textures[slot] = tex_name.map(str::to_string);
-            shapes[slot] = Some(crate::chunky::ChunkShape::from_shape(
-                material.int("Shape").unwrap_or(0),
-            ));
-            densities[slot] = material.int("Density").unwrap_or(0);
-            true
-        };
-
-        // First loop: DefaultMatTex (C4Material.cpp:349-370).
-        for material in &ordered {
-            let overlay = material
-                .value("TextureOverlay")
-                .filter(|overlay| texture_exists(overlay))
-                .unwrap_or("Smooth");
-            let name = material.value("Name").unwrap_or_default().to_string();
-            if name.is_empty() {
-                continue;
-            }
-            get_index(
-                &name,
-                Some(overlay),
-                &mut names,
-                &mut textures,
-                &mut shapes,
-                &mut densities,
-            );
-        }
-        // Second loop: the cross-ref specs (C4Material.cpp:474-484).
-        for material in &ordered {
-            for key in ["BlastShiftTo", "BelowTempConvertTo", "AboveTempConvertTo"] {
-                let Some(spec) = material.strings(key).first() else {
-                    continue;
-                };
-                if spec.is_empty() {
-                    continue;
-                }
-                let (mat_name, tex_name) = match spec.split_once('-') {
-                    Some((mat, tex)) => (mat, Some(tex)),
-                    None => (spec.as_str(), None),
-                };
-                // GetIndexMatTex: exact pair first, then the material's
-                // default entry stands in (no further add).
-                get_index(
-                    mat_name,
-                    tex_name,
-                    &mut names,
-                    &mut textures,
-                    &mut shapes,
-                    &mut densities,
-                );
-            }
+            // GetIndexMatTex: exact pair first, then the material's
+            // default entry stands in (no further add).
+            classifier.get_index(mat_name, tex_name.as_deref(), true);
         }
     }
 
     if std::env::var("LC_DEBUG_MAP").is_ok() {
         for slot in 1..9usize {
-            eprintln!("RUSTTEX {slot} = {:?} density={}", names[slot], densities[slot]);
+            eprintln!(
+                "RUSTTEX {slot} = {:?} density={}",
+                classifier.names[slot], classifier.densities[slot]
+            );
         }
     }
-    Some(MapPixelClassifier {
-        densities,
-        names,
-        textures: grid_textures,
-        shapes,
-    })
+    Some(classifier)
 }
 
 /// Build the landscape from a classified 8-bit map: the map zooms through
@@ -3022,7 +3252,7 @@ fn classified_landscape(
 fn load_legacy_landscape(
     group: &Group,
     manifest: &LegacyScenarioManifest,
-    classifier: Option<&MapPixelClassifier>,
+    classifier: Option<&mut MapPixelClassifier>,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let Some(mut landscape) = load_legacy_landscape_body(group, manifest, classifier)? else {
         return Ok(None);
@@ -3045,7 +3275,7 @@ fn load_legacy_landscape(
 fn load_legacy_landscape_body(
     group: &Group,
     manifest: &LegacyScenarioManifest,
-    classifier: Option<&MapPixelClassifier>,
+    classifier: Option<&mut MapPixelClassifier>,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let landscape_section = manifest.sections.get("landscape");
     let map_zoom_u32 = legacy_map_zoom(landscape_section);
@@ -3089,26 +3319,21 @@ fn load_legacy_landscape_body(
         }
     };
 
+    let mut classifier = classifier;
     if let Some(bytes) = map_bytes {
         // Material-classified path: the map's 8-bit palette indices are
         // texmap keys (GroupReadSurface8 keeps the index bytes). Without
         // a TexMap or for non-indexed images, the sky-pixel heuristic
         // below stands in.
-        if let Some(classifier) = classifier {
+        if let Some(classifier) = classifier.take() {
             if let Ok(bitmap) = lc_resources::bitmap::IndexedBitmap::decode(&bytes) {
-                // C++ draws MapSeed = Random(3133700) at landscape init
-                // (C4Landscape.cpp:563); our RNG is not the C++ LCG yet,
-                // so the shadow bridge hands the C++ seed across via env
-                // (standalone runs jitter deterministically from 0).
-                let map_seed = std::env::var("LC_RUST_ENGINE_MAP_SEED")
-                    .ok()
-                    .and_then(|value| value.trim().parse::<i32>().ok())
-                    .unwrap_or(0);
-                if std::env::var("LC_DEBUG_MAP").is_ok() {
-                    eprintln!("RUST MAPSEED {map_seed}");
-                }
-                return classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, map_seed)
-                    .map(Some);
+                return classified_landscape(
+                    &bitmap,
+                    classifier,
+                    map_zoom_u32 as i32,
+                    legacy_map_seed(),
+                )
+                .map(Some);
             }
         }
         let dynamic =
@@ -3162,6 +3387,39 @@ fn load_legacy_landscape_body(
 
     if exact_landscape {
         return Ok(None);
+    }
+
+    // Dynamic map (C4Landscape::Init, C4Landscape.cpp:606-614): a
+    // Landscape.txt map description renders through C4MapCreatorS2
+    // (CreateMapS2, C4Landscape.cpp:530-546); otherwise the basic
+    // C4MapCreator builds the 8-bit map from the [Landscape] keys. Both
+    // draw from the FixRandom(RandomSeed) bracket (C4Landscape.cpp:
+    // 578,734), so they never shift the post-init synced ledger.
+    // Requires a texture map for the material bytes.
+    if let Some(classifier) = classifier.take() {
+        let mut map_rng = legacy_map_creation_rng();
+        let players = legacy_startup_player_count();
+        let landscape_core = &manifest.core.landscape;
+        let bitmap = read_optional("Landscape.txt")?
+            .and_then(|bytes| {
+                crate::map_creator_s2::create_s2_map(
+                    &String::from_utf8_lossy(&bytes),
+                    classifier,
+                    landscape_core.map_width,
+                    landscape_core.map_height,
+                    landscape_core.map_player_extend,
+                    players,
+                    &mut map_rng,
+                )
+            })
+            .unwrap_or_else(|| {
+                // Dynamic map by scenario (C4Landscape.cpp:612-614) —
+                // also the fallback when the exmap yields no map node.
+                let params = basic_map_params(landscape_core);
+                crate::map_creator::create_basic_map(&params, classifier, players, &mut map_rng)
+            });
+        return classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, legacy_map_seed())
+            .map(Some);
     }
 
     let fallback_map_width = map_width_hint.unwrap_or(96);
@@ -6595,6 +6853,7 @@ global func Step(state, frame, random)
             player_starts: PlayerStart::slots_from_legacy(&[]),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
+            init_placement: None,
         };
 
         let mut engine = Engine::with_seed(11);
@@ -6689,6 +6948,7 @@ global func Step(state, frame, random)
             player_starts: PlayerStart::slots_from_legacy(&[]),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
+            init_placement: None,
         };
 
         let mut engine = Engine::with_seed(7);
@@ -9130,6 +9390,160 @@ global func Step(state, frame, random)
         assert_eq!(engine.objects[idx].state.rotation, 90);
     }
 
+    // C4Game::InitGame environment placements (C4Game.cpp:2493-2503):
+    // scenarios without NoInitialize place [Landscape] Vegetation= on
+    // surface soil (PlaceVegetation, C4Game.cpp:2962-3007), InEarth= into
+    // earth pixels (PlaceInEarth, C4Game.cpp:2949-2960) and create the
+    // [Environment] Objects= / [Game] Goals=/Rules= objects
+    // (C4Game.cpp:3988-4018) — all through the synced ledger between the
+    // Gravity draw and Weather.Init's.
+    #[test]
+    fn init_placements_populate_vegetation_inearth_and_rule_objects() {
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        for (folder, core) in [
+            (
+                "Tree.c4d",
+                // Growth admits the random-con draw (C4Game.cpp:2974).
+                "[DefCore]\nid=TREE\nName=Tree\nCategory=2\nWidth=8\nHeight=12\n\
+                 Offset=-4,-6\nVertices=1\nVertexX=0\nVertexY=0\nGrowth=4\nPlacement=0\n",
+            ),
+            (
+                "Rock.c4d",
+                "[DefCore]\nid=ROCK\nName=Rock\nCategory=16\nWidth=6\nHeight=6\nOffset=-3,-3\n",
+            ),
+            (
+                "Goal.c4d",
+                "[DefCore]\nid=GOAL\nName=Goal\nCategory=4096\n",
+            ),
+            (
+                "Rule.c4d",
+                "[DefCore]\nid=RULE\nName=Rule\nCategory=8192\n",
+            ),
+            (
+                "Envr.c4d",
+                "[DefCore]\nid=ENVR\nName=Envr\nCategory=16384\n",
+            ),
+        ] {
+            let def_dir = defs_root.join(folder);
+            std::fs::create_dir_all(&def_dir).expect("definition dir");
+            std::fs::write(def_dir.join("DefCore.txt"), core).expect("write defcore");
+        }
+
+        let scenario_dir = dir.path().join("Placements.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Placements\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Game]\nGoals=GOAL=1;\nRules=RULE=1;\n\n\
+             [Landscape]\nMapZoom=10\nMaterial=Earth\n\
+             Vegetation=TREE=1;\nVegetationLevel=100,0\n\
+             InEarth=ROCK=1;\nInEarthLevel=100,0\n\n\
+             [Environment]\nObjects=ENVR=1;\n",
+        )
+        .expect("write scenario core");
+        // 20x20 map, zoom 10 → 200x200 world: sky rows 0-9, earth 10-19
+        // (surface at world y=100, inside PlaceVegetation's [50, hgt-50]).
+        let mut rows: Vec<Vec<u8>> = Vec::new();
+        for y in 0..20 {
+            rows.push(vec![if y < 10 { 0u8 } else { 30 }; 20]);
+        }
+        let row_refs: Vec<&[u8]> = rows.iter().map(|row| row.as_slice()).collect();
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&row_refs),
+        )
+        .expect("write map");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
+        )
+        .expect("write earth");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
+        )
+        .expect("materials parse");
+        let mut engine = Engine::with_seed(7);
+        engine.configure_materials_from_library(&library);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let count = |id: &str| {
+            engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == id)
+                .count()
+        };
+        // amt = (GBackWdt/50) * VegLevel/100 = 4 tries, 20 attempts each
+        // over an all-soil surface: placements land.
+        assert!(count("TREE") >= 1, "vegetation placed on surface soil");
+        // amt = (200*200/5000) * 100/100 = 8 in-earth tries.
+        assert!(count("ROCK") >= 1, "in-earth objects placed");
+        assert_eq!(count("GOAL"), 1, "InitGoals creates the goal object");
+        assert_eq!(count("RULE"), 1, "InitRules creates the rule object");
+        assert_eq!(
+            count("ENVR"),
+            1,
+            "InitEnvironment creates the environment object"
+        );
+
+        // Vegetation sits at the earth surface (y=100) + the 3+5 soil
+        // probe offsets; in-earth rocks live inside the ground.
+        let tree = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "TREE")
+            .expect("tree exists");
+        assert!(
+            (90..=130).contains(&tree.state.position.y),
+            "tree y {} anchors at the surface",
+            tree.state.position.y
+        );
+        let rock = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "ROCK")
+            .expect("rock exists");
+        assert!(
+            rock.state.position.y >= 100,
+            "rock y {} is inside the earth",
+            rock.state.position.y
+        );
+
+        // NoInitialize=1 skips the whole block (C4Game.cpp:2493).
+        let scenario_txt = std::fs::read_to_string(scenario_dir.join("Scenario.txt")).unwrap();
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            scenario_txt.replace("Title=Placements", "Title=Placements\nNoInitialize=1"),
+        )
+        .expect("rewrite scenario core");
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario reloads");
+        let mut engine = Engine::with_seed(7);
+        engine.configure_materials_from_library(&library);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let count = |id: &str| {
+            engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == id)
+                .count()
+        };
+        assert_eq!(count("TREE"), 0, "NoInitialize skips vegetation");
+        assert_eq!(count("GOAL"), 0, "NoInitialize skips goals");
+    }
+
     // Objects.txt Mobile/FixX/FixY/FixR/RDir ingestion
     // (C4Object.cpp:2762-2772): loaded objects keep the serialized Mobile
     // verbatim (default false) with the exact C4Fixed sub-pixel
@@ -9552,12 +9966,8 @@ global func Step(state, frame, random)
         let mut shapes: Vec<Option<crate::chunky::ChunkShape>> = vec![None; 128];
         shapes[20] = Some(crate::chunky::ChunkShape::Flat);
         shapes[30] = Some(crate::chunky::ChunkShape::Flat);
-        let classifier = MapPixelClassifier {
-            densities,
-            names,
-            textures: vec![None; 128],
-            shapes,
-        };
+        let classifier =
+            MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
 
         let landscape =
             classified_landscape(&bitmap, &classifier, 10, 0).expect("landscape builds");
@@ -9611,12 +10021,8 @@ global func Step(state, frame, random)
         names[30] = Some("Earth".into());
         let mut shapes: Vec<Option<crate::chunky::ChunkShape>> = vec![None; 128];
         shapes[30] = Some(crate::chunky::ChunkShape::Smooth);
-        let classifier = MapPixelClassifier {
-            densities,
-            names,
-            textures: vec![None; 128],
-            shapes,
-        };
+        let classifier =
+            MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
 
         let landscape = classified_landscape(&bitmap, &classifier, 4, 0).expect("landscape builds");
 
@@ -9851,6 +10257,12 @@ global func Step(state, frame, random)
         // Landscape.ScenarioInit's Gravity draw precedes the weather
         // evaluates (C4Landscape.cpp:66); this scenario's Gravity=120.
         LegacyC4SVal::new(120, 0, 10, 200).evaluate(&mut replay);
+        // No NoInitialize: InitVegetation/InitInEarth ALWAYS evaluate
+        // their levels — one draw each even with empty id lists
+        // (C4Game.cpp:3069,3084) — between the Gravity draw and
+        // Weather.Init's.
+        LegacyC4SVal::new(50, 30, 0, 100).evaluate(&mut replay);
+        LegacyC4SVal::new(50, 0, 0, 100).evaluate(&mut replay);
         LegacyC4SVal::new(30, 10, 0, 100).evaluate(&mut replay);
         LegacyC4SVal::new(45, 0, 0, 100).evaluate(&mut replay);
         LegacyC4SVal::new(60, 10, 0, 100).evaluate(&mut replay);
