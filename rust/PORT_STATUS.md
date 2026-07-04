@@ -36,8 +36,24 @@
   long fixed: positions/velocities are 16.16 `C4Fixed`, `Random()` is the C++
   LCG with a shared ledger, and the join/init draw sequences are
   draw-for-draw identical.
-- Scenario sweep: **93/93 load, 93/93 apply**. GoldRush headless runs 120
+- Scenario sweep: **93/93 load, 93/93 apply**. GoldRush headless runs 1000
   ticks with ZERO script-error warnings (including the intro movie).
+- **Scenario-worlds epic (2026-07-03): 92/93 on the content-fidelity
+  audit** (`cargo xtask scenario-audit` — landscape material histogram,
+  objects by def, init-placement expectations; baseline was 71/93
+  flagged). Dynamic maps generate: C4MapCreator (basic sine/liquid/layers,
+  C4Map.cpp:73-167) and C4MapCreatorS2 (Landscape.txt exmap
+  parser+renderer, C4MapCreatorS2.cpp) draw byte-exact on the FixRandom
+  bracket (C4Landscape.cpp:578,734) and feed the classified ChunkOZoom
+  plane. The C4Game init placements run at apply (InitVegetation/
+  InitInEarth/InitAnimals/InitEnvironment/InitRules/InitGoals,
+  C4Game.cpp:2493-2503) between the Gravity draw and Weather.Init's —
+  the VegLevel/InEarthLevel evaluates draw even with empty id lists.
+  Skies of Fire, Crystal Valley, Goldmine + all 27 formerly-flat dynamic
+  scenarios build their real worlds (PNG-verified). The one remaining
+  audit flag (CTF_DeepSea animals) is C++-consistent: its water is
+  script-filled by _REF refillers AFTER InitAnimals, so C++ places no
+  sharks at init either.
 - Startup menus: all 6 screens pixel-exact vs C++ (95.4–99.8%, ±1 LSB).
 - Graphical in-game parity: NOT attempted (presentation layer, see below).
 
@@ -49,7 +65,9 @@
 3. `cargo xtask engine-snapshots verify` (Rust-vs-Rust determinism regression).
 4. `cargo xtask scenario-sweep` 93/93.
 5. `cargo xtask scenario-errors Goldrush` clean over 120 ticks.
-6. Live re-measure: `scratchpad/shadow_measure_arm64.sh 45` (see Harnesses).
+6. `cargo xtask scenario-audit` 92/93 (the CTF_DeepSea animals flag is
+   C++-consistent — see Current status).
+7. Live re-measure: `scratchpad/shadow_measure_arm64.sh 45` (see Harnesses).
 
 ## Harnesses & debugging quick reference
 
@@ -147,7 +165,7 @@
 | Subsystem | Open items |
 |---|---|
 | movement-physics | SetSolidMask update lifetime; attached-object pushback (its DensityProvider reads the put BUFFER for rotated masks, C4SolidMask.cpp:218-227 — the rotated bake buffer already models this); rotated masks stay off in the non-grid mask-rect overlay (fixture worlds only, no C++ counterpart) |
-| landscape | incremental ExecuteScan/DoScan (batch temperature conversion desyncs scan order) — including DoScan's per-converted-pixel CheckInstabilityRange (C4Landscape.cpp:225): the column conversion has no pixel coordinates to probe; PRETTY_TEMP_CONV; map creation beyond ChunkOZoom; pixel-exact DigFree/BlastFree accounting; blast/shake instability probes run as a post-pass in the C++ scan order (no per-pixel clear/probe interleave until blast/shake are per-pixel); segment- vs pixel-liquid model |
+| landscape | incremental ExecuteScan/DoScan (batch temperature conversion desyncs scan order) — including DoScan's per-converted-pixel CheckInstabilityRange (C4Landscape.cpp:225): the column conversion has no pixel coordinates to probe; PRETTY_TEMP_CONV; pixel-exact DigFree/BlastFree accounting; blast/shake instability probes run as a post-pass in the C++ scan order (no per-pixel clear/probe interleave until blast/shake are per-pixel); segment- vs pixel-liquid model. Map creators (C4MapCreator + C4MapCreatorS2) are ported; OPEN there: standalone runs use MapSeed=0 and RandomSeed=0 for the FixRandom bracket instead of the drawn `Random(3133700)`/network seed (the bridge hands the real values via `LC_RUST_ENGINE_MAP_SEED`/`LC_RUST_ENGINE_RANDOM_SEED`, players via `LC_RUST_ENGINE_STARTUP_PLAYERS`); `MapZoom` uses the clamped Std, not the bracket-internal Evaluate draw (no shipped content has a random MapZoom); Landscape.txt `evalFn=`/`drawFn=`/`algo=script` callbacks unsupported (no shipped content uses them, parse errors degrade to the basic creator like C++'s ignored ReadFile return, C4Landscape.cpp:540); C4Landscape::PostInitMap/KeepMapCreator (DrawDefMap) unported |
 | effects | Annul/AnnulCalls + FxAdd add-to-other-effect; TempRemove/TempReadd; Fx*Damage DoEnergy modification; builtin fire/helper effects (Splash/Smoke/Explosion/BubbleOut) |
 | commands | Tick2/5/35 throttling; MoveTo flight/swim control; Scale/Hangle let-go thresholds |
 | material | column-model fixture worlds keep segment removal where C++ ClearPix/ExtractMaterial act per pixel (grid worlds are C++-faithful) |
@@ -157,7 +175,7 @@
 | players-crew-teams | team home-base production sync (C4RULE_TeamHombase); CheckElimination; asset value stub; crew infos not persisted in snapshots |
 | definitions-id | runtime dispatches on procedure strings not numeric ActMap indices; GetComponents override; CalcDefValue; some DefCore flags unparsed |
 | script-values | C++ string-table interning/refcounts; save/load + net sync of values |
-| weather-sky | IFT population from Landscape.txt; SetSeasonGamma; season Min/Max wrap detail; sky parallax wind/100 vs FIXED100 |
+| weather-sky | SetSeasonGamma; season Min/Max wrap detail; sky parallax wind/100 vs FIXED100 |
 | config-info | GetAName file-based names partial; PromotionUpdate; locale/control-pref defaults |
 | resources-groups | no group write/create/gzip-out/CRC32-at-open; directory iteration order may differ from C++ |
 | network | password auth, voting, league, NCS_* client status, join-data save/restore, protocol negotiation |
@@ -190,6 +208,18 @@
 - The headless xtask world skips the player join: GoldRush intro-driven
   state (cavalry recruitment draws, coach splash) reproduces only with
   the live pinned harness.
+- **14 scenarios hang in a join/tick script loop** now that their worlds
+  are real (previously-flat landscapes never exercised these paths):
+  Fantasy/Alchemy, FarWorlds/Arctic, Missions/Funnel, Tutorial04/07/10,
+  Western/GoldenCanyon + TotemHunt, Worlds/ArcticOcean + Ashlands +
+  FoggyCliffs + Mountains + SkyIslands + Tropical (45s join+3-tick
+  smoke, 2026-07-03). Two sampled shapes: SkyIslands hangs INSIDE
+  join_player in a spawned object's Initialize (nested script frames
+  hot-looping GetX/GetY host calls); Tropical hangs in an action
+  StartCall loop of FindObject + RemoveObject (suspect: removal not
+  visible to the same-call FindObject cursor, C++ Status=0 objects drop
+  out immediately). Load+apply is NOT affected (sweep and audit stay
+  green); this is a script-VM/world-removal semantics follow-up epic.
 
 ## Changelog
 
@@ -201,4 +231,6 @@ foundations (C4Fixed/LCG/sectors) → CrossCheck/physicals → weather/disasters
 landscape → Tick10 mobile gate → frame-1 live-parity epic (393→0, complete
 2026-07-03) → persistent-slot mass mover (incremental CheckInstability
 creation at every C++ call site, no surface re-seek, C++ Count/CreatePtr
-ledger, 2026-07-03).
+ledger, 2026-07-03) → scenario-worlds epic (C4MapCreator +
+C4MapCreatorS2 dynamic maps, C4Game init placements, scenario-audit
+harness, 92/93 content fidelity, 2026-07-03).
