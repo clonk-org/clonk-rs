@@ -8522,6 +8522,14 @@ pub struct Engine {
     /// (C4Game::Synchronize, C4Game.cpp:3695).
     random_seed: u64,
     exec_seq_counter: u64,
+    /// Objects that EXITED a container this frame: C4Object::Exit re-adds
+    /// to the exec list (newest cluster position). Deferred past the
+    /// frame's spawn materialization so a create-then-exit sequence in one
+    /// script call keeps the C++ relative order (the intro Talker is
+    /// created before the player's Exit re-add). Limitation: an exit
+    /// followed by a create in the SAME frame would order the create
+    /// first here, unlike C++.
+    pending_exit_reorders: Vec<ObjectId>,
     frame: u64,
     landscape: Option<Landscape>,
     sectors: Option<SectorMap>,
@@ -10053,6 +10061,7 @@ impl Engine {
             scenario_script_counter: 0,
             random_seed: seed,
             exec_seq_counter: 0,
+            pending_exit_reorders: Vec::new(),
             frame: 0,
             landscape: None,
             sectors: None,
@@ -14674,6 +14683,12 @@ impl Engine {
         self.transfer_zones.retain_existing(&alive);
         self.prune_selection();
         self.process_spawn_queue(spawn_requests)?;
+        for exited in std::mem::take(&mut self.pending_exit_reorders) {
+            if let Some(index) = self.find_object_index(exited) {
+                self.objects[index].exec_seq = self.exec_seq_counter;
+                self.exec_seq_counter += 1;
+            }
+        }
         self.refresh_elimination_state();
         self.check_game_over()?;
         // Control.DoSyncCheck() closes the frame (C4Game.cpp:829)
@@ -19122,6 +19137,18 @@ impl Engine {
                 .saturating_sub(self_offset.y),
         );
 
+        if std::env::var("LC_ATTDBG").is_ok() && (21..=22).contains(&self.frame) {
+            eprintln!(
+                "ATTDBG f{} obj={} tgt_pos={:?} tgt_off={:?} self_off={:?} data={:#x} -> {:?}",
+                self.frame,
+                self.objects[idx].id.as_u64(),
+                target_position,
+                target_offset,
+                self_offset,
+                action_data,
+                new_position
+            );
+        }
         let object = &mut self.objects[idx];
         object.set_position(new_position);
         object.set_velocity(Vector2::ZERO);
@@ -22237,6 +22264,14 @@ impl Engine {
                 // (C4Object.cpp:1527-1528).
                 self.objects[object_index].state.in_liquid = false;
                 self.objects[object_index].state.mobile = true;
+                // Exit re-sorts the object to the NEWEST position of its
+                // category cluster in the exec list (live-oracle probe:
+                // after MovIntroStart's Exit(pPlayer) at f20 the player
+                // execs AFTER the just-created Talker — C++ EXECORD
+                // f22: coach, horse, talker, player). Deferred past this
+                // frame's spawn materialization (see field docs).
+                let exited = self.objects[object_index].id;
+                self.pending_exit_reorders.push(exited);
             }
         }
         // The moved object's own SetOCF (C4Object.cpp:1531,1570).

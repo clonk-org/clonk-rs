@@ -1044,6 +1044,12 @@ void C4Object::ExecBase()
 
 void C4Object::Execute()
 {
+	if (getenv("LC_RNG_TRACE") && Game.FrameCounter == 22 && (Number == 1425 || Number == 1450 || Number == 1532 || Number == 1451))
+	{
+		if (FILE *f = LcRngTraceFile())
+			fprintf(f, "EXECORD n=%d x=%d\n", Number, x);
+	}
+
 #ifdef DEBUGREC
 	// record debug
 	C4RCExecObj rc;
