@@ -26,6 +26,13 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// DirectExec parsing (C4AulScript::ParseFn fExprOnly,
+    /// C4AulParse.cpp:1417-1424): the source is ONE expression; anything
+    /// after it — e.g. content's stray trailing `;` — is ignored.
+    pub fn parse_direct_exec_expression(&mut self) -> Result<Expr, ParseError> {
+        self.parse_expression()
+    }
+
     pub fn parse_script(&mut self) -> Result<Script, ParseError> {
         // Parse directives, variable declarations, and functions
         // Directives and variable declarations can be interspersed

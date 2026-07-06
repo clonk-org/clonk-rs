@@ -1139,6 +1139,52 @@ impl<'a> Vm<'a> {
                             let value = cell.borrow().clone();
                             return Ok(value);
                         }
+                        // FnEval (C4Script.cpp:4507-4520) ->
+                        // C4AulScript::DirectExec (C4AulExec.cpp:1658-1707):
+                        // parse the string as ONE expression (ParseFn
+                        // fExprOnly ignores trailing text) and run it in
+                        // the calling object's context with a fresh var
+                        // space. This is the ENGINE's script-language eval:
+                        // it executes sandboxed C4Script in the same VM as
+                        // every other script (no host-language execution) —
+                        // the C++ oracle exposes it to content (the planet
+                        // Schedule() helper runs on it).
+                        if name == "eval"
+                            && args.len() <= 1
+                            && !self.functions.contains_key(name)
+                            && !self.host_functions.contains_key(name)
+                        {
+                            let code = match args
+                                .first()
+                                .map(|arg| self.evaluate(arg, env, depth + 1))
+                                .transpose()?
+                            {
+                                Some(Value::String(code)) => code,
+                                // A null string cannot parse; DirectExec's
+                                // catch yields C4VNull (C4AulExec.cpp:
+                                // 1693-1699).
+                                _ => return Ok(Value::Nil),
+                            };
+                            let Ok(expr) = crate::parser::Parser::new(&code)
+                                .parse_direct_exec_expression()
+                            else {
+                                // Parse errors log and yield C4VNull
+                                // (DirectExec's catch, C4AulExec.cpp:1693).
+                                return Ok(Value::Nil);
+                            };
+                            let mut exec_env = Environment::new_with_params(
+                                &[],
+                                &[],
+                                env.strict_level,
+                                env.object_state.clone(),
+                            )?;
+                            for var_decl in self.var_decls {
+                                exec_env.define_object_local(&var_decl.name);
+                            }
+                            // Runtime errors propagate (fPassErrors=true,
+                            // C4Script.cpp:4514).
+                            return self.evaluate(&expr, &mut exec_env, depth + 1);
+                        }
                         // `Par(n)` reads the executing call's parameter slot n;
                         // outside 0..ParCnt it is nil (C4AulExec.cpp:1127-1140).
                         if name == "Par"
