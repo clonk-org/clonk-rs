@@ -6160,8 +6160,14 @@ impl GameApp {
             MenuAction::Surrender => {
                 // CID_SurrenderPlayer -> player surrenders with evaluation
                 // (C4MainMenu.cpp:791-795); the engine's game-over check
-                // treats surrendered players as inactive.
-                if let Err(err) = self.engine.set_player_surrendered(self.local_owner, true) {
+                // treats surrendered players as inactive. C++ routes this
+                // through the control queue — until the rust network layer
+                // carries it, apply only in local rounds to avoid desyncs.
+                if self.network.is_some() {
+                    tracing::warn!("networked surrender is not routed through control yet");
+                    self.status_text = "Surrender is not yet supported in network games".to_string();
+                } else if let Err(err) = self.engine.set_player_surrendered(self.local_owner, true)
+                {
                     tracing::error!(error = ?err, "surrender failed");
                 }
             }
@@ -10915,13 +10921,19 @@ fn is_audio_path(path: &Path) -> bool {
 
 fn sandbox_music_bytes() -> &'static [u8] {
     static DATA: OnceLock<Vec<u8>> = OnceLock::new();
-    DATA.get_or_init(|| {
-        load_menu_music().unwrap_or_else(|err| {
+    if let Some(data) = DATA.get() {
+        return data.as_slice();
+    }
+    // Cache successful loads only: a failed discovery (e.g. under an
+    // env-guarded test) must not poison the process-wide cache.
+    match load_menu_music() {
+        Ok(bytes) if !bytes.is_empty() => DATA.get_or_init(|| bytes).as_slice(),
+        Ok(_) => &[],
+        Err(err) => {
             tracing::warn!(error = %err, "failed to load menu music, no music will play");
-            Vec::new()
-        })
-    })
-    .as_slice()
+            &[]
+        }
+    }
 }
 
 fn load_menu_music() -> Result<Vec<u8>> {
@@ -11939,6 +11951,9 @@ mod tests {
 
     #[test]
     fn sandbox_music_is_decodable() {
+        // Music discovery reads process env; hold the env lock so the
+        // EnvGuard-based tests cannot redirect paths mid-load.
+        let _lock = env_lock().lock();
         let audio = sandbox_music_bytes();
         let decoded = decode_audio(audio).expect("sandbox music decodes");
         assert_eq!(decoded.sample_rate, 44_100);
@@ -11976,6 +11991,9 @@ mod tests {
     fn menu_music_runs_in_menu_cycle() {
         lc_core::logging::init();
 
+        // Music discovery reads process env; hold the env lock so the
+        // EnvGuard-based tests cannot redirect paths mid-load.
+        let _lock = env_lock().lock();
         let mut app = GameApp::new(
             320,
             200,
@@ -12135,6 +12153,96 @@ mod tests {
             (400, 300),
             "cache must track the resized surface"
         );
+    }
+
+    fn new_running_sandbox_app() -> GameApp {
+        // Silent audio: keeps these apps from initialising the global
+        // sandbox-music OnceLock while env-guarded tests run in parallel.
+        let audio_options = AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        };
+        let mut app = GameApp::new(
+            320,
+            200,
+            audio_options,
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start sandbox scenario");
+        wait_for_running(&mut app);
+        app
+    }
+
+    // Escape opens the C4MainMenu-shaped player menu (C4MainMenu.cpp:643).
+    #[test]
+    fn escape_opens_player_menu_with_cpp_entries() {
+        lc_core::logging::init();
+        let mut app = new_running_sandbox_app();
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("escape");
+        let menu = app.ingame_menu.as_ref().expect("player menu open");
+        assert_eq!(menu.page(), ingame_menu::MenuPage::Main);
+        let captions: Vec<&str> = menu
+            .items()
+            .iter()
+            .map(|item| item.caption.as_str())
+            .collect();
+        assert!(captions.contains(&"Options"));
+        assert!(captions.contains(&"Abort round"));
+    }
+
+    // Escape in a submenu runs the close command back to the main menu
+    // (C4Menu::TryClose + SetCloseCommand("ActivateMenu:Main"),
+    // C4MainMenu.cpp:577).
+    #[test]
+    fn escape_in_submenu_returns_to_main_menu() {
+        lc_core::logging::init();
+        let mut app = new_running_sandbox_app();
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("escape opens menu");
+        app.apply_ingame_menu_action(MenuAction::ActivateOptions)
+            .expect("open options");
+        assert_eq!(
+            app.ingame_menu.as_ref().map(|menu| menu.page()),
+            Some(ingame_menu::MenuPage::Options)
+        );
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("escape back to main");
+        assert_eq!(
+            app.ingame_menu.as_ref().map(|menu| menu.page()),
+            Some(ingame_menu::MenuPage::Main)
+        );
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("escape closes menu");
+        assert!(app.ingame_menu.is_none());
+    }
+
+    // Surrender ends a local round with evaluation (C4MainMenu.cpp:791-795:
+    // the surrendered player counts as inactive for the game-over check).
+    #[test]
+    fn surrender_from_menu_ends_local_round() {
+        lc_core::logging::init();
+        let mut app = new_running_sandbox_app();
+        app.apply_ingame_menu_action(MenuAction::Surrender)
+            .expect("surrender");
+        for _ in 0..30 {
+            app.update().expect("tick after surrender");
+            if app.snapshot.game_over {
+                break;
+            }
+        }
+        assert!(app.snapshot.game_over, "round should end after surrender");
     }
 
     #[test]
