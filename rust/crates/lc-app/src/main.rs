@@ -1152,6 +1152,20 @@ fn run_integration_test(
     println!("  Scenario started successfully");
     println!("  Ran {} frames without errors", test_frames);
 
+    // Optional: simulate the Escape keypress (the user flow that opens the
+    // in-game player menu) before the frame dump, so menu rendering can be
+    // captured headlessly.
+    if std::env::var("LC_APP_OPEN_MENU").is_ok_and(|value| value == "player") {
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .context("simulated Escape press")?;
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .context("simulated Escape release")?;
+        for frame in 0..5 {
+            app.update()
+                .with_context(|| format!("failed to update app with menu open, frame {frame}"))?;
+        }
+    }
+
     // Optional visual check: render the final frame to a PNG
     // (rendering-parity forensics vs the C++ engine's F9 shots).
     if let Ok(dump) = std::env::var("LC_APP_DUMP_FRAME") {
