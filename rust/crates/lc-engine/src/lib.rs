@@ -11776,7 +11776,7 @@ impl Engine {
                 .with_alive(object.state.alive)
                 .with_in_liquid(object.state.in_liquid)
                 .with_ocf(ocf)
-                .with_command_names(object.commands.command_names())
+                .with_commands(object.commands.command_views())
                 .with_full_state(Rc::new(object.state.clone()))
                 .with_last_energy_loss_cause(object.last_energy_loss_cause)
             }),
@@ -25574,7 +25574,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.container,
                 object.draw_transform,
             )
-            .with_command_names(object.command_stack.command_names())
+            .with_commands(object.command_stack.command_views())
             .with_ocf(object.ocf)
             // Nested calls (obj->Method, foreign RemoveObject) need a full
             // scope for WORLD objects too — GoldRush re-runs the placed

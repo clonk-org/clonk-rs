@@ -6667,6 +6667,37 @@ impl CommandSnapshot {
     }
 }
 
+/// The FnGetCommand element view of one stack entry (C4Script.cpp:926-945):
+/// name, Target, Tx, Ty, Target2, Data. Sourced from the creating
+/// CommandRequest — C++ reads the LIVE C4Command fields, which only the
+/// Acquire/Wait InitEvaluation defaults ever rewrite (C4Command.cpp:
+/// 1659-1670); restored snapshots (no retained request) expose nil
+/// elements.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandView {
+    pub name: String,
+    pub target: Option<ObjectId>,
+    pub tx: Option<i32>,
+    pub ty: Option<i32>,
+    pub target2: Option<ObjectId>,
+    pub data: CommandData,
+}
+
+impl CommandView {
+    fn from_entry(name: String, request: Option<&CommandRequest>) -> Self {
+        Self {
+            name,
+            target: request.and_then(|request| request.target),
+            tx: request.and_then(|request| request.tx),
+            ty: request.and_then(|request| request.ty),
+            target2: request.and_then(|request| request.target2),
+            data: request
+                .map(|request| request.data.clone())
+                .unwrap_or(CommandData::None),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CommandStackSnapshot {
     commands: Vec<CommandSnapshot>,
@@ -6690,6 +6721,15 @@ impl CommandStackSnapshot {
                     .unwrap_or("None")
                     .to_string()
             })
+            .collect()
+    }
+
+    /// FnGetCommand element views; snapshots keep no request, so only
+    /// the names survive a restore.
+    pub fn command_views(&self) -> Vec<CommandView> {
+        self.command_names()
+            .into_iter()
+            .map(|name| CommandView::from_entry(name, None))
             .collect()
     }
 }
@@ -6722,6 +6762,24 @@ impl CommandStack {
                     .map(CommandId::to_name)
                     .unwrap_or("None")
                     .to_string()
+            })
+            .collect()
+    }
+
+    /// FnGetCommand element views for the active stack, top first.
+    pub fn command_views(&self) -> Vec<CommandView> {
+        self.entries
+            .iter()
+            .map(|entry| {
+                CommandView::from_entry(
+                    entry
+                        .state
+                        .id()
+                        .map(CommandId::to_name)
+                        .unwrap_or("None")
+                        .to_string(),
+                    entry.request.as_ref(),
+                )
             })
             .collect()
     }
@@ -11523,6 +11581,10 @@ struct ActiveCommand {
     mode: CommandMode,
     retries: i32,
     failures: i32,
+    /// The creating request, retained for the FnGetCommand element view
+    /// (C4Script.cpp:926-945). Not persisted — restored stacks expose
+    /// nil elements.
+    request: Option<CommandRequest>,
 }
 
 impl ActiveCommand {
@@ -11572,6 +11634,7 @@ impl ActiveCommand {
             mode: request.mode,
             retries: request.retries.max(0),
             failures: 0,
+            request: Some(request),
         })
     }
 
@@ -11581,6 +11644,7 @@ impl ActiveCommand {
             mode: snapshot.mode,
             retries: snapshot.retries,
             failures: snapshot.failures,
+            request: None,
         }
     }
 

@@ -4,7 +4,8 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::command::{
-    CommandData, CommandId, CommandMode, CommandOperation, CommandRequest, MAX_COMMAND_STACK,
+    CommandData, CommandId, CommandMode, CommandOperation, CommandRequest, CommandView,
+    MAX_COMMAND_STACK,
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::material::MaterialSet;
@@ -97,10 +98,10 @@ pub(crate) struct HostWorldObject {
     contents: Vec<ObjectId>,
     #[allow(dead_code)]
     pub draw_transform: Option<DrawTransform>,
-    /// C++ CommandName strings of the object's command stack, top first
-    /// (FnGetCommand, C4Script.cpp:918-945). A frame-start snapshot —
-    /// mid-frame command changes are not re-read (C++ reads live).
-    pub command_names: Vec<String>,
+    /// FnGetCommand views of the object's command stack, top first
+    /// (C4Script.cpp:918-945). A frame-start snapshot — mid-frame command
+    /// changes are not re-read (C++ reads live).
+    pub commands: Vec<CommandView>,
     /// Full object-state snapshot for nested script calls (Find_Func,
     /// GameCall): lets host functions build a complete object scope for
     /// another object mid-VM-call. `None` in legacy fixture contexts.
@@ -282,14 +283,14 @@ impl HostWorldObject {
             container,
             contents: Vec::new(),
             draw_transform,
-            command_names: Vec::new(),
+            commands: Vec::new(),
             state: None,
             last_energy_loss_cause: OWNER_NONE,
         }
     }
 
-    pub(crate) fn with_command_names(mut self, command_names: Vec<String>) -> Self {
-        self.command_names = command_names;
+    pub(crate) fn with_commands(mut self, commands: Vec<CommandView>) -> Self {
+        self.commands = commands;
         self
     }
 
@@ -2849,6 +2850,15 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetLeague (C4Script.cpp:3562-3568): the indexed league section of
+/// Game.Parameters.League — nullptr (nil) when no league is configured,
+/// which is every local game. League play itself is not modeled
+/// (PORT_STATUS).
+fn get_league(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _index = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetLeague", "index")?;
+    Ok(Value::Nil)
+}
+
 /// FnGetScenarioVal (C4Script.cpp:4250-4256): StdCompiler reflection over
 /// Game.C4S by entry/section. Like the GetDefCoreVal port, the hot entries
 /// real content reads are modeled — the Landscape border-open keys resolve
@@ -4406,6 +4416,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetWealth", get_wealth);
     script.register_host_function("SetWealth", set_wealth);
     script.register_host_function("GetScenarioVal", get_scenario_val);
+    script.register_host_function("GetLeague", get_league);
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetPlrValue", get_plr_value);
     script.register_host_function("GetPlrValueGain", get_plr_value_gain);
@@ -4607,6 +4618,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Min", min_func);
     script.register_host_function("Max", max_func);
     script.register_host_function("Sqrt", sqrt_func);
+    script.register_host_function("Angle", angle_func);
     script.register_host_function("Mod", modulo);
     script.register_host_function("GetMass", get_mass);
     script.register_host_function("SetMass", set_mass);
@@ -7563,6 +7575,47 @@ fn sqrt_func(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(result))
 }
 
+/// FnAngle (C4Script.cpp:3255-3280): the position-to-position angle in
+/// Clonk orientation (0 = up, 90 = right), `iPrec` scaling (default 1).
+/// Axis-aligned deltas take the exact shortcuts; the general case is
+/// `trunc(180 * prec * atan2(|dy|, |dx|) / pi)` folded into the quadrant.
+fn angle_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x1 = value_to_i32(args.first().unwrap_or(&Value::Nil), "Angle", "x1")?;
+    let y1 = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "Angle", "y1")?;
+    let x2 = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "Angle", "x2")?;
+    let y2 = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "Angle", "y2")?;
+    let mut prec = value_to_i32(args.get(4).unwrap_or(&Value::Nil), "Angle", "precision")?;
+    if prec == 0 {
+        prec = 1;
+    }
+
+    let dx = x2.wrapping_sub(x1);
+    let dy = y2.wrapping_sub(y1);
+    if dx == 0 {
+        return Ok(Value::Int(if dy > 0 { 180 * prec } else { 0 }));
+    }
+    if dy == 0 {
+        return Ok(Value::Int(if dx > 0 { 90 * prec } else { 270 * prec }));
+    }
+
+    let angle = (180.0
+        * f64::from(prec)
+        * f64::from(dy.abs()).atan2(f64::from(dx.abs()))
+        * std::f64::consts::FRAC_1_PI) as i32;
+
+    Ok(Value::Int(if x2 > x1 {
+        if y2 < y1 {
+            90 * prec - angle
+        } else {
+            90 * prec + angle
+        }
+    } else if y2 < y1 {
+        270 * prec + angle
+    } else {
+        270 * prec - angle
+    }))
+}
+
 /// FnGetMass (C4Script.cpp:1148-1158): with an id, the DEF mass; else the
 /// object's Mass = max(Def->Mass * Con / FullCon, 1)
 /// (C4Object.cpp:188; OwnMass/contents mass unmodeled). Nil without both.
@@ -9459,18 +9512,28 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
         if command_num < 0 {
             return Ok(Value::Nil);
         }
-        let Some(name) = world_object.command_names.get(command_num as usize) else {
+        let Some(view) = world_object.commands.get(command_num as usize) else {
             return Ok(Value::Nil);
         };
+        // Element map (C4Script.cpp:926-945): 0 name, 1 Target, 2 Tx,
+        // 3 C4VInt(Ty), 4 Target2, 5 C4Value(Data, C4V_Any) — a zero
+        // int Data reads nil in C++.
         match element {
-            0 => Ok(Value::String(name.clone())),
-            1..=5 => {
-                tracing::warn!(
-                    element,
-                    "GetCommand: Target/Tx/Ty/Target2/Data elements are not exposed yet; returning nil"
-                );
-                Ok(Value::Nil)
-            }
+            0 => Ok(Value::String(view.name.clone())),
+            1 => Ok(view
+                .target
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil)),
+            2 => Ok(view.tx.map(Value::Int).unwrap_or(Value::Nil)),
+            3 => Ok(Value::Int(view.ty.unwrap_or(0))),
+            4 => Ok(view
+                .target2
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil)),
+            5 => Ok(match view.data {
+                CommandData::Integer(data) if data != 0 => Value::Int(data),
+                _ => Value::Nil,
+            }),
             _ => Ok(Value::Nil),
         }
     })
@@ -18721,6 +18784,7 @@ mod tests {
         "AddMenuItem",
         "AddMessage",
         "AdjustWalkRotation",
+        "Angle",
         "AnyContainer",
         "AppendCommand",
         "BlastFree",
@@ -18810,6 +18874,7 @@ mod tests {
         "GetID",
         "GetIndexOf",
         "GetKeys",
+        "GetLeague",
         "GetLength",
         "GetMass",
         "GetMaterial",
@@ -22708,6 +22773,84 @@ mod tests {
             }
             other => panic!("expected PushBack operation, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn angle_matches_the_cpp_quadrant_math() {
+        // FnAngle (C4Script.cpp:3255-3280): 0 = up, 90 = right; axis
+        // shortcuts; trunc(180*prec*atan2(|dy|,|dx|)/pi) folded per
+        // quadrant. The dragon's Flying() computes its target rotation
+        // with Angle(iVy, -iVx) (Fantasy.c4d Dragon.c4d Script.c:540).
+        let angle = |x1: i32, y1: i32, x2: i32, y2: i32, prec: i32| {
+            let args = [
+                Value::Int(x1),
+                Value::Int(y1),
+                Value::Int(x2),
+                Value::Int(y2),
+                Value::Int(prec),
+            ];
+            let (result, _) = with_object_host_context(|| angle_func(&args));
+            result.expect("Angle succeeds")
+        };
+        assert_eq!(angle(0, 0, 0, 10, 0), Value::Int(180), "straight down");
+        assert_eq!(angle(0, 0, 0, -10, 0), Value::Int(0), "straight up");
+        assert_eq!(angle(0, 0, 0, 0, 0), Value::Int(0), "no delta");
+        assert_eq!(angle(0, 0, 10, 0, 0), Value::Int(90), "right");
+        assert_eq!(angle(0, 0, -10, 0, 0), Value::Int(270), "left");
+        assert_eq!(angle(0, 0, 10, -10, 0), Value::Int(45));
+        assert_eq!(angle(0, 0, 10, 10, 0), Value::Int(135));
+        assert_eq!(angle(0, 0, -10, -10, 0), Value::Int(315));
+        assert_eq!(angle(0, 0, -10, 10, 0), Value::Int(225));
+        // Precision: 900 - trunc(1800*atan2(2,5)/pi) = 900 - 218.
+        assert_eq!(angle(0, 0, 5, -2, 10), Value::Int(682));
+    }
+
+    #[test]
+    fn get_command_exposes_target_tx_ty_and_data_elements() {
+        // FnGetCommand elements (C4Script.cpp:926-945): 1 Target, 2 Tx,
+        // 3 C4VInt(Ty), 4 Target2, 5 C4Value(Data, C4V_Any) — zero int
+        // Data reads nil. The dragon's Flying() steers by
+        // GetCommand(0, 2)/GetCommand(0, 3) (Fantasy.c4d Dragon.c4d
+        // Script.c:505-512).
+        let world_object = HostWorldObject::new(
+            ObjectId::new(1),
+            "DRGN",
+            ObjectStatus::Normal,
+            "Fly",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::new(50, 50),
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_commands(vec![CommandView {
+            name: "MoveTo".into(),
+            target: None,
+            tx: Some(200),
+            ty: Some(90),
+            target2: None,
+            data: CommandData::Integer(0),
+        }]);
+        let world = HostWorldContext::from_objects(vec![world_object]);
+        let query = |element: i32| {
+            let (result, _) = with_object_host_context_with_world(world.clone(), || {
+                get_command(&[Value::Int(0), Value::Int(element)])
+            });
+            result.expect("GetCommand succeeds")
+        };
+        assert_eq!(query(0), Value::String("MoveTo".into()));
+        assert_eq!(query(1), Value::Nil, "no target object");
+        assert_eq!(query(2), Value::Int(200), "Tx");
+        assert_eq!(query(3), Value::Int(90), "Ty");
+        assert_eq!(query(4), Value::Nil, "no target2");
+        assert_eq!(query(5), Value::Nil, "zero Data is nil in C4V_Any");
     }
 
     #[test]
