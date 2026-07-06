@@ -19,6 +19,7 @@ mod chunky;
 mod command;
 mod compat;
 mod control;
+mod direct_com;
 mod effect;
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -14720,6 +14721,9 @@ impl Engine {
         }
         self.apply_landscape_temperature_conversions();
         self.tick_player_systems();
+        // The control half of Players.Execute (C4Game.cpp:822): flash
+        // decrements plus the LastCom COM_Single timeout dispatch.
+        self.execute_player_controls()?;
         self.messages.tick(&alive);
         // C4GameScriptHost::Execute (C4ScriptHost.cpp:222-232): while
         // Game.Script.Go, every 10th frame calls Script%d with the counter
