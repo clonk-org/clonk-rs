@@ -7607,6 +7607,9 @@ impl GameApp {
     fn open_scenario_browser(&mut self) {
         self.startup_view = StartupView::ScenarioBrowser;
         self.menu_state.set_pointer_position(None);
+        // The C++ dialog reloads from the root folder every time it is
+        // shown (OnShown -> pScenLoader->Load(ExePath), cpp:1431-1443).
+        self.menu_state.stack.truncate(1);
         // The C++ book has no Back list entry — Back is a button/K_LEFT
         // (C4StartupScenSelDlg.cpp:1367-1369,1388-1389).
         self.menu_state.set_include_back(false);
