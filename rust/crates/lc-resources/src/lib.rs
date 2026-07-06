@@ -6,6 +6,7 @@ pub mod font;
 pub mod graphics;
 pub mod group;
 pub mod material;
+pub mod rtf;
 pub mod scenario;
 pub mod texmap;
 
@@ -19,5 +20,6 @@ pub use graphics::{GraphicsError, GraphicsImage, GraphicsResource};
 pub use group::{Group, GroupEntry, GroupError};
 pub use material::{MaterialDefinition, MaterialError, MaterialLibrary};
 pub use scenario::{
-    discover, discover_many, ScenarioDiscoveryError, ScenarioEntry, ScenarioEntryKind,
+    discover, discover_many, discover_many_with_languages, discover_with_languages,
+    ScenarioDiscoveryError, ScenarioEntry, ScenarioEntryKind,
 };

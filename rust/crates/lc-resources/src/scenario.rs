@@ -100,10 +100,23 @@ pub struct ScenarioEntry {
     pub is_editable: bool,
     pub is_playable: bool,
     pub preview: Option<ScenarioPreview>,
+    /// The right-page Title.png/Title.bmp picture (C4ScenarioListLoader::
+    /// Entry fctTitle, C4StartupScenSelDlg.cpp:532-534); shares pixel data
+    /// with `preview` when both come from the same title image.
+    pub title_picture: Option<ScenarioPreview>,
     pub children: Vec<ScenarioEntry>,
     pub folder_index: Option<i32>,
     pub icon_index: Option<i32>,
     pub difficulty: Option<i32>,
+    /// `Author.txt`/group maker of packed groups (Entry::Load,
+    /// C4StartupScenSelDlg.cpp:536-552); unpacked directories have none.
+    pub author: Option<String>,
+    /// `Version.txt` contents (C4CFN_Version, C4StartupScenSelDlg.cpp:554).
+    pub version: Option<String>,
+    /// Scenario.txt `[Definitions] LocalOnly` (C4Scenario.cpp:482).
+    pub local_only: Option<bool>,
+    /// Scenario.txt `[Definitions] AllowUserChange` (C4Scenario.cpp:483).
+    pub allow_user_change: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -114,6 +127,8 @@ struct LegacyCoreInfo {
     difficulty: Option<i32>,
     save_game: Option<bool>,
     replay: Option<bool>,
+    local_only: Option<bool>,
+    allow_user_change: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -122,8 +137,28 @@ struct LegacyFolderInfo {
     index: Option<i32>,
 }
 
+/// The default language fallback sequence, mirroring the LanguageEx list the
+/// C++ frontend composes for the default English config: primary code plus
+/// the internal "US"/"DE" fallbacks (C4StartupOptionsDlg.cpp:1211-1231,
+/// C4ConfigGeneral::DefaultLanguage, C4Config.cpp:1461-1474).
+pub const DEFAULT_LANGUAGE_SEQUENCE: [&str; 2] = ["US", "DE"];
+
+fn default_language_sequence() -> Vec<String> {
+    DEFAULT_LANGUAGE_SEQUENCE
+        .iter()
+        .map(|code| code.to_string())
+        .collect()
+}
+
 pub fn discover(root: impl AsRef<Path>) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
-    discover_many([root.as_ref()])
+    discover_with_languages(root, &default_language_sequence())
+}
+
+pub fn discover_with_languages(
+    root: impl AsRef<Path>,
+    languages: &[String],
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
+    discover_many_with_languages([root.as_ref()], languages)
 }
 
 pub fn discover_many<I, P>(roots: I) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError>
@@ -131,10 +166,21 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
+    discover_many_with_languages(roots, &default_language_sequence())
+}
+
+pub fn discover_many_with_languages<I, P>(
+    roots: I,
+    languages: &[String],
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
     let mut entries = Vec::new();
     for root in roots {
         let root_path = root.as_ref();
-        let mut discovered = collect_from_path(root_path, "")?;
+        let mut discovered = collect_from_path(root_path, "", languages)?;
         entries.append(&mut discovered);
     }
     sort_entries(&mut entries);
@@ -144,6 +190,7 @@ where
 fn collect_from_directory(
     path: &Path,
     parent_identifier: &str,
+    languages: &[String],
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
     let mut entries: Vec<fs::DirEntry> = fs::read_dir(path)
         .map_err(|source| ScenarioDiscoveryError::ReadDirectory {
@@ -183,52 +230,76 @@ fn collect_from_directory(
         }
 
         let identifier = join_identifier(parent_identifier, name);
-        if file_type.is_dir() {
+        // Entry types are decided by filename, mirroring
+        // C4ScenarioListLoader::Entry::CreateEntryForFile
+        // (C4StartupScenSelDlg.cpp:581-598): "*.c4s" -> Scenario, "*.c4f" ->
+        // SubFolder, extension-less directories -> RegularFolder only when
+        // they (recursively) contain scenarios. Anything else — including
+        // .c4d/.c4g packs — is not listed.
+        if is_scenario_filename(name) {
             let group = Group::open(entry.path()).map_err(|err| ScenarioDiscoveryError::Group {
                 path: entry.path(),
                 source: err,
             })?;
-            match classify_group(&group)? {
-                GroupContentKind::Scenario => {
-                    result.push(build_scenario_entry(&group, identifier)?);
-                }
-                GroupContentKind::Folder => {
-                    result.push(build_folder_entry(&group, identifier)?);
-                }
-                GroupContentKind::Other => {
-                    continue;
-                }
-            }
-        } else if is_scenario_filename(name) {
-            let group = Group::open(entry.path()).map_err(|err| ScenarioDiscoveryError::Group {
-                path: entry.path(),
-                source: err,
-            })?;
-            result.push(build_scenario_entry(&group, identifier)?);
+            result.push(build_scenario_entry(&group, identifier, languages)?);
         } else if is_folder_filename(name) {
             let group = Group::open(entry.path()).map_err(|err| ScenarioDiscoveryError::Group {
                 path: entry.path(),
                 source: err,
             })?;
-            result.push(build_folder_entry(&group, identifier)?);
+            result.push(build_folder_entry(&group, identifier, languages)?);
+        } else if file_type.is_dir()
+            && Path::new(name).extension().is_none()
+            && dir_contains_scenarios(&entry.path())
+        {
+            let group = Group::open(entry.path()).map_err(|err| ScenarioDiscoveryError::Group {
+                path: entry.path(),
+                source: err,
+            })?;
+            result.push(build_folder_entry(&group, identifier, languages)?);
         }
     }
     sort_entries(&mut result);
     Ok(result)
 }
 
+/// Recursive check whether a directory contains a `.c4s` or `.c4f` item,
+/// mirroring `DirContainsScenarios` (C4StartupScenSelDlg.cpp:561-579).
+fn dir_contains_scenarios(dir: &Path) -> bool {
+    let Ok(read_dir) = fs::read_dir(dir) else {
+        return false;
+    };
+    read_dir.flatten().any(|entry| {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        if should_ignore_name(name) {
+            return false;
+        }
+        if is_scenario_filename(name) || is_folder_filename(name) {
+            return true;
+        }
+        entry
+            .file_type()
+            .map(|kind| kind.is_dir() && dir_contains_scenarios(&entry.path()))
+            .unwrap_or(false)
+    })
+}
+
 fn collect_from_path(
     path: &Path,
     parent_identifier: &str,
+    languages: &[String],
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
     if path.is_dir() {
-        return collect_from_directory(path, parent_identifier);
+        return collect_from_directory(path, parent_identifier, languages);
     }
     if path.is_file() {
         if !is_scenario_filename_os(path) && !is_folder_filename_os(path) {
             return Ok(Vec::new());
         }
-        return collect_from_group_file(path, parent_identifier);
+        return collect_from_group_file(path, parent_identifier, languages);
     }
     Ok(Vec::new())
 }
@@ -236,6 +307,7 @@ fn collect_from_path(
 fn collect_children_from_group(
     group: &Group,
     parent_identifier: &str,
+    languages: &[String],
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
     let mut entries = group
         .entries()
@@ -269,29 +341,20 @@ fn collect_children_from_group(
             continue;
         }
         let identifier = join_identifier(parent_identifier, name);
-        if entry.is_directory {
+        // Folder children are matched by the "*.c4s"/"*.c4f" search masks
+        // only (C4ScenarioListLoader::SubFolder::DoLoadContents,
+        // C4StartupScenSelDlg.cpp:973-1014); extension-less subdirectories
+        // inside groups are not regarded (:588).
+        if is_scenario_filename(name) {
             let child_group = group
                 .open_child(&entry.relative_path)
                 .map_err(|err| group_error(&group.root().join(&entry.relative_path), err))?;
-            match classify_group(&child_group)? {
-                GroupContentKind::Scenario => {
-                    result.push(build_scenario_entry(&child_group, identifier)?);
-                }
-                GroupContentKind::Folder => {
-                    result.push(build_folder_entry(&child_group, identifier)?);
-                }
-                GroupContentKind::Other => continue,
-            }
-        } else if is_scenario_filename(name) {
-            let child_group = group
-                .open_child(&entry.relative_path)
-                .map_err(|err| group_error(&group.root().join(&entry.relative_path), err))?;
-            result.push(build_scenario_entry(&child_group, identifier)?);
+            result.push(build_scenario_entry(&child_group, identifier, languages)?);
         } else if is_folder_filename(name) {
             let child_group = group
                 .open_child(&entry.relative_path)
                 .map_err(|err| group_error(&group.root().join(&entry.relative_path), err))?;
-            result.push(build_folder_entry(&child_group, identifier)?);
+            result.push(build_folder_entry(&child_group, identifier, languages)?);
         }
     }
     sort_entries(&mut result);
@@ -301,6 +364,7 @@ fn collect_children_from_group(
 fn collect_from_group_file(
     path: &Path,
     parent_identifier: &str,
+    languages: &[String],
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
     let name_os = match path.file_name() {
         Some(name) => name,
@@ -319,10 +383,10 @@ fn collect_from_group_file(
         source,
     })?;
     let identifier = join_identifier(parent_identifier, name);
-    let entry = match classify_group(&group)? {
-        GroupContentKind::Scenario => build_scenario_entry(&group, identifier)?,
-        GroupContentKind::Folder => build_folder_entry(&group, identifier)?,
-        GroupContentKind::Other => return Ok(Vec::new()),
+    let entry = if is_scenario_filename(name) {
+        build_scenario_entry(&group, identifier, languages)?
+    } else {
+        build_folder_entry(&group, identifier, languages)?
     };
     Ok(vec![entry])
 }
@@ -338,23 +402,9 @@ fn legacy_core_info(group: &Group) -> Result<Option<LegacyCoreInfo>, ScenarioDis
         }
     };
 
-    let text =
-        String::from_utf8(bytes).map_err(|_| ScenarioDiscoveryError::LegacyCoreEncoding {
-            path: group.root().join("Scenario.txt"),
-        })?;
+    let text = decode_legacy_text(&bytes);
 
-    let info = parse_legacy_core_info(&text);
-    if info.title.is_none()
-        && info.description.is_none()
-        && info.icon.is_none()
-        && info.difficulty.is_none()
-        && info.save_game.is_none()
-        && info.replay.is_none()
-    {
-        Ok(None)
-    } else {
-        Ok(Some(info))
-    }
+    Ok(Some(parse_legacy_core_info(&text)))
 }
 
 fn parse_legacy_core_info(text: &str) -> LegacyCoreInfo {
@@ -383,12 +433,23 @@ fn parse_legacy_core_info(text: &str) -> LegacyCoreInfo {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        if !current_section.eq_ignore_ascii_case("head") {
-            continue;
-        }
         let key = key.trim();
         let value = value.trim();
         if value.is_empty() {
+            continue;
+        }
+        if current_section.eq_ignore_ascii_case("definitions") {
+            // C4SDefinitions::CompileFunc (C4Scenario.cpp:482-483).
+            if info.local_only.is_none() && key.eq_ignore_ascii_case("localonly") {
+                info.local_only = parse_bool_flag(value);
+            } else if info.allow_user_change.is_none()
+                && key.eq_ignore_ascii_case("allowuserchange")
+            {
+                info.allow_user_change = parse_bool_flag(value);
+            }
+            continue;
+        }
+        if !current_section.eq_ignore_ascii_case("head") {
             continue;
         }
         if info.title.is_none() && key.eq_ignore_ascii_case("title") {
@@ -414,15 +475,6 @@ fn parse_legacy_core_info(text: &str) -> LegacyCoreInfo {
                 info.replay = Some(parsed);
             }
         }
-        if info.title.is_some()
-            && info.description.is_some()
-            && info.icon.is_some()
-            && info.difficulty.is_some()
-            && info.save_game.is_some()
-            && info.replay.is_some()
-        {
-            break;
-        }
     }
 
     info
@@ -443,16 +495,26 @@ fn parse_bool_flag(value: &str) -> Option<bool> {
 fn build_scenario_entry(
     group: &Group,
     identifier: String,
+    languages: &[String],
 ) -> Result<ScenarioEntry, ScenarioDiscoveryError> {
     let fallback = fallback_title_for_path(group.root());
     let manifest = scenario_manifest_info(group)?;
     let legacy = legacy_core_info(group)?;
-    let mut title = manifest
-        .as_ref()
-        .and_then(|info| info.name.as_ref())
-        .map(|name| name.trim())
-        .filter(|name| !name.is_empty())
-        .map(|name| name.to_string());
+    // Name precedence mirrors C4ScenarioListLoader::Entry::Load
+    // (C4StartupScenSelDlg.cpp:477-515): the language-resolved Title.txt wins,
+    // then the Scenario.txt [Head] Title fallback (Scenario::LoadCustom,
+    // :712-714), then the filename. The Scenario.json manifest is a Rust-port
+    // extension slotted between Title.txt and the legacy core.
+    let mut title = title_from_title_files(group, languages)?;
+
+    if title.is_none() {
+        title = manifest
+            .as_ref()
+            .and_then(|info| info.name.as_ref())
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(|name| name.to_string());
+    }
 
     if title.is_none() {
         if let Some(core) = legacy
@@ -465,18 +527,15 @@ fn build_scenario_entry(
         }
     }
 
-    if title.is_none() {
-        title = title_from_title_files(group)?;
-    }
-
     let title = title.unwrap_or(fallback);
-    let preview = load_preview_image(group)?;
+    let (preview, title_picture) = load_preview_images(group)?;
     let description = manifest
         .as_ref()
         .and_then(|info| info.description.as_ref())
         .map(|desc| desc.trim())
         .filter(|desc| !desc.is_empty())
         .map(|desc| desc.to_string())
+        .or_else(|| description_from_desc_files(group, languages))
         .or_else(|| {
             legacy
                 .as_ref()
@@ -503,19 +562,25 @@ fn build_scenario_entry(
         is_editable: group.is_directory(),
         is_playable: true,
         preview,
+        title_picture,
         children: Vec::new(),
         folder_index: None,
         icon_index,
         difficulty,
+        author: load_author(group),
+        version: load_version(group),
+        local_only: legacy.as_ref().and_then(|info| info.local_only),
+        allow_user_change: legacy.as_ref().and_then(|info| info.allow_user_change),
     })
 }
 
 fn build_folder_entry(
     group: &Group,
     identifier: String,
+    languages: &[String],
 ) -> Result<ScenarioEntry, ScenarioDiscoveryError> {
     let fallback = fallback_title_for_path(group.root());
-    let mut title = title_from_title_files(group)?;
+    let mut title = title_from_title_files(group, languages)?;
     let folder_info = folder_core_info(group)?;
     if title.is_none() {
         if let Some(info) = folder_info.as_ref().and_then(|info| info.title.clone()) {
@@ -524,27 +589,92 @@ fn build_folder_entry(
     }
 
     let title = title.unwrap_or(fallback);
-    let preview = load_preview_image(group)?;
-    let children = collect_children_from_group(group, &identifier)?;
+    let (preview, title_picture) = load_preview_images(group)?;
+    // Extension-less directories are C4ScenarioListLoader::RegularFolder:
+    // their contents come from a directory iteration that also accepts
+    // nested plain directories (C4StartupScenSelDlg.cpp:1043-1085), while
+    // .c4f folders (packed or unpacked) only search the "*.c4s"/"*.c4f"
+    // masks (SubFolder::DoLoadContents, :973-1014).
+    let children = if group.is_directory() && group.root().extension().is_none() {
+        collect_from_directory(group.root(), &identifier, languages)?
+    } else {
+        collect_children_from_group(group, &identifier, languages)?
+    };
     let folder_index = folder_info.and_then(|info| info.index);
 
     Ok(ScenarioEntry {
         identifier,
         path: group.root().to_path_buf(),
         title,
-        description: None,
+        description: description_from_desc_files(group, languages),
         kind: ScenarioEntryKind::Folder,
         is_editable: group.is_directory(),
         is_playable: false,
         preview,
+        title_picture,
         children,
         folder_index,
         icon_index: None,
         difficulty: None,
+        author: load_author(group),
+        version: load_version(group),
+        local_only: None,
+        allow_user_change: None,
     })
 }
 
-fn load_preview_image(group: &Group) -> Result<Option<ScenarioPreview>, ScenarioDiscoveryError> {
+/// The right-page description per `C4CFN_ScenarioDesc` = "Desc{}.rtf"
+/// (C4Components.h:74): the first `Desc<code>.rtf` of the language sequence
+/// that exists is converted from RTF to plain text
+/// (C4StartupScenSelDlg.cpp:523-531).
+fn description_from_desc_files(group: &Group, languages: &[String]) -> Option<String> {
+    languages
+        .iter()
+        .map(|code| format!("Desc{code}.rtf"))
+        .find(|candidate| group.exists(candidate))
+        .and_then(|candidate| group.read_file(&candidate).ok())
+        .map(|bytes| crate::rtf::rtf_to_plain_text(&bytes))
+        .filter(|text| !text.is_empty())
+}
+
+/// `Version.txt` (C4CFN_Version, C4StartupScenSelDlg.cpp:554).
+fn load_version(group: &Group) -> Option<String> {
+    group
+        .read_file("Version.txt")
+        .ok()
+        .map(|bytes| decode_legacy_text(&bytes).trim().to_string())
+        .filter(|version| !version.is_empty())
+}
+
+/// The author of packed groups (Entry::Load, C4StartupScenSelDlg.cpp:536-552):
+/// an `Author.txt` override is honoured for the hardcoded official makers,
+/// otherwise the group maker itself; unpacked directories have no author.
+fn load_author(group: &Group) -> Option<String> {
+    if group.is_directory() {
+        return None;
+    }
+    let maker = group
+        .maker()
+        .map(str::trim)
+        .filter(|maker| !maker.is_empty())
+        .map(str::to_string)?;
+    const SECONDARY_AUTHOR_MAKERS: [&str; 3] =
+        ["RedWolf Design", "Clonk History Project", "GWE-Team"];
+    SECONDARY_AUTHOR_MAKERS
+        .contains(&maker.as_str())
+        .then(|| group.read_file("Author.txt").ok())
+        .flatten()
+        .map(|bytes| decode_legacy_text(&bytes).trim().to_string())
+        .filter(|author| !author.is_empty())
+        .or(Some(maker))
+}
+
+/// Loads the list preview image (title > loader > icon candidates) and, when
+/// the winning candidate is a Title.* image, the right-page title picture
+/// (fctTitle, C4StartupScenSelDlg.cpp:532-534) sharing the same pixel data.
+fn load_preview_images(
+    group: &Group,
+) -> Result<(Option<ScenarioPreview>, Option<ScenarioPreview>), ScenarioDiscoveryError> {
     let entries = group
         .entries()
         .map_err(|err| group_error(group.root(), err))?;
@@ -571,12 +701,12 @@ fn load_preview_image(group: &Group) -> Result<Option<ScenarioPreview>, Scenario
     }
 
     if candidates.is_empty() {
-        return Ok(None);
+        return Ok((None, None));
     }
 
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
 
-    for (_, relative_path) in candidates {
+    for ((prefix_rank, _, _), relative_path) in candidates {
         let absolute_path = group.root().join(&relative_path);
         let bytes = group
             .read_file(&relative_path)
@@ -596,10 +726,12 @@ fn load_preview_image(group: &Group) -> Result<Option<ScenarioPreview>, Scenario
         let width = rgba.width();
         let height = rgba.height();
         let data = rgba.into_raw();
-        return Ok(Some(ScenarioPreview::new(width, height, data)));
+        let preview = ScenarioPreview::new(width, height, data);
+        let title_picture = (prefix_rank == 0).then(|| preview.clone());
+        return Ok((Some(preview), title_picture));
     }
 
-    Ok(None)
+    Ok((None, None))
 }
 
 fn preview_candidate_key(name: &str) -> Option<(u8, u8, String)> {
@@ -628,27 +760,6 @@ fn preview_candidate_key(name: &str) -> Option<(u8, u8, String)> {
     Some((prefix_rank, ext_rank, lower))
 }
 
-fn classify_group(group: &Group) -> Result<GroupContentKind, ScenarioDiscoveryError> {
-    if group.exists("Scenario.json") || group.exists("Scenario.txt") {
-        return Ok(GroupContentKind::Scenario);
-    }
-    let entries = group
-        .entries()
-        .map_err(|err| group_error(group.root(), err))?;
-    if entries.iter().any(|entry| {
-        entry.relative_path.components().count() == 1
-            && (entry.is_directory
-                || is_scenario_filename_os(&entry.relative_path)
-                || is_folder_filename_os(&entry.relative_path))
-    }) {
-        return Ok(GroupContentKind::Folder);
-    }
-    if group.exists("Folder.txt") {
-        return Ok(GroupContentKind::Folder);
-    }
-    Ok(GroupContentKind::Other)
-}
-
 fn scenario_manifest_info(
     group: &Group,
 ) -> Result<Option<ScenarioManifestPreview>, ScenarioDiscoveryError> {
@@ -666,41 +777,92 @@ fn scenario_manifest_info(
     Ok(Some(manifest))
 }
 
-fn title_from_title_files(group: &Group) -> Result<Option<String>, ScenarioDiscoveryError> {
-    let entries = group
-        .entries()
-        .map_err(|err| group_error(group.root(), err))?;
-    for entry in entries {
-        if entry.is_directory {
+/// Resolves the entry name from its title component, mirroring
+/// `C4ComponentHost::LoadEx` over `C4CFN_Title` = "Title{}.txt|Title.txt"
+/// (C4ComponentHost.cpp:56-95, C4Components.h:67): the first existing
+/// candidate file — "Title<code>.txt" per language code, then the plain
+/// "Title.txt" — is loaded, and the language string is looked up in it.
+fn title_from_title_files(
+    group: &Group,
+    languages: &[String],
+) -> Result<Option<String>, ScenarioDiscoveryError> {
+    let candidates = languages
+        .iter()
+        .map(|code| format!("Title{code}.txt"))
+        .chain(std::iter::once("Title.txt".to_string()));
+    for candidate in candidates {
+        if !group.exists(&candidate) {
             continue;
         }
-        if entry.relative_path.components().count() != 1 {
-            continue;
-        }
-        let name = match entry
-            .relative_path
-            .file_name()
-            .and_then(|name| name.to_str())
-        {
-            Some(name) => name,
-            None => {
-                return Err(ScenarioDiscoveryError::NonUtf8Path {
-                    path: group.root().join(&entry.relative_path),
-                })
-            }
-        };
-        if is_title_filename(name) {
-            let data = group
-                .read_file(&entry.relative_path)
-                .map_err(|err| group_error(&group.root().join(&entry.relative_path), err))?;
-            if let Ok(text) = std::str::from_utf8(&data) {
-                if let Some(line) = text.lines().map(str::trim).find(|line| !line.is_empty()) {
-                    return Ok(Some(line.to_string()));
-                }
-            }
-        }
+        let data = group
+            .read_file(&candidate)
+            .map_err(|err| group_error(&group.root().join(&candidate), err))?;
+        let text = decode_legacy_text(&data);
+        // Only the first found file is consulted (C4ComponentHost keeps a
+        // single Data buffer); a failed language lookup falls back to the
+        // caller's name chain, not to further title files
+        // (C4StartupScenSelDlg.cpp:480-483).
+        return Ok(resolve_language_string(&text, languages));
     }
     Ok(None)
+}
+
+/// `C4ComponentHost::GetLanguageString` (C4ComponentHost.cpp:238-260): for
+/// each 2-letter code of the sequence, search the text body for "XX:" and
+/// return the remainder of that line.
+fn resolve_language_string(text: &str, languages: &[String]) -> Option<String> {
+    languages.iter().find_map(|code| {
+        let needle = format!("{code}:");
+        text.find(&needle).map(|pos| {
+            let rest = &text[pos + needle.len()..];
+            let end = rest.find(['\r', '\n']).unwrap_or(rest.len());
+            rest[..end].to_string()
+        })
+    })
+}
+
+/// Decodes legacy component text: UTF-8 when valid, otherwise the
+/// Windows-1252 system charset of old Clonk content (the C++ engine converts
+/// via `TextEncodingConverter.SystemToClonk`, C4StartupScenSelDlg.cpp:474).
+pub(crate) fn decode_legacy_text(data: &[u8]) -> String {
+    std::str::from_utf8(data)
+        .map(str::to_string)
+        .unwrap_or_else(|_| data.iter().map(|&byte| cp1252_char(byte)).collect())
+}
+
+/// Windows-1252 byte to Unicode; the 0x80..0x9F range holds the CP1252
+/// specials, everything else maps like Latin-1.
+fn cp1252_char(byte: u8) -> char {
+    match byte {
+        0x80 => '\u{20AC}',
+        0x82 => '\u{201A}',
+        0x83 => '\u{0192}',
+        0x84 => '\u{201E}',
+        0x85 => '\u{2026}',
+        0x86 => '\u{2020}',
+        0x87 => '\u{2021}',
+        0x88 => '\u{02C6}',
+        0x89 => '\u{2030}',
+        0x8A => '\u{0160}',
+        0x8B => '\u{2039}',
+        0x8C => '\u{0152}',
+        0x8E => '\u{017D}',
+        0x91 => '\u{2018}',
+        0x92 => '\u{2019}',
+        0x93 => '\u{201C}',
+        0x94 => '\u{201D}',
+        0x95 => '\u{2022}',
+        0x96 => '\u{2013}',
+        0x97 => '\u{2014}',
+        0x98 => '\u{02DC}',
+        0x99 => '\u{2122}',
+        0x9A => '\u{0161}',
+        0x9B => '\u{203A}',
+        0x9C => '\u{0153}',
+        0x9E => '\u{017E}',
+        0x9F => '\u{0178}',
+        other => other as char,
+    }
 }
 
 fn folder_core_info(group: &Group) -> Result<Option<LegacyFolderInfo>, ScenarioDiscoveryError> {
@@ -823,11 +985,6 @@ fn is_folder_filename_os(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn is_title_filename(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower == "title.txt" || (lower.starts_with("title") && lower.ends_with(".txt"))
-}
-
 fn sort_entries(entries: &mut [ScenarioEntry]) {
     entries.sort_by(compare_entries);
     for entry in entries.iter_mut() {
@@ -915,12 +1072,6 @@ struct ScenarioManifestPreview {
     name: Option<String>,
     #[serde(default)]
     description: Option<String>,
-}
-
-enum GroupContentKind {
-    Scenario,
-    Folder,
-    Other,
 }
 
 #[cfg(test)]
@@ -1081,6 +1232,261 @@ mod tests {
                 "Mission B"
             ]
         );
+    }
+
+    // C4ComponentHost::GetLanguageString (C4ComponentHost.cpp:238-260): each
+    // 2-letter code of the language sequence is searched as "XX:" in the text
+    // body; the match runs to the end of the line.
+    #[test]
+    fn resolves_language_prefixed_title_lines() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("Tutorial.c4f");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(scenario_dir.join("Folder.txt"), "[Head]\nIndex=1\n").unwrap();
+        fs::write(scenario_dir.join("Title.txt"), "DE:Lernrunden\r\nUS:Tutorial").unwrap();
+
+        let us = discover_with_languages(dir.path(), &langs(&["US", "DE"])).expect("discover");
+        assert_eq!(us[0].title, "Tutorial");
+
+        let de = discover_with_languages(dir.path(), &langs(&["DE", "US"])).expect("discover");
+        assert_eq!(de[0].title, "Lernrunden");
+
+        // Unknown language falls back through the sequence to the next code.
+        let fr = discover_with_languages(dir.path(), &langs(&["FR", "DE"])).expect("discover");
+        assert_eq!(fr[0].title, "Lernrunden");
+    }
+
+    // C4CFN_Title = "Title{}.txt|Title.txt" (C4Components.h:67): language-
+    // suffixed title files are tried before the plain Title.txt.
+    #[test]
+    fn prefers_language_specific_title_file() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("Alpha.c4s");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(scenario_dir.join("Scenario.txt"), "[Head]\n").unwrap();
+        fs::write(scenario_dir.join("TitleUS.txt"), "US:From TitleUS").unwrap();
+        fs::write(scenario_dir.join("Title.txt"), "US:From Title").unwrap();
+
+        let entries = discover_with_languages(dir.path(), &langs(&["US"])).expect("discover");
+        assert_eq!(entries[0].title, "From TitleUS");
+    }
+
+    // C4ScenarioListLoader::Entry::Load (C4StartupScenSelDlg.cpp:477-515):
+    // Title.txt wins over the Scenario.txt [Head] Title fallback.
+    #[test]
+    fn title_txt_beats_scenario_core_title() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("Goldmine.c4s");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Goldmine\n",
+        )
+        .unwrap();
+        fs::write(scenario_dir.join("Title.txt"), "DE:Goldmine\nUS:Gold Mine\n").unwrap();
+
+        let entries = discover_with_languages(dir.path(), &langs(&["US", "DE"])).expect("discover");
+        assert_eq!(entries[0].title, "Gold Mine");
+    }
+
+    // Title bytes are Windows-1252 in legacy content; non-UTF-8 titles must
+    // not be dropped (SystemToClonk conversion, C4StartupScenSelDlg.cpp:474).
+    #[test]
+    fn decodes_windows_1252_titles() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("Umlaut.c4s");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(scenario_dir.join("Scenario.txt"), "[Head]\n").unwrap();
+        fs::write(scenario_dir.join("Title.txt"), b"DE:R\xe4uber\n").unwrap();
+
+        let entries = discover_with_languages(dir.path(), &langs(&["DE"])).expect("discover");
+        assert_eq!(entries[0].title, "Räuber");
+    }
+
+    // When no "XX:" line matches the sequence, the name falls back like C++
+    // (fNameLoaded stays false -> C4S.Head.Title for scenarios).
+    #[test]
+    fn unmatched_language_falls_back_to_core_title() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("Alpha.c4s");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(scenario_dir.join("Scenario.txt"), "[Head]\nTitle=CoreTitle\n").unwrap();
+        fs::write(scenario_dir.join("Title.txt"), "DE:Nur Deutsch\n").unwrap();
+
+        let entries = discover_with_languages(dir.path(), &langs(&["US"])).expect("discover");
+        assert_eq!(entries[0].title, "CoreTitle");
+    }
+
+    fn langs(codes: &[&str]) -> Vec<String> {
+        codes.iter().map(|code| code.to_string()).collect()
+    }
+
+    // Entry::Load with fLoadEx (C4StartupScenSelDlg.cpp:520-531): the
+    // description comes from Desc<code>.rtf per C4CFN_ScenarioDesc =
+    // "Desc{}.rtf" (C4Components.h:74), converted from RTF to plain text.
+    #[test]
+    fn loads_description_from_language_desc_rtf() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("Alpha.c4s");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(scenario_dir.join("Scenario.txt"), "[Head]\nTitle=Alpha\n").unwrap();
+        fs::write(
+            scenario_dir.join("DescDE.rtf"),
+            br"{\rtf1 Deutsch\par}".as_slice(),
+        )
+        .unwrap();
+        fs::write(
+            scenario_dir.join("DescUS.rtf"),
+            br"{\rtf1 English\par}".as_slice(),
+        )
+        .unwrap();
+
+        let us = discover_with_languages(dir.path(), &langs(&["US", "DE"])).expect("discover");
+        assert_eq!(us[0].description.as_deref(), Some("English\n"));
+
+        let de = discover_with_languages(dir.path(), &langs(&["DE", "US"])).expect("discover");
+        assert_eq!(de[0].description.as_deref(), Some("Deutsch\n"));
+
+        // A code without its own file falls through the sequence.
+        let fr = discover_with_languages(dir.path(), &langs(&["FR", "DE"])).expect("discover");
+        assert_eq!(fr[0].description.as_deref(), Some("Deutsch\n"));
+    }
+
+    // Folders load descriptions the same way (generic Entry::Load).
+    #[test]
+    fn folders_load_desc_rtf_too() {
+        let dir = tempdir().unwrap();
+        let folder = dir.path().join("Fantasy.c4f");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("Folder.txt"), "[Head]\nIndex=9\n").unwrap();
+        fs::write(
+            folder.join("DescUS.rtf"),
+            br"{\rtf1 Magic worlds.\par}".as_slice(),
+        )
+        .unwrap();
+
+        let entries = discover_with_languages(dir.path(), &langs(&["US", "DE"])).expect("discover");
+        assert_eq!(entries[0].description.as_deref(), Some("Magic worlds.\n"));
+    }
+
+    // The right-page title picture is Title.png/Title.bmp only
+    // (C4CFN_ScenarioTitlePNG/C4CFN_ScenarioTitle, C4StartupScenSelDlg.cpp:
+    // 532-534); Loader*.jpg is a list-preview fallback, not a title picture.
+    #[test]
+    fn title_picture_requires_title_image() {
+        let dir = tempdir().unwrap();
+
+        let with_title = dir.path().join("Titled.c4s");
+        fs::create_dir(&with_title).unwrap();
+        fs::write(with_title.join("Scenario.txt"), "[Head]\nTitle=Titled\n").unwrap();
+        fs::write(with_title.join("Title.png"), encode_test_png()).unwrap();
+
+        let with_loader = dir.path().join("Loaded.c4s");
+        fs::create_dir(&with_loader).unwrap();
+        fs::write(with_loader.join("Scenario.txt"), "[Head]\nTitle=Loaded\n").unwrap();
+        fs::write(with_loader.join("LoaderBG.png"), encode_test_png()).unwrap();
+
+        let entries = discover(dir.path()).expect("discover");
+        let titled = entries
+            .iter()
+            .find(|entry| entry.title == "Titled")
+            .unwrap();
+        let loaded = entries
+            .iter()
+            .find(|entry| entry.title == "Loaded")
+            .unwrap();
+        assert!(titled.title_picture.is_some());
+        assert!(titled.preview.is_some());
+        assert!(loaded.title_picture.is_none(), "loader is not a title pic");
+        assert!(loaded.preview.is_some(), "loader still previews the list");
+    }
+
+    // [Definitions] LocalOnly/AllowUserChange feed the "Choose definitions"
+    // checkbox (C4StartupScenSelDlg.cpp:1590-1599; defaults false,
+    // C4Scenario.cpp:150,482-483). Version.txt feeds the version line.
+    #[test]
+    fn reads_definitions_flags_and_version() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("Alpha.c4s");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Alpha\n\n[Definitions]\nLocalOnly=1\nAllowUserChange=1\n",
+        )
+        .unwrap();
+        fs::write(scenario_dir.join("Version.txt"), "4.9.8.2\n").unwrap();
+
+        let entries = discover(dir.path()).expect("discover");
+        assert_eq!(entries[0].local_only, Some(true));
+        assert_eq!(entries[0].allow_user_change, Some(true));
+        assert_eq!(entries[0].version.as_deref(), Some("4.9.8.2"));
+    }
+
+    fn encode_test_png() -> Vec<u8> {
+        let image = image::RgbaImage::from_raw(2, 2, vec![255u8; 16]).unwrap();
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, image::ImageOutputFormat::Png)
+            .unwrap();
+        bytes.into_inner()
+    }
+
+    // C4ScenarioListLoader::Entry::CreateEntryForFile
+    // (C4StartupScenSelDlg.cpp:581-598) only regards *.c4s, *.c4f and
+    // extension-less directories; .c4d/.c4g packs must not be listed — a
+    // Fantasy.c4d next to Fantasy.c4f previously produced a duplicate entry.
+    #[test]
+    fn skips_c4d_and_c4g_packs() {
+        let dir = tempdir().unwrap();
+
+        let folder = dir.path().join("Fantasy.c4f");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("Title.txt"), "DE:Fantasy\nUS:Fantasy\n").unwrap();
+        fs::write(folder.join("Folder.txt"), "[Head]\nIndex=9\n").unwrap();
+
+        // A definition pack with the same title and inner directories, which
+        // the old content-based classifier misread as a scenario folder.
+        let pack = dir.path().join("Fantasy.c4d");
+        fs::create_dir(&pack).unwrap();
+        fs::write(pack.join("Title.txt"), "DE:Fantasy\nUS:Fantasy\n").unwrap();
+        fs::create_dir(pack.join("Wizard.c4d")).unwrap();
+
+        let gfx = dir.path().join("Material.c4g");
+        fs::create_dir(&gfx).unwrap();
+        fs::create_dir(gfx.join("SomeDir")).unwrap();
+
+        let entries = discover(dir.path()).expect("discover");
+        let titles: Vec<_> = entries.iter().map(|entry| entry.title.as_str()).collect();
+        assert_eq!(titles, vec!["Fantasy"], "only the .c4f folder is listed");
+    }
+
+    // Extension-less directories are only listed when they (recursively)
+    // contain scenarios or folders (DirContainsScenarios,
+    // C4StartupScenSelDlg.cpp:561-579).
+    #[test]
+    fn lists_plain_directories_only_with_scenarios_inside() {
+        let dir = tempdir().unwrap();
+
+        let with = dir.path().join("Downloads");
+        fs::create_dir(&with).unwrap();
+        let nested = with.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let child = nested.join("Custom.c4s");
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("Scenario.txt"), "[Head]\nTitle=Custom\n").unwrap();
+
+        let without = dir.path().join("updates");
+        fs::create_dir(&without).unwrap();
+        fs::write(without.join("notes.txt"), "nothing").unwrap();
+
+        let entries = discover(dir.path()).expect("discover");
+        let titles: Vec<_> = entries.iter().map(|entry| entry.title.as_str()).collect();
+        assert_eq!(titles, vec!["Downloads"]);
+        // RegularFolder children come from directory iteration, so the
+        // nested extension-less dir is listed as a folder in turn.
+        assert_eq!(entries[0].children.len(), 1);
+        assert_eq!(entries[0].children[0].title, "nested");
+        assert_eq!(entries[0].children[0].children[0].title, "Custom");
     }
 
     #[test]

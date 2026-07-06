@@ -42,6 +42,10 @@ pub struct ScenSelAssets {
     /// `GUIIcons2.png` (256x320, 64x64 cells) — extended icons for the
     /// fair-crew/record icon buttons (C4Gui.h:734-751).
     pub icons_ex: ImageData,
+    /// `StartupScenSelTitleOv.png` (220x170) — paper frame drawn over the
+    /// right-page title picture (fctScenSelTitleOverlay, C4Startup.cpp;
+    /// OverlayPicture border 10, C4StartupScenSelDlg.cpp:1361-1362).
+    pub title_overlay: ImageData,
 }
 
 // ---------------------------------------------------------------------------
@@ -891,9 +895,28 @@ impl ScenSelScreen {
         fair_crew: bool,
         record: bool,
     ) {
+        Self::render_chrome(surface, assets, gui_fonts, gamma, fair_crew, record);
+        let layout = scen_sel_layout(surface.width() as i32, surface.height() as i32, gui_fonts);
+        // Default selection-independent widget states (first-shown frame):
+        // root caption, "Open" button, disabled unchecked checkbox.
+        draw_book_caption(surface, &layout, book_fonts, "Scenarios", gamma);
+        draw_open_button(surface, &layout, "Open", assets, gui_fonts, gamma);
+        draw_user_change_checkbox(surface, &layout, assets, gui_fonts, false, false, gamma);
+    }
+
+    /// The selection-independent part of the frame: everything except the
+    /// book caption, the Open button and the "Choose definitions" checkbox,
+    /// which change with the selection and are drawn on top by the caller.
+    pub fn render_chrome(
+        surface: &mut Surface,
+        assets: &ScenSelAssets,
+        gui_fonts: &ClonkFontSet,
+        gamma: Option<&GammaRamp>,
+        fair_crew: bool,
+        record: bool,
+    ) {
         let layout = scen_sel_layout(surface.width() as i32, surface.height() as i32, gui_fonts);
         let yellow = [255, 255, 0, 255]; // C4GUI_Caption2FontClr / ButtonFontClr
-        let black = [0, 0, 0, 255]; // ClrScenarioItem
 
         // 1. Background: StartupScenSelBG stretched to screen bounds
         // inflated by 1px (FullscreenDialog::DrawBackground,
@@ -919,19 +942,6 @@ impl ScenSelScreen {
             layout.title_anchor.1,
             "Start Game",
             yellow,
-            TextAlign::Center,
-            true,
-            gamma,
-        );
-
-        // 3. Book caption "Scenarios" (IDS_DLG_SCENARIOS): BookFontTitle,
-        // black, ACenter (C4StartupScenSelDlg.cpp:1331-1334,1534).
-        book_fonts.title.draw_with_gamma(
-            surface,
-            layout.caption_anchor.0,
-            layout.caption_anchor.1,
-            "Scenarios",
-            black,
             TextAlign::Center,
             true,
             gamma,
@@ -977,26 +987,10 @@ impl ScenSelScreen {
         let bar = &layout.list_scrollbar;
         draw_vbar(surface, bar.x, bar.y, bar.h, &assets.book_scroll, gamma);
 
-        // 7-10. Bottom bar in add order: Back, checkbox, icon buttons, Open
-        // (C4StartupScenSelDlg.cpp:1367-1382).
-        Self::draw_button(surface, &layout.back_button, "Back", assets, gui_fonts, gamma);
-
-        // Checkbox: phase fChecked + 2*!fEnabled = 2 (unchecked-disabled,
-        // C4GuiCheckBox.cpp:110-137), caption in GUI TextFont with hotkey
-        // markup, disabled color C4GUI_CheckboxDisabledFontClr.
-        let cb = &layout.user_change_checkbox;
-        draw_image_strip(surface, cb.x, cb.y, &assets.checkbox, 2 * 32, 0, 32, 32, gamma);
-        let (caption, _) = expand_hotkey_markup("Choose &definitions");
-        gui_fonts.text.draw_with_gamma(
-            surface,
-            cb.x + cb.h + 4, // x0 + Hgt + C4GUI_CheckBoxLabelSpacing
-            cb.y + (cb.h - gui_fonts.text.line_height).max(0) / 2,
-            &caption,
-            [0xaf, 0xaf, 0xaf, 255],
-            TextAlign::Left,
-            true,
-            gamma,
-        );
+        // 7-10. Bottom bar in add order: Back, icon buttons
+        // (C4StartupScenSelDlg.cpp:1367-1382); the checkbox and Open button
+        // are selection-dependent and drawn by the caller.
+        draw_button(surface, &layout.back_button, "Back", assets, gui_fonts, gamma);
 
         // Icon buttons (IconButton::DrawElement, C4GuiButton.cpp:205-232):
         // plain 64x64 icon blit, no highlight without focus/hover.
@@ -1010,40 +1004,289 @@ impl ScenSelScreen {
         let (rec_x, rec_y) = icon_ex(if record { 1 } else { 0 });
         let rec = &layout.record_button;
         draw_image_strip(surface, rec.x, rec.y, &assets.icons_ex, rec_x, rec_y, 64, 64, gamma);
-
-        Self::draw_button(surface, &layout.open_button, "Open", assets, gui_fonts, gamma);
     }
+}
 
-    /// One released GUI button (Button::DrawElement, C4GuiButton.cpp:81-110):
-    /// 3-slice GUIButton plank and the caption in the largest font fitting
-    /// `Hgt - 2` (CaptionFont for 32px buttons), C4GUI_ButtonFontClr yellow.
-    fn draw_button(
-        surface: &mut Surface,
-        rect: &IntRect,
-        text: &str,
-        assets: &ScenSelAssets,
-        gui_fonts: &ClonkFontSet,
-        gamma: Option<&GammaRamp>,
-    ) {
-        draw_bar(
+/// The book caption above the scenario list: the current folder's name, or
+/// "Scenarios" (IDS_DLG_SCENARIOS) at the root — BookFontTitle, black,
+/// ACenter (C4StartupScenSelDlg.cpp:1331-1334,1527-1535).
+pub fn draw_book_caption(
+    surface: &mut Surface,
+    layout: &ScenSelLayout,
+    book_fonts: &BookFontSet,
+    caption: &str,
+    gamma: Option<&GammaRamp>,
+) {
+    book_fonts.title.draw_with_gamma(
+        surface,
+        layout.caption_anchor.0,
+        layout.caption_anchor.1,
+        caption,
+        [0, 0, 0, 255], // ClrScenarioItem
+        TextAlign::Center,
+        true,
+        gamma,
+    );
+}
+
+/// The Open/Start button with its selection-specific text — "Open"
+/// (IDS_BTN_OPEN) for folders/none, "&Start" (IDS_BTN_STARTGAME) for
+/// scenarios (Entry::GetOpenText, C4StartupScenSelDlg.cpp:794-797,926-929;
+/// applied in UpdateSelection, :1587).
+pub fn draw_open_button(
+    surface: &mut Surface,
+    layout: &ScenSelLayout,
+    text: &str,
+    assets: &ScenSelAssets,
+    gui_fonts: &ClonkFontSet,
+    gamma: Option<&GammaRamp>,
+) {
+    let (text, _) = expand_hotkey_markup(text);
+    draw_button(surface, &layout.open_button, &text, assets, gui_fonts, gamma);
+}
+
+/// The "Choose definitions" checkbox (IDS_DLG_ALLOWUSERCHANGE): phase
+/// fChecked + 2*!fEnabled (C4GuiCheckBox.cpp:110-137); enabled/checked per
+/// the selected scenario's [Definitions] LocalOnly/AllowUserChange
+/// (C4StartupScenSelDlg.cpp:1590-1599).
+pub fn draw_user_change_checkbox(
+    surface: &mut Surface,
+    layout: &ScenSelLayout,
+    assets: &ScenSelAssets,
+    gui_fonts: &ClonkFontSet,
+    enabled: bool,
+    checked: bool,
+    gamma: Option<&GammaRamp>,
+) {
+    let cb = &layout.user_change_checkbox;
+    let phase = u32::from(checked) + 2 * u32::from(!enabled);
+    draw_image_strip(surface, cb.x, cb.y, &assets.checkbox, phase * 32, 0, 32, 32, gamma);
+    let (caption, _) = expand_hotkey_markup("Choose &definitions");
+    let color = if enabled {
+        [255, 255, 255, 255] // C4GUI_CheckboxFontClr
+    } else {
+        [0xaf, 0xaf, 0xaf, 255] // C4GUI_CheckboxDisabledFontClr
+    };
+    gui_fonts.text.draw_with_gamma(
+        surface,
+        cb.x + cb.h + 4, // x0 + Hgt + C4GUI_CheckBoxLabelSpacing
+        cb.y + (cb.h - gui_fonts.text.line_height).max(0) / 2,
+        &caption,
+        color,
+        TextAlign::Left,
+        true,
+        gamma,
+    );
+}
+
+/// One released GUI button (Button::DrawElement, C4GuiButton.cpp:81-110):
+/// 3-slice GUIButton plank and the caption in the largest font fitting
+/// `Hgt - 2` (CaptionFont for 32px buttons), C4GUI_ButtonFontClr yellow.
+fn draw_button(
+    surface: &mut Surface,
+    rect: &IntRect,
+    text: &str,
+    assets: &ScenSelAssets,
+    gui_fonts: &ClonkFontSet,
+    gamma: Option<&GammaRamp>,
+) {
+    draw_bar(
+        surface,
+        &GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
+        &assets.button,
+        gamma,
+    );
+    let font = gui_fonts.button_font(rect.h);
+    let (x1, y1) = (rect.x + rect.w - 1, rect.y + rect.h - 1);
+    font.draw_with_gamma(
+        surface,
+        (rect.x + x1) / 2,
+        (rect.y + y1 - font.line_height) / 2,
+        text,
+        [255, 255, 0, 255],
+        TextAlign::Center,
+        true,
+        gamma,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Right book page (C4StartupScenSelDlg::UpdateSelection + C4GUI::TextWindow)
+// ---------------------------------------------------------------------------
+
+/// The selected entry's data shown on the right book page
+/// (C4StartupScenSelDlg::UpdateSelection, C4StartupScenSelDlg.cpp:1551-1619).
+#[derive(Default)]
+pub struct SelectionInfo<'a> {
+    /// `Entry::GetTitlePicture` — the Title.png/Title.bmp facet.
+    pub picture: Option<&'a ImageData>,
+    /// `Entry::GetName` — shown alone only when there is no description.
+    pub title: Option<&'a str>,
+    /// `Entry::GetDesc` — Desc??.rtf plain text.
+    pub desc: Option<&'a str>,
+    /// `Entry::GetAuthor` — "Author: %s" line (IDS_CTL_AUTHOR).
+    pub author: Option<&'a str>,
+    /// `Entry::GetVersion` — "Version %s" line (IDS_DLG_VERSION).
+    pub version: Option<&'a str>,
+}
+
+/// Renders the right-page selection info like the C++ TextWindow
+/// (C4GuiLabels.cpp:454-489 geometry; C4Gui.h:1334-1337 margins; picture as
+/// OverlayPicture with the ScenSelTitleOv frame, border 10;
+/// C4StartupScenSelDlg.cpp:1607-1616 line contents). Content that exceeds
+/// the window is clipped and the book scrollbar track drawn.
+pub fn draw_selection_info(
+    surface: &mut Surface,
+    layout: &ScenSelLayout,
+    assets: &ScenSelAssets,
+    book_fonts: &BookFontSet,
+    info: &SelectionInfo,
+    gamma: Option<&GammaRamp>,
+) {
+    // TextWindow margins: left 10, right 5, top 8, bottom 8 (C4Gui.h:1334-
+    // 1337); the scroll window reserves 16px for the scrollbar
+    // (C4GuiContainers.cpp:477-491).
+    let win = &layout.selection_info;
+    let client = IntRect {
+        x: win.x + 10,
+        y: win.y + 8,
+        w: win.w - 15,
+        h: win.h - 16,
+    };
+    let content_w = client.w - 16;
+
+    // "never show a pure title string: There must always be some text or an
+    // image" (C4StartupScenSelDlg.cpp:1583-1585).
+    let has_desc = info.desc.is_some_and(|desc| !desc.is_empty());
+    let title = info
+        .title
+        .filter(|title| !title.is_empty() && (info.picture.is_some() || has_desc));
+
+    let mut y = client.y;
+    // Title picture: 220x170 incl. the 10px overlay margin (TextWindow ctor
+    // with C4StartupScenSel_TitlePictureWdt/Hgt + 2*TitleOverlayMargin,
+    // C4StartupScenSelDlg.cpp:1361-1362; C4GuiLabels.cpp:469-483).
+    if let Some(picture) = info.picture {
+        let pic_w = 220.min(content_w);
+        let pic_h = 170 * pic_w / 220;
+        let pic_x = client.x + (content_w / 2 - 220 / 2).max(0);
+        // OverlayPicture (C4GuiLabels.cpp:405-423): inner picture inset by
+        // border * rc / overlay-size, stretched without aspect; the overlay
+        // frame over the full rect.
+        let overlay = &assets.title_overlay;
+        let inset_x = 10 * pic_w / overlay.width().max(1) as i32;
+        let inset_y = 10 * pic_h / overlay.height().max(1) as i32;
+        draw_facet_stretch(
             surface,
-            &GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
-            &assets.button,
+            picture,
+            (0.0, 0.0, picture.width() as f32, picture.height() as f32),
+            (
+                (pic_x + inset_x) as f32,
+                (y + inset_y) as f32,
+                (pic_w - 2 * inset_x) as f32,
+                (pic_h - 2 * inset_y) as f32,
+            ),
             gamma,
         );
-        let font = gui_fonts.button_font(rect.h);
-        let (x1, y1) = (rect.x + rect.w - 1, rect.y + rect.h - 1);
-        font.draw_with_gamma(
+        draw_facet_stretch(
             surface,
-            (rect.x + x1) / 2,
-            (rect.y + y1 - font.line_height) / 2,
-            text,
-            [255, 255, 0, 255],
-            TextAlign::Center,
-            true,
+            overlay,
+            (0.0, 0.0, overlay.width() as f32, overlay.height() as f32),
+            (pic_x as f32, y as f32, pic_w as f32, pic_h as f32),
+            gamma,
+        );
+        y += pic_h + 10; // C4StartupScenSel_TitlePicturePadding
+    }
+
+    // Assemble the text lines like UpdateSelection (:1610-1615): the lone
+    // title in BookFontCapt; the desc with its first line promoted to
+    // BookFontCapt (C4LogBuffer::AppendLines pFirstLineFont, C4LogBuf.cpp:
+    // 174-215; empty segments are skipped); author/version in 50% black.
+    let black = [0u8, 0, 0, 255]; // ClrScenarioItem
+    let half_black = [0u8, 0, 0, 127]; // ClrScenarioItemXtra
+    let mut lines: Vec<(String, &ClonkFont, [u8; 4])> = Vec::new();
+    if let (Some(title), false) = (title, has_desc) {
+        lines.push((title.to_string(), &book_fonts.caption, black));
+    }
+    if let Some(desc) = info.desc.filter(|_| has_desc) {
+        let mut first = true;
+        for segment in desc.split(['\r', '\n']).filter(|line| !line.is_empty()) {
+            let font = if first {
+                &book_fonts.caption
+            } else {
+                &book_fonts.text
+            };
+            first = false;
+            lines.push((segment.to_string(), font, black));
+        }
+    }
+    if let Some(author) = info.author.filter(|author| !author.is_empty()) {
+        lines.push((format!("Author: {author}"), &book_fonts.text, half_black));
+    }
+    if let Some(version) = info.version.filter(|version| !version.is_empty()) {
+        lines.push((format!("Version {version}"), &book_fonts.text, half_black));
+    }
+
+    // Word-wrap (CStdFont::BreakMessage semantics: greedy break at spaces)
+    // and draw, clipping at the client bottom.
+    let bottom = client.y + client.h;
+    let mut overflowed = false;
+    'lines: for (text, font, color) in &lines {
+        for wrapped in wrap_line(text, font, content_w) {
+            if y + font.line_height > bottom {
+                overflowed = true;
+                break 'lines;
+            }
+            font.draw_with_gamma(
+                surface,
+                client.x,
+                y,
+                &wrapped,
+                *color,
+                TextAlign::Left,
+                false,
+                gamma,
+            );
+            y += font.line_height;
+        }
+    }
+
+    // Book scrollbar track on overflow (SetDecoration auto-hide,
+    // C4GuiContainers.cpp:343-368).
+    if overflowed {
+        draw_vbar(
+            surface,
+            client.x + client.w - 16,
+            client.y,
+            client.h,
+            &assets.book_scroll,
             gamma,
         );
     }
+}
+
+/// Greedy word wrap at spaces against the pixel width, like
+/// `CStdFont::BreakMessage` for label text.
+fn wrap_line(text: &str, font: &ClonkFont, width: i32) -> Vec<String> {
+    let mut wrapped = Vec::new();
+    let mut current = String::new();
+    for word in text.split(' ').filter(|word| !word.is_empty()) {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if current.is_empty() || font.measure(&candidate, false).0 <= width {
+            current = candidate;
+        } else {
+            wrapped.push(std::mem::take(&mut current));
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() || wrapped.is_empty() {
+        wrapped.push(current);
+    }
+    wrapped
 }
 
 #[cfg(test)]
@@ -1235,6 +1478,7 @@ mod tests {
             button: load("GUIButton.png"),
             checkbox: load("GUICheckbox.png"),
             icons_ex: load("GUIIcons2.png"),
+            title_overlay: load("StartupScenSelTitleOv.png"),
         };
         let gui_fonts = endeavour_font_set();
         let ttf = std::fs::read(
