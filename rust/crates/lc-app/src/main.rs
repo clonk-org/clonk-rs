@@ -632,6 +632,7 @@ impl FrontendAssets {
             button: self.dialog_image("GUIButton.png")?,
             checkbox: self.dialog_image("GUICheckbox.png")?,
             icons_ex: self.dialog_image("GUIIcons2.png")?,
+            title_overlay: self.dialog_image("StartupScenSelTitleOv.png")?,
         })
     }
 
@@ -1029,8 +1030,13 @@ fn run_menu_dump(
     }
 
     // Switch to the requested startup view through the same activation path
-    // the UI uses, so per-view state objects exist.
-    let item = match menu_view {
+    // the UI uses, so per-view state objects exist. "scenarios:<Folder>[/..]"
+    // additionally descends into the named folder(s) of the book.
+    let (view_name, folder_path) = menu_view
+        .split_once(':')
+        .map(|(view, path)| (view, Some(path)))
+        .unwrap_or((menu_view, None));
+    let item = match view_name {
         "main" => None,
         "scenarios" => Some(MainMenuItem::LocalGame),
         "options" => Some(MainMenuItem::Options),
@@ -1044,6 +1050,22 @@ fn run_menu_dump(
     if let Some(item) = item {
         app.handle_main_menu_activation(item)
             .map_err(|err| anyhow::anyhow!("activating menu view `{menu_view}`: {err}"))?;
+    }
+    if let Some(path) = folder_path {
+        for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+            let identifier = app
+                .menu_state
+                .current_entries()
+                .iter()
+                .find(|entry| entry.title.eq_ignore_ascii_case(segment))
+                .map(|entry| entry.identifier.clone())
+                .ok_or_else(|| anyhow::anyhow!("no folder titled `{segment}` in the book"))?;
+            app.menu_state.enter_folder(&identifier);
+            let actions = app.menu_state.select_default_entry();
+            let _ = app.process_menu_actions(actions);
+        }
+        app.scenario_label = app.menu_state.label_path();
+        app.mark_menu_dirty();
     }
 
     // Render one frame to the CPU surface, then encode it.
@@ -2573,6 +2595,9 @@ struct GameApp {
     menu_render_version: u64,
     menu_frame_cache: Option<MenuFrameCache>,
     menu_backdrop_cache: StartupBackdropCache,
+    /// Last scenario-list row click (index, time) for double-click detection
+    /// (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
+    scensel_last_click: Option<(usize, Instant)>,
     /// Wall clock of the scenario start; `Game.Time` counts real seconds
     /// while the game runs (C4Game::Sec1Timer, src/C4Game.cpp:1737-1741).
     run_started: Option<Instant>,
@@ -2694,12 +2719,20 @@ struct MenuState {
     menu: StartupMenu,
     pointer_position: Option<GuiPoint>,
     stack: Vec<MenuLayer>,
+    /// Whether a synthetic "Back" row is injected at index 0. The network
+    /// lobby's generic list uses it; the C++-faithful scenario book does not
+    /// (C4StartupScenSelDlg has a Back *button*, no Back list entry).
+    include_back: bool,
 }
 
 #[derive(Clone, Debug)]
 struct MenuLayer {
     title: String,
     entries: Vec<FrontendScenario>,
+    /// The folder entry this layer lists the children of (None at root);
+    /// shown on the right page when nothing is selected
+    /// (C4StartupScenSelDlg::UpdateSelection, cpp:1566-1572).
+    folder: Option<FrontendScenario>,
 }
 
 struct MainMenuState {
@@ -3272,6 +3305,15 @@ impl MenuLayer {
         Self {
             title: title.into(),
             entries,
+            folder: None,
+        }
+    }
+
+    fn for_folder(folder: FrontendScenario) -> Self {
+        Self {
+            title: folder.title.clone(),
+            entries: folder.children.clone(),
+            folder: Some(folder),
         }
     }
 }
@@ -3282,7 +3324,36 @@ impl MenuState {
             menu,
             pointer_position: None,
             stack: vec![MenuLayer::new("Scenarios", entries)],
+            include_back: true,
         }
+    }
+
+    /// Switches Back-row injection and rebuilds the visible entries.
+    fn set_include_back(&mut self, include_back: bool) {
+        if self.include_back != include_back {
+            self.include_back = include_back;
+            self.refresh_menu_entries();
+        }
+    }
+
+    /// The scenario behind the menu's selected row, if any.
+    fn selected_scenario(&self) -> Option<&FrontendScenario> {
+        let offset = usize::from(self.include_back);
+        let index = self.menu.selected_index()?.checked_sub(offset)?;
+        self.stack.last().and_then(|layer| layer.entries.get(index))
+    }
+
+    /// The folder whose contents are currently listed (None at root).
+    fn current_folder(&self) -> Option<&FrontendScenario> {
+        self.stack.last().and_then(|layer| layer.folder.as_ref())
+    }
+
+    /// The list caption: current folder name, or "Scenarios" at the root
+    /// (C4StartupScenSelDlg::UpdateList, cpp:1527-1535).
+    fn book_caption(&self) -> &str {
+        self.current_folder()
+            .map(|folder| folder.title.as_str())
+            .unwrap_or("Scenarios")
     }
 
     fn pointer_position(&self) -> Option<GuiPoint> {
@@ -3316,8 +3387,7 @@ impl MenuState {
             return;
         };
 
-        self.stack
-            .push(MenuLayer::new(folder.title.clone(), folder.children));
+        self.stack.push(MenuLayer::for_folder(folder));
         self.pointer_position = None;
         self.refresh_menu_entries();
     }
@@ -3332,8 +3402,7 @@ impl MenuState {
     }
 
     fn refresh_menu_entries(&mut self) {
-        let include_back = true;
-        let entries = build_menu_entries(self.current_entries(), include_back);
+        let entries = build_menu_entries(self.current_entries(), self.include_back);
         if let Err(err) = self.menu.set_entries(entries) {
             tracing::error!(error = %err, "failed to update startup menu entries");
         }
@@ -3354,7 +3423,9 @@ impl MenuState {
         if self.current_entries().is_empty() {
             return Vec::new();
         }
-        let target_index = 1;
+        // The first real entry (past the Back row when present), mirroring
+        // SelectFirstEntry (C4StartupScenSelDlg.cpp:1536-1537).
+        let target_index = usize::from(self.include_back);
         match self.menu.select_entry_by_index(target_index) {
             Ok(actions) => actions,
             Err(err) => {
@@ -5098,6 +5169,7 @@ impl GameApp {
             menu_render_version: 0,
             menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
+            scensel_last_click: None,
             run_started: None,
             board_line: None,
             show_startup_hint: false,
@@ -5438,17 +5510,35 @@ impl GameApp {
                 if let Some(gui_key) = map_key_code(key) {
                     match self.startup_view {
                         StartupView::ScenarioBrowser => match state {
-                            ElementState::Pressed => {
-                                if gui_key == KeyCode::Escape && self.menu_state.stack.len() <= 1 {
-                                    self.show_main_menu();
-                                } else {
+                            ElementState::Pressed => match gui_key {
+                                // Dialog escape returns to the main screen
+                                // (C4StartupScenSelDlg::OnClosed, cpp:1445-1463).
+                                KeyCode::Escape => self.show_main_menu(),
+                                // K_LEFT = KeyBack = DoBack(true): folder up,
+                                // or close at root (cpp:1388,413,1705-1725).
+                                KeyCode::Left => self.scensel_do_back()?,
+                                // K_RIGHT = KeyForward = DoOK (cpp:1392,415).
+                                KeyCode::Right => {
                                     self.handle_menu_input(|menu| {
-                                        menu.menu().handle_key_down(gui_key)
+                                        menu.menu().handle_key_down(KeyCode::Enter)
+                                    })?;
+                                    self.handle_menu_input(|menu| {
+                                        menu.menu().handle_key_up(KeyCode::Enter)
+                                    })?;
+                                }
+                                _ => self.handle_menu_input(|menu| {
+                                    menu.menu().handle_key_down(gui_key)
+                                })?,
+                            },
+                            ElementState::Released => {
+                                if !matches!(
+                                    gui_key,
+                                    KeyCode::Escape | KeyCode::Left | KeyCode::Right
+                                ) {
+                                    self.handle_menu_input(|menu| {
+                                        menu.menu().handle_key_up(gui_key)
                                     })?
                                 }
-                            }
-                            ElementState::Released => {
-                                self.handle_menu_input(|menu| menu.menu().handle_key_up(gui_key))?
                             }
                         },
                         StartupView::NetworkGame | StartupView::PlayerSelection => {
@@ -7453,6 +7543,20 @@ impl GameApp {
         Ok(())
     }
 
+    /// C4StartupScenSelDlg::DoBack(true) (cpp:1705-1725): backtrace the
+    /// folder stack first; from the root, return to the main screen.
+    fn scensel_do_back(&mut self) -> Result<(), EngineError> {
+        if self.menu_state.stack.len() <= 1 {
+            self.show_main_menu();
+        } else {
+            self.play_ui_sound("DoorClose");
+            self.menu_state.leave_folder();
+            self.scenario_label = self.menu_state.label_path();
+            self.handle_menu_input(|menu| menu.select_default_entry())?;
+        }
+        Ok(())
+    }
+
     /// Routes a click through the C++-faithful scenario book layout
     /// (Back / Open buttons + list rows, C4StartupScenSelDlg.cpp:1349-1382).
     fn handle_scensel_parity_click(&mut self, point: GuiPoint) -> Result<(), EngineError> {
@@ -7469,12 +7573,7 @@ impl GameApp {
             |x: i32, y: i32, w: i32, h: i32| px >= x && px < x + w && py >= y && py < y + h;
         let (back, open, list) = (layout.back_button, layout.open_button, layout.list);
         if inside(back.x, back.y, back.w, back.h) {
-            if self.menu_state.stack.len() <= 1 {
-                self.show_main_menu();
-            } else {
-                self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Escape))?;
-                self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?;
-            }
+            self.scensel_do_back()?;
         } else if inside(open.x, open.y, open.w, open.h) {
             self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
             self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?;
@@ -7482,9 +7581,24 @@ impl GameApp {
             if let Some(book) = self.assets.book_fonts.clone() {
                 let pitch = lc_frontend::startup_scensel::scen_list_item_height(&book.text) + 1;
                 let index = ((py - (list.y + 3)) / pitch).max(0) as usize;
-                self.handle_menu_input(|menu| {
-                    menu.menu().select_entry_by_index(index).unwrap_or_default()
-                })?;
+                // Double-click on the selected row opens/starts it
+                // (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
+                let now = Instant::now();
+                let is_double = self
+                    .scensel_last_click
+                    .is_some_and(|(last_index, at)| {
+                        last_index == index && now.duration_since(at) < Duration::from_millis(500)
+                    })
+                    && self.menu_state.menu().selected_index() == Some(index);
+                self.scensel_last_click = Some((index, now));
+                if is_double {
+                    self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
+                    self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?;
+                } else {
+                    self.handle_menu_input(|menu| {
+                        menu.menu().select_entry_by_index(index).unwrap_or_default()
+                    })?;
+                }
             }
         }
         Ok(())
@@ -7493,6 +7607,9 @@ impl GameApp {
     fn open_scenario_browser(&mut self) {
         self.startup_view = StartupView::ScenarioBrowser;
         self.menu_state.set_pointer_position(None);
+        // The C++ book has no Back list entry — Back is a button/K_LEFT
+        // (C4StartupScenSelDlg.cpp:1367-1369,1388-1389).
+        self.menu_state.set_include_back(false);
         self.menu_state.refresh_menu_entries();
         let width = self.graphics.surface().width() as f32;
         let height = self.graphics.surface().height() as f32;
@@ -7507,6 +7624,7 @@ impl GameApp {
     fn open_network_lobby(&mut self) {
         self.startup_view = StartupView::NetworkLobby;
         self.menu_state.set_pointer_position(None);
+        self.menu_state.set_include_back(true);
         self.menu_state.refresh_menu_entries();
         let width = self.graphics.surface().width() as f32;
         let height = self.graphics.surface().height() as f32;
@@ -9300,9 +9418,29 @@ fn fill_engine_box(
     }
 }
 
-/// Draws the live scenario entries into the book list with the C++ item look
-/// (ScenListItem rows + ListBox selection bar; scrolling not yet wired).
-fn draw_scensel_entries(
+/// The list icon of an entry, mirroring the C++ defaults: scenarios use
+/// C4S.Head.Icon clamped to the strip else 14 (Scenario::LoadCustom,
+/// C4StartupScenSelDlg.cpp:705-710), .c4f folders 0 (SubFolder::LoadCustom,
+/// :951-952), plain directories 44 (RegularFolder::LoadCustom, :1036-1037).
+fn scensel_entry_icon(entry: &FrontendScenario) -> u32 {
+    match entry.kind {
+        ScenarioKind::Scenario => entry
+            .icon_index
+            .filter(|icon| (0..=51).contains(icon))
+            .map(|icon| icon as u32)
+            .unwrap_or(14),
+        _ => match entry.path.as_deref().and_then(|path| path.extension()) {
+            Some(ext) if ext.eq_ignore_ascii_case("c4f") => 0,
+            Some(_) => 0,
+            None => 44,
+        },
+    }
+}
+
+/// Draws the selection-dependent layer of the scenario book over the cached
+/// chrome: caption, list rows + selection bar, the right info page, the
+/// Open/Start button and the "Choose definitions" checkbox.
+fn draw_scensel_dynamic(
     surface: &mut Surface,
     scenario_menu: &mut MenuState,
     assets: &lc_frontend::startup_scensel::ScenSelAssets,
@@ -9310,38 +9448,42 @@ fn draw_scensel_entries(
     book_fonts: &lc_frontend::startup_scensel::BookFontSet,
     gamma: &'static lc_graphics::GammaRamp,
 ) {
-    let layout = lc_frontend::startup_scensel::scen_sel_layout(
-        surface.width() as i32,
-        surface.height() as i32,
-        fonts,
+    use lc_frontend::startup_scensel as scensel;
+
+    let layout =
+        scensel::scen_sel_layout(surface.width() as i32, surface.height() as i32, fonts);
+
+    // Caption: current folder name, or "Scenarios" at root (cpp:1527-1535).
+    scensel::draw_book_caption(
+        surface,
+        &layout,
+        book_fonts,
+        scenario_menu.book_caption(),
+        Some(gamma),
     );
-    let item_h = lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+
+    // List rows (ScenListItem, cpp:1210-1238) with the ListBox selection bar.
+    let item_h = scensel::scen_list_item_height(&book_fonts.text);
     let x = layout.list.x + 3;
     let item_w = layout.list.w - 6 - 16;
     let bottom = layout.list.y + layout.list.h - 3;
+    let offset = usize::from(scenario_menu.include_back);
     let selected = scenario_menu.menu().selected_index();
-    let entries: Vec<(u32, String)> = scenario_menu
-        .menu()
-        .entries()
+    let rows: Vec<(u32, String)> = scenario_menu
+        .current_entries()
         .iter()
-        .map(|entry| {
-            let icon = match entry.kind {
-                lc_frontend::ScenarioKind::Folder => 0,
-                _ => 18,
-            };
-            (icon, entry.title.clone())
-        })
+        .map(|entry| (scensel_entry_icon(entry), entry.title.clone()))
         .collect();
     let mut y = layout.list.y + 3;
-    for (index, (icon, title)) in entries.iter().enumerate() {
+    for (index, (icon, title)) in rows.iter().enumerate() {
         if y + item_h > bottom {
             break;
         }
-        if selected == Some(index) {
+        if selected == Some(index + offset) {
             // C4GUI_ListBoxSelColor (focused list), C4GuiListBox.cpp:107-124.
             fill_engine_box(surface, x, y, x + item_w - 1, y + item_h - 1, 0xafaf0000, gamma);
         }
-        lc_frontend::startup_scensel::draw_scen_list_item(
+        scensel::draw_scen_list_item(
             surface,
             &assets.scen_icons,
             &book_fonts.text,
@@ -9354,6 +9496,46 @@ fn draw_scensel_entries(
         );
         y += item_h + 1; // C4GUI_DefaultListSpacing
     }
+
+    // Right page + selection-specific button/checkbox states
+    // (UpdateSelection, cpp:1551-1619): the selected entry, else the current
+    // folder (but not the root).
+    let selection = scenario_menu
+        .selected_scenario()
+        .or_else(|| scenario_menu.current_folder());
+    let info = selection
+        .map(|entry| scensel::SelectionInfo {
+            picture: entry.title_picture.as_ref(),
+            title: Some(entry.title.as_str()),
+            desc: entry.description.as_deref(),
+            author: entry.author.as_deref(),
+            version: entry.version.as_deref(),
+        })
+        .unwrap_or_default();
+    scensel::draw_selection_info(surface, &layout, assets, book_fonts, &info, Some(gamma));
+
+    let is_scenario = selection.is_some_and(|entry| matches!(entry.kind, ScenarioKind::Scenario));
+    let open_text = if is_scenario { "&Start" } else { "Open" };
+    scensel::draw_open_button(surface, &layout, open_text, assets, fonts, Some(gamma));
+
+    let (cb_enabled, cb_checked) = selection
+        .filter(|entry| matches!(entry.kind, ScenarioKind::Scenario))
+        .map(|entry| {
+            (
+                !entry.local_only.unwrap_or(false),
+                entry.allow_user_change.unwrap_or(false),
+            )
+        })
+        .unwrap_or((false, false));
+    scensel::draw_user_change_checkbox(
+        surface,
+        &layout,
+        assets,
+        fonts,
+        cb_enabled,
+        cb_checked,
+        Some(gamma),
+    );
 }
 
 /// The startup render gamma ramp (default config: identity + black floor).
@@ -9409,18 +9591,20 @@ fn render_startup_frame(
                 assets.book_fonts.as_ref(),
             ) {
                 (Some(dlg_assets), Some(fonts), Some(book_fonts)) => {
+                    // Selection-independent chrome only; the caption, list,
+                    // right page, Open button and checkbox change with the
+                    // selection and are drawn fresh over the restored copy.
                     restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
-                        lc_frontend::startup_scensel::ScenSelScreen::render(
+                        lc_frontend::startup_scensel::ScenSelScreen::render_chrome(
                             surface,
                             &dlg_assets,
                             fonts,
-                            book_fonts,
                             Some(startup_gamma()),
                             flags.fair_crew,
                             flags.record,
                         );
                     });
-                    draw_scensel_entries(
+                    draw_scensel_dynamic(
                         surface,
                         scenario_menu,
                         &dlg_assets,
@@ -11631,6 +11815,103 @@ mod tests {
                 ),
             "expected default selection to target folder_missions after returning to root"
         );
+    }
+
+    // The C++ book has no Back list row (C4StartupScenSelDlg has a Back
+    // button/K_LEFT instead) and selects the first entry
+    // (SelectFirstEntry, cpp:1536-1537).
+    #[test]
+    fn scensel_menu_state_without_back_row_selects_first_entry() {
+        let scenarios = sample_scenarios();
+        let entries = build_menu_entries(&scenarios, true);
+        let menu = StartupMenu::new(entries, test_font(), None).expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.menu().resize(1280.0, 720.0);
+
+        state.set_include_back(false);
+        assert!(state
+            .menu()
+            .entries()
+            .iter()
+            .all(|entry| entry.identifier != BACK_ENTRY_IDENTIFIER));
+
+        let selection = state.select_default_entry();
+        assert!(matches!(
+            selection.as_slice(),
+            [StartupMenuAction::SelectionChanged(summary)]
+            if summary.identifier == "folder_missions"
+        ));
+        assert_eq!(
+            state.selected_scenario().map(|entry| entry.title.as_str()),
+            Some("Missions")
+        );
+    }
+
+    // Selected-row -> scenario mapping honours the Back-row offset used by
+    // the network lobby list.
+    #[test]
+    fn selected_scenario_maps_through_back_row_offset() {
+        let scenarios = sample_scenarios();
+        let entries = build_menu_entries(&scenarios, true);
+        let menu = StartupMenu::new(entries, test_font(), None).expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.menu().resize(1280.0, 720.0);
+
+        let _ = state.menu().select_entry_by_index(0); // Back row
+        assert!(state.selected_scenario().is_none());
+        let _ = state.menu().select_entry_by_index(1);
+        assert_eq!(
+            state.selected_scenario().map(|entry| entry.title.as_str()),
+            Some("Missions")
+        );
+    }
+
+    // Caption above the list: current folder name, "Scenarios" at root
+    // (C4StartupScenSelDlg::UpdateList, cpp:1527-1535); with no selection
+    // the right page falls back to the listed folder (cpp:1566-1572).
+    #[test]
+    fn book_caption_and_folder_fallback_track_the_stack() {
+        let scenarios = sample_scenarios();
+        let entries = build_menu_entries(&scenarios, false);
+        let menu = StartupMenu::new(entries, test_font(), None).expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.menu().resize(1280.0, 720.0);
+        state.set_include_back(false);
+
+        assert_eq!(state.book_caption(), "Scenarios");
+        assert!(state.current_folder().is_none(), "root has no folder info");
+
+        state.enter_folder("folder_missions");
+        assert_eq!(state.book_caption(), "Missions");
+        assert_eq!(
+            state.current_folder().map(|folder| folder.title.as_str()),
+            Some("Missions")
+        );
+
+        state.leave_folder();
+        assert_eq!(state.book_caption(), "Scenarios");
+    }
+
+    // List icon defaults (C4StartupScenSelDlg.cpp:705-710,951-952,1036-1037):
+    // scenario Icon= clamped to the 52-icon strip else 14; .c4f folder 0;
+    // plain directory 44.
+    #[test]
+    fn scensel_entry_icons_follow_cpp_defaults() {
+        let mut scenario = FrontendScenario::fallback();
+        scenario.kind = ScenarioKind::Scenario;
+        scenario.icon_index = Some(15);
+        assert_eq!(scensel_entry_icon(&scenario), 15);
+        scenario.icon_index = Some(99);
+        assert_eq!(scensel_entry_icon(&scenario), 14);
+        scenario.icon_index = None;
+        assert_eq!(scensel_entry_icon(&scenario), 14);
+
+        let mut folder = FrontendScenario::fallback();
+        folder.kind = ScenarioKind::Folder;
+        folder.path = Some(PathBuf::from("/tmp/Fantasy.c4f"));
+        assert_eq!(scensel_entry_icon(&folder), 0);
+        folder.path = Some(PathBuf::from("/tmp/Downloads"));
+        assert_eq!(scensel_entry_icon(&folder), 44);
     }
 
     #[test]
