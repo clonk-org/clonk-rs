@@ -1137,11 +1137,42 @@ fn run_integration_test(
         anyhow::bail!("Scenario did not enter Running mode after 15000 update cycles");
     }
 
-    // Run test frames
+    // Run test frames, optionally with scripted control input:
+    // LC_APP_TEST_INPUT="5:Right+,20:Right-,25:Up+" presses (+) and
+    // releases (-) the named control at the given test frame, driving the
+    // same dispatch path as live key input.
+    let scripted_input = std::env::var("LC_APP_TEST_INPUT")
+        .ok()
+        .map(|spec| parse_test_input_spec(&spec))
+        .transpose()
+        .context("parse LC_APP_TEST_INPUT")?
+        .unwrap_or_default();
     println!("Running {} test frames...", test_frames);
     for frame in 0..test_frames {
+        for (when, event) in &scripted_input {
+            if *when == frame {
+                println!("  test input at frame {frame}: {event:?}");
+                let owner = app.local_owner;
+                app.dispatch_control_event_for_owner(owner, *event)
+                    .map_err(|error| anyhow::anyhow!("scripted input failed: {error}"))?;
+            }
+        }
         app.update()
             .with_context(|| format!("failed to update app at frame {}", frame))?;
+    }
+
+    // Forensics for scripted-input runs: where did the cursor crew end up?
+    if let Some(cursor) = app.engine.crew_cursor(app.local_owner) {
+        if let Some(snapshot) = app.engine.object_snapshot(cursor) {
+            println!(
+                "  cursor crew: def={} action={} pos=({}, {}) comdir={:?}",
+                snapshot.definition_id,
+                snapshot.action.name,
+                snapshot.position.x,
+                snapshot.position.y,
+                snapshot.command_direction
+            );
+        }
     }
 
     let elapsed = start.elapsed();
@@ -1168,6 +1199,61 @@ fn run_integration_test(
     }
 
     Ok(())
+}
+
+/// `LC_APP_TEST_INPUT` grammar: comma-separated `frame:Name+` (press) /
+/// `frame:Name-` (release) entries with Name in Left/Right/Up/Down/
+/// Throw/Dig/Special/Special2.
+fn parse_test_input_spec(spec: &str) -> Result<Vec<(u32, ControlEvent)>> {
+    spec.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (frame, action) = entry
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("expected frame:Action in `{entry}`"))?;
+            let frame: u32 = frame.trim().parse()?;
+            let action = action.trim();
+            let (name, press) = match action.as_bytes().last() {
+                Some(b'+') => (&action[..action.len() - 1], true),
+                Some(b'-') => (&action[..action.len() - 1], false),
+                _ => (action, true),
+            };
+            let event = match name {
+                "Left" | "Right" | "Up" | "Down" => {
+                    let button = match name {
+                        "Left" => lc_engine::ControlButton::Left,
+                        "Right" => lc_engine::ControlButton::Right,
+                        "Up" => lc_engine::ControlButton::Up,
+                        _ => lc_engine::ControlButton::Down,
+                    };
+                    if press {
+                        ControlEvent::Press(button)
+                    } else {
+                        ControlEvent::Release(button)
+                    }
+                }
+                "Throw" | "Dig" | "Special" | "Special2" => {
+                    let command = match name {
+                        "Throw" => ControlCommand::Throw,
+                        "Dig" => ControlCommand::Dig,
+                        "Special" => ControlCommand::Special,
+                        _ => ControlCommand::Special2,
+                    };
+                    ControlEvent::Command {
+                        command,
+                        kind: if press {
+                            CommandKind::Press
+                        } else {
+                            CommandKind::Release
+                        },
+                    }
+                }
+                other => anyhow::bail!("unknown control `{other}` in `{entry}`"),
+            };
+            Ok((frame, event))
+        })
+        .collect()
 }
 
 fn main() -> Result<()> {
