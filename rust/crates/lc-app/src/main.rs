@@ -47,7 +47,10 @@ use control_options::{
 };
 use game_over::{GameOverEntry, GameOverOutcome, GameOverState};
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
-use ingame_menu::{IngameMenuAction, IngameMenuState};
+use ingame_menu::{
+    DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
+    MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState,
+};
 use input::{ControlBindingId, KeyboardBindings};
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::std_config::Config;
@@ -215,6 +218,10 @@ const STARTUP_DIALOG_IMAGES: &[&str] = &[
     "GUIScroll.png",
     "StartupContext.png",
     "Player.png",
+    // In-game menu sheets (C4GraphicsResource.cpp:199-227).
+    "Menu.png",
+    "Options.png",
+    "Control.png",
 ];
 
 struct RuntimeConfig {
@@ -226,6 +233,11 @@ struct RuntimeConfig {
 
 const SYNC_CHECK_RATE: u32 = if cfg!(debug_assertions) { 1 } else { 100 };
 const SYNC_CHECK_HISTORY: i32 = 50;
+
+/// `C4D_Goal` / `C4D_Rule` DefCore category bits
+/// (lc-engine script_constants.rs:18,22; C4Def.h).
+const C4D_GOAL: i32 = 1 << 5;
+const C4D_RULE: i32 = 1 << 19;
 
 const DEFAULT_LOADING_MESSAGE: &str = "Preparing scenario";
 
@@ -1154,13 +1166,33 @@ fn run_integration_test(
 
     // Optional: simulate the Escape keypress (the user flow that opens the
     // in-game player menu) before the frame dump, so menu rendering can be
-    // captured headlessly.
-    if std::env::var("LC_APP_OPEN_MENU").is_ok_and(|value| value == "player") {
+    // captured headlessly. Values other than "player" jump into the named
+    // submenu; LC_APP_OPEN_MENU_FRAMES controls how long the menu idles
+    // (e.g. past the 90-frame tooltip delay, C4Menu.cpp:37).
+    if let Ok(page) = std::env::var("LC_APP_OPEN_MENU") {
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .context("simulated Escape press")?;
         app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
             .context("simulated Escape release")?;
-        for frame in 0..5 {
+        let submenu = match page.as_str() {
+            "options" => Some(MenuAction::ActivateOptions),
+            "display" => Some(MenuAction::ActivateDisplay),
+            "savegame" => Some(MenuAction::ActivateSavegame),
+            "goals" => Some(MenuAction::ActivateGoals),
+            "rules" => Some(MenuAction::ActivateRules),
+            "surrender" => Some(MenuAction::ActivateSurrender),
+            "abort" => Some(MenuAction::Abort),
+            _ => None,
+        };
+        if let Some(action) = submenu {
+            app.apply_ingame_menu_action(action)
+                .context("simulated submenu activation")?;
+        }
+        let idle_frames = std::env::var("LC_APP_OPEN_MENU_FRAMES")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(5);
+        for frame in 0..idle_frames {
             app.update()
                 .with_context(|| format!("failed to update app with menu open, frame {frame}"))?;
         }
@@ -2545,6 +2577,14 @@ struct GameApp {
     startup_view_flags: StartupViewFlags,
     object_menu: Option<ObjectMenuState>,
     ingame_menu: Option<IngameMenuState>,
+    /// Cached Graphics.c4g sheets for the in-game menu renderer.
+    ingame_menu_gfx: Option<IngameMenuGraphics>,
+    /// `Config.Graphics` display toggles driven by the Display submenu
+    /// (C4MainMenu.cpp:855-884); session-only, not persisted.
+    display_flags: DisplayFlags,
+    /// `C4Player::MouseControl` analogue: gates in-game mouse gameplay
+    /// input (C4MainMenu.cpp:847-849).
+    mouse_control: bool,
     save_browser: Option<SaveBrowserState>,
     save_browser_return_to_menu: bool,
     mode: AppMode,
@@ -5028,6 +5068,9 @@ impl GameApp {
             },
             object_menu: None,
             ingame_menu: None,
+            ingame_menu_gfx: None,
+            display_flags: DisplayFlags::default(),
+            mouse_control: true,
             save_browser: None,
             save_browser_return_to_menu: false,
             mode: AppMode::Loading,
@@ -5285,6 +5328,11 @@ impl GameApp {
     /// rank (src/C4ObjectInfo.cpp:330-370) and the def rank symbols
     /// (src/C4ObjectInfo.cpp:334-341).
     fn populate_crew_portraits(&self, players: &mut [PlayerOverlay]) {
+        // Config.Graphics.ShowPortraits from the Display menu
+        // (C4MainMenu.cpp:872).
+        if !self.display_flags.portraits {
+            return;
+        }
         let hud_graphics = self.graphics.hud_graphics();
         let fallback_portrait = hud_graphics.crew.clone();
         let mut portrait_cache: HashMap<String, Option<ImageData>> = HashMap::new();
@@ -5351,6 +5399,20 @@ impl GameApp {
                 VirtualKeyCode::F9 => {
                     if let Err(err) = self.quick_load() {
                         tracing::error!(error = ?err, "quick load failed");
+                    }
+                    return Ok(());
+                }
+                // Rust extras: the named save/load browsers (superseded in
+                // the player menu by the C++-shaped savegame slots).
+                VirtualKeyCode::F6 if matches!(self.mode, AppMode::Running) => {
+                    if let Err(err) = self.open_save_browser() {
+                        tracing::error!(error = ?err, "failed to open save browser");
+                    }
+                    return Ok(());
+                }
+                VirtualKeyCode::F7 if matches!(self.mode, AppMode::Running) => {
+                    if let Err(err) = self.open_load_browser() {
+                        tracing::error!(error = ?err, "failed to open load browser");
                     }
                     return Ok(());
                 }
@@ -5578,26 +5640,38 @@ impl GameApp {
         Ok(())
     }
 
+    /// Opens the player menu (`C4Player::ActivateMenuMain` ->
+    /// `C4MainMenu::ActivateMain`, C4Player.cpp:2327 + C4MainMenu.cpp:643).
     fn open_ingame_menu(&mut self) -> Result<(), EngineError> {
         if !matches!(self.mode, AppMode::Running) || self.ingame_menu.is_some() {
             return Ok(());
         }
         self.close_object_menu();
         self.clear_local_controls()?;
-        let has_quick_save = quick_save_exists();
-        let has_saved_games = any_saved_games_exist();
-        self.ingame_menu = Some(IngameMenuState::new(has_quick_save, has_saved_games));
-        if self.status_text.is_empty() {
-            self.status_text = "Paused".to_string();
-        }
+        self.ingame_menu = IngameMenuState::main_menu(&self.main_menu_conditions());
         Ok(())
+    }
+
+    /// `C4MainMenu::ActivateMain` conditions (C4MainMenu.cpp:643-715) from
+    /// the running app state. MaxPlayers falls back to the C4Scenario
+    /// default of 12 (scenario.rs:1266); league/team data is not ported.
+    fn main_menu_conditions(&self) -> MainMenuConditions {
+        let players = &self.snapshot.players;
+        MainMenuConditions {
+            has_player: players.iter().any(|player| player.id == self.local_owner),
+            player_count: players.len(),
+            max_players: 12,
+            is_league: false,
+            network_enabled: self.network.is_some(),
+            network_host: matches!(self.network_mode, Some(NetworkMode::Host(_))),
+            network_has_clients: self.network.is_some(),
+            is_fullscreen: true,
+            team_switch_allowed: false,
+        }
     }
 
     fn close_ingame_menu(&mut self) {
         self.ingame_menu = None;
-        if self.status_text == "Paused" {
-            self.status_text.clear();
-        }
     }
 
     fn open_object_menu(&mut self) -> Result<bool, EngineError> {
@@ -5700,8 +5774,8 @@ impl GameApp {
             return Ok(menu_command);
         };
 
-        if let Some(action) = menu.handle_command(command, kind) {
-            self.execute_ingame_menu_action(action)?;
+        if let Some(outcome) = menu.handle_command(command, kind) {
+            self.execute_ingame_menu_outcome(outcome)?;
         }
         Ok(true)
     }
@@ -5981,53 +6055,366 @@ impl GameApp {
         }
     }
 
-    fn execute_ingame_menu_action(&mut self, action: IngameMenuAction) -> Result<(), EngineError> {
-        match action {
-            IngameMenuAction::Resume => {
-                self.close_ingame_menu();
-            }
-            IngameMenuAction::QuickSave => match self.quick_save() {
-                Ok(_) => {
-                    if let Some(menu) = self.ingame_menu.as_mut() {
-                        let quick_available = quick_save_exists();
-                        let saved_available = any_saved_games_exist();
-                        menu.update_save_options(quick_available, saved_available);
-                    }
-                }
-                Err(err) => {
-                    tracing::error!(error = ?err, "quick save failed");
-                    self.status_text = format!("Quick save failed: {err:#}");
-                }
-            },
-            IngameMenuAction::QuickLoad => match self.quick_load() {
-                Ok(()) => {
+    /// Applies a menu outcome: `C4Menu::Enter` closes non-permanent menus
+    /// before the command runs (C4Menu.cpp:512-518); `C4Menu::TryClose`
+    /// executes the close command after closing (C4Menu.cpp:317-334).
+    fn execute_ingame_menu_outcome(&mut self, outcome: MenuOutcome) -> Result<(), EngineError> {
+        match outcome {
+            MenuOutcome::Action { action, close_menu } => {
+                if close_menu {
                     self.close_ingame_menu();
                 }
-                Err(err) => {
-                    tracing::error!(error = ?err, "quick load failed");
-                    self.status_text = format!("Quick load failed: {err:#}");
-                }
-            },
-            IngameMenuAction::SaveGame => {
-                if let Err(err) = self.open_save_browser() {
-                    tracing::error!(error = ?err, "failed to open save menu");
-                    self.status_text = format!("Save menu failed: {err:#}");
-                    self.open_ingame_menu()?;
-                }
+                self.apply_ingame_menu_action(action)?;
             }
-            IngameMenuAction::LoadGame => {
-                if let Err(err) = self.open_load_browser() {
-                    tracing::error!(error = ?err, "failed to open load menu");
-                    self.status_text = format!("Load menu failed: {err:#}");
-                    self.open_ingame_menu()?;
-                }
-            }
-            IngameMenuAction::AbortToMenu => {
+            MenuOutcome::Closed { close_action } => {
                 self.close_ingame_menu();
-                self.return_to_menu();
+                if let Some(action) = close_action {
+                    self.apply_ingame_menu_action(action)?;
+                }
             }
         }
         Ok(())
+    }
+
+    /// `C4MainMenu::MenuCommand` (C4MainMenu.cpp:734-948).
+    fn apply_ingame_menu_action(&mut self, action: MenuAction) -> Result<(), EngineError> {
+        match action {
+            MenuAction::ActivateMain => {
+                self.ingame_menu = IngameMenuState::main_menu(&self.main_menu_conditions());
+            }
+            MenuAction::ActivateGoals => {
+                // C++ queues CID_ActivateGameGoalMenu and shows the goal
+                // list with fulfilled markers (C4MainMenu.cpp:332-380);
+                // rust lists the live C4D_Goal objects directly.
+                let goals = self.goal_rule_entries(C4D_GOAL);
+                self.cache_definition_icons(&goals);
+                self.ingame_menu = Some(IngameMenuState::goals_menu(&goals));
+            }
+            MenuAction::ActivateRules => {
+                let rules = self.goal_rule_entries(C4D_RULE);
+                self.cache_definition_icons(&rules);
+                self.ingame_menu = Some(IngameMenuState::rules_menu(&rules));
+            }
+            MenuAction::ActivateNewPlayer => {
+                // Player discovery from packed .c4p files is not wired in
+                // lc-app yet; the empty menu shows the C++ IDS_MENU_NOPLRFILES
+                // caption (C4MainMenu.cpp:71).
+                let players: Vec<NewPlayerEntry> = Vec::new();
+                self.ingame_menu = Some(IngameMenuState::new_player_menu(&players));
+            }
+            MenuAction::ActivateOptions => {
+                self.ingame_menu = Some(IngameMenuState::options_menu(&self.option_flags(), 0));
+            }
+            MenuAction::ActivateDisplay => {
+                self.ingame_menu = Some(IngameMenuState::display_menu(&self.display_flags, 0));
+            }
+            MenuAction::ActivateSavegame => {
+                // Game.CanQuickSave: network clients may not save
+                // (C4Game.cpp:2205-2223) — the menu simply stays closed.
+                if self.can_quick_save() {
+                    let slots = self.savegame_slots();
+                    self.ingame_menu = Some(IngameMenuState::savegame_menu(&slots));
+                }
+            }
+            MenuAction::ActivateSurrender => {
+                self.ingame_menu = Some(IngameMenuState::surrender_menu());
+            }
+            MenuAction::ActivateClientDisconnect => {
+                self.ingame_menu = Some(IngameMenuState::client_disconnect_menu());
+            }
+            MenuAction::ActivateHostility
+            | MenuAction::ActivateHostDisconnect
+            | MenuAction::ActivateObserver => {
+                // Hostility changes, client kicking and observer viewports
+                // are not ported yet (see PORT_STATUS.md); reopen the main
+                // menu instead of dropping the player into nothing.
+                self.status_text = "Not yet supported in the Rust port".to_string();
+                self.ingame_menu = IngameMenuState::main_menu(&self.main_menu_conditions());
+            }
+            MenuAction::Abort => {
+                // C++: FullScreen.ShowAbortDlg -> C4AbortGameDialog
+                // (C4MainMenu.cpp:785-789; C4GameDialogs.cpp:33-79). The
+                // rust port approximates the dialog as a menu page; the
+                // Restart button shows for the control host (offline or
+                // network host).
+                let show_restart = self.can_quick_save();
+                self.ingame_menu = Some(IngameMenuState::abort_confirm_menu(show_restart));
+            }
+            MenuAction::AbortConfirmed => {
+                // `Game.Abort()` back to the startup menu
+                // (C4GameDialogs.cpp:104-121).
+                self.close_ingame_menu();
+                self.return_to_menu();
+            }
+            MenuAction::RestartRound => {
+                // `Application.SetNextMission(Game.ScenarioFilename)` +
+                // abort (C4GameDialogs.cpp:116-120).
+                self.close_ingame_menu();
+                self.restart_current_scenario()?;
+            }
+            MenuAction::Surrender => {
+                // CID_SurrenderPlayer -> player surrenders with evaluation
+                // (C4MainMenu.cpp:791-795); the engine's game-over check
+                // treats surrendered players as inactive.
+                if let Err(err) = self.engine.set_player_surrendered(self.local_owner, true) {
+                    tracing::error!(error = ?err, "surrender failed");
+                }
+            }
+            MenuAction::Part => {
+                // "Part": leave the network game (C4MainMenu.cpp:821-832).
+                // Network teardown mid-round is not ported; log the gap.
+                tracing::warn!("network part from the player menu is not ported yet");
+                self.status_text = "Leaving a network game is not yet supported".to_string();
+            }
+            MenuAction::SaveSlot(slot) => {
+                // "Save:Game:<file>:<title>" -> Game.QuickSave + reopen the
+                // savegame menu (C4MainMenu.cpp:797-804).
+                self.save_to_slot(slot);
+                if self.ingame_menu.is_some() {
+                    let slots = self.savegame_slots();
+                    self.ingame_menu = Some(IngameMenuState::savegame_menu(&slots));
+                }
+            }
+            MenuAction::ToggleSound => {
+                // Application.SoundSystem->ToggleOnOff() + reopen with the
+                // previous selection (C4MainMenu.cpp:842-852).
+                let selection = self.ingame_menu_selection();
+                self.toggle_sound_option();
+                self.ingame_menu =
+                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
+            }
+            MenuAction::ToggleMusic => {
+                let selection = self.ingame_menu_selection();
+                self.toggle_music_option();
+                self.ingame_menu =
+                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
+            }
+            MenuAction::ToggleMouseControl => {
+                let selection = self.ingame_menu_selection();
+                self.mouse_control = !self.mouse_control;
+                self.ingame_menu =
+                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
+            }
+            MenuAction::Display(toggle) => {
+                // Toggle + reopen with the previous selection
+                // (C4MainMenu.cpp:855-884).
+                let selection = self.ingame_menu_selection();
+                self.display_flags.toggle(toggle);
+                self.ingame_menu =
+                    Some(IngameMenuState::display_menu(&self.display_flags, selection));
+            }
+            MenuAction::GoalInfo(id) | MenuAction::RuleInfo(id) => {
+                // C++ queues CID_ActivateGameGoalRule to show the goal/rule
+                // info menu (C4MainMenu.cpp:886-897); not ported yet.
+                tracing::warn!(definition = %id, "goal/rule info menu is not ported yet");
+                self.close_ingame_menu();
+            }
+            MenuAction::JoinPlayer(file) => {
+                // CtrlJoinLocalNoNetwork (C4MainMenu.cpp:761-772): runtime
+                // player join is not ported yet.
+                tracing::warn!(%file, "runtime player join is not ported yet");
+                self.status_text = "Player join is not yet supported".to_string();
+            }
+            MenuAction::NoOp => {}
+        }
+        Ok(())
+    }
+
+    fn ingame_menu_selection(&self) -> usize {
+        self.ingame_menu
+            .as_ref()
+            .map(IngameMenuState::selection)
+            .unwrap_or(0)
+    }
+
+    /// `C4Game::CanQuickSave` (C4Game.cpp:2205-2223): network hosts only.
+    fn can_quick_save(&self) -> bool {
+        self.network.is_none() || matches!(self.network_mode, Some(NetworkMode::Host(_)))
+    }
+
+    /// Unique live definitions with the given category bit, in object-list
+    /// order (`Game.Objects.ObjectsInt().GetListID`, C4MainMenu.cpp:394).
+    fn goal_rule_entries(&self, category_bit: i32) -> Vec<GoalRuleEntry> {
+        let mut seen = HashSet::new();
+        let mut entries = Vec::new();
+        for object in &self.snapshot.objects {
+            if !object.status.is_active() {
+                continue;
+            }
+            let id = object.definition_id.as_str();
+            if !seen.insert(id.to_string()) {
+                continue;
+            }
+            let category = self.engine.definition_category(id).unwrap_or(0);
+            if category & category_bit == 0 {
+                continue;
+            }
+            entries.push(GoalRuleEntry {
+                definition_id: id.to_string(),
+                name: self
+                    .engine
+                    .definition_name(id)
+                    .unwrap_or(id)
+                    .to_string(),
+                fulfilled: false,
+            });
+        }
+        entries
+    }
+
+    /// Loads the definition pictures for goal/rule menu symbols
+    /// (`pDef->Draw(fctSymbol)`, C4MainMenu.cpp:367,397).
+    fn cache_definition_icons(&mut self, entries: &[GoalRuleEntry]) {
+        let icons: Vec<(String, ImageData)> = entries
+            .iter()
+            .filter_map(|entry| {
+                self.engine
+                    .definition_picture_image(&entry.definition_id)
+                    .map(|image| {
+                        (
+                            entry.definition_id.clone(),
+                            ImageData::from_arc(image.width(), image.height(), image.into_pixels()),
+                        )
+                    })
+            })
+            .collect();
+        let gfx = self.ensure_ingame_menu_gfx();
+        for (id, image) in icons {
+            gfx.definition_icons.insert(id, image);
+        }
+    }
+
+    /// The ten savegame slots (C4MainMenu.cpp:483-494): C++ probes
+    /// `ScenName.c4f/ScenNameN.c4s`; the rust port probes the deterministic
+    /// slot files in the save directory.
+    fn savegame_slots(&self) -> [SaveSlotState; 10] {
+        let mut slots = [SaveSlotState { free: true }; 10];
+        for (index, slot) in slots.iter_mut().enumerate() {
+            slot.free = !self.savegame_slot_path((index + 1) as u8).exists();
+        }
+        slots
+    }
+
+    fn savegame_slot_base(&self) -> String {
+        self.active_scenario
+            .as_ref()
+            .map(|scenario| scenario.title.clone())
+            .unwrap_or_else(|| self.scenario_label.clone())
+    }
+
+    fn savegame_slot_path(&self, slot: u8) -> PathBuf {
+        let base = sanitize_save_label(&format!("{}{}", self.savegame_slot_base(), slot));
+        resolve_save_directory().join(format!("{base}.lcsave"))
+    }
+
+    /// `Game.QuickSave(strFilename, strTitle)` for a menu slot
+    /// (C4MainMenu.cpp:797-804) via the existing save plumbing.
+    fn save_to_slot(&mut self, slot: u8) {
+        let label = format!("{} {}", self.savegame_slot_base(), slot);
+        let path = self.savegame_slot_path(slot);
+        if let Err(err) = self.perform_named_save(&label, Some(path)) {
+            tracing::error!(error = ?err, slot, "slot save failed");
+            self.status_text = format!("Save failed: {err:#}");
+        }
+    }
+
+    /// `Application.MusicSystem->ToggleOnOff()` (C4MainMenu.cpp:837-840).
+    fn toggle_music_option(&mut self) {
+        let enabled = self
+            .audio
+            .as_mut()
+            .map(|audio| {
+                audio.options.music_enabled = !audio.options.music_enabled;
+                if !audio.options.music_enabled {
+                    audio.stop_music();
+                }
+                audio.options.music_enabled
+            })
+            .unwrap_or(false);
+        if enabled {
+            if let Some(path) = self
+                .active_scenario
+                .as_ref()
+                .and_then(|scenario| scenario.path.clone())
+            {
+                self.play_scenario_audio(&path);
+            } else {
+                self.play_sandbox_audio();
+            }
+        }
+    }
+
+    /// `Application.SoundSystem->ToggleOnOff()` (C4MainMenu.cpp:842-845).
+    fn toggle_sound_option(&mut self) {
+        if let Some(audio) = self.audio.as_mut() {
+            audio.options.sound_enabled = !audio.options.sound_enabled;
+            if !audio.options.sound_enabled {
+                audio.reset_sfx();
+            }
+        }
+    }
+
+    fn option_flags(&self) -> OptionFlags {
+        OptionFlags {
+            sound: self
+                .audio
+                .as_ref()
+                .map(|audio| audio.options.sound_enabled)
+                .unwrap_or(false),
+            music: self
+                .audio
+                .as_ref()
+                .map(|audio| audio.options.music_enabled)
+                .unwrap_or(false),
+            mouse_shown: true,
+            mouse: self.mouse_control,
+        }
+    }
+
+    /// Restart the running round (C4AbortGameDialog's Restart button:
+    /// `Application.SetNextMission` + `Game.Abort`, C4GameDialogs.cpp:116-120).
+    fn restart_current_scenario(&mut self) -> Result<(), EngineError> {
+        let Some(scenario) = self.active_scenario.clone() else {
+            self.return_to_menu();
+            return Ok(());
+        };
+        self.return_to_menu();
+        if let Err(err) = self.start_scenario(scenario) {
+            tracing::error!(error = ?err, "failed to restart scenario");
+            self.status_text = format!("Restart failed: {err:#}");
+        }
+        Ok(())
+    }
+
+    fn ensure_ingame_menu_gfx(&mut self) -> &mut IngameMenuGraphics {
+        if self.ingame_menu_gfx.is_none() {
+            let throw_key = self
+                .bindings
+                .key_for(ControlBindingId::Throw)
+                .map(format_key_label)
+                .unwrap_or_default();
+            let dig_key = self
+                .bindings
+                .key_for(ControlBindingId::Dig)
+                .map(format_key_label)
+                .unwrap_or_default();
+            self.ingame_menu_gfx = Some(IngameMenuGraphics {
+                menu: self.assets.dialog_image("Menu.png"),
+                options: self.assets.dialog_image("Options.png"),
+                control: self.assets.dialog_image("Control.png"),
+                gui_icons: self.assets.dialog_image("GUIIcons.png"),
+                player: self.assets.dialog_image("Player.png"),
+                caption_bar: self.assets.dialog_image("GUICaption.png"),
+                definition_icons: HashMap::new(),
+                show_commands: self.display_flags.show_commands,
+                show_command_keys: self.display_flags.show_command_keys,
+                throw_key,
+                dig_key,
+            });
+        }
+        self.ingame_menu_gfx
+            .as_mut()
+            .expect("ingame menu gfx initialised above")
     }
 
     fn open_save_browser(&mut self) -> Result<()> {
@@ -6722,6 +7109,11 @@ impl GameApp {
 
     fn handle_mouse_drag(&mut self, state: IngameMouseState) -> Result<(), EngineError> {
         if !matches!(self.mode, AppMode::Running) {
+            return Ok(());
+        }
+        // Mouse control disabled from the Options menu
+        // (C4Player::ToggleMouseControl analogue, C4MainMenu.cpp:847-849).
+        if !self.mouse_control {
             return Ok(());
         }
         let Some(selection) = self.snapshot.crew_selection.get(&self.local_owner) else {
@@ -7615,6 +8007,10 @@ impl GameApp {
                 }
                 self.record_current_snapshot();
                 self.refresh_object_menu();
+                // Tooltip delay counter (C4Menu::Draw, C4Menu.cpp:805).
+                if let Some(menu) = self.ingame_menu.as_mut() {
+                    menu.tick();
+                }
                 self.refresh_focus();
                 self.update_audio();
                 self.maybe_emit_sync_check();
@@ -8149,11 +8545,28 @@ impl GameApp {
                 let surface = self.graphics.surface_mut();
                 menu.render(surface, font.as_ref());
             }
-        } else if let Some(menu) = self.ingame_menu.as_ref() {
-            let font = self.assets.font_arc();
+        } else if self.ingame_menu.is_some() {
+            let fonts = self.assets.clonk_fonts.clone();
+            let fallback = self.assets.font_arc();
             {
+                let show_commands = self.display_flags.show_commands;
+                let show_command_keys = self.display_flags.show_command_keys;
+                let gfx = self.ensure_ingame_menu_gfx();
+                gfx.show_commands = show_commands;
+                gfx.show_command_keys = show_command_keys;
+            }
+            if let (Some(menu), Some(gfx)) =
+                (self.ingame_menu.as_ref(), self.ingame_menu_gfx.as_ref())
+            {
+                // FontRegular for items, FontTiny for command-key labels
+                // (C4Menu.cpp:170; C4ObjectCom.cpp:940).
+                let font = lc_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
+                let tiny = fonts
+                    .as_deref()
+                    .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
                 let surface = self.graphics.surface_mut();
-                menu.render(surface, font.as_ref());
+                let area = Rect::new(0, 0, surface.width(), surface.height());
+                menu.render(surface, area, &font, tiny.as_ref(), gfx);
             }
         }
 

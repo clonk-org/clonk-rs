@@ -13258,6 +13258,15 @@ impl Engine {
             .map(|definition| definition.name())
     }
 
+    /// The definition's DefCore Category bits (C4Def::Category), e.g. for
+    /// filtering C4D_Goal/C4D_Rule objects like `C4MainMenu::ActivateRules`
+    /// (C4MainMenu.cpp:392-400).
+    pub fn definition_category(&self, definition_id: &str) -> Option<i32> {
+        self.definitions
+            .get(definition_id)
+            .map(|definition| definition.category())
+    }
+
     pub fn definition_value(&self, definition_id: &str) -> Option<i32> {
         self.definitions
             .get(definition_id)
@@ -34054,6 +34063,24 @@ func Trigger() {
             Value::Nil,
             "owner-scoped lookup: definition globals are not in the scenario host"
         );
+    }
+
+    #[test]
+    fn definition_category_exposes_defcore_category_bits() {
+        // Menus filter goal/rule objects by their DefCore Category
+        // (C4MainMenu.cpp:392-400).
+        let mut engine = Engine::with_seed(7);
+        let mut goal_def =
+            Definition::from_script("GOAL", "Goal", "").expect("goal compiles");
+        goal_def.set_category(1 << 5); // C4D_Goal
+        engine
+            .register_definition(goal_def)
+            .expect("goal registers");
+        // normalize_category keeps the goal bit (a display-category default
+        // may be OR'd in, mirroring C4Def defaults).
+        let category = engine.definition_category("GOAL").expect("category");
+        assert_ne!(category & (1 << 5), 0);
+        assert_eq!(engine.definition_category("NONE"), None);
     }
 
     #[test]
