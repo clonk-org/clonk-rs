@@ -1367,12 +1367,13 @@ fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_player_name(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlayerName expects exactly 1 argument: player",
+            "GetPlayerName expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlayerName", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlayerName", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1386,12 +1387,13 @@ fn get_player_name(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_player_id(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlayerID expects exactly 1 argument: player",
+            "GetPlayerID expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlayerID", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlayerID", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1406,12 +1408,13 @@ fn get_player_id(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlayerTeam expects exactly 1 argument: player",
+            "GetPlayerTeam expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlayerTeam", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlayerTeam", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1428,12 +1431,13 @@ fn get_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_player_type(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlayerType expects exactly 1 argument: player",
+            "GetPlayerType expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlayerType", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlayerType", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1448,12 +1452,13 @@ fn get_player_type(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetWealth expects exactly 1 argument: player",
+            "GetWealth expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetWealth", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetWealth", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1505,12 +1510,13 @@ fn set_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_score(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetScore expects exactly 1 argument: player",
+            "GetScore expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetScore", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetScore", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1524,12 +1530,13 @@ fn get_score(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_plr_value(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlrValue expects exactly 1 argument: player",
+            "GetPlrValue expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlrValue", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlrValue", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1543,12 +1550,13 @@ fn get_plr_value(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_plr_value_gain(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlrValueGain expects exactly 1 argument: player",
+            "GetPlrValueGain expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlrValueGain", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlrValueGain", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -2870,13 +2878,15 @@ fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_crew(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 2 {
+    if args.len() > 2 {
         return Err(RuntimeError::new(
-            "GetCrew expects exactly 2 arguments: player and index",
+            "GetCrew expects at most 2 arguments: player and index",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetCrew", "player")?;
-    let index = value_to_i32(&args[1], "GetCrew", "index")?;
+    // Unfilled iPlr/index slots are nil -> 0 (FnGetCrew, C4Script.cpp:2798);
+    // SkiesOfFire's InitializePlayer calls GetCrew(iPlr) with no index.
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetCrew", "player")?;
+    let index = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "GetCrew", "index")?;
     if index < 0 {
         return Ok(Value::Nil);
     }
@@ -2897,12 +2907,13 @@ fn get_crew(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_crew_count(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetCrewCount expects exactly 1 argument: player",
+            "GetCrewCount expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetCrewCount", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetCrewCount", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -2969,12 +2980,13 @@ fn get_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetViewCursor expects exactly 1 argument: player",
+            "GetViewCursor expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetViewCursor", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetViewCursor", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -2989,12 +3001,13 @@ fn get_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_select_count(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetSelectCount expects exactly 1 argument: player",
+            "GetSelectCount expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetSelectCount", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetSelectCount", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -3010,13 +3023,7 @@ fn get_select_count(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "GetHomebaseMaterial expects at least 1 argument: player",
-        ));
-    }
-
-    let player_id = value_to_i32(&args[0], "GetHomebaseMaterial", "player")?;
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetHomebaseMaterial", "player")?;
     let definition = parse_definition_argument(args.get(1), "GetHomebaseMaterial")?;
     let index = match args.get(2) {
         Some(Value::Nil) | None => None,
@@ -3075,13 +3082,7 @@ fn get_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "GetHomebaseProduction expects at least 1 argument: player",
-        ));
-    }
-
-    let player_id = value_to_i32(&args[0], "GetHomebaseProduction", "player")?;
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetHomebaseProduction", "player")?;
     let definition = parse_definition_argument(args.get(1), "GetHomebaseProduction")?;
     let index = match args.get(2) {
         Some(Value::Nil) | None => None,
@@ -3140,13 +3141,7 @@ fn get_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "GetPlrKnowledge expects at least 1 argument: player",
-        ));
-    }
-
-    let player_id = value_to_i32(&args[0], "GetPlrKnowledge", "player")?;
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlrKnowledge", "player")?;
     let definition = parse_definition_argument(args.get(1), "GetPlrKnowledge")?;
     let index = match args.get(2) {
         Some(Value::Nil) | None => 0,
@@ -5107,13 +5102,7 @@ enum LogLevel {
 }
 
 fn log_internal(function: &str, args: &[Value], level: LogLevel) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(format!(
-            "{function} expects at least 1 argument: message",
-        )));
-    }
-
-    let format_str = match &args[0] {
+    let format_str = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => String::new(),
         other => {
@@ -5294,13 +5283,7 @@ fn get_index_of(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn format_string(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "Format expects at least 1 argument: format",
-        ));
-    }
-
-    let format_str = match &args[0] {
+    let format_str = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => String::new(),
         other => {
@@ -5317,13 +5300,7 @@ fn format_string(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn message(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "Message expects at least 1 argument: message",
-        ));
-    }
-
-    let raw_message = match &args[0] {
+    let raw_message = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => return Ok(Value::Bool(false)),
         other => {
@@ -5399,14 +5376,8 @@ fn resolve_target_player(context: &EffectHostContext, player_id: i32) -> Option<
 }
 
 fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "PlayerMessage expects at least 2 arguments: player and message",
-        ));
-    }
-
-    let player_id = value_to_i32(&args[0], "PlayerMessage", "player")?;
-    let raw_message = match &args[1] {
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "PlayerMessage", "player")?;
+    let raw_message = match args.get(1).unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => return Ok(Value::Bool(false)),
         other => {
@@ -5478,13 +5449,7 @@ fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "AddMessage expects at least 1 argument: message",
-        ));
-    }
-
-    let raw_message = match &args[0] {
+    let raw_message = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => return Ok(Value::Bool(false)),
         other => {
@@ -5536,13 +5501,7 @@ fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "PlrMessage expects at least 2 arguments: message and player",
-        ));
-    }
-
-    let raw_message = match &args[0] {
+    let raw_message = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => return Ok(Value::Bool(false)),
         other => {
@@ -5553,7 +5512,7 @@ fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let player_id = value_to_i32(&args[1], "PlrMessage", "player")?;
+    let player_id = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "PlrMessage", "player")?;
     let format_args = if args.len() > 2 { &args[2..] } else { &[] };
     let formatted = format_script_string("PlrMessage", &raw_message, format_args)?;
     let display_text = extract_message_text(&formatted);
@@ -6449,13 +6408,7 @@ fn redirect_foreign_effect_target(
 }
 
 fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "AddEffect expects at least 2 arguments: name and state",
-        ));
-    }
-
-    let name = match effect_name_filter("AddEffect", &args[0])? {
+    let name = match effect_name_filter("AddEffect", args.first().unwrap_or(&Value::Nil))? {
         Some(name) => name.to_owned(),
         None => return Ok(Value::Int(0)),
     };
@@ -6662,17 +6615,12 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(result) = redirect_foreign_effect_target("RemoveEffect", args) {
         return result;
     }
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "RemoveEffect expects at least 2 arguments: name and state",
-        ));
-    }
+    let name_filter =
+        effect_name_filter("RemoveEffect", args.first().unwrap_or(&Value::Nil))?.map(str::to_owned);
 
-    let name_filter = effect_name_filter("RemoveEffect", &args[0])?.map(str::to_owned);
-
-    let scope = determine_scope_from_state(&args[1])?;
+    let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
     if matches!(scope, EffectScope::Object) {
-        match &args[1] {
+        match args.get(1).unwrap_or(&Value::Nil) {
             Value::Object(_) | Value::Proplist(_) => {}
             other => {
                 return Err(RuntimeError::new(format!(
@@ -6723,15 +6671,9 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(result) = redirect_foreign_effect_target("GetEffect", args) {
         return result;
     }
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "GetEffect expects at least 2 arguments: name and state",
-        ));
-    }
+    let name_filter = effect_name_filter("GetEffect", args.first().unwrap_or(&Value::Nil))?;
 
-    let name_filter = effect_name_filter("GetEffect", &args[0])?;
-
-    let scope = determine_scope_from_state(&args[1])?;
+    let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
     let effects = match snapshot_effects_from_context(scope) {
         Some(effects) => effects,
         None => match scope {
@@ -6831,15 +6773,9 @@ fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(result) = redirect_foreign_effect_target("GetEffectCount", args) {
         return result;
     }
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "GetEffectCount expects at least 2 arguments: name and state",
-        ));
-    }
+    let name_filter = effect_name_filter("GetEffectCount", args.first().unwrap_or(&Value::Nil))?;
 
-    let name_filter = effect_name_filter("GetEffectCount", &args[0])?;
-
-    let scope = determine_scope_from_state(&args[1])?;
+    let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
     let effects = match snapshot_effects_from_context(scope) {
         Some(effects) => effects,
         None => match scope {
@@ -6894,15 +6830,11 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(result) = redirect_foreign_effect_target("EffectVar", args) {
         return result;
     }
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "EffectVar expects at least 3 arguments: index, state, and number",
-        ));
-    }
-
-    let var_index = match &args[0] {
+    // Unfilled iVarIndex is nil -> 0 (FnEffectVar, C4Script.cpp:5577).
+    let var_index = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) if *value >= 0 => *value as usize,
-        Value::Int(_) | Value::Nil => return Ok(Value::Nil),
+        Value::Nil => 0,
+        Value::Int(_) => return Ok(Value::Nil),
         other => {
             return Err(RuntimeError::new(format!(
                 "EffectVar: expected int for index, got {}",
@@ -6911,9 +6843,9 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let scope = determine_scope_from_state(&args[1])?;
+    let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
 
-    let effect_number = match &args[2] {
+    let effect_number = match args.get(2).unwrap_or(&Value::Nil) {
         Value::Int(value) if *value > 0 => *value as usize,
         Value::Int(_) | Value::Nil => return Ok(Value::Nil),
         other => {
@@ -6951,7 +6883,7 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
     // FnEffectVar resolves the effect BY NUMBER (C4Effect::Get(iNumber,
     // true), C4Script.cpp:5583); snapshot proplists carry positional
     // stand-in numbers from extract_effects_from_state.
-    let effects = extract_effects_from_state(&args[1])?;
+    let effects = extract_effects_from_state(args.get(1).unwrap_or(&Value::Nil))?;
     let number = i32::try_from(effect_number).unwrap_or(i32::MAX);
     Ok(effects
         .iter()
@@ -7131,11 +7063,7 @@ fn random(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new("Sound expects at least 1 argument: name"));
-    }
-
-    let name = match &args[0] {
+    let name = match args.first().unwrap_or(&Value::Nil) {
         Value::String(value) if !value.is_empty() => value.clone(),
         Value::Nil => return Ok(Value::Bool(true)),
         other => {
@@ -7273,13 +7201,7 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "SoundLevel expects at least 2 arguments: name and level",
-        ));
-    }
-
-    let name = match &args[0] {
+    let name = match args.first().unwrap_or(&Value::Nil) {
         Value::String(value) if !value.is_empty() => value.clone(),
         Value::Nil => return Ok(Value::Bool(true)),
         other => {
@@ -7290,7 +7212,7 @@ fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let level = match &args[1] {
+    let level = match args.get(1).unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
         Value::Nil => 0,
         other => {
@@ -8549,13 +8471,7 @@ fn reset_physical(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "DoEnergy expects at least 1 argument: change",
-        ));
-    }
-
-    let change = match &args[0] {
+    let change = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
         Value::Nil => 0,
         other => {
@@ -8727,13 +8643,7 @@ fn stage_energy_loss_cause(
 }
 
 fn do_con(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "DoCon expects at least 1 argument: change",
-        ));
-    }
-
-    let change_percent = match &args[0] {
+    let change_percent = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
         Value::Nil => 0,
         other => {
@@ -8778,13 +8688,7 @@ fn do_con(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "DoDamage expects at least 1 argument: change",
-        ));
-    }
-
-    let change = match &args[0] {
+    let change = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
         Value::Nil => 0,
         other => {
@@ -8912,13 +8816,7 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     if std::env::var("LC_DEBUG_CHBM").is_ok() {
         tracing::warn!(?args, "OSA SetAction");
     }
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetAction expects at least 1 argument: action name",
-        ));
-    }
-
-    let action_name = match &args[0] {
+    let action_name = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) if !name.is_empty() => Some(name.clone()),
         Value::String(_) | Value::Nil => None,
         other => {
@@ -9057,12 +8955,6 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetBridgeActionData expects at least 1 argument: length",
-        ));
-    }
-
     let mut param_count = args.len();
     let mut target_id: Option<ObjectId> = None;
 
@@ -9072,19 +8964,18 @@ fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
             parse_object_reference_argument(&args[param_count], "SetBridgeActionData", "object")?;
     }
 
-    if param_count == 0 {
-        return Err(RuntimeError::new(
-            "SetBridgeActionData expects at least 1 argument: length",
-        ));
-    }
-
     if param_count > 4 {
         return Err(RuntimeError::new(
             "SetBridgeActionData accepts at most 4 arguments before the object parameter",
         ));
     }
 
-    let length = value_to_i32(&args[0], "SetBridgeActionData", "length")?;
+    let length = if param_count > 0 {
+        value_to_i32(&args[0], "SetBridgeActionData", "length")?
+    } else {
+        // Unfilled iBridgeLength is nil -> 0 (C4Script.cpp:756).
+        0
+    };
     let move_clonk = if param_count > 1 {
         value_to_bool(&args[1], "SetBridgeActionData", "move_clonk")?
     } else {
@@ -9137,13 +9028,8 @@ fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetActionData expects at least 1 argument: data",
-        ));
-    }
-
-    let data = value_to_i32(&args[0], "SetActionData", "data")?;
+    // Unfilled iData is nil -> 0 (FnSetActionData, C4Script.cpp:767).
+    let data = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetActionData", "data")?;
     let mut index = 1;
     let mut target_id: Option<ObjectId> = None;
 
@@ -9676,15 +9562,10 @@ fn get_phase(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_phase(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetPhase expects at least 1 argument: phase",
-        ));
-    }
-
-    let phase = match &args[0] {
+    // Unfilled iVal is nil -> 0 (FnSetPhase, C4Script.cpp:828).
+    let phase = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
-        Value::Nil => return Ok(Value::Bool(false)),
+        Value::Nil => 0,
         other => {
             return Err(RuntimeError::new(format!(
                 "SetPhase: expected int or nil for phase, got {}",
@@ -10838,19 +10719,14 @@ fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "BlastFree expects at least 3 arguments: x, y, level",
-        ));
-    }
     if args.len() > 4 {
         return Err(RuntimeError::new(
             "BlastFree expects at most 4 arguments: x, y, level, caused_by",
         ));
     }
 
-    let mut x = value_to_i32(&args[0], "BlastFree", "x")?;
-    let mut y = value_to_i32(&args[1], "BlastFree", "y")?;
+    let mut x = value_to_i32(args.first().unwrap_or(&Value::Nil), "BlastFree", "x")?;
+    let mut y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "BlastFree", "y")?;
     let level = value_to_i32(&args[2], "BlastFree", "level")?;
     if level <= 0 {
         return Ok(Value::Bool(false));
@@ -10903,19 +10779,14 @@ fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "ShakeFree expects at least 3 arguments: x, y, radius",
-        ));
-    }
     if args.len() > 3 {
         return Err(RuntimeError::new(
             "ShakeFree expects exactly 3 arguments: x, y, radius",
         ));
     }
 
-    let x = value_to_i32(&args[0], "ShakeFree", "x")?;
-    let y = value_to_i32(&args[1], "ShakeFree", "y")?;
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "ShakeFree", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ShakeFree", "y")?;
     let radius = value_to_i32(&args[2], "ShakeFree", "radius")?;
     if radius <= 0 {
         return Ok(Value::Bool(false));
@@ -10935,15 +10806,9 @@ fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "DigFree expects at least 3 arguments: x, y, radius",
-        ));
-    }
-
-    let x = value_to_i32(&args[0], "DigFree", "x")?;
-    let y = value_to_i32(&args[1], "DigFree", "y")?;
-    let radius = value_to_i32(&args[2], "DigFree", "radius")?;
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "DigFree", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "DigFree", "y")?;
+    let radius = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "DigFree", "radius")?;
     if radius < 0 {
         return Ok(Value::Bool(false));
     }
@@ -11017,16 +10882,10 @@ fn free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 4 {
-        return Err(RuntimeError::new(
-            "DigFreeRect expects at least 4 arguments: x, y, width, height",
-        ));
-    }
-
-    let x = value_to_i32(&args[0], "DigFreeRect", "x")?;
-    let y = value_to_i32(&args[1], "DigFreeRect", "y")?;
-    let width = value_to_i32(&args[2], "DigFreeRect", "width")?;
-    let height = value_to_i32(&args[3], "DigFreeRect", "height")?;
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "DigFreeRect", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "DigFreeRect", "y")?;
+    let width = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "DigFreeRect", "width")?;
+    let height = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "DigFreeRect", "height")?;
     if width <= 0 || height <= 0 {
         return Ok(Value::Bool(false));
     }
@@ -12066,15 +11925,10 @@ fn collect_closest_matches(world: &impl WorldAccessor, params: &FindObjectParams
 }
 
 fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetDir expects at least 1 argument: direction",
-        ));
-    }
-
-    let raw_direction = match &args[0] {
+    // Unfilled ndir is nil -> 0 = DIR_Left (FnSetDir, C4Script.cpp:798).
+    let raw_direction = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
-        Value::Nil => return Ok(Value::Bool(false)),
+        Value::Nil => 0,
         other => {
             return Err(RuntimeError::new(format!(
                 "SetDir: expected int or nil for direction, got {}",
@@ -12237,13 +12091,8 @@ fn get_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_r(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetR expects at least 1 argument: rotation",
-        ));
-    }
-
-    let rotation = value_to_i32(&args[0], "SetR", "rotation")?;
+    // Unfilled nr is nil -> 0 (FnSetR, C4Script.cpp:737).
+    let rotation = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetR", "rotation")?;
 
     let mut index = 1;
     let mut target_id: Option<ObjectId> = None;
@@ -12316,15 +12165,11 @@ fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetComDir expects at least 1 argument: command direction",
-        ));
-    }
-
-    let raw_direction = match &args[0] {
+    // Unfilled ncomdir is nil -> 0 = COMD_Stop (FnSetComDir,
+    // C4Script.cpp:791, C4Object.h:56-57).
+    let raw_direction = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
-        Value::Nil => return Ok(Value::Bool(false)),
+        Value::Nil => 0,
         other => {
             return Err(RuntimeError::new(format!(
                 "SetComDir: expected int or nil for command direction, got {}",
@@ -12420,9 +12265,8 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
         args = &args[1..];
     }
     if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetCommand expects at least 1 argument: command name",
-        ));
+        // C++ FnSetCommand: !szCommand -> false (C4Script.cpp:843-899).
+        return Ok(Value::Bool(false));
     }
     if let Some(target) = leading_target {
         if active_object_id() != Some(target) {
@@ -12489,9 +12333,8 @@ fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
         args = &args[1..];
     }
     if args.is_empty() {
-        return Err(RuntimeError::new(
-            "AddCommand expects at least 1 argument: command name",
-        ));
+        // C++ FnAddCommand: !szCommand -> false (C4Script.cpp:843-899).
+        return Ok(Value::Bool(false));
     }
 
     let command_name = match &args[0] {
@@ -12554,9 +12397,8 @@ fn append_command(args: &[Value]) -> Result<Value, RuntimeError> {
         args = &args[1..];
     }
     if args.is_empty() {
-        return Err(RuntimeError::new(
-            "AppendCommand expects at least 1 argument: command name",
-        ));
+        // C++ FnAppendCommand: !szCommand -> false (C4Script.cpp:843-899).
+        return Ok(Value::Bool(false));
     }
     if let Some(target) = leading_target {
         if active_object_id() != Some(target) {
@@ -12847,14 +12689,13 @@ fn set_velocity_component(
     args: &[Value],
     component: VelocityComponent,
 ) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(format!(
-            "{} expects at least 1 argument: value",
-            component.set_function_name()
-        )));
-    }
-
-    let value = value_to_i32(&args[0], component.set_function_name(), "value")?;
+    // Unfilled parameter slots are nil -> 0 (C4AulExec parameter filling):
+    // a bare FnSetXDir()/FnSetYDir() zeroes the dir (C4Script.cpp:697-708).
+    let value = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        component.set_function_name(),
+        "value",
+    )?;
     let mut index = 1;
     let mut target_id: Option<ObjectId> = None;
 
@@ -12934,13 +12775,9 @@ fn set_y_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 fn set_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     // C++ FnSetRDir(value, [target], [precision = 10]) sets rdir = itofix(value,
     // precision), a fractional `C4Fixed` angular velocity. `C4Script.cpp:710`.
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetRDir expects at least 1 argument: value",
-        ));
-    }
-
-    let value = value_to_i32(&args[0], "SetRDir", "value")?;
+    // Unfilled parameter slots are nil -> 0 (C4AulExec parameter filling): a
+    // bare FnSetRDir() zeroes the spin (the dragon's Jumping/StopFlying).
+    let value = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetRDir", "value")?;
     let mut index = 1;
     let mut target_id: Option<ObjectId> = None;
     if let Some(arg) = args.get(index) {
@@ -13174,14 +13011,9 @@ fn apply_position_bounds(
 }
 
 fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "SetPosition expects at least 2 arguments: x, y",
-        ));
-    }
-
-    let x = value_to_i32(&args[0], "SetPosition", "x")?;
-    let y = value_to_i32(&args[1], "SetPosition", "y")?;
+    // Unfilled iX/iY are nil -> 0 (FnSetPosition, C4Script.cpp:462).
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetPosition", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetPosition", "y")?;
 
     let mut index = 2;
     let mut target_id: Option<ObjectId> = None;
@@ -13248,15 +13080,9 @@ fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "CreateObject expects at least 1 argument: definition",
-        ));
-    }
-
     // FnCreateObject takes a C4ID (C4Script.cpp:1892); our resources address
     // definitions by their id string, so id values and strings coincide.
-    let definition = match &args[0] {
+    let definition = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
         Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => return Ok(Value::Nil),
         other => {
@@ -13481,16 +13307,10 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "CreateConstruction expects at least 1 argument: definition",
-        ));
-    }
-
     // FnCreateConstruction takes a C4ID (C4Script.cpp:1911-1912); our
     // resources address definitions by their id string, so id values and
     // strings coincide.
-    let definition = match &args[0] {
+    let definition = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
         Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => return Ok(Value::Nil),
         other => {
@@ -13844,13 +13664,7 @@ fn rectangles_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool 
 }
 
 fn create_particle(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "CreateParticle expects at least 1 argument: name",
-        ));
-    }
-
-    let definition = match &args[0] {
+    let definition = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) if !name.is_empty() => name.clone(),
         Value::String(_) | Value::Nil => return Ok(Value::Bool(false)),
         other => {
@@ -14345,13 +14159,8 @@ fn contents_count(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn find_contents(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "FindContents expects at least 1 argument: definition",
-        ));
-    }
-
-    let definition = parse_definition_argument(Some(&args[0]), "FindContents")?;
+    let definition =
+        parse_definition_argument(Some(args.first().unwrap_or(&Value::Nil)), "FindContents")?;
     let Some(definition) = definition else {
         return Ok(Value::Nil);
     };
@@ -14399,13 +14208,10 @@ fn find_contents(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn find_other_contents(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "FindOtherContents expects at least 1 argument: definition",
-        ));
-    }
-
-    let definition = parse_definition_argument(Some(&args[0]), "FindOtherContents")?;
+    let definition = parse_definition_argument(
+        Some(args.first().unwrap_or(&Value::Nil)),
+        "FindOtherContents",
+    )?;
     let target_id = parse_object_reference_argument(
         args.get(1).unwrap_or(&Value::Nil),
         "FindOtherContents",
@@ -14493,13 +14299,9 @@ fn get_ocf(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetGraphics expects at least 1 argument: graphics name",
-        ));
-    }
-
-    let graphics_name = match &args[0] {
+    // A null pGfxName restores the DEFAULT graphics (FnSetGraphics,
+    // C4Script.cpp:4378).
+    let graphics_name = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) if !name.is_empty() => Some(name.clone()),
         Value::String(_) | Value::Nil => None,
         // Falsy parameters reset to nil before the type check
@@ -14715,37 +14517,27 @@ fn parse_draw_transform_components(
     args: &[Value],
     function: &str,
 ) -> Result<[i32; 6], RuntimeError> {
-    if args.len() < 6 {
-        return Err(RuntimeError::new(format!(
-            "{function} expects at least 6 arguments: a, b, c, d, e, f"
-        )));
-    }
     Ok([
-        value_to_i32(&args[0], function, "a")?,
-        value_to_i32(&args[1], function, "b")?,
-        value_to_i32(&args[2], function, "c")?,
-        value_to_i32(&args[3], function, "d")?,
-        value_to_i32(&args[4], function, "e")?,
-        value_to_i32(&args[5], function, "f")?,
+        value_to_i32(args.first().unwrap_or(&Value::Nil), function, "a")?,
+        value_to_i32(args.get(1).unwrap_or(&Value::Nil), function, "b")?,
+        value_to_i32(args.get(2).unwrap_or(&Value::Nil), function, "c")?,
+        value_to_i32(args.get(3).unwrap_or(&Value::Nil), function, "d")?,
+        value_to_i32(args.get(4).unwrap_or(&Value::Nil), function, "e")?,
+        value_to_i32(args.get(5).unwrap_or(&Value::Nil), function, "f")?,
     ])
 }
 
 fn parse_draw_transform_matrix(args: &[Value], function: &str) -> Result<[i32; 9], RuntimeError> {
-    if args.len() < 9 {
-        return Err(RuntimeError::new(format!(
-            "{function} expects at least 9 arguments: a, b, c, d, e, f, g, h, i"
-        )));
-    }
     Ok([
-        value_to_i32(&args[0], function, "a")?,
-        value_to_i32(&args[1], function, "b")?,
-        value_to_i32(&args[2], function, "c")?,
-        value_to_i32(&args[3], function, "d")?,
-        value_to_i32(&args[4], function, "e")?,
-        value_to_i32(&args[5], function, "f")?,
-        value_to_i32(&args[6], function, "g")?,
-        value_to_i32(&args[7], function, "h")?,
-        value_to_i32(&args[8], function, "i")?,
+        value_to_i32(args.first().unwrap_or(&Value::Nil), function, "a")?,
+        value_to_i32(args.get(1).unwrap_or(&Value::Nil), function, "b")?,
+        value_to_i32(args.get(2).unwrap_or(&Value::Nil), function, "c")?,
+        value_to_i32(args.get(3).unwrap_or(&Value::Nil), function, "d")?,
+        value_to_i32(args.get(4).unwrap_or(&Value::Nil), function, "e")?,
+        value_to_i32(args.get(5).unwrap_or(&Value::Nil), function, "f")?,
+        value_to_i32(args.get(6).unwrap_or(&Value::Nil), function, "g")?,
+        value_to_i32(args.get(7).unwrap_or(&Value::Nil), function, "h")?,
+        value_to_i32(args.get(8).unwrap_or(&Value::Nil), function, "i")?,
     ])
 }
 
@@ -15573,13 +15365,8 @@ fn act_idle(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetCategory expects at least 1 argument: category",
-        ));
-    }
-
-    let category = value_to_i32(&args[0], "SetCategory", "category")?;
+    // Unfilled iCategory is nil -> 0 (FnSetCategory, C4Script.cpp:805).
+    let category = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetCategory", "category")?;
 
     let mut index = 1;
     let mut target_id: Option<ObjectId> = None;
@@ -15616,14 +15403,10 @@ fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetOwner expects at least 1 argument: owner",
-        ));
-    }
-
-    let owner = match &args[0] {
+    // Unfilled iOwner is nil -> 0 (FnSetOwner, C4Script.cpp:820).
+    let owner = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
+        Value::Nil => 0,
         other => {
             return Err(RuntimeError::new(format!(
                 "SetOwner: expected int for owner, got {}",
@@ -15668,13 +15451,8 @@ fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_alive(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetAlive expects at least 1 argument: alive",
-        ));
-    }
-
-    let alive = match &args[0] {
+    // Unfilled nalv is nil -> false (FnSetAlive, C4Script.cpp:813).
+    let alive = match args.first().unwrap_or(&Value::Nil) {
         Value::Bool(flag) => *flag,
         Value::Int(value) => *value != 0,
         Value::Nil => false,
@@ -16177,15 +15955,11 @@ fn with_context_mut<R>(
 }
 
 fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetObjectStatus expects at least 1 argument: status",
-        ));
-    }
-
-    let status_value = match &args[0] {
+    // Unfilled iNewStatus is nil -> 0 = STATUS_Deleted rejection path
+    // (FnSetObjectStatus, C4Script.cpp:5416-5428).
+    let status_value = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
-        Value::Nil => return Ok(Value::Bool(false)),
+        Value::Nil => 0,
         other => {
             return Err(RuntimeError::new(format!(
                 "SetObjectStatus: expected int or nil for status, got {}",
@@ -22688,6 +22462,95 @@ mod tests {
             }
             other => panic!("expected PushBack operation, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn host_functions_fill_missing_parameters_like_the_cpp_vm() {
+        // C4AulExec fills unfilled parameter slots with nil; engine
+        // functions convert nil to 0/false/nullptr instead of failing
+        // (C4AulExec parameter filling + C4Value conversions). Each case
+        // mirrors the C++ Fn* result for an under-filled call.
+        // FnGetCrew(iPlr, index): missing index is 0 (C4Script.cpp:2798);
+        // SkiesOfFire's InitializePlayer calls GetCrew(iPlr).
+        let (result, _) = with_object_host_context(|| get_crew(&[Value::Int(0)]));
+        assert_eq!(result.expect("GetCrew tolerates 1 arg"), Value::Nil);
+
+        // FnSetAction(nullptr) -> false (C4Script.cpp:747-751).
+        let (result, _) = with_object_host_context(|| set_action(&[]));
+        assert_eq!(result.expect("SetAction() runs"), Value::Bool(false));
+
+        // FnMessage(nullptr) -> false (C4Script.cpp:2421-2424).
+        let (result, _) = with_object_host_context(|| message(&[]));
+        assert_eq!(result.expect("Message() runs"), Value::Bool(false));
+
+        // FnSetCommand: !szCommand -> false (C4Script.cpp:843-844).
+        let (result, _) = with_object_host_context(|| set_command(&[]));
+        assert_eq!(result.expect("SetCommand() runs"), Value::Bool(false));
+
+        // FnSetR(0 default) -> SetRotation(0) (C4Script.cpp:737-745); the
+        // scope dedupes the no-op write (rotation already 0), so only the
+        // success result is observable.
+        let (result, _) = with_object_host_context(|| set_r(&[]));
+        assert_eq!(result.expect("SetR() runs"), Value::Bool(true));
+
+        // The remaining int/bool-parameter wrappers accept bare calls
+        // (all C4ValueInt/bool slots: C4Script.cpp:462-828, 2290-3120,
+        // 5416, 5577).
+        for (name, result) in [
+            ("SetComDir", with_object_host_context(|| set_com_dir(&[])).0),
+            ("SetDir", with_object_host_context(|| set_dir(&[])).0),
+            ("SetPhase", with_object_host_context(|| set_phase(&[])).0),
+            ("DoEnergy", with_object_host_context(|| do_energy(&[])).0),
+            ("DoCon", with_object_host_context(|| do_con(&[])).0),
+            ("DoDamage", with_object_host_context(|| do_damage(&[])).0),
+            (
+                "SetPosition",
+                with_object_host_context(|| set_position(&[])).0,
+            ),
+            (
+                "SetActionData",
+                with_object_host_context(|| set_action_data(&[])).0,
+            ),
+            (
+                "SetCategory",
+                with_object_host_context(|| set_category(&[])).0,
+            ),
+            ("SetOwner", with_object_host_context(|| set_owner(&[])).0),
+            ("SetAlive", with_object_host_context(|| set_alive(&[])).0),
+            (
+                "GetPlayerName",
+                with_object_host_context(|| get_player_name(&[])).0,
+            ),
+            ("GetWealth", with_object_host_context(|| get_wealth(&[])).0),
+            (
+                "GetCrewCount",
+                with_object_host_context(|| get_crew_count(&[])).0,
+            ),
+            ("AddCommand", with_object_host_context(|| add_command(&[])).0),
+            (
+                "AppendCommand",
+                with_object_host_context(|| append_command(&[])).0,
+            ),
+        ] {
+            assert!(result.is_ok(), "{name}() must not error: {result:?}");
+        }
+    }
+
+    #[test]
+    fn set_dir_functions_default_missing_arguments_to_zero() {
+        // Unfilled C4ValueInt parameters are nil -> 0 (C4AulExec.cpp
+        // parameter filling): FnSetRDir()/FnSetXDir() zero the dir and
+        // still mobilize (C4Script.cpp:697-732). The dragon stops itself
+        // with bare SetRDir()/SetXDir() calls (Fantasy.c4d Dragon.c4d
+        // Script.c:689).
+        let (result, outcome) = with_object_host_context(|| {
+            set_r_dir(&[])?;
+            set_x_dir(&[])
+        });
+        assert_eq!(result.expect("bare SetXDir succeeds"), Value::Bool(true));
+        let update = outcome.object_update.expect("velocity update recorded");
+        assert_eq!(update.rotation_velocity, Some(C4Fixed::ZERO));
+        assert_eq!(update.fixed_velocity_x, Some(C4Fixed::ZERO));
     }
 
     #[test]
