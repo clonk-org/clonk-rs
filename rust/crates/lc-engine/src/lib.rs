@@ -150,9 +150,10 @@ use lc_resources::definition::{
     ActionFacet as ResourceActionFacet, TargetRect as ResourceTargetRect,
 };
 use lc_resources::{
-    ActionDefinition as ResourceActionDefinition, PhysicalInfo, PictureRect as ResourcePictureRect,
+    ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
     ResourceDefinition as ResourceDefinitionData, C4_MAX_PHYSICAL,
 };
+pub use lc_resources::PhysicalInfo;
 pub use lc_script::ScriptError;
 
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, Value};
@@ -11012,7 +11013,11 @@ impl Engine {
         if self.players.contains_key(&id) {
             return Err(EngineError::PlayerAlreadyExists(id));
         }
-        let player = config.build();
+        let mut player = config.build();
+        // C4Player::InitControl flashes both markers at the join
+        // (C4Player.cpp:1747).
+        player.control.select_flash = 30;
+        player.control.cursor_flash = 30;
         self.players.insert(id, player);
         self.players_registered = true;
         self.sync_player_cursor(id);
@@ -12286,6 +12291,11 @@ impl Engine {
         for id in validated {
             selection.select(id);
         }
+        // Crew selection flashes the select marks (C4Player::SelectCrew,
+        // C4Player.cpp:1846 / SelectSingleByCursor, :1317).
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.control.select_flash = 30;
+        }
         self.sync_player_cursor(owner);
         Ok(())
     }
@@ -12346,6 +12356,11 @@ impl Engine {
                 let selection = self.crew_selection.entry(owner).or_default();
                 selection.select(id);
                 selection.set_cursor(Some(id));
+                // Cursor changes flash the cursor arrow (C4Player::SetCursor
+                // with fSelectArrow, C4Player.cpp:1836-1845).
+                if let Some(player) = self.players.get_mut(&owner) {
+                    player.control.cursor_flash = 30;
+                }
             }
             None => {
                 if let Some(selection) = self.crew_selection.get_mut(&owner) {
@@ -13753,6 +13768,7 @@ impl Engine {
                         })
                     },
                     shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
+                    shape: self.object_shape_rect(object),
                     status: object.state.status,
                     destroyed: object.destroyed,
                     category: object.state.category,
@@ -14667,6 +14683,7 @@ impl Engine {
                         .current_shape_rect()
                         .map(|rect| rect.y)
                         .unwrap_or(0),
+                    shape: self.object_shape_rect(&self.objects[idx]),
                     status: self.objects[idx].state.status,
                     destroyed: self.objects[idx].destroyed,
                     category: self.objects[idx].state.category,

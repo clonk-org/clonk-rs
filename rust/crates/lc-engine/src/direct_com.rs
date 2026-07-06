@@ -119,6 +119,11 @@ impl Engine {
     /// Cursor-object menu conversion (`Cursor->Menu->ConvertCom`, :1503-1508)
     /// is handled by the app-side object menu before events reach the engine.
     pub fn player_in_com(&mut self, owner: i32, com: u8, data: i32) -> Result<(), EngineError> {
+        // Coms for unknown players are dropped like C4Game control routing
+        // does when Players.Get fails.
+        if !self.players.contains_key(&owner) {
+            return Ok(());
+        }
         if com == COM_CLEAR_PRESSED_COMS {
             let player = self.player_mut(owner)?;
             player.control.pressed_coms = 0;
@@ -1394,11 +1399,13 @@ mod tests {
         let mut definition = Definition::from_script(id, id, script).expect("script compiles");
         definition.configure_actions(Some("Walk".to_string()), clonk_actions());
         definition.set_movement_profile(MovementProfile::default());
-        let mut physical = PhysicalInfo::default();
-        physical.walk = 70_000;
-        physical.jump = 40_000;
-        physical.dig = 40_000;
-        physical.can_dig = 1;
+        let physical = PhysicalInfo {
+            walk: 70_000,
+            jump: 40_000,
+            dig: 40_000,
+            can_dig: 1,
+            ..Default::default()
+        };
         definition.set_physical(physical);
         engine.register_definition(definition).expect("register");
     }
