@@ -10,12 +10,10 @@ use crate::command::{CommandId, CommandMode, CommandOperation, CommandRequest};
 use crate::compat;
 use crate::control::{
     COM_CLEAR_PRESSED_COMS, COM_CONTENTS, COM_CURSOR_FIRST, COM_CURSOR_LAST, COM_CURSOR_LEFT,
-    COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE,
-    COM_MENU_DOWN, COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_FIRST, COM_MENU_LAST,
-    COM_MENU_LEFT, COM_MENU_NAVIGATION1, COM_MENU_NAVIGATION2, COM_MENU_RIGHT, COM_MENU_SELECT,
-    COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_NONE, COM_RELEASE_FIRST, COM_RELEASE_LAST,
-    COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
-    COM_WHEEL_DOWN, COM_WHEEL_UP,
+    COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_FIRST,
+    COM_MENU_LAST, COM_MENU_NAVIGATION1, COM_MENU_NAVIGATION2, COM_NONE, COM_RELEASE_FIRST,
+    COM_RELEASE_LAST, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2,
+    COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP,
 };
 use crate::math::itofix;
 use crate::{
@@ -246,16 +244,10 @@ impl Engine {
             // Crew cycling (C4Player.cpp:1481-1484) is frontend-handled.
             return Ok(());
         }
-        match com {
-            COM_MENU_ENTER | COM_MENU_ENTER_ALL | COM_MENU_CLOSE | COM_MENU_SHOW_TEXT
-            | COM_MENU_LEFT | COM_MENU_RIGHT | COM_MENU_UP | COM_MENU_DOWN | COM_MENU_SELECT => {
-                // Object menus live in the app layer; menu coms that reach
-                // the engine are leftovers and get swallowed in
-                // object_direct_com like C4Object.cpp:3356-3357.
-                self.player_object_com(owner, com, data)
-            }
-            _ => self.player_object_com(owner, com, data),
-        }
+        // Everything else routes to the cursor object (C4Player.cpp:1486);
+        // menu-com leftovers get swallowed in object_direct_com like
+        // C4Object.cpp:3356-3357 (object menus live in the app layer).
+        self.player_object_com(owner, com, data)
     }
 
     /// `C4Player::ObjectCom` (C4Player.cpp:1368-1390): route the com to the
