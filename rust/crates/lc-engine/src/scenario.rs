@@ -7705,6 +7705,300 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn goldrush_bandit_order_defend_chain_loads_rifle_like_cpp() {
+        // The GoldRush f30 wall: a bandit armed by FxAIBanditNoMoveStart
+        // (Goldrush.c4s/Locals.c4d/AI.c4d/Script.c:97-107 — ContextDefend
+        // + CreateContents AMBO,AMBO,WINC) must reload at the FIRST
+        // OrderDefend timer tick: FxOrderDefendTimer -> ExecuteWatch
+        // (Cowboy.c4d/Script.c:641-703) -> WINC::ControlThrow
+        // (Winchester.c4d/Script.c:7-31) -> FireRifle (Cowboy:436-456) ->
+        // CheckAmmo (Winchester:289-299) -> LoadRifle (Cowboy:499-504);
+        // the rifle removes itself and leaves a WCHR crosshair. The
+        // fixture distills those scripts with the content call forms.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "global func Initialize(state, random) {\n\
+                 var obj = CreateObject(GOOD, 50, 50, -1);\n\
+                 obj->Boot();\n\
+                 return nil;\n\
+             }\n",
+        );
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/ActMap.txt"),
+            "[Action]\nName=Walk\nProcedure=NONE\nDirections=2\nFlipDir=1\nLength=16\nDelay=15\nNextAction=Walk\n\n\
+             [Action]\nName=AimRifle\nProcedure=NONE\nDirections=2\nFlipDir=1\nLength=10\nDelay=0\nNextAction=Hold\n\n\
+             [Action]\nName=LoadRifle\nProcedure=NONE\nDirections=2\nFlipDir=1\nLength=10\nDelay=3\nEndCall=AimAgain\n",
+        )
+        .expect("write bandit actmap");
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            r#"#strict
+local iOwner;
+local idWeapon;
+local iRifleAmmo;
+local iAimPhase;
+local pOrdrTarget;
+local ordrData1, ordrData2;
+
+public func Boot() {
+  SetAction("Walk");
+  ContextDefend();
+  CreateContents(AMBO);
+  CreateContents(AMBO);
+  CreateContents(WINC);
+  iOwner = -2;
+  return(1);
+}
+
+public func ContextDefend()
+{
+  if(GetEffect("Order*", this())) RemoveEffect("Order*", this());
+  ordrData1 = GetX(); ordrData2 = GetY();
+  AddEffect("OrderDefend", this(), 1, 30, this());
+  return(1);
+}
+
+func FxOrderDefendTimer(pThis, iNumber)
+{
+  var iDx=Abs(GetX()-ordrData1), iDy=Abs(GetY()-ordrData2);
+  if (!pOrdrTarget)
+    if (iDx>20 || iDy>50)
+      return(SetCommand(this(),"MoveTo",0,ordrData1,ordrData2));
+  if (iDx>150 || iDy>150)
+    return(1, pOrdrTarget=0);
+  pOrdrTarget=FindEnemyUnit();
+  if (!pOrdrTarget) return(ExecuteWatch());
+  if (ObjectDistance(pOrdrTarget) > 350) return(ExecuteWatch());
+  return(1);
+}
+
+private func FindEnemyUnit()
+{
+  // The real Hostile/GetOwner overrides live in the Goldrush AI.c4d
+  // appendto; the fixture pins the no-enemy watch path.
+  return(0);
+}
+
+private func ExecuteWatch()
+{
+  var pWeapon;
+  if(GetCartridgeCount())
+  {
+    if(pWeapon = FindContents(WINC)) pWeapon->ControlThrow(this());
+    if(idWeapon == WINC && !iRifleAmmo) return(LoadRifle());
+  }
+  if (Random(3)) return(1);
+  SetDir(Random(2));
+  return(1);
+}
+
+private func GetCartridgeCount() { return(GetSpecialCount("IsBullet")); }
+
+private func GetObjectCount(idObj)
+{
+  var idUnpackedObj;
+  if (idUnpackedObj = idObj->~UnpackTo())
+    return(GetObjectCount(idUnpackedObj) * idObj->PackCount());
+  return(1);
+}
+
+private func GetSpecialCount(szTest)
+{
+  var iCnt, pObj;
+  for(var i = 0; pObj = Contents(i); i++)
+    if(ObjectCall(pObj, szTest))
+      iCnt++;
+  for(var i = 0; pObj = Contents(i); i++)
+    if(pObj->~UnpackTo())
+      if(DefinitionCall(pObj->~UnpackTo(), szTest))
+        iCnt += GetObjectCount(pObj);
+  return(iCnt);
+}
+
+public func FireRifle()
+{
+  if (!Contents()->~IsRifle()) return(0);
+  if (GetAction() eq "Walk")
+    if (SetAction("AimRifle"))
+      return(1, SetPhase(6));
+  return(0);
+}
+
+public func LoadRifle()
+{
+  if(GetAction() eq "AimRifle") { Sound("RifleLoad"); return(SetAction("LoadRifle")); }
+}
+
+protected func AimAgain() { return(1); }
+"#,
+        )
+        .expect("write bandit script");
+        let defs_root = dir.path().join("Defs.c4d");
+        for (id, defcore, script) in [
+            (
+                "Ammo.c4d",
+                "[DefCore]\nid=AMBO\nName=AmmoBox\nCategory=0\nCrewMember=0\n",
+                r#"#strict
+local iUsedItems;
+public func UnpackTo() { return(CSHO); }
+public func IsCartridgePack() { return(1); }
+public func MaxPackCount() { return(20); }
+public func PackCount() { return(MaxPackCount()-LocalN("iUsedItems")); }
+public func DoPackCount(iChange)
+{
+  iUsedItems-=iChange;
+  if(PackCount()<=0) return(RemoveObject());
+}
+public func GetItem()
+{
+  var obj = CreateContents(UnpackTo(), Contained());
+  DoPackCount(-1);
+  return(obj);
+}
+"#,
+            ),
+            (
+                "Shot.c4d",
+                "[DefCore]\nid=CSHO\nName=Shot\nCategory=0\nCrewMember=0\n",
+                "#strict\npublic func IsBullet() { return(1); }\n",
+            ),
+            (
+                "Crosshair.c4d",
+                "[DefCore]\nid=WCHR\nName=Crosshair\nCategory=0\nCrewMember=0\n",
+                "#strict\n",
+            ),
+            (
+                "Winchester.c4d",
+                "[DefCore]\nid=WINC\nName=Winchester\nCategory=0\nCrewMember=0\nCollectible=1\n",
+                r#"#strict
+public func IsRifle() { return(1); }
+public func ControlThrow(pClonk)
+{
+  if(!(pClonk->~FireRifle()))
+  {
+    if(!GetPlrDownDouble(pClonk->GetOwner()))
+      return(1);
+    else
+      return(0);
+  }
+  SetPhase(6, pClonk);
+  var pCross = CreateObject(WCHR, 0, 0, GetOwner(pClonk)); pCross->SetAction("Crosshair", pClonk);
+  Local(0,GetCrosshair(pClonk)) = 84;
+  WINC->ActualizePhase(pClonk);
+  LocalN("iRifleAmmo", pClonk) = ContentsCount();
+  while(Contents()) Enter(pCross, Contents());
+  LocalN("idWeapon",pClonk)=GetID();
+  if(!LocalN("iRifleAmmo", pClonk)) DefinitionCall(GetID(), "CheckAmmo", pClonk);
+  RemoveObject();
+  return(1);
+}
+protected func CheckAmmo(pClonk)
+{
+  if((GetAction(pClonk) ne "AimRifle") && (GetAction(pClonk) ne "RideAimRifle")) return(0);
+  if(!pClonk->~GetCartridgeCount()) return(Sound("RevolverNoAmmo", 0, pClonk));
+  LocalN("iAimPhase", pClonk)=GetPhase(pClonk);
+  pClonk->~LoadRifle();
+}
+public func GetCrosshair(pClonk)
+{
+  return(FindObject(WCHR, 0, 0, 0, 0, 0, "Crosshair", pClonk));
+}
+public func ActualizePhase(pClonk)
+{
+  var iDir = GetDir(pClonk)*2-1;
+  var iAngle = Local(0,GetCrosshair(pClonk));
+  var pObj = FindObject(WCHR,0,0,0,0,0,"Crosshair",pClonk);
+  SetVertexXY(0,-Sin(iAngle,40)*iDir,Cos(iAngle,40),pObj);
+  if(!WildcardMatch(GetAction(pClonk),"*Aim*")) return(1);
+  if(iAngle< 90) SetPhase(6,pClonk);
+  return(1);
+}
+"#,
+            ),
+        ] {
+            let def_dir = defs_root.join(id);
+            std::fs::create_dir_all(&def_dir).expect("def dir");
+            std::fs::write(def_dir.join("DefCore.txt"), defcore).expect("defcore");
+            std::fs::write(def_dir.join("Script.c"), script).expect("script");
+        }
+        // WCHR needs its Crosshair action for SetAction (content ActMap).
+        std::fs::write(
+            defs_root.join("Crosshair.c4d/ActMap.txt"),
+            "[Action]\nName=Crosshair\nProcedure=ATTACH\nLength=1\nDelay=1\nNextAction=Crosshair\n",
+        )
+        .expect("crosshair actmap");
+
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        // The live game installs planet/System.c4g before the scenario;
+        // WINC::ActualizePhase needs its SetVertexXY helper
+        // (planet/System.c4g/Commits.c:68-76).
+        engine.install_global_scripts(&[(
+            "Commits.c".to_string(),
+            "#strict\n\
+             global func SetVertexXY(int index, int x, int y, object obj) {\n\
+               if (!obj && !this()) return(0);\n\
+               if (!SetVertex(index, 0, x, obj)) return(0);\n\
+               if (!SetVertex(index, 1, y, obj)) return(0);\n\
+               return(1);\n\
+             }\n"
+                .to_string(),
+        )]);
+        // The OrderDefend effect (interval 30) first fires 30 execs after
+        // the scenario-apply Boot (C4Effect::Execute iTime % iIntervall,
+        // C4Effect.cpp:340-345).
+        for _ in 0..31 {
+            engine.tick().expect("tick");
+        }
+        let snapshot = engine.snapshot();
+        let bandit = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GOOD")
+            .expect("bandit exists");
+        assert_eq!(
+            bandit.action.name, "LoadRifle",
+            "the first OrderDefend tick walks the whole load chain \
+             (cpp GoldRush f30: bandits enter LoadRifle)"
+        );
+        assert_eq!(
+            bandit.local_vars.get("idWeapon"),
+            Some(&lc_script::Value::C4Id("WINC".into())),
+            "ControlThrow recorded the weapon id on the clonk \
+             (Winchester.c4d/Script.c:25)"
+        );
+        assert_eq!(
+            bandit.local_vars.get("iRifleAmmo"),
+            Some(&lc_script::Value::Int(0)),
+            "the empty rifle left iRifleAmmo=0 (Winchester:22)"
+        );
+        assert_eq!(
+            bandit.local_vars.get("iAimPhase"),
+            Some(&lc_script::Value::Int(6)),
+            "CheckAmmo stored the aim phase before reloading \
+             (Winchester:297, FireRifle set phase 6)"
+        );
+        assert_eq!(
+            snapshot
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "WCHR")
+                .count(),
+            1,
+            "ControlThrow created the crosshair (Winchester:18)"
+        );
+        assert!(
+            !snapshot
+                .objects
+                .iter()
+                .any(|object| object.definition_id == "WINC"),
+            "the rifle removed itself at the end of ControlThrow \
+             (Winchester:29 - cpp removes the bandits' rifles at f30)"
+        );
+    }
+
+    #[test]
     fn namespaced_object_calls_run_the_named_defs_function_on_the_target() {
         // `obj->ID::Func(...)` (AB_CALLNS, C4AulParse.cpp:3160-3245):
         // the function resolves in def ID's script at parse time and runs
