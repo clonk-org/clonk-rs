@@ -625,6 +625,10 @@ pub struct JoinPlayerConfig {
     pub pref_position: i32,
     /// The crew roster from the player file (C4Player::CrewInfoList).
     pub crew: Vec<player_file::CrewInfo>,
+    /// `PrefControlStyle` (AutoStopControl): Jump'n'Run control when true
+    /// (C4Player::InitControl, C4Player.cpp:2371-2380; the scenario
+    /// ForcedControlStyle head override is not parsed yet).
+    pub control_style: bool,
     /// `Game.Parameters.StartupPlayerCount` — gates the standard-position
     /// distribution (C4Player.cpp:719).
     pub startup_player_count: i32,
@@ -10247,7 +10251,12 @@ impl Engine {
         if config.team.is_some() {
             player_config = player_config.with_team(config.team);
         }
-        let player = player_config.with_color(Some(color)).build();
+        let mut player = player_config.with_color(Some(color)).build();
+        // C4Player::InitControl (C4Player.cpp:1747, 2371-2380): flash both
+        // markers at the join and take the AutoStopControl preference.
+        player.control.select_flash = 30;
+        player.control.cursor_flash = 30;
+        player.control.control_style = config.control_style;
         self.players.insert(number, player);
         self.players_registered = true;
         self.crew_rosters.insert(number, config.crew.clone());

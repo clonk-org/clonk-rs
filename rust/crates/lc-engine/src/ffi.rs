@@ -483,17 +483,18 @@ impl RuntimeHandle {
                 None
             }
         };
-        let (file_name, file_color_dw, pref_color, pref_position, crew) = file
+        let (file_name, file_color_dw, pref_color, pref_position, control_style, crew) = file
             .map(|file| {
                 (
                     file.name,
                     file.pref_color_dw & 0xffffff,
                     file.pref_color,
                     file.pref_position,
+                    file.pref_control_style,
                     file.crew,
                 )
             })
-            .unwrap_or_else(|| ("Neuling".to_string(), 0xff, 0, 0, Vec::new()));
+            .unwrap_or_else(|| ("Neuling".to_string(), 0xff, 0, 0, false, Vec::new()));
 
         let name = info
             .as_ref()
@@ -521,6 +522,7 @@ impl RuntimeHandle {
                 pref_position,
                 crew,
                 startup_player_count,
+                control_style,
             })
             .map_err(|error| format!("join failed: {error}"))?;
         tracing::info!(

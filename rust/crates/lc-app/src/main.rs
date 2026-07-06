@@ -5170,6 +5170,9 @@ impl GameApp {
             pref_position: 0,
             crew: Vec::new(),
             startup_player_count: 1,
+            // AutoStopControl pref default 0 = classic control
+            // (C4InfoCore.cpp:84).
+            control_style: false,
         })?;
         self.local_owner = joined.number;
         Ok(())

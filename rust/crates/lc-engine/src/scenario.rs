@@ -7078,6 +7078,7 @@ global func Step(state, frame, random)
                 pref_position: 0,
                 crew: Vec::new(),
                 startup_player_count: 1,
+                control_style: false,
             })
             .expect("join succeeds");
         engine
@@ -7126,6 +7127,7 @@ global func Step(state, frame, random)
                     has_died: false,
                 }],
                 startup_player_count: 1,
+                control_style: false,
             })
             .expect("join succeeds");
 
@@ -7218,6 +7220,7 @@ global func Step(state, frame, random)
                 pref_position: 0,
                 crew: Vec::new(),
                 startup_player_count: 1,
+                control_style: false,
             })
             .expect("join succeeds");
         assert_eq!(joined.number, 0);
@@ -7789,6 +7792,7 @@ global func Step(state, frame, random)
                 pref_position: 0,
                 crew: Vec::new(),
                 startup_player_count: 1,
+                control_style: false,
             })
             .expect("join succeeds");
         assert_eq!(
@@ -7915,6 +7919,7 @@ global func Step(state, frame, random)
                 pref_position: 0,
                 crew: Vec::new(),
                 startup_player_count: 1,
+                control_style: false,
             })
             .expect("join succeeds");
         assert_eq!(engine.rng, replay, "draw ledger matches");
@@ -8074,6 +8079,7 @@ global func Step(state, frame, random)
                 pref_position: 0,
                 crew: Vec::new(),
                 startup_player_count: 1,
+                control_style: false,
             })
             .expect("join succeeds");
         let snapshot = engine.snapshot();
@@ -8255,6 +8261,7 @@ global func Step(state, frame, random)
                 pref_position: 0,
                 crew: Vec::new(),
                 startup_player_count: 1,
+                control_style: false,
             })
             .expect("the join itself succeeds");
         let lingering = engine
@@ -10571,6 +10578,7 @@ mod game_start_sync {
                 pref_position: 0,
                 crew: Vec::new(),
                 startup_player_count: 1,
+                control_style: false,
             })
             .expect("join succeeds");
 

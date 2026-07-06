@@ -72,6 +72,9 @@ pub struct PlayerFile {
     pub pref_color_dw: u32,
     /// `[Preferences] Position` — preferred start position (default 0).
     pub pref_position: i32,
+    /// `[Preferences] AutoStopControl` — PrefControlStyle: Jump'n'Run
+    /// control when 1 (C4InfoCore.cpp:170; default 0 = classic, :84).
+    pub pref_control_style: bool,
     /// Crew roster, `*.c4i` entries in group order then subfolder recursion
     /// (C4ObjectInfoList.cpp:56-83).
     pub crew: Vec<CrewInfo>,
@@ -112,6 +115,7 @@ impl PlayerFile {
                 .map(|value| value as u32)
                 .unwrap_or(0xff),
             pref_position: int("Preferences", "Position", 0),
+            pref_control_style: int("Preferences", "AutoStopControl", 0) != 0,
             crew,
         })
     }
@@ -209,7 +213,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("player dir");
         std::fs::write(
             root.join("Player.txt"),
-            "[Player]\nName=Tyler\nRank=3\n\n[Preferences]\nColor=4\nColorDw=12345678\nPosition=2\n",
+            "[Player]\nName=Tyler\nRank=3\n\n[Preferences]\nColor=4\nColorDw=12345678\nPosition=2\nAutoStopControl=1\n",
         )
         .expect("write core");
 
@@ -234,6 +238,10 @@ mod tests {
         assert_eq!(player.pref_color, 4);
         assert_eq!(player.pref_color_dw, 12345678);
         assert_eq!(player.pref_position, 2);
+        assert!(
+            player.pref_control_style,
+            "AutoStopControl=1 selects Jump'n'Run control (C4InfoCore.cpp:170)"
+        );
 
         assert_eq!(player.crew.len(), 2);
         let wipf = player
@@ -271,6 +279,10 @@ mod tests {
         assert_eq!(player.pref_color, 0);
         assert_eq!(player.pref_color_dw, 0xff);
         assert_eq!(player.pref_position, 0);
+        assert!(
+            !player.pref_control_style,
+            "AutoStopControl defaults to 0 = classic (C4InfoCore.cpp:84)"
+        );
         assert!(player.crew.is_empty());
     }
 }
