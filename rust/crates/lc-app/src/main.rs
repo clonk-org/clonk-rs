@@ -1103,10 +1103,15 @@ fn run_integration_test(
         path: Some(scenario_path.to_path_buf()),
         root_label: None,
         preview: None,
+        title_picture: None,
         children: Vec::new(),
         folder_index: None,
         icon_index: None,
         difficulty: None,
+        author: None,
+        version: None,
+        local_only: None,
+        allow_user_change: None,
     };
 
     println!("Starting scenario: {}", scenario.title);
@@ -3532,10 +3537,21 @@ struct FrontendScenario {
     path: Option<PathBuf>,
     root_label: Option<String>,
     preview: Option<ImageData>,
+    /// Right-page Title.png/Title.bmp picture (C4ScenarioListLoader::Entry
+    /// fctTitle); unlike `preview` this never falls back to Loader/Icon art.
+    title_picture: Option<ImageData>,
     children: Vec<FrontendScenario>,
     folder_index: Option<i32>,
     icon_index: Option<i32>,
     difficulty: Option<i32>,
+    /// Author of packed groups (C4StartupScenSelDlg.cpp:536-552).
+    author: Option<String>,
+    /// Version.txt contents (C4StartupScenSelDlg.cpp:554).
+    version: Option<String>,
+    /// Scenario.txt [Definitions] LocalOnly (C4Scenario.cpp:482).
+    local_only: Option<bool>,
+    /// Scenario.txt [Definitions] AllowUserChange (C4Scenario.cpp:483).
+    allow_user_change: Option<bool>,
 }
 
 impl FrontendScenario {
@@ -3566,10 +3582,15 @@ impl FrontendScenario {
             is_editable,
             is_playable,
             preview,
+            title_picture,
             children,
             folder_index,
             icon_index,
             difficulty,
+            author,
+            version,
+            local_only,
+            allow_user_change,
         } = entry;
 
         let kind = match kind {
@@ -3583,10 +3604,12 @@ impl FrontendScenario {
             .map(|child| FrontendScenario::from_resource(child, root_label))
             .collect();
 
-        let preview = preview.map(|preview| {
+        let to_image = |preview: resource_scenario::ScenarioPreview| {
             let (width, height, pixels) = preview.into_arc();
             ImageData::from_arc(width, height, pixels)
-        });
+        };
+        let preview = preview.map(to_image);
+        let title_picture = title_picture.map(to_image);
 
         Self {
             identifier,
@@ -3598,10 +3621,15 @@ impl FrontendScenario {
             path: Some(path),
             root_label: Some(root_label.to_string()),
             preview,
+            title_picture,
             children,
             folder_index,
             icon_index,
             difficulty,
+            author,
+            version,
+            local_only,
+            allow_user_change,
         }
     }
 
@@ -3645,10 +3673,15 @@ impl FrontendScenario {
                 ScenarioKind::Scenario,
                 FALLBACK_SCENARIO_TITLE,
             )),
+            title_picture: None,
             children: Vec::new(),
             folder_index: None,
             icon_index: None,
             difficulty: None,
+            author: None,
+            version: None,
+            local_only: None,
+            allow_user_change: None,
         }
     }
 }
@@ -3717,6 +3750,21 @@ fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenar
     }
     if existing.difficulty.is_none() {
         existing.difficulty = incoming.difficulty;
+    }
+    if existing.title_picture.is_none() {
+        existing.title_picture = incoming.title_picture.take();
+    }
+    if existing.author.is_none() {
+        existing.author = incoming.author.take();
+    }
+    if existing.version.is_none() {
+        existing.version = incoming.version.take();
+    }
+    if existing.local_only.is_none() {
+        existing.local_only = incoming.local_only;
+    }
+    if existing.allow_user_change.is_none() {
+        existing.allow_user_change = incoming.allow_user_change;
     }
 }
 
@@ -4075,10 +4123,15 @@ impl SavedScenarioInfo {
                 ScenarioKind::Scenario,
                 &self.title,
             )),
+            title_picture: None,
             children: Vec::new(),
             folder_index: None,
             icon_index: None,
             difficulty: None,
+            author: None,
+            version: None,
+            local_only: None,
+            allow_user_change: None,
         }
     }
 }
@@ -10275,16 +10328,71 @@ fn find_definition_in_group(
     Ok(None)
 }
 
+/// Composes the language fallback sequence like the C++ frontend
+/// (C4StartupOptionsDlg::UpdateLanguage, C4StartupOptionsDlg.cpp:1211-1231):
+/// the configured codes (Config `LanguageEx`/`Language`, else the
+/// environment locale) followed by the internal "US"/"DE" fallbacks.
+fn startup_language_sequence(paths: Option<&AppPaths>) -> Vec<String> {
+    let mut codes: Vec<String> = Vec::new();
+    let push_code = |codes: &mut Vec<String>, segment: &str| {
+        let code: String = segment
+            .chars()
+            .filter(char::is_ascii_alphabetic)
+            .take(2)
+            .map(|ch| ch.to_ascii_uppercase())
+            .collect();
+        if code.len() == 2 && !codes.contains(&code) {
+            codes.push(code);
+        }
+    };
+
+    let config = paths.and_then(|paths| lc_core::std_config::Config::load(paths.config_file()).ok());
+    if let Some(config) = config.as_ref() {
+        if let Some(sequence) = config
+            .get_in(Some("General"), "LanguageEx")
+            .or_else(|| config.get("LanguageEx"))
+        {
+            for segment in sequence.split(',') {
+                push_code(&mut codes, segment);
+            }
+        }
+        if codes.is_empty() {
+            if let Some(primary) = config
+                .get_in(Some("General"), "Language")
+                .or_else(|| config.get("Language"))
+            {
+                push_code(&mut codes, primary);
+            }
+        }
+    }
+    if codes.is_empty() {
+        for key in ["LC_LANGUAGE", "LC_ALL", "LANG"] {
+            if let Ok(value) = std::env::var(key) {
+                push_code(&mut codes, &value);
+                if !codes.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+    // Internal fallbacks (C4StartupOptionsDlg.cpp:1221-1231).
+    for fallback in ["US", "DE"] {
+        push_code(&mut codes, fallback);
+    }
+    codes
+}
+
 fn load_frontend_scenarios() -> Vec<FrontendScenario> {
     match AppPaths::discover() {
         Ok(paths) => {
+            let languages = startup_language_sequence(Some(&paths));
             let roots = scenario_roots(&paths);
             let existing_roots: Vec<_> = roots.iter().filter(|root| root.path.exists()).collect();
             if !existing_roots.is_empty() {
                 let mut combined_entries: Vec<(resource_scenario::ScenarioEntry, String)> =
                     Vec::new();
                 for root in existing_roots {
-                    match resource_scenario::discover(&root.path) {
+                    match resource_scenario::discover_with_languages(&root.path, &languages) {
                         Ok(entries) => combined_entries
                             .extend(entries.into_iter().map(|entry| (entry, root.label.clone()))),
                         Err(err) => {
@@ -10792,9 +10900,14 @@ mod tests {
             root_label: None,
             preview: None,
             children: Vec::new(),
+            title_picture: None,
             folder_index: None,
             icon_index: None,
             difficulty: None,
+            author: None,
+            version: None,
+            local_only: None,
+            allow_user_change: None,
         };
         app.activate_loaded_scenario(frontend, scenario_data)
             .expect("scenario activates");
@@ -11175,9 +11288,14 @@ mod tests {
             root_label: None,
             preview: None,
             children: Vec::new(),
+            title_picture: None,
             folder_index: None,
             icon_index: None,
             difficulty: None,
+            author: None,
+            version: None,
+            local_only: None,
+            allow_user_change: None,
         };
 
         let folder = FrontendScenario {
@@ -11191,9 +11309,14 @@ mod tests {
             root_label: None,
             preview: None,
             children: vec![child],
+            title_picture: None,
             folder_index: None,
             icon_index: None,
             difficulty: None,
+            author: None,
+            version: None,
+            local_only: None,
+            allow_user_change: None,
         };
 
         vec![folder]
@@ -11425,9 +11548,14 @@ mod tests {
             root_label: Some("Scenarios".into()),
             preview: None,
             children: Vec::new(),
+            title_picture: None,
             folder_index: None,
             icon_index: None,
             difficulty: None,
+            author: None,
+            version: None,
+            local_only: None,
+            allow_user_change: None,
         };
         let info = SavedScenarioInfo::from_frontend(&original, "Label", 123);
         assert_eq!(info.identifier, original.identifier);
