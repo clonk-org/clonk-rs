@@ -7704,6 +7704,49 @@ global func Step(state, frame, random)
         );
     }
 
+    // FnGetPlrColorDw (C4Script.cpp:3658-3666): the joined player's
+    // resolved 24-bit ColorDw; a missing player reads nil. GoldRush's
+    // intro movie Talker colors its text with it.
+    #[test]
+    fn get_plr_color_dw_returns_the_joined_players_color() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "global func Initialize(state, random) { return nil; }\n",
+        );
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict\nlocal iColor;\n\
+             public func Probe(iPlr) {\n\
+                 iColor = GetPlrColorDw(iPlr);\n\
+                 return(1);\n\
+             }\n",
+        )
+        .expect("write probe script");
+
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        join_test_player(&mut engine);
+        let snapshot = engine.snapshot();
+        let object_id = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GOOD")
+            .expect("crew object exists")
+            .id;
+        let idx = engine.find_object_index(object_id).expect("object exists");
+        engine
+            .call_object_function(idx, "Probe", vec![lc_script::Value::Int(0)])
+            .expect("probe runs");
+        let idx = engine.find_object_index(object_id).expect("object exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iColor"),
+            Some(&lc_script::Value::Int(0xff0000)),
+            "the join color (join_test_player uses color_dw 0xff0000) \
+             comes back as C4Player::ColorDw"
+        );
+    }
+
     #[test]
     fn goldrush_bandit_order_defend_chain_loads_rifle_like_cpp() {
         // The GoldRush f30 wall: a bandit armed by FxAIBanditNoMoveStart

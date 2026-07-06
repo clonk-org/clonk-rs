@@ -39360,6 +39360,103 @@ func Selection(pFrom) { iSel = 1; return 1; }
         );
     }
 
+    // FnGetDamage (C4Script.cpp:1366-1370): `pObj->Damage` — the optional
+    // object parameter reads a FOREIGN object's damage; the GoldRush
+    // telegraph's Damage callback self-checks `GetDamage()>100`
+    // (Telegraph.c4d/Script.c:9) once bandit fire lands.
+    #[test]
+    fn get_damage_reads_own_and_foreign_damage_like_cpp() {
+        let script = r#"#strict
+local iOwn, iOther;
+public func Probe(pOther) {
+  DoDamage(7);
+  DoDamage(9, pOther);
+  iOwn = GetDamage();
+  iOther = GetDamage(pOther);
+  return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("Targ"))
+            .expect("target registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("Targ").with_category(CATEGORY_OBJECT))
+            .expect("target spawns");
+
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(idx, "Probe", vec![Value::Object(target.as_u64())])
+            .expect("probe runs");
+
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iOwn"),
+            Some(&Value::Int(7)),
+            "GetDamage() reads the caller's damage"
+        );
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iOther"),
+            Some(&Value::Int(9)),
+            "GetDamage(pObj) reads the foreign object's damage"
+        );
+    }
+
+    // FnEval (C4Script.cpp:4507-4520) -> C4AulScript::DirectExec
+    // (C4AulExec.cpp:1658-1707): the string parses as ONE expression
+    // (ParseFn fExprOnly, C4AulParse.cpp:1417-1424 — trailing text like a
+    // stray ';' is ignored) and runs in the calling object's context.
+    // The planet Schedule() helper drives GoldRush's intro-movie end
+    // through it: FxIntScheduleTimer does eval(EffectVar(0, ...))
+    // (planet/System.c4g/Helpers.c:125-132).
+    #[test]
+    fn eval_direct_execs_an_expression_in_the_object_context_like_cpp() {
+        let script = r#"#strict
+local iGot, iSum;
+public func Poke() { iGot = 7; return(iGot); }
+public func Boot() {
+  iSum = eval("1+2");
+  eval("Poke();");
+  return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let idx = engine.find_object_index(id).expect("actor exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        let idx = engine.find_object_index(id).expect("actor exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iSum"),
+            Some(&Value::Int(3)),
+            "eval returns the expression value"
+        );
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iGot"),
+            Some(&Value::Int(7)),
+            "the eval'd call runs in the object's own context \
+             (cthr->Obj->Def->Script.DirectExec, C4Script.cpp:4514) — \
+             a trailing ';' is tolerated like ParseFn fExprOnly"
+        );
+    }
+
     // FnDoEnergy's pObj (C4Script.cpp:492-499): `if (!pObj) pObj = cthr->Obj`
     // is only the local-call default — a named FOREIGN target takes the
     // change (C4Object::DoEnergy percent scale, C4Object.cpp:1345-1365).
@@ -40227,6 +40324,51 @@ public func Poke(pClonk) {
 
         assert!(timer_calls >= 1);
         assert_eq!(stop_calls, 0);
+    }
+
+    // FnRemoveEffect's fDoNoCalls is a C++ bool parameter
+    // (C4Script.cpp:5493): C4Value converts ints freely, and CR content
+    // passes `1` — the GoldRush Talker's movie timer does
+    // RemoveEffect("Movie", ..., 0, 1).
+    #[test]
+    fn remove_effect_accepts_int_no_calls_flag_like_cpp() {
+        let script = r#"#strict
+local iStopped;
+public func Boot() { AddEffect("Pulse", this(), 1, 1, this()); return(1); }
+func FxPulseTimer(pThis, iNumber) {
+  RemoveEffect("Pulse", this(), 0, 1);
+  return(1);
+}
+func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
+"#;
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        for _ in 0..2 {
+            engine.tick().expect("tick");
+        }
+
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert!(
+            engine.objects[idx].state.effects.is_empty(),
+            "the int flag converts like C++ and the effect is removed"
+        );
+        assert_ne!(
+            engine.objects[idx].state.local_vars.get("iStopped"),
+            Some(&Value::Int(1)),
+            "a truthy no-calls flag skips FxPulseStop"
+        );
     }
 
     #[test]

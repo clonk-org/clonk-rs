@@ -4535,6 +4535,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetCon", get_con);
     script.register_host_function("DoCon", do_con);
     script.register_host_function("DoDamage", do_damage);
+    script.register_host_function("GetDamage", get_damage);
+    script.register_host_function("GetPlrColorDw", get_plr_color_dw);
     script.register_host_function("DoHomebaseMaterial", do_homebase_material);
     script.register_host_function("DoHomebaseProduction", do_homebase_production);
     script.register_host_function("Random", random);
@@ -6677,10 +6679,14 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
+    // `bool fDoNoCalls` (FnRemoveEffect, C4Script.cpp:5493): C4Value
+    // converts ints freely - CR content passes 1 (the Talker's movie
+    // timer).
     let mut no_callbacks = false;
     if let Some(flag) = args.get(3) {
         match flag {
             Value::Bool(value) => no_callbacks = *value,
+            Value::Int(value) => no_callbacks = *value != 0,
             Value::Nil => {}
             other => {
                 return Err(RuntimeError::new(format!(
@@ -8752,6 +8758,74 @@ fn do_con(args: &[Value]) -> Result<Value, RuntimeError> {
         let delta = construction_delta_from_percent(change_percent);
         object.adjust_construction(delta);
         Ok(Value::Bool(true))
+    })
+}
+
+/// FnGetDamage (C4Script.cpp:1366-1370): `pObj->Damage`, the optional
+/// object parameter defaulting to the caller.
+fn get_damage(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetDamage expects at most 1 argument: target",
+        ));
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.first() {
+        target_id = parse_object_reference_argument(arg, "GetDamage", "target")?;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if object.id() == target {
+                    return Ok(Value::Int(object.damage()));
+                }
+            }
+            if let Some(other) = context.get_world_object(target) {
+                return Ok(Value::Int(other.damage()));
+            }
+            return Ok(Value::Nil);
+        }
+
+        match context.object_context() {
+            Some(object) => Ok(Value::Int(object.damage())),
+            None => Ok(Value::Nil),
+        }
+    })
+}
+
+/// FnGetPlrColorDw (C4Script.cpp:3658-3666): the player's resolved
+/// C4Player::ColorDw; a missing player reads nil.
+fn get_plr_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetPlrColorDw expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetPlrColorDw", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Int(
+            player
+                .color
+                .map(|color| {
+                    ((color.r as i32) << 16) | ((color.g as i32) << 8) | color.b as i32
+                })
+                .unwrap_or(0),
+        ))
     })
 }
 
@@ -17086,6 +17160,7 @@ impl EffectHostContext {
             object.action_target = scope.current_action_target;
             object.action_target2 = scope.current_action_target2;
             object.action_data = scope.current_action_data;
+            object.damage = scope.current_damage;
         }
         Some(object)
     }
@@ -18787,6 +18862,7 @@ mod tests {
         "GetCrewCount",
         "GetCrewEnabled",
         "GetCursor",
+        "GetDamage",
         "GetDefCoreVal",
         "GetDir",
         "GetEffect",
@@ -18819,6 +18895,7 @@ mod tests {
         "GetPlayerName",
         "GetPlayerTeam",
         "GetPlayerType",
+        "GetPlrColorDw",
         "GetPlrDownDouble",
         "GetPlrKnowledge",
         "GetPlrValue",
