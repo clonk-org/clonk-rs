@@ -13977,7 +13977,7 @@ impl Engine {
             self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
 
             for update in container_updates {
-                self.apply_container_change(update.object_id, update.previous, update.new)?;
+                self.apply_container_change(update.object_id, update.previous, update.new, false)?;
             }
 
             for event in command_events {
@@ -14509,7 +14509,7 @@ impl Engine {
             }
             self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
             if let Some((previous_container, new_container)) = container_change {
-                self.apply_container_change(object_id, previous_container, new_container)?;
+                self.apply_container_change(object_id, previous_container, new_container, false)?;
             }
 
             self.apply_particle_commands(particles);
@@ -14598,7 +14598,7 @@ impl Engine {
                 }
                 self.apply_particle_commands(emitted_particles);
                 if previous_container != new_container {
-                    self.apply_container_change(object_id, previous_container, new_container)?;
+                    self.apply_container_change(object_id, previous_container, new_container, false)?;
                 }
             }
             self.update_sector_for_index(idx);
@@ -14998,7 +14998,7 @@ impl Engine {
         }
         self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
         if let Some((previous_container, new_container)) = container_change {
-            self.apply_container_change(object_id, previous_container, new_container)?;
+            self.apply_container_change(object_id, previous_container, new_container, false)?;
         }
         // Host-driven changes are SetOCF events (SetAlive C4Object.h:361,
         // DoCon C4Object.cpp:1417, status C4Object.cpp:4139).
@@ -15424,7 +15424,7 @@ impl Engine {
         self.update_sector_for_index(index);
 
         for (previous, new) in container_changes {
-            self.apply_container_change(object_id, previous, new)?;
+            self.apply_container_change(object_id, previous, new, false)?;
         }
 
         self.apply_nested_object_outcomes(other_objects)?;
@@ -15599,7 +15599,7 @@ impl Engine {
             self.update_sector_for_index(index);
 
             for (previous, new) in container_changes {
-                self.apply_container_change(object_id, previous, new)?;
+                self.apply_container_change(object_id, previous, new, false)?;
             }
         }
         Ok(())
@@ -16190,7 +16190,7 @@ impl Engine {
         self.reset_sectors_from_landscape();
 
         for (object_id, container) in container_assignments {
-            self.apply_container_change(object_id, None, Some(container))?;
+            self.apply_container_change(object_id, None, Some(container), true)?;
             // Restores denumerate Contained without running Enter — the
             // snapshot controller stays authoritative (no C4Object.cpp:1582
             // transfer on load).
@@ -17268,7 +17268,7 @@ impl Engine {
             );
         }
         for (changed_object_id, previous, new) in contact_container_changes {
-            self.apply_container_change(changed_object_id, previous, new)?;
+            self.apply_container_change(changed_object_id, previous, new, false)?;
         }
         for outcome in contact_outcomes {
             self.apply_callback_outcome(
@@ -19159,7 +19159,7 @@ impl Engine {
 
         if previous_container != target_container
             && self
-                .apply_container_change(object_id, previous_container, target_container)
+                .apply_container_change(object_id, previous_container, target_container, false)
                 .is_err()
         {
             self.reset_action_to_default(idx, definition_id, true);
@@ -22368,11 +22368,64 @@ impl Engine {
             .map(|(index, id, _)| (index, id))
     }
 
+    /// C4ObjectList::Add stContents insertion (C4ObjectList.cpp:110-176,
+    /// reached from C4Object::Enter, C4Object.cpp:1587), forward order —
+    /// index 0 is the C++ list head `First` (= `Contents(0)`):
+    /// - line defs skip sorting (`fUnsorted`, :148) and append at the tail;
+    /// - pass 1 (:150-162, skipped for C4D_StaticBack): insert before the
+    ///   forward-first live entry with the same sorted category AND the
+    ///   same def — the same-id cluster;
+    /// - pass 2 (:164-173): insert before the forward-first live entry
+    ///   whose (Category & C4D_SortLimit) <= the entering object's; with
+    ///   no such entry the object appends at the tail.
+    /// The transient `Unsorted` flag is not modeled (same note as
+    /// `insert_into_exec_list`); rust contents hold live objects only.
+    fn contents_insert_position(&self, container_index: usize, object_index: usize) -> usize {
+        let contents = &self.objects[container_index].state.contents;
+        let is_line = self
+            .definitions
+            .get(&self.objects[object_index].definition_id)
+            .map(|definition| definition.line() != 0)
+            .unwrap_or(false);
+        if is_line {
+            return contents.len();
+        }
+        let category = self.objects[object_index].state.category;
+        let sort_category = category & CATEGORY_SORT_LIMIT;
+        let definition_id = &self.objects[object_index].definition_id;
+        if category & CATEGORY_STATIC_BACK == 0 {
+            let cluster_position = contents.iter().position(|&other| {
+                self.find_object_index(other).is_some_and(|other_index| {
+                    let object = &self.objects[other_index];
+                    object.state.category & CATEGORY_SORT_LIMIT == sort_category
+                        && object.definition_id == *definition_id
+                })
+            });
+            if let Some(position) = cluster_position {
+                return position;
+            }
+        }
+        contents
+            .iter()
+            .position(|&other| {
+                self.find_object_index(other).is_some_and(|other_index| {
+                    self.objects[other_index].state.category & CATEGORY_SORT_LIMIT
+                        <= sort_category
+                })
+            })
+            .unwrap_or(contents.len())
+    }
+
+    /// `loaded`: a compiled load rebuilds contents verbatim — C4ObjectList::
+    /// DenumerateRead appends in saved order (Add stNone, C4ObjectList.cpp:
+    /// 457-464) — while runtime entries sort in (Add stContents,
+    /// C4Object.cpp:1587; see `contents_insert_position`).
     fn apply_container_change(
         &mut self,
         object_id: ObjectId,
         previous: Option<ObjectId>,
         new: Option<ObjectId>,
+        loaded: bool,
     ) -> Result<(), EngineError> {
         if previous == new {
             return Ok(());
@@ -22419,9 +22472,20 @@ impl Engine {
                     });
                 }
 
-                let contents = &mut self.objects[container_index].state.contents;
-                if !contents.contains(&object_id) {
-                    contents.push(object_id);
+                if !self.objects[container_index]
+                    .state
+                    .contents
+                    .contains(&object_id)
+                {
+                    let position = if loaded {
+                        self.objects[container_index].state.contents.len()
+                    } else {
+                        self.contents_insert_position(container_index, object_index)
+                    };
+                    self.objects[container_index]
+                        .state
+                        .contents
+                        .insert(position, object_id);
                 }
 
                 self.objects[object_index].state.container = Some(container_id);
@@ -22647,7 +22711,7 @@ impl Engine {
         }
 
         for (object_id, previous) in updates {
-            self.apply_container_change(object_id, previous, None)?;
+            self.apply_container_change(object_id, previous, None, false)?;
         }
 
         for object in &mut self.objects {
@@ -25004,7 +25068,7 @@ impl Engine {
         self.update_sector_for_index(index);
         self.update_solid_mask(index);
         for (previous, new) in container_changes {
-            self.apply_container_change(id, previous, new)?;
+            self.apply_container_change(id, previous, new, loaded)?;
         }
         if loaded {
             // Loaded Contained placement is denumeration, not Enter — the
@@ -38793,6 +38857,64 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         assert_eq!(stop_calls, 1);
     }
 
+    // C4Object::Enter adds to the container's contents with
+    // C4ObjectList::Add stContents (C4Object.cpp:1587): a sorted insert
+    // (C4ObjectList.cpp:110-176) — before the forward-first live link
+    // with the same sorted category AND the same def (the same-id
+    // cluster, :150-162), else before the forward-first live link whose
+    // (Category & C4D_SortLimit) <= the entering object's (:164-173).
+    // Equal-category items therefore enter at the FRONT: Contents(0) is
+    // the newest item. The GoldRush bandits arm via CreateContents(AMBO)
+    // x2 + CreateContents(WINC) (Goldrush.c4s/Locals.c4d/AI.c4d/Script.c:
+    // 103-105) and FireRifle checks `Contents()->~IsRifle()`
+    // (Cowboy.c4d/Script.c:439) — the rifle must be first.
+    #[test]
+    fn runtime_contents_enter_inserts_before_equal_category_like_cpp() {
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(simple_definition("Ches"))
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("AMBO"))
+            .expect("ammo registers");
+        engine
+            .register_definition(simple_definition("WINC"))
+            .expect("rifle registers");
+
+        let chest = engine
+            .spawn_object(SpawnConfig::new("Ches").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let ammo_a = engine
+            .spawn_object(
+                SpawnConfig::new("AMBO")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("ammo a spawns");
+        let ammo_b = engine
+            .spawn_object(
+                SpawnConfig::new("AMBO")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("ammo b spawns");
+        let rifle = engine
+            .spawn_object(
+                SpawnConfig::new("WINC")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("rifle spawns");
+
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![rifle, ammo_b, ammo_a],
+            "each Enter inserts at the front of its category bracket, \
+             same-id entries cluster (C4ObjectList.cpp:150-173)"
+        );
+    }
+
     // FnShiftContents (C4Script.cpp:1784-1797): the regular shift rotates
     // the contents CYCLICALLY to the next different item
     // (C4Object::ShiftContents C4Object.cpp:5728-5752,
@@ -38806,7 +38928,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         global func Initialize(state, random) { return nil; }
         global func Step(state, frame, random) { return nil; }
         global func Cycle() { return ShiftContents(); }
-        global func Pick() { return ShiftContents(0, 0, SWRD); }
+        global func Pick() { return ShiftContents(0, 0, REVR); }
         "#;
         let mut engine = Engine::with_seed(3);
         engine
@@ -38846,14 +38968,17 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             )
             .expect("revolver b spawns");
 
+        // Each Enter front-inserts within its category bracket / id
+        // cluster (C4ObjectList::Add stContents, C4ObjectList.cpp:150-173).
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![sword, revolver_a, revolver_b]
+            vec![revolver_b, revolver_a, sword]
         );
 
-        // Regular shift: the next DIFFERENT item after the sword is
-        // revolver_a; the rotation keeps relative order.
+        // Regular shift: the next DIFFERENT item after revolver_b is the
+        // sword (revolver_a picture-concats); the rotation keeps relative
+        // order.
         let result = engine
             .call_object_function(chest_idx, "Cycle", Vec::new())
             .expect("cycle runs");
@@ -38861,11 +38986,12 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![revolver_a, revolver_b, sword],
+            vec![sword, revolver_b, revolver_a],
             "cyclic rotation to the next different item (C4ObjectList.cpp:815-833)"
         );
 
-        // idTarget form: bring the sword back to the front.
+        // idTarget form: bring the forward-first REVR back to the front
+        // (Contents.Find, C4Script.cpp:1791).
         let result = engine
             .call_object_function(chest_idx, "Pick", Vec::new())
             .expect("pick runs");
@@ -38873,7 +38999,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![sword, revolver_a, revolver_b],
+            vec![revolver_b, revolver_a, sword],
             "DirectComContents rotates the target to the front (C4Object.cpp:5765)"
         );
     }
@@ -38923,8 +39049,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![revolver_a, revolver_b],
-            "a uniform stack keeps its order"
+            vec![revolver_b, revolver_a],
+            "a uniform stack keeps its (Enter-sorted, newest-first) order"
         );
     }
 
@@ -38983,8 +39109,9 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![revolver, sword],
-            "the foreign chest rotated (C4Object.cpp:5730-5752)"
+            vec![sword, revolver],
+            "the foreign chest rotated the sword to the front \
+             (Enter-sorted [revolver, sword], C4Object.cpp:5730-5752)"
         );
     }
 
@@ -39042,12 +39169,13 @@ func ControlContents(id) { iSeen = id; return 1; }
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![sword, revolver],
-            "a truthy ~ControlContents vetoes the rotation (C4Object.cpp:5762)"
+            vec![revolver, sword],
+            "a truthy ~ControlContents vetoes the rotation (C4Object.cpp:5762); \
+             Enter sorted the later revolver to the front"
         );
         assert_eq!(
             engine.objects[chest_idx].state.local_vars.get("iSeen"),
-            Some(&Value::C4Id("REVR".into())),
+            Some(&Value::C4Id("SWRD".into())),
             "~ControlContents receives the new front's id (C4VID(pTarget->id))"
         );
     }
@@ -39079,16 +39207,12 @@ func Selection(pFrom) { iSel = 1; return 1; }
             .register_definition(simple_definition("REVR"))
             .expect("revolver registers");
 
+        // Spawn the sword first: the later revolver Enter-sorts to the
+        // front (C4ObjectList.cpp:164-173), giving contents
+        // [revolver, sword].
         let chest = engine
             .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
             .expect("chest spawns");
-        let revolver = engine
-            .spawn_object(
-                SpawnConfig::new("REVR")
-                    .with_category(CATEGORY_OBJECT)
-                    .with_container(chest),
-            )
-            .expect("revolver spawns");
         let sword = engine
             .spawn_object(
                 SpawnConfig::new("SWRD")
@@ -39096,6 +39220,13 @@ func Selection(pFrom) { iSel = 1; return 1; }
                     .with_container(chest),
             )
             .expect("sword spawns");
+        let revolver = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver spawns");
 
         // First shift: SWRD comes to the front, its Selection returns 1 —
         // no Grab sound (C4Object.cpp:5767).
