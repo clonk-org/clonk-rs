@@ -117,6 +117,18 @@ impl LocalCells {
         }
     }
 
+    /// The LIVE cell for one local by its persistence name — the engine's
+    /// `__local_{i}` keys map to numbered slots, everything else to named
+    /// locals. Cross-object references (LocalN/Local hooks) hand this out
+    /// so foreign writes mutate the in-flight session directly (C++
+    /// mutates the one live C4Object).
+    pub fn cell(&self, name: &str) -> ValueCell {
+        name.strip_prefix("__local_")
+            .and_then(|index| index.parse::<i32>().ok())
+            .map(|index| self.state.local_slot_cell(index))
+            .unwrap_or_else(|| self.state.named_local_cell(name))
+    }
+
     /// Every named local and indexed slot as a plain map (the fold shape
     /// call_with_locals returns).
     pub fn snapshot(&self) -> HashMap<String, Value> {

@@ -16735,6 +16735,18 @@ struct NestedCallPrep {
 /// `None` when the function is not visible to the target (C++ fails the
 /// check silently) and `Some(Err(_))` for runtime errors (`fPassErrors=true`
 /// — the caller rethrows, aborting the calling script).
+/// Registers the ACTIVE outer call's live local cells so nested calls and
+/// cross-object LocalN/Local references onto the same object mutate the
+/// running session's storage (C++ mutates the one live C4Object). The
+/// per-callback host context owns the entry's lifetime.
+pub(crate) fn register_session_local_cells(target: ObjectId, cells: lc_script::LocalCells) {
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.session_local_cells.insert(target, cells);
+        }
+    });
+}
+
 pub(crate) fn call_world_object_function(
     target: ObjectId,
     function: &str,
@@ -17183,6 +17195,12 @@ impl EffectHostContext {
     /// LocalN). Seeded from the freshest known value: an accumulated
     /// nested-call state first, the world snapshot otherwise.
     fn foreign_local_cell(&mut self, target: ObjectId, name: &str) -> lc_script::ValueCell {
+        // An object with an in-flight VM session shares its LIVE cells:
+        // the foreign write mutates the running call's storage directly
+        // and its fold carries it (C++ mutates the one live C4Object).
+        if let Some(cells) = self.session_local_cells.get(&target) {
+            return cells.cell(name);
+        }
         if let Some(cell) = self.foreign_local_cells.get(&(target, name.to_string())) {
             return cell.clone();
         }

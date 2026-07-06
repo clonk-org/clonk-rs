@@ -7932,6 +7932,10 @@ impl Definition {
         let context_locals = context_is_self
             .then(|| state.local_vars.clone())
             .unwrap_or_default();
+        // The callback's LIVE local cells: registered as the object's
+        // session so nested calls / cross-object references back onto it
+        // share the storage (C++ mutates the one live C4Object).
+        let context_cells = lc_script::LocalCells::from_local_vars(&context_locals);
 
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
@@ -7987,6 +7991,16 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
+                if context_is_self {
+                    compat::register_session_local_cells(object_id, context_cells.clone());
+                    return self.script.call_effect_callback_in_context_with_cells(
+                        &effect.name,
+                        event,
+                        &args,
+                        &context_cells,
+                        context_this,
+                    );
+                }
                 self.script.call_effect_callback_in_context(
                     &effect.name,
                     event,
@@ -39955,6 +39969,79 @@ public func Poke(pClonk) {
             engine.objects[idx].state.local_vars.get("iSeenPhase"),
             Some(&Value::Int(6)),
             "GetPhase(pTarget) reads the in-flight phase (C++ live state)"
+        );
+    }
+
+    // One live object (C4AulExec): the outer effect callback's own local
+    // writes, a nested call's write-back to the caller, and a subsequent
+    // outer READ of that write-back all see the same storage. GoldRush's
+    // FxOrderDefendTimer writes pOrdrTarget around the nested
+    // WINC::ControlThrow chain (Cowboy.c4d/Script.c:641-669).
+    #[test]
+    fn outer_effect_locals_and_nested_write_backs_share_live_storage() {
+        let holder_script = r#"#strict
+local iBefore, iFromItem, iAfter;
+public func Boot() { AddEffect("Probe", this(), 1, 5, this()); return(1); }
+func FxProbeTimer(pThis, iNumber) {
+  iBefore = 1;
+  var pItem = FindContents(ITEM);
+  if (pItem) pItem->Tag(this());
+  iAfter = iFromItem + 1;
+  return(-1);
+}
+"#;
+        let item_script = r#"#strict
+public func Tag(pClonk) { LocalN("iFromItem", pClonk) = 7; return(1); }
+"#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("HOLD", "Holder", holder_script)
+                    .expect("holder compiles"),
+            )
+            .expect("holder registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
+            )
+            .expect("item registers");
+
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
+            .expect("holder spawns");
+        engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(holder),
+            )
+            .expect("item spawns");
+        let idx = engine.find_object_index(holder).expect("holder exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        for _ in 0..6 {
+            engine.tick().expect("tick");
+        }
+
+        let idx = engine.find_object_index(holder).expect("holder exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(
+            locals.get("iBefore"),
+            Some(&Value::Int(1)),
+            "the outer callback's own pre-nested write persists"
+        );
+        assert_eq!(
+            locals.get("iFromItem"),
+            Some(&Value::Int(7)),
+            "the nested call's write-back to the caller persists"
+        );
+        assert_eq!(
+            locals.get("iAfter"),
+            Some(&Value::Int(8)),
+            "the outer callback READS the nested write-back live \
+             (C++ mutates the one live object mid-call)"
         );
     }
 
