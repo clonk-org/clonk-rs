@@ -75,6 +75,9 @@ pub(crate) struct HostWorldObject {
     /// C4Object::InLiquid (the cached flag FnInLiquid reads).
     in_liquid: bool,
     pub action_name: String,
+    /// Action.Dir as a script value (0=Left, 1=Right) — read by foreign
+    /// GetDir (FnGetDir reads any pObj).
+    pub direction: i32,
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
     pub action_procedure: Option<String>,
@@ -190,6 +193,11 @@ pub(crate) enum PlayerCommand {
 }
 
 impl HostWorldObject {
+    pub(crate) fn with_direction(mut self, direction: i32) -> Self {
+        self.direction = direction;
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn new(
         id: ObjectId,
@@ -264,6 +272,7 @@ impl HostWorldObject {
             alive: true,
             in_liquid: false,
             action_name: action_name.into(),
+            direction: 0,
             action_target,
             action_target2,
             action_procedure,
@@ -12052,6 +12061,9 @@ fn collect_closest_matches(world: &impl WorldAccessor, params: &FindObjectParams
 }
 
 fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
+    if std::env::var("LC_DIRDBG").is_ok() && !matches!(args.first(), Some(Value::Int(_))) {
+        eprintln!("DIRDBG SetDir args={args:?}");
+    }
     // Unfilled ndir is nil -> 0 = DIR_Left (FnSetDir, C4Script.cpp:798).
     let raw_direction = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
@@ -12209,7 +12221,15 @@ fn get_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 
         if let Some(target) = target_id {
             if target != object.id() {
-                return Ok(Value::Nil);
+                // FnGetDir reads ANY pObj's Action.Dir (C4Script.cpp:790
+                // area; every object fn carries the `if (!pObj) pObj =
+                // cthr->Obj` prologue and no self-only gate). The CLNK
+                // Riding() PhaseCall does SetDir(GetDir(GetActionTarget()))
+                // on the ridden vehicle — a Nil here flipped riders Left.
+                return Ok(context
+                    .get_world_object(target)
+                    .map(|other| Value::Int(other.direction))
+                    .unwrap_or(Value::Nil));
             }
         }
 

@@ -11771,7 +11771,7 @@ impl Engine {
                     object.state.action.phase,
                     object.state.container,
                     object.state.draw_transform,
-                )
+                ).with_direction(object.state.direction.to_script_value())
                 .with_contents(object.state.contents.clone())
                 .with_alive(object.state.alive)
                 .with_in_liquid(object.state.in_liquid)
@@ -25590,7 +25590,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.action.phase,
                 object.container,
                 object.draw_transform,
-            )
+            ).with_direction(object.direction.to_script_value())
             .with_commands(object.command_stack.command_views())
             .with_ocf(object.ocf)
             // Nested calls (obj->Method, foreign RemoveObject) need a full
