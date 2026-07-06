@@ -26,7 +26,8 @@ use crate::{
     EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate,
-    PhysicsSettings, PlayerState, QueuedCommand, SpawnConfig, TransferZoneCommand,
+    PhysicsSettings, PlayerState, QueuedCommand, ShapeAttachRecord, SpawnConfig,
+    TransferZoneCommand,
     TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER,
     CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
@@ -4501,6 +4502,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetYDir", set_y_dir);
     script.register_host_function("GetYDir", get_y_dir);
     script.register_host_function("SetRDir", set_r_dir);
+    script.register_host_function("AdjustWalkRotation", adjust_walk_rotation);
     script.register_host_function("GetRDir", get_r_dir);
     script.register_host_function("FindObject", find_object);
     script.register_host_function("FindObjectOwner", find_object_owner);
@@ -5604,6 +5606,19 @@ fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// The FnAdjustWalkRotation seam (C4Script.cpp:5439-5448 +
+/// C4Object::AdjustWalkRotation, C4Object.cpp:6019-6086): Def->Rotateable,
+/// the frame's Action.t_attach, the shape attach record, and
+/// Def->Shape.VtxX[iAttachVtx] (the DEF vertex for the middle-bottom
+/// check; the LIVE vertex comes from the scope's vertices).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WalkRotationSeed {
+    pub rotateable: i32,
+    pub t_attach: u32,
+    pub attach: ShapeAttachRecord,
+    pub def_attach_vtx_x: i32,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct HostObjectContext<'a> {
     pub id: ObjectId,
@@ -5649,6 +5664,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub temporary_physical: Option<PhysicalInfo>,
     pub physical_changes: Vec<(String, i32)>,
     pub definition_physical: PhysicalInfo,
+    pub walk_rotation: WalkRotationSeed,
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -5775,7 +5791,13 @@ impl<'a> HostObjectContext<'a> {
             temporary_physical: None,
             physical_changes: Vec::new(),
             definition_physical: PhysicalInfo::default(),
+            walk_rotation: WalkRotationSeed::default(),
         }
+    }
+
+    pub fn with_walk_rotation(mut self, walk_rotation: WalkRotationSeed) -> Self {
+        self.walk_rotation = walk_rotation;
+        self
     }
 
     pub fn with_alive(mut self, alive: bool) -> Self {
@@ -12815,6 +12837,139 @@ fn set_y_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     set_velocity_component(args, VelocityComponent::Y)
 }
 
+/// FnAdjustWalkRotation (C4Script.cpp:5439-5448): bails unless the def is
+/// Rotateable, this frame's Action.t_attach carries CNAT_Bottom and the
+/// last shape attach hit a material; then C4Object::AdjustWalkRotation
+/// (C4Object.cpp:6019-6086) probes the floor around the attach position
+/// and steers rdir toward the slope.
+fn adjust_walk_rotation(args: &[Value]) -> Result<Value, RuntimeError> {
+    let range_x = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "AdjustWalkRotation",
+        "range_x",
+    )?;
+    let range_y = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "AdjustWalkRotation",
+        "range_y",
+    )?;
+    let speed = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "AdjustWalkRotation",
+        "speed",
+    )?;
+    let target_id = args
+        .get(3)
+        .map(|arg| parse_object_reference_argument(arg, "AdjustWalkRotation", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("AdjustWalkRotation requires an active engine context")
+        })?;
+
+        let Some(object) = context.object_context() else {
+            return Ok(Value::Bool(false));
+        };
+        if let Some(target) = target_id {
+            if target != object.id() {
+                // Foreign dispatch is not modeled — the same documented
+                // gap as SetRDir's target parameter.
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        let seed = object.walk_rotation;
+        let rotation = object.rotation();
+        // The LIVE Shape.VtxX for the else-branch (C4Object.cpp:6072).
+        let live_vtx_x = usize::try_from(seed.attach.vtx)
+            .ok()
+            .and_then(|vtx| object.vertices.get(vtx))
+            .map(|vertex| vertex.x)
+            .unwrap_or(0);
+
+        // Guard: Rotateable + bottom attach + attached material
+        // (C4Script.cpp:5443-5446).
+        if seed.rotateable == 0 || seed.t_attach & CNAT_BOTTOM == 0 || !seed.attach.mat_valid {
+            return Ok(Value::Bool(false));
+        }
+
+        let dest_angle = if seed.attach.vtx < 0 || seed.def_attach_vtx_x == 0 {
+            // Attachment at the middle (bottom) vertex: evaluate the
+            // floor around the ABSOLUTE attach position
+            // (C4Object.cpp:6023-6065).
+            let landscape = context.landscape_ref();
+            let solid =
+                |x: i32, y: i32| evaluate_landscape_query(landscape, LandscapeQuery::Solid, x, y);
+            let probe = |x_check: i32| -> i32 {
+                let mut offset = 0i32;
+                if solid(x_check, seed.attach.y) {
+                    // up: `while (--i > -iRangeY) if (solid) { ++i; break; }`
+                    loop {
+                        offset -= 1;
+                        if offset <= -range_y {
+                            break;
+                        }
+                        if solid(x_check, seed.attach.y + offset) {
+                            offset += 1;
+                            break;
+                        }
+                    }
+                } else {
+                    // down: `while (++i < iRangeY) if (solid) { --i; break; }`
+                    loop {
+                        offset += 1;
+                        if offset >= range_y {
+                            break;
+                        }
+                        if solid(x_check, seed.attach.y + offset) {
+                            offset -= 1;
+                            break;
+                        }
+                    }
+                }
+                offset
+            };
+            let solid_left = probe(seed.attach.x - range_x);
+            let solid_right = probe(seed.attach.x + range_x);
+            // "100% accurate for large values of Pi" — the INNER integer
+            // division happens first (C4Object.cpp:6064).
+            (solid_right - solid_left) * (35 / range_x.max(1))
+        } else if live_vtx_x > 0 {
+            // Attachment at a non-middle vertex: rotate the feet down
+            // (C4Object.cpp:6068-6076).
+            -50
+        } else {
+            50
+        };
+
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        // Move to destination angle (C4Object.cpp:6078-6084). C++ writes
+        // rdir directly (no Mobile flag); the pending-update path arms
+        // mobile, but every caller runs from an attached procedure that
+        // has already set it.
+        if (dest_angle - rotation).abs() > 2 {
+            let bounded = itofix((dest_angle - rotation).clamp(-15, 15));
+            let divisor = if speed != 0 { 10000 / speed } else { 0 };
+            // `rdir /= (10000 / iSpeed)` — a zero divisor is division by
+            // zero in C++ (unreachable for sane speeds); fail safe here.
+            let rdir = if divisor != 0 {
+                bounded / divisor
+            } else {
+                C4Fixed::ZERO
+            };
+            object.set_rotation_velocity(rdir);
+        } else {
+            object.set_rotation_velocity(C4Fixed::ZERO);
+        }
+        Ok(Value::Bool(true))
+    })
+}
+
 fn set_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     // C++ FnSetRDir(value, [target], [precision = 10]) sets rdir = itofix(value,
     // precision), a fractional `C4Fixed` angular velocity. `C4Script.cpp:710`.
@@ -16784,6 +16939,7 @@ impl EffectHostContext {
                 temporary_physical,
                 physical_changes,
                 definition_physical,
+                walk_rotation,
             } = ctx;
             {
                 let mut scope = ObjectScopeContext::new(
@@ -16825,6 +16981,7 @@ impl EffectHostContext {
                     definition_physical,
                 );
                 scope.definition_id = definition_id;
+                scope.walk_rotation = walk_rotation;
                 scope
             }
         });
@@ -17661,6 +17818,8 @@ struct ObjectScopeContext {
     temporary_physical: Option<PhysicalInfo>,
     physical_changes: Vec<(String, i32)>,
     definition_physical: PhysicalInfo,
+    /// FnAdjustWalkRotation seam — see [`WalkRotationSeed`].
+    walk_rotation: WalkRotationSeed,
 }
 
 impl ObjectScopeContext {
@@ -17751,6 +17910,7 @@ impl ObjectScopeContext {
             temporary_physical,
             physical_changes,
             definition_physical,
+            walk_rotation: WalkRotationSeed::default(),
         }
     }
 
@@ -18560,6 +18720,7 @@ mod tests {
         "AddEffect",
         "AddMenuItem",
         "AddMessage",
+        "AdjustWalkRotation",
         "AnyContainer",
         "AppendCommand",
         "BlastFree",
@@ -22592,6 +22753,172 @@ mod tests {
             || get_r(&[]),
         );
         assert_eq!(result.expect("GetR succeeds"), Value::Int(-10));
+    }
+
+    fn adjust_walk_rotation_case(
+        seed: WalkRotationSeed,
+        rotation: i32,
+        vertices: &[ObjectVertex],
+        landscape: Option<Landscape>,
+        args: &[Value],
+    ) -> (Result<Value, RuntimeError>, EffectContextOutcome) {
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            landscape,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        with_effect_context(
+            Some(
+                HostObjectContext::with_category(
+                    ObjectId::new(1),
+                    None,
+                    ObjectStatus::Normal,
+                    100,
+                    0,
+                    crate::FULL_CON,
+                    OWNER_NONE,
+                    Vector2::ZERO,
+                    Vector2::ZERO,
+                    rotation,
+                    &[],
+                    "Walk",
+                    0,
+                    0,
+                    0,
+                    ActionLibrary::default(),
+                    Direction::Left,
+                    CommandDirection::Stop,
+                    0,
+                    None,
+                    None,
+                    vertices,
+                    DEFAULT_CATEGORY,
+                    ocf::NORMAL,
+                    false,
+                    None,
+                    None,
+                )
+                .with_walk_rotation(seed),
+            ),
+            &[],
+            world,
+            1,
+            || adjust_walk_rotation(args),
+        )
+    }
+
+    #[test]
+    fn adjust_walk_rotation_steers_rdir_toward_the_floor_slope() {
+        // C4Object::AdjustWalkRotation floor probe (C4Object.cpp:6023-6065):
+        // GBackSolid columns at iAttachX +/- iRangeX around iAttachY, then
+        // iDestAngle = (right - left) * (35 / max(iRangeX,1)) — INNER
+        // integer division first (35/20 = 1 for the dragon's
+        // AdjustWalkRotation(20, 20, 100), Fantasy.c4d Dragon.c4d
+        // Script.c:701). rdir = itofix(BoundBy(dest - r, -15, 15)) /
+        // (10000 / iSpeed) (C4Object.cpp:6078-6084).
+        // Ground: columns 0..32 surface y=25, columns 32..64 surface y=5.
+        // Attach at (30, 15): left probe x=10 descends to the y=25 floor
+        // (offset +9), right probe x=50 sits inside ground (offset 0) ->
+        // dest = (0 - 9) * 1 = -9; r = 0 -> rdir = itofix(-9)/100.
+        let mut surface = vec![25; 32];
+        surface.extend(vec![5; 32]);
+        let landscape = Landscape::new(64, surface).expect("landscape builds");
+        let seed = WalkRotationSeed {
+            rotateable: 45,
+            t_attach: CNAT_BOTTOM,
+            attach: ShapeAttachRecord {
+                mat_valid: true,
+                x: 30,
+                y: 15,
+                vtx: 0,
+            },
+            def_attach_vtx_x: 0,
+        };
+        let args = [Value::Int(20), Value::Int(20), Value::Int(100)];
+        let (result, outcome) =
+            adjust_walk_rotation_case(seed, 0, &[], Some(landscape), &args);
+        assert_eq!(result.expect("AdjustWalkRotation succeeds"), Value::Bool(true));
+        assert_eq!(
+            outcome
+                .object_update
+                .and_then(|update| update.rotation_velocity),
+            Some(C4Fixed::from_raw(-9 * 65536 / 100)),
+            "rdir = itofix(-9) / (10000/100)"
+        );
+    }
+
+    #[test]
+    fn adjust_walk_rotation_guards_and_vertex_branch() {
+        // Guards (C4Script.cpp:5443-5446): no Rotateable / no bottom
+        // attach / no attach material -> false, rdir untouched.
+        let args = [Value::Int(20), Value::Int(20), Value::Int(100)];
+        let (result, outcome) = adjust_walk_rotation_case(
+            WalkRotationSeed::default(),
+            0,
+            &[],
+            None,
+            &args,
+        );
+        assert_eq!(result.expect("guarded call runs"), Value::Bool(false));
+        assert_eq!(
+            outcome
+                .object_update
+                .and_then(|update| update.rotation_velocity),
+            None
+        );
+
+        // Attachment at a NON-middle vertex (Def->Shape.VtxX[vtx] != 0):
+        // live Shape.VtxX > 0 -> iDestAngle = -50 (C4Object.cpp:6068-6076);
+        // r = 0 -> rdir = itofix(BoundBy(-50, -15, 15)) / 100.
+        let vertices = vec![ObjectVertex::new(0, 0), ObjectVertex::new(3, 10)];
+        let seed = WalkRotationSeed {
+            rotateable: 45,
+            t_attach: CNAT_BOTTOM,
+            attach: ShapeAttachRecord {
+                mat_valid: true,
+                x: 30,
+                y: 15,
+                vtx: 1,
+            },
+            def_attach_vtx_x: 5,
+        };
+        let (result, outcome) = adjust_walk_rotation_case(seed, 0, &vertices, None, &args);
+        assert_eq!(result.expect("vertex branch runs"), Value::Bool(true));
+        assert_eq!(
+            outcome
+                .object_update
+                .and_then(|update| update.rotation_velocity),
+            Some(C4Fixed::from_raw(-15 * 65536 / 100)),
+            "rdir = itofix(-15) / 100"
+        );
+
+        // Within +/-2 degrees of the destination the spin clears
+        // (C4Object.cpp:6083 `else rdir = 0`).
+        let vertices = vec![ObjectVertex::new(0, 0), ObjectVertex::new(3, 10)];
+        let seed = WalkRotationSeed {
+            rotateable: 45,
+            t_attach: CNAT_BOTTOM,
+            attach: ShapeAttachRecord {
+                mat_valid: true,
+                x: 30,
+                y: 15,
+                vtx: 1,
+            },
+            def_attach_vtx_x: 5,
+        };
+        let (result, outcome) = adjust_walk_rotation_case(seed, -49, &vertices, None, &args);
+        assert_eq!(result.expect("near-dest call runs"), Value::Bool(true));
+        assert_eq!(
+            outcome
+                .object_update
+                .and_then(|update| update.rotation_velocity),
+            Some(C4Fixed::ZERO)
+        );
     }
 
     #[test]

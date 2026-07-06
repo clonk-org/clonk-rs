@@ -1923,6 +1923,37 @@ pub struct ObjectMenuState {
     pub items: Vec<ObjectMenuItem>,
 }
 
+/// C4Shape attach bookkeeping (`AttachMat`/`iAttachX`/`iAttachY`/
+/// `iAttachVtx`, C4Shape.h:52-55): `AttachMat` resets to MNone at the top
+/// of every `C4Shape::Attach` while the position/vertex fields only
+/// overwrite on a successful attach (C4Shape.cpp:165-270). The movement
+/// rotation step restores the WHOLE record on contact undo (`Shape =
+/// lshape`, C4Movement.cpp:395-417). A dense pixel always maps to a real
+/// material (solid masks paint MVehic), so `AttachMat != MNone` is
+/// exactly "the last attach succeeded" — tracked as `mat_valid`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShapeAttachRecord {
+    /// `Shape.AttachMat != MNone`.
+    pub mat_valid: bool,
+    /// Absolute attachment position (`iAttachX`/`iAttachY`).
+    pub x: i32,
+    pub y: i32,
+    /// The vertex index that attached (`iAttachVtx`).
+    pub vtx: i32,
+}
+
+impl ShapeAttachRecord {
+    /// serde gate: the all-default record is C4Shape's initial state
+    /// (C4Shape.cpp:34) — skip it so recorded snapshots stay byte-stable.
+    pub fn is_unattached(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn u32_is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectState {
     pub position: Vector2,
@@ -2074,6 +2105,16 @@ pub struct ObjectState {
     /// — readers consume this field, never a fresh compute.
     #[serde(default)]
     pub ocf: u32,
+    /// C4Shape attach bookkeeping — see [`ShapeAttachRecord`]. Runtime
+    /// state, not part of Objects.txt.
+    #[serde(default, skip_serializing_if = "ShapeAttachRecord::is_unattached")]
+    pub shape_attach: ShapeAttachRecord,
+    /// `C4Object::Action.t_attach` as latched by ExecAction this frame
+    /// (C4Object.cpp:4692 + the per-procedure ORs), mirrored from
+    /// `frame_t_attach` for the script host seam (FnAdjustWalkRotation
+    /// reads it, C4Script.cpp:5444).
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub t_attach: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -2115,6 +2156,8 @@ pub(crate) fn preview_spawn_state(
         position,
         velocity: Vector2::ZERO,
         rotation: 0,
+        shape_attach: ShapeAttachRecord::default(),
+        t_attach: 0,
         energy: 0,
         damage: 0,
         magic_energy: 0,
@@ -3566,6 +3609,7 @@ impl Object {
                 movement.solid_masks,
                 solid_mask_removed.then_some(movement.object_id),
                 movement.contact_density,
+                &mut self.state.shape_attach,
             ) {
                 no_attach = true;
             }
@@ -3819,6 +3863,9 @@ impl Object {
             let previous_rotation = self.state.rotation;
             let previous_vertices = self.state.vertices.clone();
             let previous_position = self.state.position;
+            // `C4Shape lshape = Shape` — the contact undo restores the
+            // attach record too (C4Movement.cpp:395-417).
+            let previous_attach = self.state.shape_attach;
 
             self.state.rotation += sign_i32(target_rotation - self.state.rotation);
             if self.shape_template.line == 0 {
@@ -3836,6 +3883,7 @@ impl Object {
                     movement.solid_masks,
                     solid_mask_removed.then_some(movement.object_id),
                     movement.contact_density,
+                    &mut self.state.shape_attach,
                 );
             }
 
@@ -3854,6 +3902,7 @@ impl Object {
                 self.state.rotation = previous_rotation;
                 self.state.vertices = previous_vertices;
                 self.state.position = previous_position;
+                self.state.shape_attach = previous_attach;
                 self.fixed_position =
                     FixedVec2::from_ints(previous_position.x, previous_position.y);
                 self.fixed_rotation = itofix(previous_rotation);
@@ -6208,6 +6257,22 @@ impl Definition {
         &self.physical
     }
 
+    /// Seed for the FnAdjustWalkRotation host seam (C4Script.cpp:5439-5448):
+    /// Def->Rotateable, the frame's Action.t_attach, the shape attach record
+    /// and Def->Shape.VtxX[Shape.iAttachVtx] (C4Object.cpp:6023).
+    fn walk_rotation_seed(&self, state: &ObjectState) -> compat::WalkRotationSeed {
+        compat::WalkRotationSeed {
+            rotateable: self.rotateable,
+            t_attach: state.t_attach,
+            attach: state.shape_attach,
+            def_attach_vtx_x: usize::try_from(state.shape_attach.vtx)
+                .ok()
+                .and_then(|vtx| self.shape_vertices.get(vtx))
+                .map(|vertex| vertex.x)
+                .unwrap_or(0),
+        }
+    }
+
     pub fn set_physical(&mut self, physical: PhysicalInfo) {
         self.physical = physical;
     }
@@ -6364,6 +6429,7 @@ impl Definition {
                     state.physical_changes.clone(),
                     *self.physical(),
                 )
+                .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -6541,6 +6607,7 @@ impl Definition {
                     state.physical_changes.clone(),
                     *self.physical(),
                 )
+                .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -6710,6 +6777,7 @@ impl Definition {
                     state.physical_changes.clone(),
                     *self.physical(),
                 )
+                .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -6903,6 +6971,7 @@ impl Definition {
                     state.physical_changes.clone(),
                     *self.physical(),
                 )
+                .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -7022,6 +7091,7 @@ impl Definition {
             *self.physical(),
         )
         .with_base_graphics(state.base_graphics.clone())
+        .with_walk_rotation(self.walk_rotation_seed(state))
         .with_ocf(state.ocf);
         let (result, outcome) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -7157,6 +7227,7 @@ impl Definition {
             *self.physical(),
         )
         .with_base_graphics(state.base_graphics.clone())
+        .with_walk_rotation(self.walk_rotation_seed(state))
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -7276,6 +7347,7 @@ impl Definition {
             state.physical_changes.clone(),
             *self.physical(),
         )
+        .with_walk_rotation(self.walk_rotation_seed(state))
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -7398,6 +7470,7 @@ impl Definition {
             state.physical_changes.clone(),
             *self.physical(),
         )
+        .with_walk_rotation(self.walk_rotation_seed(state))
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -7525,6 +7598,7 @@ impl Definition {
             *self.physical(),
         )
         .with_base_graphics(state.base_graphics.clone())
+        .with_walk_rotation(self.walk_rotation_seed(state))
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -7980,6 +8054,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_base_graphics(state.base_graphics.clone())
+                .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -9381,6 +9456,7 @@ fn procedure_t_attach(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn shape_attach(
     vertices: &[ObjectVertex],
     position: &mut Vector2,
@@ -9390,7 +9466,12 @@ fn shape_attach(
     solid_masks: &[SolidMaskRect],
     excluded_solid_mask: Option<ObjectId>,
     contact_density: i32,
+    record: &mut ShapeAttachRecord,
 ) -> bool {
+    // C4Shape::Attach resets AttachMat to MNone up front; the position/
+    // vertex fields only overwrite on success (C4Shape.cpp:176,217-219,
+    // 253-255).
+    record.mat_valid = false;
     let (xcd, ycd) = attach_direction(attach);
     if xcd == 0 && ycd == 0 {
         return false;
@@ -9400,7 +9481,7 @@ fn shape_attach(
     let mut attached = false;
 
     if attach & CNAT_MULTI_ATTACH == 0 {
-        for vertex in vertices {
+        for (vtx, vertex) in vertices.iter().enumerate() {
             if vertex.cnat & attach == 0 {
                 continue;
             }
@@ -9420,6 +9501,12 @@ fn shape_attach(
                         ay,
                     ) >= contact_density
                 {
+                    *record = ShapeAttachRecord {
+                        mat_valid: true,
+                        x: ax,
+                        y: ay,
+                        vtx: vtx as i32,
+                    };
                     position.x += xcnt;
                     position.y += ycnt;
                     attached = true;
@@ -9433,7 +9520,7 @@ fn shape_attach(
         let mut xcnt = xcrng;
         let mut ycnt = ycrng;
         'search: while xcnt != -xcrng || ycnt != -ycrng {
-            for vertex in vertices {
+            for (vtx, vertex) in vertices.iter().enumerate() {
                 if vertex.cnat & attach == 0 {
                     continue;
                 }
@@ -9443,6 +9530,12 @@ fn shape_attach(
                     && ax < landscape.width() as i32
                     && landscape.density_at(ax, ay, materials) >= contact_density
                 {
+                    *record = ShapeAttachRecord {
+                        mat_valid: true,
+                        x: ax,
+                        y: ay,
+                        vtx: vtx as i32,
+                    };
                     position.x += xcnt;
                     position.y += ycnt;
                     attached = true;
@@ -16108,6 +16201,8 @@ impl Engine {
                     position: snapshot.position,
                     velocity: snapshot.velocity,
                     rotation: snapshot.rotation.rem_euclid(360),
+                    shape_attach: ShapeAttachRecord::default(),
+                    t_attach: 0,
                     energy: snapshot.energy,
                     construction: snapshot.construction,
                     damage: snapshot.damage,
@@ -17480,6 +17575,9 @@ impl Engine {
             action_attach,
             self.objects[idx].upright_t_attach,
         );
+        // Mirror into the script-visible state: FnAdjustWalkRotation
+        // reads Action.t_attach (C4Script.cpp:5444).
+        self.objects[idx].state.t_attach = self.objects[idx].frame_t_attach;
 
         if matches!(procedure, ActionProcedure::Dig) {
             self.apply_dig_procedure(idx, &definition_id);
@@ -24521,6 +24619,8 @@ impl Engine {
                 position,
                 velocity,
                 rotation: rotation.rem_euclid(360),
+                shape_attach: ShapeAttachRecord::default(),
+                t_attach: 0,
                 // C4Object::Init: `if (Alive) Energy = GetPhysical()->Energy`
                 // (C4Object.cpp:192, raw C4MaxPhysical scale); at creation
                 // no info/temporary physical exists yet, so the def's
@@ -25358,6 +25458,8 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         position: snapshot.position,
         velocity: snapshot.velocity,
         rotation: snapshot.rotation.rem_euclid(360),
+        shape_attach: ShapeAttachRecord::default(),
+        t_attach: 0,
         energy: snapshot.energy,
         construction: snapshot.construction,
         damage: snapshot.damage,
