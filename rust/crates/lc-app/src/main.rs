@@ -5526,7 +5526,12 @@ impl GameApp {
                     if self.object_menu.is_some() {
                         self.close_object_menu();
                     } else if self.ingame_menu.is_some() {
-                        self.close_ingame_menu();
+                        // Route through TryClose so submenus run their close
+                        // command back to the main menu (C4Menu.cpp:317-334).
+                        self.handle_menu_command_failsafe(
+                            ControlCommand::MenuClose,
+                            CommandKind::Press,
+                        )?;
                     } else {
                         self.open_ingame_menu()?;
                     }
