@@ -4,7 +4,8 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::command::{
-    CommandData, CommandId, CommandMode, CommandOperation, CommandRequest, MAX_COMMAND_STACK,
+    CommandData, CommandId, CommandMode, CommandOperation, CommandRequest, CommandView,
+    MAX_COMMAND_STACK,
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::material::MaterialSet;
@@ -26,7 +27,8 @@ use crate::{
     EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate,
-    PhysicsSettings, PlayerState, QueuedCommand, SpawnConfig, TransferZoneCommand,
+    PhysicsSettings, PlayerState, QueuedCommand, ShapeAttachRecord, SpawnConfig,
+    TransferZoneCommand,
     TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER,
     CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
@@ -96,10 +98,10 @@ pub(crate) struct HostWorldObject {
     contents: Vec<ObjectId>,
     #[allow(dead_code)]
     pub draw_transform: Option<DrawTransform>,
-    /// C++ CommandName strings of the object's command stack, top first
-    /// (FnGetCommand, C4Script.cpp:918-945). A frame-start snapshot —
-    /// mid-frame command changes are not re-read (C++ reads live).
-    pub command_names: Vec<String>,
+    /// FnGetCommand views of the object's command stack, top first
+    /// (C4Script.cpp:918-945). A frame-start snapshot — mid-frame command
+    /// changes are not re-read (C++ reads live).
+    pub commands: Vec<CommandView>,
     /// Full object-state snapshot for nested script calls (Find_Func,
     /// GameCall): lets host functions build a complete object scope for
     /// another object mid-VM-call. `None` in legacy fixture contexts.
@@ -281,14 +283,14 @@ impl HostWorldObject {
             container,
             contents: Vec::new(),
             draw_transform,
-            command_names: Vec::new(),
+            commands: Vec::new(),
             state: None,
             last_energy_loss_cause: OWNER_NONE,
         }
     }
 
-    pub(crate) fn with_command_names(mut self, command_names: Vec<String>) -> Self {
-        self.command_names = command_names;
+    pub(crate) fn with_commands(mut self, commands: Vec<CommandView>) -> Self {
+        self.commands = commands;
         self
     }
 
@@ -1171,9 +1173,23 @@ fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, R
     }
 }
 
+/// Which post-name script argument layout a command function uses.
+#[derive(Clone, Copy)]
+enum CommandArgLayout {
+    /// FnSetCommand: (name, target, Tx, Ty, target2, data, retries) — no
+    /// update-interval slot, and the resulting command is always pushed
+    /// with C4CMD_Mode_Base (C4Script.cpp:840-867, C4Object.cpp:3949).
+    Set,
+    /// FnAddCommand/FnAppendCommand: (name, target, Tx, Ty, target2,
+    /// interval, data, retries, base_mode); an unfilled base_mode is int 0
+    /// = C4CMD_Mode_SilentSub (C4Script.cpp:870-916, C4Command.h:62).
+    Add,
+}
+
 fn parse_command_request(
     id: CommandId,
     args: &[Value],
+    layout: CommandArgLayout,
     function: &str,
 ) -> Result<CommandRequest, RuntimeError> {
     let target = if args.len() > 1 {
@@ -1206,20 +1222,25 @@ fn parse_command_request(
         None
     };
 
-    let update_interval = if args.len() > 5 {
-        let interval = value_to_i32(&args[5], function, "update_interval")?;
-        if interval < 0 {
-            return Err(RuntimeError::new(format!(
-                "{}: update interval must be >= 0",
-                function
-            )));
-        }
-        interval as u32
-    } else {
-        0
+    let (interval_slot, data_slot, retries_slot, mode_slot) = match layout {
+        CommandArgLayout::Set => (None, 5usize, 6usize, None),
+        CommandArgLayout::Add => (Some(5usize), 6, 7, Some(8usize)),
     };
 
-    let data_value = args.get(6).unwrap_or(&Value::Nil);
+    let update_interval = interval_slot
+        .and_then(|slot| args.get(slot))
+        .map(|value| value_to_i32(value, function, "update_interval"))
+        .transpose()?
+        .unwrap_or(0);
+    if update_interval < 0 {
+        return Err(RuntimeError::new(format!(
+            "{}: update interval must be >= 0",
+            function
+        )));
+    }
+    let update_interval = update_interval as u32;
+
+    let data_value = args.get(data_slot).unwrap_or(&Value::Nil);
     let data = match (id, data_value) {
         (CommandId::Call, Value::String(text)) => CommandData::Text(text.clone()),
         (CommandId::Call, Value::Nil) => CommandData::Text(String::new()),
@@ -1234,18 +1255,21 @@ fn parse_command_request(
         (_, other) => CommandData::Integer(value_to_i32(other, function, "data")?),
     };
 
-    let retries = if args.len() > 7 {
-        value_to_i32(&args[7], function, "retries")?
-    } else {
-        0
-    };
+    let retries = args
+        .get(retries_slot)
+        .map(|value| value_to_i32(value, function, "retries"))
+        .transpose()?
+        .unwrap_or(0);
 
-    let mode = if args.len() > 8 {
-        let raw = value_to_i32(&args[8], function, "mode")?;
-        CommandMode::from_i32(raw).unwrap_or(CommandMode::Base)
-    } else {
-        CommandMode::Base
-    };
+    let mode = mode_slot
+        .and_then(|slot| args.get(slot))
+        .map(|value| value_to_i32(value, function, "mode"))
+        .transpose()?
+        .map(|raw| CommandMode::from_i32(raw).unwrap_or(CommandMode::Base))
+        .unwrap_or(match layout {
+            CommandArgLayout::Set => CommandMode::Base,
+            CommandArgLayout::Add => CommandMode::SilentSub,
+        });
 
     Ok(CommandRequest::new(id)
         .with_target(target)
@@ -1345,12 +1369,13 @@ fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_player_name(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlayerName expects exactly 1 argument: player",
+            "GetPlayerName expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlayerName", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlayerName", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1364,12 +1389,13 @@ fn get_player_name(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_player_id(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlayerID expects exactly 1 argument: player",
+            "GetPlayerID expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlayerID", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlayerID", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1384,12 +1410,13 @@ fn get_player_id(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlayerTeam expects exactly 1 argument: player",
+            "GetPlayerTeam expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlayerTeam", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlayerTeam", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1406,12 +1433,13 @@ fn get_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_player_type(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlayerType expects exactly 1 argument: player",
+            "GetPlayerType expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlayerType", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlayerType", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1426,12 +1454,13 @@ fn get_player_type(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetWealth expects exactly 1 argument: player",
+            "GetWealth expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetWealth", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetWealth", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1483,12 +1512,13 @@ fn set_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_score(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetScore expects exactly 1 argument: player",
+            "GetScore expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetScore", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetScore", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1502,12 +1532,13 @@ fn get_score(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_plr_value(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlrValue expects exactly 1 argument: player",
+            "GetPlrValue expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlrValue", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlrValue", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1521,12 +1552,13 @@ fn get_plr_value(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_plr_value_gain(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetPlrValueGain expects exactly 1 argument: player",
+            "GetPlrValueGain expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetPlrValueGain", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlrValueGain", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -2818,6 +2850,54 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetLeague (C4Script.cpp:3562-3568): the indexed league section of
+/// Game.Parameters.League — nullptr (nil) when no league is configured,
+/// which is every local game. League play itself is not modeled
+/// (PORT_STATUS).
+fn get_league(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _index = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetLeague", "index")?;
+    Ok(Value::Nil)
+}
+
+/// FnGetScenarioVal (C4Script.cpp:4250-4256): StdCompiler reflection over
+/// Game.C4S by entry/section. Like the GetDefCoreVal port, the hot entries
+/// real content reads are modeled — the Landscape border-open keys resolve
+/// from the loaded landscape, which C4Landscape::ScenarioInit seeds from
+/// exactly those scenario values (`bool BottomOpen, TopOpen; int32_t
+/// LeftOpen, RightOpen`, C4Scenario.h:224-225, C4Landscape.cpp:67-71).
+/// Anything else is nil with a debug note (PORT_STATUS).
+fn get_scenario_val(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(entry) = parse_optional_string(args.first(), "GetScenarioVal", "entry")? else {
+        return Ok(Value::Nil);
+    };
+    let section = parse_optional_string(args.get(1), "GetScenarioVal", "section")?;
+    let _entry_index = parse_optional_i32(args.get(2), "GetScenarioVal", "entry_nr")?.unwrap_or(0);
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let landscape_entry = matches!(section.as_deref(), None | Some("Landscape"));
+        if landscape_entry {
+            if let Some(landscape) = context.landscape_ref() {
+                match entry.as_str() {
+                    "BottomOpen" => return Ok(Value::Bool(landscape.bottom_open())),
+                    "TopOpen" => return Ok(Value::Bool(landscape.top_open())),
+                    "LeftOpen" => return Ok(Value::Int(landscape.left_open())),
+                    "RightOpen" => return Ok(Value::Int(landscape.right_open())),
+                    _ => {}
+                }
+            }
+        }
+        tracing::debug!(
+            entry = entry.as_str(),
+            section = section.as_deref().unwrap_or(""),
+            "GetScenarioVal entry not modeled; nil"
+        );
+        Ok(Value::Nil)
+    })
+}
+
 fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
     // FnGetHiRank (C4Script.cpp:2792-2796) ->
     // C4Player::GetHiRankActiveCrew(false) (C4Player.cpp:1003-1020): walk
@@ -2848,13 +2928,15 @@ fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_crew(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 2 {
+    if args.len() > 2 {
         return Err(RuntimeError::new(
-            "GetCrew expects exactly 2 arguments: player and index",
+            "GetCrew expects at most 2 arguments: player and index",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetCrew", "player")?;
-    let index = value_to_i32(&args[1], "GetCrew", "index")?;
+    // Unfilled iPlr/index slots are nil -> 0 (FnGetCrew, C4Script.cpp:2798);
+    // SkiesOfFire's InitializePlayer calls GetCrew(iPlr) with no index.
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetCrew", "player")?;
+    let index = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "GetCrew", "index")?;
     if index < 0 {
         return Ok(Value::Nil);
     }
@@ -2875,12 +2957,13 @@ fn get_crew(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_crew_count(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetCrewCount expects exactly 1 argument: player",
+            "GetCrewCount expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetCrewCount", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetCrewCount", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -2947,12 +3030,13 @@ fn get_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetViewCursor expects exactly 1 argument: player",
+            "GetViewCursor expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetViewCursor", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetViewCursor", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -2967,12 +3051,13 @@ fn get_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_select_count(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "GetSelectCount expects exactly 1 argument: player",
+            "GetSelectCount expects at most 1 argument: player",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetSelectCount", "player")?;
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetSelectCount", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -2988,13 +3073,7 @@ fn get_select_count(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "GetHomebaseMaterial expects at least 1 argument: player",
-        ));
-    }
-
-    let player_id = value_to_i32(&args[0], "GetHomebaseMaterial", "player")?;
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetHomebaseMaterial", "player")?;
     let definition = parse_definition_argument(args.get(1), "GetHomebaseMaterial")?;
     let index = match args.get(2) {
         Some(Value::Nil) | None => None,
@@ -3053,13 +3132,7 @@ fn get_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "GetHomebaseProduction expects at least 1 argument: player",
-        ));
-    }
-
-    let player_id = value_to_i32(&args[0], "GetHomebaseProduction", "player")?;
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetHomebaseProduction", "player")?;
     let definition = parse_definition_argument(args.get(1), "GetHomebaseProduction")?;
     let index = match args.get(2) {
         Some(Value::Nil) | None => None,
@@ -3118,13 +3191,7 @@ fn get_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "GetPlrKnowledge expects at least 1 argument: player",
-        ));
-    }
-
-    let player_id = value_to_i32(&args[0], "GetPlrKnowledge", "player")?;
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlrKnowledge", "player")?;
     let definition = parse_definition_argument(args.get(1), "GetPlrKnowledge")?;
     let index = match args.get(2) {
         Some(Value::Nil) | None => 0,
@@ -4350,6 +4417,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerID", get_player_id);
     script.register_host_function("GetWealth", get_wealth);
     script.register_host_function("SetWealth", set_wealth);
+    script.register_host_function("GetScenarioVal", get_scenario_val);
+    script.register_host_function("GetLeague", get_league);
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetPlrValue", get_plr_value);
     script.register_host_function("GetPlrValueGain", get_plr_value_gain);
@@ -4446,6 +4515,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetYDir", set_y_dir);
     script.register_host_function("GetYDir", get_y_dir);
     script.register_host_function("SetRDir", set_r_dir);
+    script.register_host_function("AdjustWalkRotation", adjust_walk_rotation);
     script.register_host_function("GetRDir", get_r_dir);
     script.register_host_function("FindObject", find_object);
     script.register_host_function("FindObjectOwner", find_object_owner);
@@ -4550,6 +4620,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Min", min_func);
     script.register_host_function("Max", max_func);
     script.register_host_function("Sqrt", sqrt_func);
+    script.register_host_function("Angle", angle_func);
     script.register_host_function("Mod", modulo);
     script.register_host_function("GetMass", get_mass);
     script.register_host_function("SetMass", set_mass);
@@ -5087,13 +5158,7 @@ enum LogLevel {
 }
 
 fn log_internal(function: &str, args: &[Value], level: LogLevel) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(format!(
-            "{function} expects at least 1 argument: message",
-        )));
-    }
-
-    let format_str = match &args[0] {
+    let format_str = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => String::new(),
         other => {
@@ -5274,13 +5339,7 @@ fn get_index_of(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn format_string(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "Format expects at least 1 argument: format",
-        ));
-    }
-
-    let format_str = match &args[0] {
+    let format_str = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => String::new(),
         other => {
@@ -5297,13 +5356,7 @@ fn format_string(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn message(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "Message expects at least 1 argument: message",
-        ));
-    }
-
-    let raw_message = match &args[0] {
+    let raw_message = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => return Ok(Value::Bool(false)),
         other => {
@@ -5379,14 +5432,8 @@ fn resolve_target_player(context: &EffectHostContext, player_id: i32) -> Option<
 }
 
 fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "PlayerMessage expects at least 2 arguments: player and message",
-        ));
-    }
-
-    let player_id = value_to_i32(&args[0], "PlayerMessage", "player")?;
-    let raw_message = match &args[1] {
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "PlayerMessage", "player")?;
+    let raw_message = match args.get(1).unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => return Ok(Value::Bool(false)),
         other => {
@@ -5458,13 +5505,7 @@ fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "AddMessage expects at least 1 argument: message",
-        ));
-    }
-
-    let raw_message = match &args[0] {
+    let raw_message = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => return Ok(Value::Bool(false)),
         other => {
@@ -5516,13 +5557,7 @@ fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "PlrMessage expects at least 2 arguments: message and player",
-        ));
-    }
-
-    let raw_message = match &args[0] {
+    let raw_message = match args.first().unwrap_or(&Value::Nil) {
         Value::String(text) => text.clone(),
         Value::Nil => return Ok(Value::Bool(false)),
         other => {
@@ -5533,7 +5568,7 @@ fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let player_id = value_to_i32(&args[1], "PlrMessage", "player")?;
+    let player_id = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "PlrMessage", "player")?;
     let format_args = if args.len() > 2 { &args[2..] } else { &[] };
     let formatted = format_script_string("PlrMessage", &raw_message, format_args)?;
     let display_text = extract_message_text(&formatted);
@@ -5585,6 +5620,19 @@ fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// The FnAdjustWalkRotation seam (C4Script.cpp:5439-5448 +
+/// C4Object::AdjustWalkRotation, C4Object.cpp:6019-6086): Def->Rotateable,
+/// the frame's Action.t_attach, the shape attach record, and
+/// Def->Shape.VtxX[iAttachVtx] (the DEF vertex for the middle-bottom
+/// check; the LIVE vertex comes from the scope's vertices).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WalkRotationSeed {
+    pub rotateable: i32,
+    pub t_attach: u32,
+    pub attach: ShapeAttachRecord,
+    pub def_attach_vtx_x: i32,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct HostObjectContext<'a> {
     pub id: ObjectId,
@@ -5630,6 +5678,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub temporary_physical: Option<PhysicalInfo>,
     pub physical_changes: Vec<(String, i32)>,
     pub definition_physical: PhysicalInfo,
+    pub walk_rotation: WalkRotationSeed,
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -5756,7 +5805,13 @@ impl<'a> HostObjectContext<'a> {
             temporary_physical: None,
             physical_changes: Vec::new(),
             definition_physical: PhysicalInfo::default(),
+            walk_rotation: WalkRotationSeed::default(),
         }
+    }
+
+    pub fn with_walk_rotation(mut self, walk_rotation: WalkRotationSeed) -> Self {
+        self.walk_rotation = walk_rotation;
+        self
     }
 
     pub fn with_alive(mut self, alive: bool) -> Self {
@@ -6429,13 +6484,7 @@ fn redirect_foreign_effect_target(
 }
 
 fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "AddEffect expects at least 2 arguments: name and state",
-        ));
-    }
-
-    let name = match effect_name_filter("AddEffect", &args[0])? {
+    let name = match effect_name_filter("AddEffect", args.first().unwrap_or(&Value::Nil))? {
         Some(name) => name.to_owned(),
         None => return Ok(Value::Int(0)),
     };
@@ -6642,17 +6691,12 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(result) = redirect_foreign_effect_target("RemoveEffect", args) {
         return result;
     }
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "RemoveEffect expects at least 2 arguments: name and state",
-        ));
-    }
+    let name_filter =
+        effect_name_filter("RemoveEffect", args.first().unwrap_or(&Value::Nil))?.map(str::to_owned);
 
-    let name_filter = effect_name_filter("RemoveEffect", &args[0])?.map(str::to_owned);
-
-    let scope = determine_scope_from_state(&args[1])?;
+    let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
     if matches!(scope, EffectScope::Object) {
-        match &args[1] {
+        match args.get(1).unwrap_or(&Value::Nil) {
             Value::Object(_) | Value::Proplist(_) => {}
             other => {
                 return Err(RuntimeError::new(format!(
@@ -6703,15 +6747,9 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(result) = redirect_foreign_effect_target("GetEffect", args) {
         return result;
     }
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "GetEffect expects at least 2 arguments: name and state",
-        ));
-    }
+    let name_filter = effect_name_filter("GetEffect", args.first().unwrap_or(&Value::Nil))?;
 
-    let name_filter = effect_name_filter("GetEffect", &args[0])?;
-
-    let scope = determine_scope_from_state(&args[1])?;
+    let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
     let effects = match snapshot_effects_from_context(scope) {
         Some(effects) => effects,
         None => match scope {
@@ -6811,15 +6849,9 @@ fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(result) = redirect_foreign_effect_target("GetEffectCount", args) {
         return result;
     }
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "GetEffectCount expects at least 2 arguments: name and state",
-        ));
-    }
+    let name_filter = effect_name_filter("GetEffectCount", args.first().unwrap_or(&Value::Nil))?;
 
-    let name_filter = effect_name_filter("GetEffectCount", &args[0])?;
-
-    let scope = determine_scope_from_state(&args[1])?;
+    let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
     let effects = match snapshot_effects_from_context(scope) {
         Some(effects) => effects,
         None => match scope {
@@ -6874,15 +6906,11 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(result) = redirect_foreign_effect_target("EffectVar", args) {
         return result;
     }
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "EffectVar expects at least 3 arguments: index, state, and number",
-        ));
-    }
-
-    let var_index = match &args[0] {
+    // Unfilled iVarIndex is nil -> 0 (FnEffectVar, C4Script.cpp:5577).
+    let var_index = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) if *value >= 0 => *value as usize,
-        Value::Int(_) | Value::Nil => return Ok(Value::Nil),
+        Value::Nil => 0,
+        Value::Int(_) => return Ok(Value::Nil),
         other => {
             return Err(RuntimeError::new(format!(
                 "EffectVar: expected int for index, got {}",
@@ -6891,9 +6919,9 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let scope = determine_scope_from_state(&args[1])?;
+    let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
 
-    let effect_number = match &args[2] {
+    let effect_number = match args.get(2).unwrap_or(&Value::Nil) {
         Value::Int(value) if *value > 0 => *value as usize,
         Value::Int(_) | Value::Nil => return Ok(Value::Nil),
         other => {
@@ -6931,7 +6959,7 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
     // FnEffectVar resolves the effect BY NUMBER (C4Effect::Get(iNumber,
     // true), C4Script.cpp:5583); snapshot proplists carry positional
     // stand-in numbers from extract_effects_from_state.
-    let effects = extract_effects_from_state(&args[1])?;
+    let effects = extract_effects_from_state(args.get(1).unwrap_or(&Value::Nil))?;
     let number = i32::try_from(effect_number).unwrap_or(i32::MAX);
     Ok(effects
         .iter()
@@ -7111,11 +7139,7 @@ fn random(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new("Sound expects at least 1 argument: name"));
-    }
-
-    let name = match &args[0] {
+    let name = match args.first().unwrap_or(&Value::Nil) {
         Value::String(value) if !value.is_empty() => value.clone(),
         Value::Nil => return Ok(Value::Bool(true)),
         other => {
@@ -7253,13 +7277,7 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "SoundLevel expects at least 2 arguments: name and level",
-        ));
-    }
-
-    let name = match &args[0] {
+    let name = match args.first().unwrap_or(&Value::Nil) {
         Value::String(value) if !value.is_empty() => value.clone(),
         Value::Nil => return Ok(Value::Bool(true)),
         other => {
@@ -7270,7 +7288,7 @@ fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let level = match &args[1] {
+    let level = match args.get(1).unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
         Value::Nil => 0,
         other => {
@@ -7557,6 +7575,47 @@ fn sqrt_func(args: &[Value]) -> Result<Value, RuntimeError> {
     // C++ implementation does: sqrt, then adjusts for rounding
     let result = (value as f64).sqrt() as i32;
     Ok(Value::Int(result))
+}
+
+/// FnAngle (C4Script.cpp:3255-3280): the position-to-position angle in
+/// Clonk orientation (0 = up, 90 = right), `iPrec` scaling (default 1).
+/// Axis-aligned deltas take the exact shortcuts; the general case is
+/// `trunc(180 * prec * atan2(|dy|, |dx|) / pi)` folded into the quadrant.
+fn angle_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x1 = value_to_i32(args.first().unwrap_or(&Value::Nil), "Angle", "x1")?;
+    let y1 = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "Angle", "y1")?;
+    let x2 = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "Angle", "x2")?;
+    let y2 = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "Angle", "y2")?;
+    let mut prec = value_to_i32(args.get(4).unwrap_or(&Value::Nil), "Angle", "precision")?;
+    if prec == 0 {
+        prec = 1;
+    }
+
+    let dx = x2.wrapping_sub(x1);
+    let dy = y2.wrapping_sub(y1);
+    if dx == 0 {
+        return Ok(Value::Int(if dy > 0 { 180 * prec } else { 0 }));
+    }
+    if dy == 0 {
+        return Ok(Value::Int(if dx > 0 { 90 * prec } else { 270 * prec }));
+    }
+
+    let angle = (180.0
+        * f64::from(prec)
+        * f64::from(dy.abs()).atan2(f64::from(dx.abs()))
+        * std::f64::consts::FRAC_1_PI) as i32;
+
+    Ok(Value::Int(if x2 > x1 {
+        if y2 < y1 {
+            90 * prec - angle
+        } else {
+            90 * prec + angle
+        }
+    } else if y2 < y1 {
+        270 * prec + angle
+    } else {
+        270 * prec - angle
+    }))
 }
 
 /// FnGetMass (C4Script.cpp:1148-1158): with an id, the DEF mass; else the
@@ -8529,13 +8588,7 @@ fn reset_physical(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "DoEnergy expects at least 1 argument: change",
-        ));
-    }
-
-    let change = match &args[0] {
+    let change = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
         Value::Nil => 0,
         other => {
@@ -8707,13 +8760,7 @@ fn stage_energy_loss_cause(
 }
 
 fn do_con(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "DoCon expects at least 1 argument: change",
-        ));
-    }
-
-    let change_percent = match &args[0] {
+    let change_percent = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
         Value::Nil => 0,
         other => {
@@ -8758,13 +8805,7 @@ fn do_con(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "DoDamage expects at least 1 argument: change",
-        ));
-    }
-
-    let change = match &args[0] {
+    let change = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
         Value::Nil => 0,
         other => {
@@ -8892,13 +8933,7 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     if std::env::var("LC_DEBUG_CHBM").is_ok() {
         tracing::warn!(?args, "OSA SetAction");
     }
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetAction expects at least 1 argument: action name",
-        ));
-    }
-
-    let action_name = match &args[0] {
+    let action_name = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) if !name.is_empty() => Some(name.clone()),
         Value::String(_) | Value::Nil => None,
         other => {
@@ -9037,12 +9072,6 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetBridgeActionData expects at least 1 argument: length",
-        ));
-    }
-
     let mut param_count = args.len();
     let mut target_id: Option<ObjectId> = None;
 
@@ -9052,19 +9081,18 @@ fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
             parse_object_reference_argument(&args[param_count], "SetBridgeActionData", "object")?;
     }
 
-    if param_count == 0 {
-        return Err(RuntimeError::new(
-            "SetBridgeActionData expects at least 1 argument: length",
-        ));
-    }
-
     if param_count > 4 {
         return Err(RuntimeError::new(
             "SetBridgeActionData accepts at most 4 arguments before the object parameter",
         ));
     }
 
-    let length = value_to_i32(&args[0], "SetBridgeActionData", "length")?;
+    let length = if param_count > 0 {
+        value_to_i32(&args[0], "SetBridgeActionData", "length")?
+    } else {
+        // Unfilled iBridgeLength is nil -> 0 (C4Script.cpp:756).
+        0
+    };
     let move_clonk = if param_count > 1 {
         value_to_bool(&args[1], "SetBridgeActionData", "move_clonk")?
     } else {
@@ -9117,13 +9145,8 @@ fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetActionData expects at least 1 argument: data",
-        ));
-    }
-
-    let data = value_to_i32(&args[0], "SetActionData", "data")?;
+    // Unfilled iData is nil -> 0 (FnSetActionData, C4Script.cpp:767).
+    let data = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetActionData", "data")?;
     let mut index = 1;
     let mut target_id: Option<ObjectId> = None;
 
@@ -9491,18 +9514,28 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
         if command_num < 0 {
             return Ok(Value::Nil);
         }
-        let Some(name) = world_object.command_names.get(command_num as usize) else {
+        let Some(view) = world_object.commands.get(command_num as usize) else {
             return Ok(Value::Nil);
         };
+        // Element map (C4Script.cpp:926-945): 0 name, 1 Target, 2 Tx,
+        // 3 C4VInt(Ty), 4 Target2, 5 C4Value(Data, C4V_Any) — a zero
+        // int Data reads nil in C++.
         match element {
-            0 => Ok(Value::String(name.clone())),
-            1..=5 => {
-                tracing::warn!(
-                    element,
-                    "GetCommand: Target/Tx/Ty/Target2/Data elements are not exposed yet; returning nil"
-                );
-                Ok(Value::Nil)
-            }
+            0 => Ok(Value::String(view.name.clone())),
+            1 => Ok(view
+                .target
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil)),
+            2 => Ok(view.tx.map(Value::Int).unwrap_or(Value::Nil)),
+            3 => Ok(Value::Int(view.ty.unwrap_or(0))),
+            4 => Ok(view
+                .target2
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil)),
+            5 => Ok(match view.data {
+                CommandData::Integer(data) if data != 0 => Value::Int(data),
+                _ => Value::Nil,
+            }),
             _ => Ok(Value::Nil),
         }
     })
@@ -9656,15 +9689,10 @@ fn get_phase(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_phase(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetPhase expects at least 1 argument: phase",
-        ));
-    }
-
-    let phase = match &args[0] {
+    // Unfilled iVal is nil -> 0 (FnSetPhase, C4Script.cpp:828).
+    let phase = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
-        Value::Nil => return Ok(Value::Bool(false)),
+        Value::Nil => 0,
         other => {
             return Err(RuntimeError::new(format!(
                 "SetPhase: expected int or nil for phase, got {}",
@@ -10818,19 +10846,14 @@ fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "BlastFree expects at least 3 arguments: x, y, level",
-        ));
-    }
     if args.len() > 4 {
         return Err(RuntimeError::new(
             "BlastFree expects at most 4 arguments: x, y, level, caused_by",
         ));
     }
 
-    let mut x = value_to_i32(&args[0], "BlastFree", "x")?;
-    let mut y = value_to_i32(&args[1], "BlastFree", "y")?;
+    let mut x = value_to_i32(args.first().unwrap_or(&Value::Nil), "BlastFree", "x")?;
+    let mut y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "BlastFree", "y")?;
     let level = value_to_i32(&args[2], "BlastFree", "level")?;
     if level <= 0 {
         return Ok(Value::Bool(false));
@@ -10883,19 +10906,14 @@ fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "ShakeFree expects at least 3 arguments: x, y, radius",
-        ));
-    }
     if args.len() > 3 {
         return Err(RuntimeError::new(
             "ShakeFree expects exactly 3 arguments: x, y, radius",
         ));
     }
 
-    let x = value_to_i32(&args[0], "ShakeFree", "x")?;
-    let y = value_to_i32(&args[1], "ShakeFree", "y")?;
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "ShakeFree", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ShakeFree", "y")?;
     let radius = value_to_i32(&args[2], "ShakeFree", "radius")?;
     if radius <= 0 {
         return Ok(Value::Bool(false));
@@ -10915,15 +10933,9 @@ fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "DigFree expects at least 3 arguments: x, y, radius",
-        ));
-    }
-
-    let x = value_to_i32(&args[0], "DigFree", "x")?;
-    let y = value_to_i32(&args[1], "DigFree", "y")?;
-    let radius = value_to_i32(&args[2], "DigFree", "radius")?;
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "DigFree", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "DigFree", "y")?;
+    let radius = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "DigFree", "radius")?;
     if radius < 0 {
         return Ok(Value::Bool(false));
     }
@@ -10997,16 +11009,10 @@ fn free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 4 {
-        return Err(RuntimeError::new(
-            "DigFreeRect expects at least 4 arguments: x, y, width, height",
-        ));
-    }
-
-    let x = value_to_i32(&args[0], "DigFreeRect", "x")?;
-    let y = value_to_i32(&args[1], "DigFreeRect", "y")?;
-    let width = value_to_i32(&args[2], "DigFreeRect", "width")?;
-    let height = value_to_i32(&args[3], "DigFreeRect", "height")?;
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "DigFreeRect", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "DigFreeRect", "y")?;
+    let width = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "DigFreeRect", "width")?;
+    let height = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "DigFreeRect", "height")?;
     if width <= 0 || height <= 0 {
         return Ok(Value::Bool(false));
     }
@@ -12046,15 +12052,10 @@ fn collect_closest_matches(world: &impl WorldAccessor, params: &FindObjectParams
 }
 
 fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetDir expects at least 1 argument: direction",
-        ));
-    }
-
-    let raw_direction = match &args[0] {
+    // Unfilled ndir is nil -> 0 = DIR_Left (FnSetDir, C4Script.cpp:798).
+    let raw_direction = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
-        Value::Nil => return Ok(Value::Bool(false)),
+        Value::Nil => 0,
         other => {
             return Err(RuntimeError::new(format!(
                 "SetDir: expected int or nil for direction, got {}",
@@ -12217,13 +12218,8 @@ fn get_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_r(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetR expects at least 1 argument: rotation",
-        ));
-    }
-
-    let rotation = value_to_i32(&args[0], "SetR", "rotation")?;
+    // Unfilled nr is nil -> 0 (FnSetR, C4Script.cpp:737).
+    let rotation = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetR", "rotation")?;
 
     let mut index = 1;
     let mut target_id: Option<ObjectId> = None;
@@ -12281,7 +12277,10 @@ fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
                 }
             }
             if let Some(other) = context.get_world_object(target) {
-                return Ok(Value::Int(other.rotation.rem_euclid(360)));
+                // FnGetR returns the raw r — the movement circle bounds
+                // keep it within (-180, 180], possibly negative
+                // (C4Movement.cpp:434-435).
+                return Ok(Value::Int(other.rotation));
             }
             return Ok(Value::Nil);
         }
@@ -12296,15 +12295,11 @@ fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetComDir expects at least 1 argument: command direction",
-        ));
-    }
-
-    let raw_direction = match &args[0] {
+    // Unfilled ncomdir is nil -> 0 = COMD_Stop (FnSetComDir,
+    // C4Script.cpp:791, C4Object.h:56-57).
+    let raw_direction = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
-        Value::Nil => return Ok(Value::Bool(false)),
+        Value::Nil => 0,
         other => {
             return Err(RuntimeError::new(format!(
                 "SetComDir: expected int or nil for command direction, got {}",
@@ -12400,9 +12395,8 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
         args = &args[1..];
     }
     if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetCommand expects at least 1 argument: command name",
-        ));
+        // C++ FnSetCommand: !szCommand -> false (C4Script.cpp:843-899).
+        return Ok(Value::Bool(false));
     }
     if let Some(target) = leading_target {
         if active_object_id() != Some(target) {
@@ -12445,7 +12439,7 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         };
 
-        let request = parse_command_request(command_id, args, "SetCommand")?;
+        let request = parse_command_request(command_id, args, CommandArgLayout::Set, "SetCommand")?;
         object.clear_command_stack();
         let success = object.push_command_front(request);
         Ok(Value::Bool(success))
@@ -12469,9 +12463,8 @@ fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
         args = &args[1..];
     }
     if args.is_empty() {
-        return Err(RuntimeError::new(
-            "AddCommand expects at least 1 argument: command name",
-        ));
+        // C++ FnAddCommand: !szCommand -> false (C4Script.cpp:843-899).
+        return Ok(Value::Bool(false));
     }
 
     let command_name = match &args[0] {
@@ -12490,7 +12483,7 @@ fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
         None => return Ok(Value::Bool(false)),
     };
 
-    let request = parse_command_request(command_id, args, "AddCommand")?;
+    let request = parse_command_request(command_id, args, CommandArgLayout::Add, "AddCommand")?;
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -12517,10 +12510,33 @@ fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn append_command(args: &[Value]) -> Result<Value, RuntimeError> {
+    // C++ FnAppendCommand leads with the object slot (pObj, szCommand, ...;
+    // C4Script.cpp:894-916); 0/nil means the calling object. The name-first
+    // form stays for the command-DSL fixtures. A FOREIGN target re-dispatches
+    // through the reentrancy seam like SetCommand so the queued command lands
+    // on the target's own stack.
+    let mut args = args;
+    let mut leading_target: Option<ObjectId> = None;
+    let leads_with_object_slot = matches!(
+        (args.first(), args.get(1)),
+        (Some(Value::Object(_) | Value::Proplist(_)), _)
+            | (Some(Value::Nil | Value::Int(0)), Some(Value::String(_)))
+    );
+    if leads_with_object_slot {
+        leading_target = parse_object_reference_argument(&args[0], "AppendCommand", "target")?;
+        args = &args[1..];
+    }
     if args.is_empty() {
-        return Err(RuntimeError::new(
-            "AppendCommand expects at least 1 argument: command name",
-        ));
+        // C++ FnAppendCommand: !szCommand -> false (C4Script.cpp:843-899).
+        return Ok(Value::Bool(false));
+    }
+    if let Some(target) = leading_target {
+        if active_object_id() != Some(target) {
+            return match call_world_object_function(target, "AppendCommand", args) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
     }
 
     let command_name = match &args[0] {
@@ -12539,7 +12555,7 @@ fn append_command(args: &[Value]) -> Result<Value, RuntimeError> {
         None => return Ok(Value::Bool(false)),
     };
 
-    let request = parse_command_request(command_id, args, "AppendCommand")?;
+    let request = parse_command_request(command_id, args, CommandArgLayout::Add, "AppendCommand")?;
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -12803,14 +12819,13 @@ fn set_velocity_component(
     args: &[Value],
     component: VelocityComponent,
 ) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(format!(
-            "{} expects at least 1 argument: value",
-            component.set_function_name()
-        )));
-    }
-
-    let value = value_to_i32(&args[0], component.set_function_name(), "value")?;
+    // Unfilled parameter slots are nil -> 0 (C4AulExec parameter filling):
+    // a bare FnSetXDir()/FnSetYDir() zeroes the dir (C4Script.cpp:697-708).
+    let value = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        component.set_function_name(),
+        "value",
+    )?;
     let mut index = 1;
     let mut target_id: Option<ObjectId> = None;
 
@@ -12887,16 +12902,145 @@ fn set_y_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     set_velocity_component(args, VelocityComponent::Y)
 }
 
+/// FnAdjustWalkRotation (C4Script.cpp:5439-5448): bails unless the def is
+/// Rotateable, this frame's Action.t_attach carries CNAT_Bottom and the
+/// last shape attach hit a material; then C4Object::AdjustWalkRotation
+/// (C4Object.cpp:6019-6086) probes the floor around the attach position
+/// and steers rdir toward the slope.
+fn adjust_walk_rotation(args: &[Value]) -> Result<Value, RuntimeError> {
+    let range_x = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "AdjustWalkRotation",
+        "range_x",
+    )?;
+    let range_y = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "AdjustWalkRotation",
+        "range_y",
+    )?;
+    let speed = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "AdjustWalkRotation",
+        "speed",
+    )?;
+    let target_id = args
+        .get(3)
+        .map(|arg| parse_object_reference_argument(arg, "AdjustWalkRotation", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("AdjustWalkRotation requires an active engine context")
+        })?;
+
+        let Some(object) = context.object_context() else {
+            return Ok(Value::Bool(false));
+        };
+        if let Some(target) = target_id {
+            if target != object.id() {
+                // Foreign dispatch is not modeled — the same documented
+                // gap as SetRDir's target parameter.
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        let seed = object.walk_rotation;
+        let rotation = object.rotation();
+        // The LIVE Shape.VtxX for the else-branch (C4Object.cpp:6072).
+        let live_vtx_x = usize::try_from(seed.attach.vtx)
+            .ok()
+            .and_then(|vtx| object.vertices.get(vtx))
+            .map(|vertex| vertex.x)
+            .unwrap_or(0);
+
+        // Guard: Rotateable + bottom attach + attached material
+        // (C4Script.cpp:5443-5446).
+        if seed.rotateable == 0 || seed.t_attach & CNAT_BOTTOM == 0 || !seed.attach.mat_valid {
+            return Ok(Value::Bool(false));
+        }
+
+        let dest_angle = if seed.attach.vtx < 0 || seed.def_attach_vtx_x == 0 {
+            // Attachment at the middle (bottom) vertex: evaluate the
+            // floor around the ABSOLUTE attach position
+            // (C4Object.cpp:6023-6065).
+            let landscape = context.landscape_ref();
+            let solid =
+                |x: i32, y: i32| evaluate_landscape_query(landscape, LandscapeQuery::Solid, x, y);
+            let probe = |x_check: i32| -> i32 {
+                let mut offset = 0i32;
+                if solid(x_check, seed.attach.y) {
+                    // up: `while (--i > -iRangeY) if (solid) { ++i; break; }`
+                    loop {
+                        offset -= 1;
+                        if offset <= -range_y {
+                            break;
+                        }
+                        if solid(x_check, seed.attach.y + offset) {
+                            offset += 1;
+                            break;
+                        }
+                    }
+                } else {
+                    // down: `while (++i < iRangeY) if (solid) { --i; break; }`
+                    loop {
+                        offset += 1;
+                        if offset >= range_y {
+                            break;
+                        }
+                        if solid(x_check, seed.attach.y + offset) {
+                            offset -= 1;
+                            break;
+                        }
+                    }
+                }
+                offset
+            };
+            let solid_left = probe(seed.attach.x - range_x);
+            let solid_right = probe(seed.attach.x + range_x);
+            // "100% accurate for large values of Pi" — the INNER integer
+            // division happens first (C4Object.cpp:6064).
+            (solid_right - solid_left) * (35 / range_x.max(1))
+        } else if live_vtx_x > 0 {
+            // Attachment at a non-middle vertex: rotate the feet down
+            // (C4Object.cpp:6068-6076).
+            -50
+        } else {
+            50
+        };
+
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        // Move to destination angle (C4Object.cpp:6078-6084). C++ writes
+        // rdir directly (no Mobile flag); the pending-update path arms
+        // mobile, but every caller runs from an attached procedure that
+        // has already set it.
+        if (dest_angle - rotation).abs() > 2 {
+            let bounded = itofix((dest_angle - rotation).clamp(-15, 15));
+            let divisor = if speed != 0 { 10000 / speed } else { 0 };
+            // `rdir /= (10000 / iSpeed)` — a zero divisor is division by
+            // zero in C++ (unreachable for sane speeds); fail safe here.
+            let rdir = if divisor != 0 {
+                bounded / divisor
+            } else {
+                C4Fixed::ZERO
+            };
+            object.set_rotation_velocity(rdir);
+        } else {
+            object.set_rotation_velocity(C4Fixed::ZERO);
+        }
+        Ok(Value::Bool(true))
+    })
+}
+
 fn set_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     // C++ FnSetRDir(value, [target], [precision = 10]) sets rdir = itofix(value,
     // precision), a fractional `C4Fixed` angular velocity. `C4Script.cpp:710`.
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetRDir expects at least 1 argument: value",
-        ));
-    }
-
-    let value = value_to_i32(&args[0], "SetRDir", "value")?;
+    // Unfilled parameter slots are nil -> 0 (C4AulExec parameter filling): a
+    // bare FnSetRDir() zeroes the spin (the dragon's Jumping/StopFlying).
+    let value = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetRDir", "value")?;
     let mut index = 1;
     let mut target_id: Option<ObjectId> = None;
     if let Some(arg) = args.get(index) {
@@ -13130,14 +13274,9 @@ fn apply_position_bounds(
 }
 
 fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "SetPosition expects at least 2 arguments: x, y",
-        ));
-    }
-
-    let x = value_to_i32(&args[0], "SetPosition", "x")?;
-    let y = value_to_i32(&args[1], "SetPosition", "y")?;
+    // Unfilled iX/iY are nil -> 0 (FnSetPosition, C4Script.cpp:462).
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetPosition", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetPosition", "y")?;
 
     let mut index = 2;
     let mut target_id: Option<ObjectId> = None;
@@ -13208,15 +13347,9 @@ fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "CreateObject expects at least 1 argument: definition",
-        ));
-    }
-
     // FnCreateObject takes a C4ID (C4Script.cpp:1892); our resources address
     // definitions by their id string, so id values and strings coincide.
-    let definition = match &args[0] {
+    let definition = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
         Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => return Ok(Value::Nil),
         other => {
@@ -13441,16 +13574,10 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "CreateConstruction expects at least 1 argument: definition",
-        ));
-    }
-
     // FnCreateConstruction takes a C4ID (C4Script.cpp:1911-1912); our
     // resources address definitions by their id string, so id values and
     // strings coincide.
-    let definition = match &args[0] {
+    let definition = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
         Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => return Ok(Value::Nil),
         other => {
@@ -13804,13 +13931,7 @@ fn rectangles_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool 
 }
 
 fn create_particle(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "CreateParticle expects at least 1 argument: name",
-        ));
-    }
-
-    let definition = match &args[0] {
+    let definition = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) if !name.is_empty() => name.clone(),
         Value::String(_) | Value::Nil => return Ok(Value::Bool(false)),
         other => {
@@ -14305,13 +14426,8 @@ fn contents_count(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn find_contents(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "FindContents expects at least 1 argument: definition",
-        ));
-    }
-
-    let definition = parse_definition_argument(Some(&args[0]), "FindContents")?;
+    let definition =
+        parse_definition_argument(Some(args.first().unwrap_or(&Value::Nil)), "FindContents")?;
     let Some(definition) = definition else {
         return Ok(Value::Nil);
     };
@@ -14359,13 +14475,10 @@ fn find_contents(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn find_other_contents(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "FindOtherContents expects at least 1 argument: definition",
-        ));
-    }
-
-    let definition = parse_definition_argument(Some(&args[0]), "FindOtherContents")?;
+    let definition = parse_definition_argument(
+        Some(args.first().unwrap_or(&Value::Nil)),
+        "FindOtherContents",
+    )?;
     let target_id = parse_object_reference_argument(
         args.get(1).unwrap_or(&Value::Nil),
         "FindOtherContents",
@@ -14453,13 +14566,9 @@ fn get_ocf(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetGraphics expects at least 1 argument: graphics name",
-        ));
-    }
-
-    let graphics_name = match &args[0] {
+    // A null pGfxName restores the DEFAULT graphics (FnSetGraphics,
+    // C4Script.cpp:4378).
+    let graphics_name = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) if !name.is_empty() => Some(name.clone()),
         Value::String(_) | Value::Nil => None,
         // Falsy parameters reset to nil before the type check
@@ -14675,37 +14784,27 @@ fn parse_draw_transform_components(
     args: &[Value],
     function: &str,
 ) -> Result<[i32; 6], RuntimeError> {
-    if args.len() < 6 {
-        return Err(RuntimeError::new(format!(
-            "{function} expects at least 6 arguments: a, b, c, d, e, f"
-        )));
-    }
     Ok([
-        value_to_i32(&args[0], function, "a")?,
-        value_to_i32(&args[1], function, "b")?,
-        value_to_i32(&args[2], function, "c")?,
-        value_to_i32(&args[3], function, "d")?,
-        value_to_i32(&args[4], function, "e")?,
-        value_to_i32(&args[5], function, "f")?,
+        value_to_i32(args.first().unwrap_or(&Value::Nil), function, "a")?,
+        value_to_i32(args.get(1).unwrap_or(&Value::Nil), function, "b")?,
+        value_to_i32(args.get(2).unwrap_or(&Value::Nil), function, "c")?,
+        value_to_i32(args.get(3).unwrap_or(&Value::Nil), function, "d")?,
+        value_to_i32(args.get(4).unwrap_or(&Value::Nil), function, "e")?,
+        value_to_i32(args.get(5).unwrap_or(&Value::Nil), function, "f")?,
     ])
 }
 
 fn parse_draw_transform_matrix(args: &[Value], function: &str) -> Result<[i32; 9], RuntimeError> {
-    if args.len() < 9 {
-        return Err(RuntimeError::new(format!(
-            "{function} expects at least 9 arguments: a, b, c, d, e, f, g, h, i"
-        )));
-    }
     Ok([
-        value_to_i32(&args[0], function, "a")?,
-        value_to_i32(&args[1], function, "b")?,
-        value_to_i32(&args[2], function, "c")?,
-        value_to_i32(&args[3], function, "d")?,
-        value_to_i32(&args[4], function, "e")?,
-        value_to_i32(&args[5], function, "f")?,
-        value_to_i32(&args[6], function, "g")?,
-        value_to_i32(&args[7], function, "h")?,
-        value_to_i32(&args[8], function, "i")?,
+        value_to_i32(args.first().unwrap_or(&Value::Nil), function, "a")?,
+        value_to_i32(args.get(1).unwrap_or(&Value::Nil), function, "b")?,
+        value_to_i32(args.get(2).unwrap_or(&Value::Nil), function, "c")?,
+        value_to_i32(args.get(3).unwrap_or(&Value::Nil), function, "d")?,
+        value_to_i32(args.get(4).unwrap_or(&Value::Nil), function, "e")?,
+        value_to_i32(args.get(5).unwrap_or(&Value::Nil), function, "f")?,
+        value_to_i32(args.get(6).unwrap_or(&Value::Nil), function, "g")?,
+        value_to_i32(args.get(7).unwrap_or(&Value::Nil), function, "h")?,
+        value_to_i32(args.get(8).unwrap_or(&Value::Nil), function, "i")?,
     ])
 }
 
@@ -15533,13 +15632,8 @@ fn act_idle(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetCategory expects at least 1 argument: category",
-        ));
-    }
-
-    let category = value_to_i32(&args[0], "SetCategory", "category")?;
+    // Unfilled iCategory is nil -> 0 (FnSetCategory, C4Script.cpp:805).
+    let category = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetCategory", "category")?;
 
     let mut index = 1;
     let mut target_id: Option<ObjectId> = None;
@@ -15576,14 +15670,10 @@ fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetOwner expects at least 1 argument: owner",
-        ));
-    }
-
-    let owner = match &args[0] {
+    // Unfilled iOwner is nil -> 0 (FnSetOwner, C4Script.cpp:820).
+    let owner = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
+        Value::Nil => 0,
         other => {
             return Err(RuntimeError::new(format!(
                 "SetOwner: expected int for owner, got {}",
@@ -15628,13 +15718,8 @@ fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_alive(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetAlive expects at least 1 argument: alive",
-        ));
-    }
-
-    let alive = match &args[0] {
+    // Unfilled nalv is nil -> false (FnSetAlive, C4Script.cpp:813).
+    let alive = match args.first().unwrap_or(&Value::Nil) {
         Value::Bool(flag) => *flag,
         Value::Int(value) => *value != 0,
         Value::Nil => false,
@@ -16137,15 +16222,11 @@ fn with_context_mut<R>(
 }
 
 fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "SetObjectStatus expects at least 1 argument: status",
-        ));
-    }
-
-    let status_value = match &args[0] {
+    // Unfilled iNewStatus is nil -> 0 = STATUS_Deleted rejection path
+    // (FnSetObjectStatus, C4Script.cpp:5416-5428).
+    let status_value = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
-        Value::Nil => return Ok(Value::Bool(false)),
+        Value::Nil => 0,
         other => {
             return Err(RuntimeError::new(format!(
                 "SetObjectStatus: expected int or nil for status, got {}",
@@ -16927,6 +17008,7 @@ impl EffectHostContext {
                 temporary_physical,
                 physical_changes,
                 definition_physical,
+                walk_rotation,
             } = ctx;
             {
                 let mut scope = ObjectScopeContext::new(
@@ -16968,6 +17050,7 @@ impl EffectHostContext {
                     definition_physical,
                 );
                 scope.definition_id = definition_id;
+                scope.walk_rotation = walk_rotation;
                 scope
             }
         });
@@ -17822,6 +17905,8 @@ struct ObjectScopeContext {
     temporary_physical: Option<PhysicalInfo>,
     physical_changes: Vec<(String, i32)>,
     definition_physical: PhysicalInfo,
+    /// FnAdjustWalkRotation seam — see [`WalkRotationSeed`].
+    walk_rotation: WalkRotationSeed,
 }
 
 impl ObjectScopeContext {
@@ -17900,7 +17985,10 @@ impl ObjectScopeContext {
             current_command_direction: command_direction,
             current_position: position,
             current_fixed_velocity: FixedVec2::from_ints(velocity.x, velocity.y),
-            current_rotation: rotation.rem_euclid(360),
+            // Seed the RAW engine r: the movement circle bounds keep it
+            // within (-180, 180] and FnGetR reads it unnormalized; only
+            // SetR normalizes (C4Object::SetRotation, C4Object.cpp:5632).
+            current_rotation: rotation,
             vertices,
             graphics_overlays,
             base_graphics,
@@ -17909,6 +17997,7 @@ impl ObjectScopeContext {
             temporary_physical,
             physical_changes,
             definition_physical,
+            walk_rotation: WalkRotationSeed::default(),
         }
     }
 
@@ -18718,6 +18807,8 @@ mod tests {
         "AddEffect",
         "AddMenuItem",
         "AddMessage",
+        "AdjustWalkRotation",
+        "Angle",
         "AnyContainer",
         "AppendCommand",
         "BlastFree",
@@ -18807,6 +18898,7 @@ mod tests {
         "GetID",
         "GetIndexOf",
         "GetKeys",
+        "GetLeague",
         "GetLength",
         "GetMass",
         "GetMaterial",
@@ -18835,6 +18927,7 @@ mod tests {
         "GetProcedure",
         "GetR",
         "GetRDir",
+        "GetScenarioVal",
         "GetScore",
         "GetSelectCount",
         "GetTemperature",
@@ -19527,6 +19620,44 @@ mod tests {
             Value::Bool(false),
             "water is not solid"
         );
+    }
+
+    #[test]
+    fn get_scenario_val_reads_landscape_border_openness() {
+        // FnGetScenarioVal reflects Game.C4S by entry/section
+        // (C4Script.cpp:4250-4256); C4SLandscape carries `bool BottomOpen,
+        // TopOpen; int32_t LeftOpen, RightOpen` (C4Scenario.h:224-225) which
+        // seed the landscape borders (C4Landscape.cpp:67-71). The dragon's
+        // MoveTo reads BottomOpen (Fantasy.c4d Dragon.c4d Script.c:1549).
+        let mut landscape = Landscape::flat(32, 20);
+        landscape.set_border_open(7, 0, true, false);
+        let world = || {
+            HostWorldContext::with_landscape(
+                Vec::<HostWorldObject>::new(),
+                Some(landscape.clone()),
+                HashMap::new(),
+                Vec::new(),
+                HashMap::new(),
+                HashMap::new(),
+                1,
+                false,
+            )
+        };
+        let query = |entry: &str| {
+            let (result, _) = with_effect_context(None, &[], world(), 1, || {
+                get_scenario_val(&[
+                    Value::String(entry.into()),
+                    Value::String("Landscape".into()),
+                ])
+            });
+            result.expect("GetScenarioVal succeeds")
+        };
+        assert_eq!(query("BottomOpen"), Value::Bool(false));
+        assert_eq!(query("TopOpen"), Value::Bool(true));
+        assert_eq!(query("LeftOpen"), Value::Int(7));
+        assert_eq!(query("RightOpen"), Value::Int(0));
+        // Unmodeled entries are nil with a debug note, like GetDefCoreVal.
+        assert_eq!(query("SkyDef"), Value::Nil);
     }
 
     #[test]
@@ -22663,6 +22794,461 @@ mod tests {
                 assert_eq!(request.id, CommandId::MoveTo);
                 assert_eq!(request.tx, Some(3));
                 assert_eq!(request.ty, Some(4));
+            }
+            other => panic!("expected PushBack operation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn angle_matches_the_cpp_quadrant_math() {
+        // FnAngle (C4Script.cpp:3255-3280): 0 = up, 90 = right; axis
+        // shortcuts; trunc(180*prec*atan2(|dy|,|dx|)/pi) folded per
+        // quadrant. The dragon's Flying() computes its target rotation
+        // with Angle(iVy, -iVx) (Fantasy.c4d Dragon.c4d Script.c:540).
+        let angle = |x1: i32, y1: i32, x2: i32, y2: i32, prec: i32| {
+            let args = [
+                Value::Int(x1),
+                Value::Int(y1),
+                Value::Int(x2),
+                Value::Int(y2),
+                Value::Int(prec),
+            ];
+            let (result, _) = with_object_host_context(|| angle_func(&args));
+            result.expect("Angle succeeds")
+        };
+        assert_eq!(angle(0, 0, 0, 10, 0), Value::Int(180), "straight down");
+        assert_eq!(angle(0, 0, 0, -10, 0), Value::Int(0), "straight up");
+        assert_eq!(angle(0, 0, 0, 0, 0), Value::Int(0), "no delta");
+        assert_eq!(angle(0, 0, 10, 0, 0), Value::Int(90), "right");
+        assert_eq!(angle(0, 0, -10, 0, 0), Value::Int(270), "left");
+        assert_eq!(angle(0, 0, 10, -10, 0), Value::Int(45));
+        assert_eq!(angle(0, 0, 10, 10, 0), Value::Int(135));
+        assert_eq!(angle(0, 0, -10, -10, 0), Value::Int(315));
+        assert_eq!(angle(0, 0, -10, 10, 0), Value::Int(225));
+        // Precision: 900 - trunc(1800*atan2(2,5)/pi) = 900 - 218.
+        assert_eq!(angle(0, 0, 5, -2, 10), Value::Int(682));
+    }
+
+    #[test]
+    fn get_command_exposes_target_tx_ty_and_data_elements() {
+        // FnGetCommand elements (C4Script.cpp:926-945): 1 Target, 2 Tx,
+        // 3 C4VInt(Ty), 4 Target2, 5 C4Value(Data, C4V_Any) — zero int
+        // Data reads nil. The dragon's Flying() steers by
+        // GetCommand(0, 2)/GetCommand(0, 3) (Fantasy.c4d Dragon.c4d
+        // Script.c:505-512).
+        let world_object = HostWorldObject::new(
+            ObjectId::new(1),
+            "DRGN",
+            ObjectStatus::Normal,
+            "Fly",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::new(50, 50),
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_commands(vec![CommandView {
+            name: "MoveTo".into(),
+            target: None,
+            tx: Some(200),
+            ty: Some(90),
+            target2: None,
+            data: CommandData::Integer(0),
+        }]);
+        let world = HostWorldContext::from_objects(vec![world_object]);
+        let query = |element: i32| {
+            let (result, _) = with_object_host_context_with_world(world.clone(), || {
+                get_command(&[Value::Int(0), Value::Int(element)])
+            });
+            result.expect("GetCommand succeeds")
+        };
+        assert_eq!(query(0), Value::String("MoveTo".into()));
+        assert_eq!(query(1), Value::Nil, "no target object");
+        assert_eq!(query(2), Value::Int(200), "Tx");
+        assert_eq!(query(3), Value::Int(90), "Ty");
+        assert_eq!(query(4), Value::Nil, "no target2");
+        assert_eq!(query(5), Value::Nil, "zero Data is nil in C4V_Any");
+    }
+
+    #[test]
+    fn get_r_returns_the_raw_engine_rotation() {
+        // C++ keeps r within (-180, 180] via the movement circle bounds
+        // (C4Movement.cpp:434-435) and FnGetR returns it RAW — a walker
+        // leaning left reads a NEGATIVE angle. Only SetR normalizes to
+        // 0..360 (C4Object::SetRotation, C4Object.cpp:5632-5634). The
+        // dragon's Flying()/AdjustWalkRotation deltas depend on signed r.
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::with_category(
+                ObjectId::new(1),
+                None,
+                ObjectStatus::Normal,
+                100,
+                0,
+                crate::FULL_CON,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                -10,
+                &[],
+                "Walk",
+                0,
+                0,
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                0,
+                None,
+                None,
+                &[],
+                DEFAULT_CATEGORY,
+                ocf::NORMAL,
+                false,
+                None,
+                None,
+            )),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || get_r(&[]),
+        );
+        assert_eq!(result.expect("GetR succeeds"), Value::Int(-10));
+    }
+
+    fn adjust_walk_rotation_case(
+        seed: WalkRotationSeed,
+        rotation: i32,
+        vertices: &[ObjectVertex],
+        landscape: Option<Landscape>,
+        args: &[Value],
+    ) -> (Result<Value, RuntimeError>, EffectContextOutcome) {
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            landscape,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        with_effect_context(
+            Some(
+                HostObjectContext::with_category(
+                    ObjectId::new(1),
+                    None,
+                    ObjectStatus::Normal,
+                    100,
+                    0,
+                    crate::FULL_CON,
+                    OWNER_NONE,
+                    Vector2::ZERO,
+                    Vector2::ZERO,
+                    rotation,
+                    &[],
+                    "Walk",
+                    0,
+                    0,
+                    0,
+                    ActionLibrary::default(),
+                    Direction::Left,
+                    CommandDirection::Stop,
+                    0,
+                    None,
+                    None,
+                    vertices,
+                    DEFAULT_CATEGORY,
+                    ocf::NORMAL,
+                    false,
+                    None,
+                    None,
+                )
+                .with_walk_rotation(seed),
+            ),
+            &[],
+            world,
+            1,
+            || adjust_walk_rotation(args),
+        )
+    }
+
+    #[test]
+    fn adjust_walk_rotation_steers_rdir_toward_the_floor_slope() {
+        // C4Object::AdjustWalkRotation floor probe (C4Object.cpp:6023-6065):
+        // GBackSolid columns at iAttachX +/- iRangeX around iAttachY, then
+        // iDestAngle = (right - left) * (35 / max(iRangeX,1)) — INNER
+        // integer division first (35/20 = 1 for the dragon's
+        // AdjustWalkRotation(20, 20, 100), Fantasy.c4d Dragon.c4d
+        // Script.c:701). rdir = itofix(BoundBy(dest - r, -15, 15)) /
+        // (10000 / iSpeed) (C4Object.cpp:6078-6084).
+        // Ground: columns 0..32 surface y=25, columns 32..64 surface y=5.
+        // Attach at (30, 15): left probe x=10 descends to the y=25 floor
+        // (offset +9), right probe x=50 sits inside ground (offset 0) ->
+        // dest = (0 - 9) * 1 = -9; r = 0 -> rdir = itofix(-9)/100.
+        let mut surface = vec![25; 32];
+        surface.extend(vec![5; 32]);
+        let landscape = Landscape::new(64, surface).expect("landscape builds");
+        let seed = WalkRotationSeed {
+            rotateable: 45,
+            t_attach: CNAT_BOTTOM,
+            attach: ShapeAttachRecord {
+                mat_valid: true,
+                x: 30,
+                y: 15,
+                vtx: 0,
+            },
+            def_attach_vtx_x: 0,
+        };
+        let args = [Value::Int(20), Value::Int(20), Value::Int(100)];
+        let (result, outcome) =
+            adjust_walk_rotation_case(seed, 0, &[], Some(landscape), &args);
+        assert_eq!(result.expect("AdjustWalkRotation succeeds"), Value::Bool(true));
+        assert_eq!(
+            outcome
+                .object_update
+                .and_then(|update| update.rotation_velocity),
+            Some(C4Fixed::from_raw(-9 * 65536 / 100)),
+            "rdir = itofix(-9) / (10000/100)"
+        );
+    }
+
+    #[test]
+    fn adjust_walk_rotation_guards_and_vertex_branch() {
+        // Guards (C4Script.cpp:5443-5446): no Rotateable / no bottom
+        // attach / no attach material -> false, rdir untouched.
+        let args = [Value::Int(20), Value::Int(20), Value::Int(100)];
+        let (result, outcome) = adjust_walk_rotation_case(
+            WalkRotationSeed::default(),
+            0,
+            &[],
+            None,
+            &args,
+        );
+        assert_eq!(result.expect("guarded call runs"), Value::Bool(false));
+        assert_eq!(
+            outcome
+                .object_update
+                .and_then(|update| update.rotation_velocity),
+            None
+        );
+
+        // Attachment at a NON-middle vertex (Def->Shape.VtxX[vtx] != 0):
+        // live Shape.VtxX > 0 -> iDestAngle = -50 (C4Object.cpp:6068-6076);
+        // r = 0 -> rdir = itofix(BoundBy(-50, -15, 15)) / 100.
+        let vertices = vec![ObjectVertex::new(0, 0), ObjectVertex::new(3, 10)];
+        let seed = WalkRotationSeed {
+            rotateable: 45,
+            t_attach: CNAT_BOTTOM,
+            attach: ShapeAttachRecord {
+                mat_valid: true,
+                x: 30,
+                y: 15,
+                vtx: 1,
+            },
+            def_attach_vtx_x: 5,
+        };
+        let (result, outcome) = adjust_walk_rotation_case(seed, 0, &vertices, None, &args);
+        assert_eq!(result.expect("vertex branch runs"), Value::Bool(true));
+        assert_eq!(
+            outcome
+                .object_update
+                .and_then(|update| update.rotation_velocity),
+            Some(C4Fixed::from_raw(-15 * 65536 / 100)),
+            "rdir = itofix(-15) / 100"
+        );
+
+        // Within +/-2 degrees of the destination the spin clears
+        // (C4Object.cpp:6083 `else rdir = 0`).
+        let vertices = vec![ObjectVertex::new(0, 0), ObjectVertex::new(3, 10)];
+        let seed = WalkRotationSeed {
+            rotateable: 45,
+            t_attach: CNAT_BOTTOM,
+            attach: ShapeAttachRecord {
+                mat_valid: true,
+                x: 30,
+                y: 15,
+                vtx: 1,
+            },
+            def_attach_vtx_x: 5,
+        };
+        let (result, outcome) = adjust_walk_rotation_case(seed, -49, &vertices, None, &args);
+        assert_eq!(result.expect("near-dest call runs"), Value::Bool(true));
+        assert_eq!(
+            outcome
+                .object_update
+                .and_then(|update| update.rotation_velocity),
+            Some(C4Fixed::ZERO)
+        );
+    }
+
+    #[test]
+    fn host_functions_fill_missing_parameters_like_the_cpp_vm() {
+        // C4AulExec fills unfilled parameter slots with nil; engine
+        // functions convert nil to 0/false/nullptr instead of failing
+        // (C4AulExec parameter filling + C4Value conversions). Each case
+        // mirrors the C++ Fn* result for an under-filled call.
+        // FnGetCrew(iPlr, index): missing index is 0 (C4Script.cpp:2798);
+        // SkiesOfFire's InitializePlayer calls GetCrew(iPlr).
+        let (result, _) = with_object_host_context(|| get_crew(&[Value::Int(0)]));
+        assert_eq!(result.expect("GetCrew tolerates 1 arg"), Value::Nil);
+
+        // FnSetAction(nullptr) -> false (C4Script.cpp:747-751).
+        let (result, _) = with_object_host_context(|| set_action(&[]));
+        assert_eq!(result.expect("SetAction() runs"), Value::Bool(false));
+
+        // FnMessage(nullptr) -> false (C4Script.cpp:2421-2424).
+        let (result, _) = with_object_host_context(|| message(&[]));
+        assert_eq!(result.expect("Message() runs"), Value::Bool(false));
+
+        // FnSetCommand: !szCommand -> false (C4Script.cpp:843-844).
+        let (result, _) = with_object_host_context(|| set_command(&[]));
+        assert_eq!(result.expect("SetCommand() runs"), Value::Bool(false));
+
+        // FnSetR(0 default) -> SetRotation(0) (C4Script.cpp:737-745); the
+        // scope dedupes the no-op write (rotation already 0), so only the
+        // success result is observable.
+        let (result, _) = with_object_host_context(|| set_r(&[]));
+        assert_eq!(result.expect("SetR() runs"), Value::Bool(true));
+
+        // The remaining int/bool-parameter wrappers accept bare calls
+        // (all C4ValueInt/bool slots: C4Script.cpp:462-828, 2290-3120,
+        // 5416, 5577).
+        for (name, result) in [
+            ("SetComDir", with_object_host_context(|| set_com_dir(&[])).0),
+            ("SetDir", with_object_host_context(|| set_dir(&[])).0),
+            ("SetPhase", with_object_host_context(|| set_phase(&[])).0),
+            ("DoEnergy", with_object_host_context(|| do_energy(&[])).0),
+            ("DoCon", with_object_host_context(|| do_con(&[])).0),
+            ("DoDamage", with_object_host_context(|| do_damage(&[])).0),
+            (
+                "SetPosition",
+                with_object_host_context(|| set_position(&[])).0,
+            ),
+            (
+                "SetActionData",
+                with_object_host_context(|| set_action_data(&[])).0,
+            ),
+            (
+                "SetCategory",
+                with_object_host_context(|| set_category(&[])).0,
+            ),
+            ("SetOwner", with_object_host_context(|| set_owner(&[])).0),
+            ("SetAlive", with_object_host_context(|| set_alive(&[])).0),
+            (
+                "GetPlayerName",
+                with_object_host_context(|| get_player_name(&[])).0,
+            ),
+            ("GetWealth", with_object_host_context(|| get_wealth(&[])).0),
+            (
+                "GetCrewCount",
+                with_object_host_context(|| get_crew_count(&[])).0,
+            ),
+            ("AddCommand", with_object_host_context(|| add_command(&[])).0),
+            (
+                "AppendCommand",
+                with_object_host_context(|| append_command(&[])).0,
+            ),
+        ] {
+            assert!(result.is_ok(), "{name}() must not error: {result:?}");
+        }
+    }
+
+    #[test]
+    fn set_dir_functions_default_missing_arguments_to_zero() {
+        // Unfilled C4ValueInt parameters are nil -> 0 (C4AulExec.cpp
+        // parameter filling): FnSetRDir()/FnSetXDir() zero the dir and
+        // still mobilize (C4Script.cpp:697-732). The dragon stops itself
+        // with bare SetRDir()/SetXDir() calls (Fantasy.c4d Dragon.c4d
+        // Script.c:689).
+        let (result, outcome) = with_object_host_context(|| {
+            set_r_dir(&[])?;
+            set_x_dir(&[])
+        });
+        assert_eq!(result.expect("bare SetXDir succeeds"), Value::Bool(true));
+        let update = outcome.object_update.expect("velocity update recorded");
+        assert_eq!(update.rotation_velocity, Some(C4Fixed::ZERO));
+        assert_eq!(update.fixed_velocity_x, Some(C4Fixed::ZERO));
+    }
+
+    #[test]
+    fn set_command_parses_the_cpp_argument_order() {
+        // C++ FnSetCommand(pObj, szCommand, pTarget, Tx, iTy, pTarget2, data,
+        // iRetries) has NO update-interval slot: data follows target2 directly
+        // (C4Script.cpp:840-867). The dragon issues SetCommand(this(),
+        // "MoveTo", 0, x, y, 0, C4CMD_MoveTo_NoPosAdjust=1, C4Command.h:68)
+        // (Fantasy.c4d Dragon.c4d Script.c:1565).
+        let this = object_reference_value(ObjectId::new(1));
+        let args = vec![
+            this,
+            Value::String("MoveTo".into()),
+            Value::Int(0),
+            Value::Int(200),
+            Value::Int(90),
+            Value::Int(0),
+            Value::Int(1),
+        ];
+        let (result, outcome) = with_object_host_context(|| set_command(&args));
+        assert_eq!(result.expect("SetCommand succeeds"), Value::Bool(true));
+        let request = match &outcome.command_operations[1] {
+            CommandOperation::PushFront(request) => request.clone(),
+            other => panic!("expected PushFront operation, got {:?}", other),
+        };
+        assert_eq!(request.id, CommandId::MoveTo);
+        assert_eq!(request.tx, Some(200));
+        assert_eq!(request.ty, Some(90));
+        assert_eq!(request.data, CommandData::Integer(1));
+        assert_eq!(request.update_interval, 0, "SetCommand has no interval slot");
+    }
+
+    #[test]
+    fn add_command_defaults_to_silent_sub_mode() {
+        // C++ FnAddCommand's iBaseMode is a C4ValueInt: an unfilled slot is
+        // int 0 = C4CMD_Mode_SilentSub (C4Script.cpp:870, C4Command.h:62) —
+        // NOT Base.
+        let args = vec![Value::String("Wait".into())];
+        let (result, outcome) = with_object_host_context(|| add_command(&args));
+        assert_eq!(result.expect("AddCommand succeeds"), Value::Bool(true));
+        match &outcome.command_operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.mode, CommandMode::SilentSub);
+            }
+            other => panic!("expected PushFront operation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_command_leads_with_the_object_slot() {
+        // C++ FnAppendCommand(pObj, szCommand, pTarget, Tx, iTy, pTarget2,
+        // iUpdateInterval, Data, iRetries, iBaseMode) — the OBJECT slot comes
+        // first, like SetCommand/AddCommand (C4Script.cpp:894-916). The dragon
+        // queues AppendCommand(this(), "Call", this(), 0,0,0,0, "StopComDir")
+        // (Fantasy.c4d Dragon.c4d Script.c:1566).
+        let this = object_reference_value(ObjectId::new(1));
+        let args = vec![
+            this.clone(),
+            Value::String("Call".into()),
+            this,
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::String("StopComDir".into()),
+        ];
+        let (result, outcome) = with_object_host_context(|| append_command(&args));
+        assert_eq!(result.expect("AppendCommand succeeds"), Value::Bool(true));
+        assert_eq!(outcome.command_operations.len(), 1);
+        match &outcome.command_operations[0] {
+            CommandOperation::PushBack(request) => {
+                assert_eq!(request.id, CommandId::Call);
+                assert_eq!(request.target, Some(ObjectId::new(1)));
+                assert_eq!(request.data, CommandData::Text("StopComDir".into()));
             }
             other => panic!("expected PushBack operation, got {:?}", other),
         }
