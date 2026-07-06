@@ -15124,6 +15124,14 @@ impl Engine {
             return Ok(());
         };
 
+        tracing::debug!(
+            definition = %definition_id,
+            function,
+            ?kind,
+            action = action_name,
+            object = self.objects[index].id.as_u64(),
+            "action callback"
+        );
         let object_id = self.objects[index].id;
         let state_snapshot = match state_override {
             Some(state) => state,
@@ -37710,6 +37718,209 @@ func FoundIt(pObj) { RemoveObject(pObj); return(1); }
             removed,
             "the target-relative closest search finds the animal next to pOther"
         );
+    }
+
+    // Time.c4d/Script.c `Initialized` (and Driftwood.c4d): `while(pOther =
+    // FindObject(GetID())) RemoveObject(pOther);` — C4Object::AssignRemoval
+    // sets Status=0 IMMEDIATELY (C4Object.cpp:282) and C4Game::FindObject
+    // skips Status==0 objects (C4Game.cpp:1360-1365), so the dedup loop
+    // removes each duplicate exactly once and terminates within ONE script
+    // call. The Rust copy-in/copy-out seam must read removals through the
+    // nested-scope staging or the loop never ends (the Tropical/Alchemy/
+    // Funnel/Ashlands + GoldenCanyon/ArcticOcean/Arctic join hang).
+    #[test]
+    fn same_call_remove_object_drops_out_of_find_object() {
+        let script = r#"#strict
+func Dedup() {
+    var pOther, n;
+    while ((pOther = FindObject(TIMR)) && n < 32) {
+        RemoveObject(pOther);
+        n++;
+    }
+    return(n);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("TIMR", "Timer", script).expect("timer compiles"),
+            )
+            .expect("timer registers");
+        let keeper = engine
+            .spawn_object(SpawnConfig::new("TIMR").with_position(Vector2::new(10, 10)))
+            .expect("keeper spawns");
+        let dup_a = engine
+            .spawn_object(SpawnConfig::new("TIMR").with_position(Vector2::new(20, 10)))
+            .expect("dup spawns");
+        let dup_b = engine
+            .spawn_object(SpawnConfig::new("TIMR").with_position(Vector2::new(30, 10)))
+            .expect("dup spawns");
+
+        let idx = engine.find_object_index(keeper).expect("keeper exists");
+        let result = engine
+            .call_object_function(idx, "Dedup", Vec::new())
+            .expect("Dedup runs");
+        assert_eq!(
+            result,
+            Value::Int(2),
+            "each duplicate is found+removed exactly once (C4Object.cpp:282, C4Game.cpp:1365)"
+        );
+        for id in [dup_a, dup_b] {
+            let destroyed = engine
+                .find_object_index(id)
+                .map(|index| {
+                    engine.objects[index].destroyed
+                        || engine.objects[index].state.status == ObjectStatus::Deleted
+                })
+                .unwrap_or(true);
+            assert!(destroyed, "the duplicate's removal was committed");
+        }
+        let keeper_alive = engine
+            .find_object_index(keeper)
+            .map(|index| engine.objects[index].state.status == ObjectStatus::Normal)
+            .unwrap_or(false);
+        assert!(
+            keeper_alive,
+            "the caller survives (FindObject excludes cthr->Obj, C4Script.cpp:2115-2131)"
+        );
+    }
+
+    // Basement72.c4d (BAS7) `MoveOutClonk`: `while(Stuck(pObj) &&
+    // Inside(GetY(pObj)-GetY(),-15,+5)) SetPosition(GetX(pObj),
+    // GetY(pObj)-1,pObj);` — FnSetPosition force-positions ANY pObj live
+    // (C4Script.cpp:462-477, pObj->ForcePosition) and FnGetX/FnGetY/FnStuck
+    // read the live x/y (C4Script.cpp:1197,1292,1858-1862), so every
+    // iteration sees the previous SetPosition and the loop walks the stuck
+    // object upward out of the ground. The Rust seam must both APPLY the
+    // foreign SetPosition and READ it back within the same call (the
+    // SkyIslands/Tutorial04/07/10/FoggyCliffs/Mountains join hang).
+    #[test]
+    fn same_call_foreign_set_position_is_visible_to_get_y_and_stuck() {
+        let script = r#"#strict
+func MoveOut(pObj) {
+    var n;
+    while (Stuck(pObj) && Inside(GetY(pObj)-GetY(), -15, 5) && n < 64) {
+        SetPosition(GetX(pObj), GetY(pObj)-1, pObj);
+        n++;
+    }
+    return(n);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("BASE", "Basement", script).expect("basement compiles"),
+            )
+            .expect("basement registers");
+        engine
+            .register_definition(simple_definition("CLNK"))
+            .expect("clonk registers");
+        // Solid ground from y >= 20 in every column.
+        engine.set_landscape(Landscape::new(100, vec![20; 100]).expect("landscape constructs"));
+
+        let base = engine
+            .spawn_object(
+                SpawnConfig::new("BASE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 28)),
+            )
+            .expect("basement spawns");
+        let stuck_clonk = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 25))
+                    .with_vertices(vec![ObjectVertex::new(0, 0)]),
+            )
+            .expect("clonk spawns");
+
+        let idx = engine.find_object_index(base).expect("basement exists");
+        let result = engine
+            .call_object_function(idx, "MoveOut", vec![Value::Object(stuck_clonk.as_u64())])
+            .expect("MoveOut runs");
+        assert_eq!(
+            result,
+            Value::Int(6),
+            "y walks 25→19 one pixel per iteration, Stuck turns false above the surface \
+             (C4Script.cpp:462-477,1858-1862)"
+        );
+        let final_position = engine
+            .object_snapshot(stuck_clonk)
+            .expect("clonk snapshot available")
+            .position;
+        assert_eq!(
+            final_position,
+            Vector2::new(50, 19),
+            "the foreign ForcePosition writes commit to the world"
+        );
+    }
+
+    // TotemHunt _PLO `DoPlrLaunch`: `while (Contents()) {
+    // SetCrewEnabled(1, Contents()); Exit(Contents(), x-GetX(), y-GetY()); }`
+    // — C4Object::Exit removes the object from its container's Contents
+    // list IMMEDIATELY (C4Object.cpp:1529-1533, `Contents.Remove(this);
+    // Contained = nullptr`), so FnContents never returns an exited object
+    // again within the same call and the eject loop terminates (the
+    // TotemHunt tick hang).
+    #[test]
+    fn same_call_exit_drops_out_of_contents() {
+        let script = r#"#strict
+func Eject() {
+    var n;
+    while (Contents() && n < 32) {
+        Exit(Contents());
+        n++;
+    }
+    return(n);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CONT", "Container", script).expect("container compiles"),
+            )
+            .expect("container registers");
+        engine
+            .register_definition(simple_definition("ITEM"))
+            .expect("item registers");
+        let container = engine
+            .spawn_object(
+                SpawnConfig::new("CONT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(40, 40)),
+            )
+            .expect("container spawns");
+        let item_a = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(container),
+            )
+            .expect("item spawns");
+        let item_b = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(container),
+            )
+            .expect("item spawns");
+
+        let idx = engine.find_object_index(container).expect("container exists");
+        let result = engine
+            .call_object_function(idx, "Eject", Vec::new())
+            .expect("Eject runs");
+        assert_eq!(
+            result,
+            Value::Int(2),
+            "each content is ejected exactly once (C4Object.cpp:1529-1533)"
+        );
+        for id in [item_a, item_b] {
+            let contained = engine
+                .object_snapshot(id)
+                .expect("item snapshot available")
+                .container;
+            assert_eq!(contained, None, "the Exit committed to the world");
+        }
     }
 
     // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure

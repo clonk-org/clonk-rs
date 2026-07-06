@@ -3954,21 +3954,23 @@ pub(crate) fn compute_vertex_contact(
 fn resolve_vertices(
     context: &EffectHostContext,
     target: Option<ObjectId>,
-) -> Option<(Vector2, &[ObjectVertex])> {
+) -> Option<(Vector2, Vec<ObjectVertex>)> {
     if let Some(target_id) = target {
         if let Some(object) = context.object_context() {
             if object.id() == target_id {
-                return Some((object.effective_position(), object.vertices()));
+                return Some((object.effective_position(), object.vertices().to_vec()));
             }
         }
+        // Foreign targets read THROUGH the mid-call staging (a scope's
+        // SetPosition/SetVertex writes) like the live C4Object the C++
+        // engine hands to Shape.CheckContact (FnStuck, C4Script.cpp:1858).
         context
-            .world
-            .get(target_id)
-            .map(|other| (other.position(), other.vertices()))
+            .get_world_object(target_id)
+            .map(|other| (other.position(), other.vertices().to_vec()))
     } else {
         context
             .object_context()
-            .map(|object| (object.effective_position(), object.vertices()))
+            .map(|object| (object.effective_position(), object.vertices().to_vec()))
     }
 }
 
@@ -10535,7 +10537,7 @@ fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
                 return Ok(Value::Int(0));
             }
             let mut result = 0u32;
-            for vertex in vertices {
+            for vertex in &vertices {
                 result |= compute_vertex_contact(landscape, position, vertex, mask);
             }
             return Ok(Value::Int(result as i32));
@@ -13179,24 +13181,28 @@ fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
             None
         };
 
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        // FnSetPosition (C4Script.cpp:462-477): no pObj means the caller,
+        // and ANY object force-positions live (`pObj->ForcePosition`) — the
+        // BAS7 MoveOutClonk loop repositions a FOREIGN stuck object and
+        // re-reads it within the same call.
+        let active = context.object_context().map(|object| object.id());
+        let Some(target) = target_id.or(active) else {
+            return Ok(Value::Bool(false));
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(scope) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
 
         let mut position = Vector2::new(x, y);
         if check_bounds {
-            let vertices: Vec<ObjectVertex> = object.vertices().to_vec();
+            let vertices: Vec<ObjectVertex> = scope.vertices().to_vec();
             position = apply_position_bounds(position, &vertices, landscape_snapshot.as_ref());
         }
 
-        object.set_position(position);
+        scope.set_position(position);
         Ok(Value::Bool(true))
     })
 }
@@ -17054,22 +17060,40 @@ impl EffectHostContext {
         } else {
             self.world.get(id).cloned()?
         };
-        // C++ mutates live state mid-call: reflect the freshest known
-        // containment (Enter/Exit in the active or a finished nested
-        // scope) so container-filtered searches see it (FnFindObject
-        // vContainer, C4Script.cpp:2122-2127).
-        if let Some(container) = self
-            .object
-            .as_ref()
-            .filter(|scope| scope.id == id)
-            .map(|scope| scope.current_container)
-            .or_else(|| {
-                self.nested_objects
-                    .get(&id)
-                    .map(|state| state.scope.current_container)
-            })
-        {
-            object.container = container;
+        // C++ mutates live state mid-call: an object with a scope in THIS
+        // call (active, dormant outer, or finished nested) reads through
+        // that scope, so later host queries in the same call see earlier
+        // writes exactly like the live C4Object. Removals surface as
+        // deleted status (C4Object::AssignRemoval sets Status=0
+        // immediately, C4Object.cpp:282) which FindObject & friends skip
+        // (C4Game.cpp:1360-1365); containment reflects Enter/Exit
+        // (FnFindObject vContainer, C4Script.cpp:2122-2127).
+        if let Some(scope) = self.object_scope(id) {
+            object.status = if scope.destroy {
+                ObjectStatus::Deleted
+            } else {
+                scope.status
+            };
+            object.container = scope.current_container;
+            object.position = scope.effective_position();
+            object.vertices = scope.vertices().to_vec();
+        }
+        // The snapshot contents list re-checks each child's live state:
+        // C4Object::Exit removes the child from its container's Contents
+        // IMMEDIATELY (C4Object.cpp:1529-1533), as does AssignRemoval for
+        // removed children (C4Object.cpp:297-305) — a same-call eject loop
+        // (`while(Contents()) Exit(Contents())`, the TotemHunt _PLO
+        // DoPlrLaunch) must see the list shrink.
+        if !object.contents.is_empty() {
+            object.contents.retain(|child_id| {
+                self.object_scope(*child_id)
+                    .map(|scope| {
+                        !scope.destroy
+                            && scope.status.is_active()
+                            && scope.current_container == Some(id)
+                    })
+                    .unwrap_or(true)
+            });
         }
         Some(object)
     }
