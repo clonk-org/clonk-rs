@@ -493,6 +493,36 @@ mod tests {
     }
 
     #[test]
+    fn wait_takes_its_duration_from_data_then_tx() {
+        // C4CMD_Wait InitEvaluation (C4Command.cpp:1659-1663): a nonzero
+        // Data overrides the update interval, else a nonzero Tx does. The
+        // dragon waits via SetCommand(this(), "Wait", 0,0,0,0, 10) — data
+        // slot 10, no interval (Fantasy.c4d Dragon.c4d Script.c:1649).
+        let from_data = CommandRequest::new(CommandId::Wait).with_data(CommandData::Integer(10));
+        assert_eq!(
+            WaitState::from_request(&from_data).remaining,
+            Some(10),
+            "Data overrides the interval"
+        );
+
+        let from_tx = CommandRequest::new(CommandId::Wait).with_tx(Some(7));
+        assert_eq!(
+            WaitState::from_request(&from_tx).remaining,
+            Some(7),
+            "Tx is the fallback duration"
+        );
+
+        let from_interval = CommandRequest::new(CommandId::Wait)
+            .with_update_interval(3)
+            .with_data(CommandData::Integer(10));
+        assert_eq!(
+            WaitState::from_request(&from_interval).remaining,
+            Some(10),
+            "Data wins even when an interval is present"
+        );
+    }
+
+    #[test]
     fn wait_stops_dig_and_completes_after_interval() {
         let actor_id = ObjectId::new(50);
         let mut actor = snapshot_with_id(actor_id.as_u64());
@@ -8966,11 +8996,16 @@ struct WaitState {
 
 impl WaitState {
     fn from_request(request: &CommandRequest) -> Self {
-        let remaining = if request.update_interval == 0 {
-            None
-        } else {
-            Some(request.update_interval)
+        // C4CMD_Wait InitEvaluation (C4Command.cpp:1659-1663): a nonzero
+        // Data overrides the update interval, else a nonzero Tx does.
+        let interval = match request.data {
+            CommandData::Integer(data) if data != 0 => data.max(0) as u32,
+            _ => match request.tx {
+                Some(tx) if tx != 0 => tx.max(0) as u32,
+                _ => request.update_interval,
+            },
         };
+        let remaining = (interval != 0).then_some(interval);
         Self { remaining }
     }
 

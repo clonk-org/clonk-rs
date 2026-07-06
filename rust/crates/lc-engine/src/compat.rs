@@ -1171,9 +1171,23 @@ fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, R
     }
 }
 
+/// Which post-name script argument layout a command function uses.
+#[derive(Clone, Copy)]
+enum CommandArgLayout {
+    /// FnSetCommand: (name, target, Tx, Ty, target2, data, retries) — no
+    /// update-interval slot, and the resulting command is always pushed
+    /// with C4CMD_Mode_Base (C4Script.cpp:840-867, C4Object.cpp:3949).
+    Set,
+    /// FnAddCommand/FnAppendCommand: (name, target, Tx, Ty, target2,
+    /// interval, data, retries, base_mode); an unfilled base_mode is int 0
+    /// = C4CMD_Mode_SilentSub (C4Script.cpp:870-916, C4Command.h:62).
+    Add,
+}
+
 fn parse_command_request(
     id: CommandId,
     args: &[Value],
+    layout: CommandArgLayout,
     function: &str,
 ) -> Result<CommandRequest, RuntimeError> {
     let target = if args.len() > 1 {
@@ -1206,20 +1220,25 @@ fn parse_command_request(
         None
     };
 
-    let update_interval = if args.len() > 5 {
-        let interval = value_to_i32(&args[5], function, "update_interval")?;
-        if interval < 0 {
-            return Err(RuntimeError::new(format!(
-                "{}: update interval must be >= 0",
-                function
-            )));
-        }
-        interval as u32
-    } else {
-        0
+    let (interval_slot, data_slot, retries_slot, mode_slot) = match layout {
+        CommandArgLayout::Set => (None, 5usize, 6usize, None),
+        CommandArgLayout::Add => (Some(5usize), 6, 7, Some(8usize)),
     };
 
-    let data_value = args.get(6).unwrap_or(&Value::Nil);
+    let update_interval = interval_slot
+        .and_then(|slot| args.get(slot))
+        .map(|value| value_to_i32(value, function, "update_interval"))
+        .transpose()?
+        .unwrap_or(0);
+    if update_interval < 0 {
+        return Err(RuntimeError::new(format!(
+            "{}: update interval must be >= 0",
+            function
+        )));
+    }
+    let update_interval = update_interval as u32;
+
+    let data_value = args.get(data_slot).unwrap_or(&Value::Nil);
     let data = match (id, data_value) {
         (CommandId::Call, Value::String(text)) => CommandData::Text(text.clone()),
         (CommandId::Call, Value::Nil) => CommandData::Text(String::new()),
@@ -1234,18 +1253,21 @@ fn parse_command_request(
         (_, other) => CommandData::Integer(value_to_i32(other, function, "data")?),
     };
 
-    let retries = if args.len() > 7 {
-        value_to_i32(&args[7], function, "retries")?
-    } else {
-        0
-    };
+    let retries = args
+        .get(retries_slot)
+        .map(|value| value_to_i32(value, function, "retries"))
+        .transpose()?
+        .unwrap_or(0);
 
-    let mode = if args.len() > 8 {
-        let raw = value_to_i32(&args[8], function, "mode")?;
-        CommandMode::from_i32(raw).unwrap_or(CommandMode::Base)
-    } else {
-        CommandMode::Base
-    };
+    let mode = mode_slot
+        .and_then(|slot| args.get(slot))
+        .map(|value| value_to_i32(value, function, "mode"))
+        .transpose()?
+        .map(|raw| CommandMode::from_i32(raw).unwrap_or(CommandMode::Base))
+        .unwrap_or(match layout {
+            CommandArgLayout::Set => CommandMode::Base,
+            CommandArgLayout::Add => CommandMode::SilentSub,
+        });
 
     Ok(CommandRequest::new(id)
         .with_target(target)
@@ -12443,7 +12465,7 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         };
 
-        let request = parse_command_request(command_id, args, "SetCommand")?;
+        let request = parse_command_request(command_id, args, CommandArgLayout::Set, "SetCommand")?;
         object.clear_command_stack();
         let success = object.push_command_front(request);
         Ok(Value::Bool(success))
@@ -12488,7 +12510,7 @@ fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
         None => return Ok(Value::Bool(false)),
     };
 
-    let request = parse_command_request(command_id, args, "AddCommand")?;
+    let request = parse_command_request(command_id, args, CommandArgLayout::Add, "AddCommand")?;
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -12515,10 +12537,34 @@ fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn append_command(args: &[Value]) -> Result<Value, RuntimeError> {
+    // C++ FnAppendCommand leads with the object slot (pObj, szCommand, ...;
+    // C4Script.cpp:894-916); 0/nil means the calling object. The name-first
+    // form stays for the command-DSL fixtures. A FOREIGN target re-dispatches
+    // through the reentrancy seam like SetCommand so the queued command lands
+    // on the target's own stack.
+    let mut args = args;
+    let mut leading_target: Option<ObjectId> = None;
+    let leads_with_object_slot = matches!(
+        (args.first(), args.get(1)),
+        (Some(Value::Object(_) | Value::Proplist(_)), _)
+            | (Some(Value::Nil | Value::Int(0)), Some(Value::String(_)))
+    );
+    if leads_with_object_slot {
+        leading_target = parse_object_reference_argument(&args[0], "AppendCommand", "target")?;
+        args = &args[1..];
+    }
     if args.is_empty() {
         return Err(RuntimeError::new(
             "AppendCommand expects at least 1 argument: command name",
         ));
+    }
+    if let Some(target) = leading_target {
+        if active_object_id() != Some(target) {
+            return match call_world_object_function(target, "AppendCommand", args) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
     }
 
     let command_name = match &args[0] {
@@ -12537,7 +12583,7 @@ fn append_command(args: &[Value]) -> Result<Value, RuntimeError> {
         None => return Ok(Value::Bool(false)),
     };
 
-    let request = parse_command_request(command_id, args, "AppendCommand")?;
+    let request = parse_command_request(command_id, args, CommandArgLayout::Add, "AppendCommand")?;
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -22639,6 +22685,83 @@ mod tests {
                 assert_eq!(request.id, CommandId::MoveTo);
                 assert_eq!(request.tx, Some(3));
                 assert_eq!(request.ty, Some(4));
+            }
+            other => panic!("expected PushBack operation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn set_command_parses_the_cpp_argument_order() {
+        // C++ FnSetCommand(pObj, szCommand, pTarget, Tx, iTy, pTarget2, data,
+        // iRetries) has NO update-interval slot: data follows target2 directly
+        // (C4Script.cpp:840-867). The dragon issues SetCommand(this(),
+        // "MoveTo", 0, x, y, 0, C4CMD_MoveTo_NoPosAdjust=1, C4Command.h:68)
+        // (Fantasy.c4d Dragon.c4d Script.c:1565).
+        let this = object_reference_value(ObjectId::new(1));
+        let args = vec![
+            this,
+            Value::String("MoveTo".into()),
+            Value::Int(0),
+            Value::Int(200),
+            Value::Int(90),
+            Value::Int(0),
+            Value::Int(1),
+        ];
+        let (result, outcome) = with_object_host_context(|| set_command(&args));
+        assert_eq!(result.expect("SetCommand succeeds"), Value::Bool(true));
+        let request = match &outcome.command_operations[1] {
+            CommandOperation::PushFront(request) => request.clone(),
+            other => panic!("expected PushFront operation, got {:?}", other),
+        };
+        assert_eq!(request.id, CommandId::MoveTo);
+        assert_eq!(request.tx, Some(200));
+        assert_eq!(request.ty, Some(90));
+        assert_eq!(request.data, CommandData::Integer(1));
+        assert_eq!(request.update_interval, 0, "SetCommand has no interval slot");
+    }
+
+    #[test]
+    fn add_command_defaults_to_silent_sub_mode() {
+        // C++ FnAddCommand's iBaseMode is a C4ValueInt: an unfilled slot is
+        // int 0 = C4CMD_Mode_SilentSub (C4Script.cpp:870, C4Command.h:62) —
+        // NOT Base.
+        let args = vec![Value::String("Wait".into())];
+        let (result, outcome) = with_object_host_context(|| add_command(&args));
+        assert_eq!(result.expect("AddCommand succeeds"), Value::Bool(true));
+        match &outcome.command_operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.mode, CommandMode::SilentSub);
+            }
+            other => panic!("expected PushFront operation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_command_leads_with_the_object_slot() {
+        // C++ FnAppendCommand(pObj, szCommand, pTarget, Tx, iTy, pTarget2,
+        // iUpdateInterval, Data, iRetries, iBaseMode) — the OBJECT slot comes
+        // first, like SetCommand/AddCommand (C4Script.cpp:894-916). The dragon
+        // queues AppendCommand(this(), "Call", this(), 0,0,0,0, "StopComDir")
+        // (Fantasy.c4d Dragon.c4d Script.c:1566).
+        let this = object_reference_value(ObjectId::new(1));
+        let args = vec![
+            this.clone(),
+            Value::String("Call".into()),
+            this,
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::String("StopComDir".into()),
+        ];
+        let (result, outcome) = with_object_host_context(|| append_command(&args));
+        assert_eq!(result.expect("AppendCommand succeeds"), Value::Bool(true));
+        assert_eq!(outcome.command_operations.len(), 1);
+        match &outcome.command_operations[0] {
+            CommandOperation::PushBack(request) => {
+                assert_eq!(request.id, CommandId::Call);
+                assert_eq!(request.target, Some(ObjectId::new(1)));
+                assert_eq!(request.data, CommandData::Text("StopComDir".into()));
             }
             other => panic!("expected PushBack operation, got {:?}", other),
         }
