@@ -12190,7 +12190,10 @@ fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
                 }
             }
             if let Some(other) = context.get_world_object(target) {
-                return Ok(Value::Int(other.rotation.rem_euclid(360)));
+                // FnGetR returns the raw r — the movement circle bounds
+                // keep it within (-180, 180], possibly negative
+                // (C4Movement.cpp:434-435).
+                return Ok(Value::Int(other.rotation));
             }
             return Ok(Value::Nil);
         }
@@ -17736,7 +17739,10 @@ impl ObjectScopeContext {
             current_command_direction: command_direction,
             current_position: position,
             current_fixed_velocity: FixedVec2::from_ints(velocity.x, velocity.y),
-            current_rotation: rotation.rem_euclid(360),
+            // Seed the RAW engine r: the movement circle bounds keep it
+            // within (-180, 180] and FnGetR reads it unnormalized; only
+            // SetR normalizes (C4Object::SetRotation, C4Object.cpp:5632).
+            current_rotation: rotation,
             vertices,
             graphics_overlays,
             base_graphics,
@@ -22541,6 +22547,51 @@ mod tests {
             }
             other => panic!("expected PushBack operation, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn get_r_returns_the_raw_engine_rotation() {
+        // C++ keeps r within (-180, 180] via the movement circle bounds
+        // (C4Movement.cpp:434-435) and FnGetR returns it RAW — a walker
+        // leaning left reads a NEGATIVE angle. Only SetR normalizes to
+        // 0..360 (C4Object::SetRotation, C4Object.cpp:5632-5634). The
+        // dragon's Flying()/AdjustWalkRotation deltas depend on signed r.
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::with_category(
+                ObjectId::new(1),
+                None,
+                ObjectStatus::Normal,
+                100,
+                0,
+                crate::FULL_CON,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                -10,
+                &[],
+                "Walk",
+                0,
+                0,
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                0,
+                None,
+                None,
+                &[],
+                DEFAULT_CATEGORY,
+                ocf::NORMAL,
+                false,
+                None,
+                None,
+            )),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || get_r(&[]),
+        );
+        assert_eq!(result.expect("GetR succeeds"), Value::Int(-10));
     }
 
     #[test]
