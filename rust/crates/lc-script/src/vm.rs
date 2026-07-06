@@ -505,6 +505,33 @@ impl<'a> Vm<'a> {
         env.object_state.named_local_cell(local_name)
     }
 
+    /// Numbered Local slot cell (FnLocal by-reference, C4Script.cpp:
+    /// 3423-3433: `pObj->Local[iIndex].GetRef()`): a FOREIGN target
+    /// resolves through the cross-object cell hook under the engine's
+    /// `__local_{index}` persistence key (ObjectState round-trips
+    /// numbered slots as those local_vars entries); otherwise the
+    /// executing object's own slot.
+    fn numbered_local_cell(
+        &self,
+        env: &mut Environment,
+        index: i32,
+        target: Option<Value>,
+    ) -> ValueCell {
+        let foreign = target.filter(|value| {
+            !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false))
+                && *value != self.this_value
+        });
+        if let Some(target) = foreign {
+            if let Some(cell) = self
+                .local_cell_hook
+                .and_then(|hook| hook(&target, &format!("__local_{}", index.max(0))))
+            {
+                return cell;
+            }
+        }
+        env.object_state.local_slot_cell(index)
+    }
+
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::Value).collect();
         self.invoke_value(name, args, 0, ObjectState::default())
@@ -1041,6 +1068,24 @@ impl<'a> Vm<'a> {
                                 AssignmentTarget::LocalSlot(index)
                             };
                             return self.get_target_value(env, &target);
+                        }
+                        // `Local(n, pObj)` reads ANOTHER object's numbered
+                        // slot through the returned reference (FnLocal,
+                        // C4Script.cpp:3423-3433); a negative index is nil.
+                        if name == "Local"
+                            && args.len() == 2
+                            && !self.functions.contains_key(name)
+                            && !self.host_functions.contains_key(name)
+                        {
+                            let index =
+                                self.evaluate_slot_index("Local()", &args[0], env, depth)?;
+                            if index < 0 {
+                                return Ok(Value::Nil);
+                            }
+                            let target = self.evaluate(&args[1], env, depth + 1)?;
+                            let cell = self.numbered_local_cell(env, index, Some(target));
+                            let value = cell.borrow().clone();
+                            return Ok(value);
                         }
                         // FnSetLocal (C4Script.cpp:3408-3414): writes the
                         // numbered Local slot, returns the value; the object
@@ -1825,6 +1870,15 @@ impl<'a> Vm<'a> {
                     *cell.borrow_mut() = value;
                     return Ok(());
                 }
+                // `Local(n, obj) = v` / `obj->Local(n) = v`: FnLocal's
+                // returned reference targets the FOREIGN numbered slot
+                // (C4Script.cpp:3423-3433).
+                if method == "Local" && args.len() == 1 {
+                    let index = self.evaluate_slot_index("Local()", &args[0], env, 0)?;
+                    let cell = self.numbered_local_cell(env, index, Some(object_value));
+                    *cell.borrow_mut() = value;
+                    return Ok(());
+                }
                 let object_id = match object_value {
                     Value::Int(n) => n.to_string(),
                     Value::String(s) => s.clone(),
@@ -1910,6 +1964,17 @@ impl<'a> Vm<'a> {
                         }
                     };
                     let cell = self.localn_cell(env, &local_name, Some(object_value));
+                    let value = cell.borrow().clone();
+                    return Ok(value);
+                }
+                // `Local(n, obj)` compound reads (FnLocal by-reference,
+                // C4Script.cpp:3423-3433).
+                if method == "Local" && args.len() == 1 {
+                    let index = self.evaluate_slot_index("Local()", &args[0], env, 0)?;
+                    if index < 0 {
+                        return Ok(Value::Nil);
+                    }
+                    let cell = self.numbered_local_cell(env, index, Some(object_value));
                     let value = cell.borrow().clone();
                     return Ok(value);
                 }
@@ -2019,6 +2084,21 @@ impl<'a> Vm<'a> {
                 Ok(LValueRef::Cell(self.localn_cell(
                     env,
                     &local_name,
+                    Some(object_value),
+                )))
+            }
+            // `Local(n, obj)` by reference: FnLocal returns
+            // `pObj->Local[iIndex].GetRef()` (C4Script.cpp:3423-3433).
+            AssignmentTarget::MethodSlot {
+                object,
+                method,
+                args,
+            } if method == "Local" && args.len() == 1 => {
+                let object_value = self.evaluate(object, env, depth + 1)?;
+                let index = self.evaluate_slot_index("Local()", &args[0], env, depth)?;
+                Ok(LValueRef::Cell(self.numbered_local_cell(
+                    env,
+                    index,
                     Some(object_value),
                 )))
             }
@@ -2339,6 +2419,45 @@ mod tests {
         let var_decls: Vec<VarDecl> = Vec::new();
         let vm = Vm::new(&functions, &host_functions, &var_decls, None);
         vm.call(entry_point, args)
+    }
+
+    #[test]
+    fn foreign_numbered_local_resolves_through_the_cell_hook() {
+        // FnLocal (C4Script.cpp:3423-3433): `Local(i, pObj)` returns
+        // `pObj->Local[iIndex].GetRef()` — reads AND writes reach the
+        // FOREIGN object's numbered slot. The cross-object cell hook
+        // carries it under the engine's `__local_{i}` persistence key.
+        let source = r#"
+            func Test(target) {
+                Local(2, target) = 84;
+                return Local(2, target) + 1;
+            }
+        "#;
+        let script = Parser::new(source)
+            .parse_script()
+            .expect("parse should succeed");
+        let functions: HashMap<String, Function> = script
+            .functions
+            .into_iter()
+            .map(|f| (f.name.clone(), f))
+            .collect();
+        let host_functions = HashMap::new();
+        let var_decls: Vec<VarDecl> = Vec::new();
+        let cell = value_cell(Value::Nil);
+        let hook_cell = cell.clone();
+        let hook: crate::engine::LocalCellHook = std::rc::Rc::new(move |target, name| {
+            (matches!(target, Value::Int(42)) && name == "__local_2")
+                .then(|| hook_cell.clone())
+        });
+        let vm = Vm::new(&functions, &host_functions, &var_decls, None)
+            .with_local_cell_hook(Some(&hook));
+        let result = vm.call("Test", &[Value::Int(42)]).expect("script runs");
+        assert_eq!(result, Value::Int(85), "the read sees the earlier write");
+        assert_eq!(
+            *cell.borrow(),
+            Value::Int(84),
+            "the write landed in the foreign cell"
+        );
     }
 
     #[test]
