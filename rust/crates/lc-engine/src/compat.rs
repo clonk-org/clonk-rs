@@ -2848,6 +2848,45 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetScenarioVal (C4Script.cpp:4250-4256): StdCompiler reflection over
+/// Game.C4S by entry/section. Like the GetDefCoreVal port, the hot entries
+/// real content reads are modeled — the Landscape border-open keys resolve
+/// from the loaded landscape, which C4Landscape::ScenarioInit seeds from
+/// exactly those scenario values (`bool BottomOpen, TopOpen; int32_t
+/// LeftOpen, RightOpen`, C4Scenario.h:224-225, C4Landscape.cpp:67-71).
+/// Anything else is nil with a debug note (PORT_STATUS).
+fn get_scenario_val(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(entry) = parse_optional_string(args.first(), "GetScenarioVal", "entry")? else {
+        return Ok(Value::Nil);
+    };
+    let section = parse_optional_string(args.get(1), "GetScenarioVal", "section")?;
+    let _entry_index = parse_optional_i32(args.get(2), "GetScenarioVal", "entry_nr")?.unwrap_or(0);
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let landscape_entry = matches!(section.as_deref(), None | Some("Landscape"));
+        if landscape_entry {
+            if let Some(landscape) = context.landscape_ref() {
+                match entry.as_str() {
+                    "BottomOpen" => return Ok(Value::Bool(landscape.bottom_open())),
+                    "TopOpen" => return Ok(Value::Bool(landscape.top_open())),
+                    "LeftOpen" => return Ok(Value::Int(landscape.left_open())),
+                    "RightOpen" => return Ok(Value::Int(landscape.right_open())),
+                    _ => {}
+                }
+            }
+        }
+        tracing::debug!(
+            entry = entry.as_str(),
+            section = section.as_deref().unwrap_or(""),
+            "GetScenarioVal entry not modeled; nil"
+        );
+        Ok(Value::Nil)
+    })
+}
+
 fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
     // FnGetHiRank (C4Script.cpp:2792-2796) ->
     // C4Player::GetHiRankActiveCrew(false) (C4Player.cpp:1003-1020): walk
@@ -4365,6 +4404,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerID", get_player_id);
     script.register_host_function("GetWealth", get_wealth);
     script.register_host_function("SetWealth", set_wealth);
+    script.register_host_function("GetScenarioVal", get_scenario_val);
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetPlrValue", get_plr_value);
     script.register_host_function("GetPlrValueGain", get_plr_value_gain);
@@ -18631,6 +18671,7 @@ mod tests {
         "GetProcedure",
         "GetR",
         "GetRDir",
+        "GetScenarioVal",
         "GetScore",
         "GetSelectCount",
         "GetTemperature",
@@ -19323,6 +19364,44 @@ mod tests {
             Value::Bool(false),
             "water is not solid"
         );
+    }
+
+    #[test]
+    fn get_scenario_val_reads_landscape_border_openness() {
+        // FnGetScenarioVal reflects Game.C4S by entry/section
+        // (C4Script.cpp:4250-4256); C4SLandscape carries `bool BottomOpen,
+        // TopOpen; int32_t LeftOpen, RightOpen` (C4Scenario.h:224-225) which
+        // seed the landscape borders (C4Landscape.cpp:67-71). The dragon's
+        // MoveTo reads BottomOpen (Fantasy.c4d Dragon.c4d Script.c:1549).
+        let mut landscape = Landscape::flat(32, 20);
+        landscape.set_border_open(7, 0, true, false);
+        let world = || {
+            HostWorldContext::with_landscape(
+                Vec::<HostWorldObject>::new(),
+                Some(landscape.clone()),
+                HashMap::new(),
+                Vec::new(),
+                HashMap::new(),
+                HashMap::new(),
+                1,
+                false,
+            )
+        };
+        let query = |entry: &str| {
+            let (result, _) = with_effect_context(None, &[], world(), 1, || {
+                get_scenario_val(&[
+                    Value::String(entry.into()),
+                    Value::String("Landscape".into()),
+                ])
+            });
+            result.expect("GetScenarioVal succeeds")
+        };
+        assert_eq!(query("BottomOpen"), Value::Bool(false));
+        assert_eq!(query("TopOpen"), Value::Bool(true));
+        assert_eq!(query("LeftOpen"), Value::Int(7));
+        assert_eq!(query("RightOpen"), Value::Int(0));
+        // Unmodeled entries are nil with a debug note, like GetDefCoreVal.
+        assert_eq!(query("SkyDef"), Value::Nil);
     }
 
     #[test]
