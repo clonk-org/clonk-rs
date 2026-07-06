@@ -17048,6 +17048,23 @@ impl EffectHostContext {
         self.pending_landscape_ops.push(operation);
     }
 
+    /// The freshest in-flight scope for `id`: the active scope, a
+    /// suspended (dormant) outer scope, or a finished nested-call scope.
+    /// C++ mutates the one live C4Object, so mid-call reads must see
+    /// these over the frame-start world snapshot.
+    fn scope_state_for(&self, id: ObjectId) -> Option<&ObjectScopeContext> {
+        self.object
+            .as_ref()
+            .filter(|scope| scope.id == id)
+            .or_else(|| {
+                self.dormant_scopes
+                    .iter()
+                    .flatten()
+                    .find(|scope| scope.id == id)
+            })
+            .or_else(|| self.nested_objects.get(&id).map(|state| &state.scope))
+    }
+
     fn get_world_object(&self, id: ObjectId) -> Option<HostWorldObject> {
         let mut object = if let Some(object) = self.pending_objects.get(&id) {
             object.clone()
@@ -17057,19 +17074,18 @@ impl EffectHostContext {
         // C++ mutates live state mid-call: reflect the freshest known
         // containment (Enter/Exit in the active or a finished nested
         // scope) so container-filtered searches see it (FnFindObject
-        // vContainer, C4Script.cpp:2122-2127).
-        if let Some(container) = self
-            .object
-            .as_ref()
-            .filter(|scope| scope.id == id)
-            .map(|scope| scope.current_container)
-            .or_else(|| {
-                self.nested_objects
-                    .get(&id)
-                    .map(|state| state.scope.current_container)
-            })
-        {
-            object.container = container;
+        // vContainer, C4Script.cpp:2122-2127), and the freshest ACTION —
+        // GoldRush's WINC::CheckAmmo gates on GetAction(pClonk) right
+        // after a nested SetAction("AimRifle") on the suspended caller
+        // (Winchester.c4d/Script.c:292, Cowboy.c4d/Script.c:442-443).
+        if let Some(scope) = self.scope_state_for(id) {
+            object.container = scope.current_container;
+            object.action_name = scope.current_action_name.clone();
+            object.action_phase = scope.current_action_phase;
+            object.action_ticks = scope.current_action_ticks;
+            object.action_target = scope.current_action_target;
+            object.action_target2 = scope.current_action_target2;
+            object.action_data = scope.current_action_data;
         }
         Some(object)
     }

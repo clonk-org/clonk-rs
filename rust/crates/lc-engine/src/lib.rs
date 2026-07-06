@@ -13998,6 +13998,7 @@ impl Engine {
                     player_commands,
                     landscape_ops,
                     effect_spawns,
+                    effect_other_objects,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -14031,6 +14032,9 @@ impl Engine {
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
+                }
+                if !effect_other_objects.is_empty() {
+                    self.apply_nested_object_outcomes(effect_other_objects)?;
                 }
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
@@ -14092,6 +14096,7 @@ impl Engine {
                     player_commands,
                     landscape_ops,
                     effect_spawns,
+                    effect_other_objects,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -14125,6 +14130,9 @@ impl Engine {
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
+                }
+                if !effect_other_objects.is_empty() {
+                    self.apply_nested_object_outcomes(effect_other_objects)?;
                 }
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
@@ -14533,6 +14541,7 @@ impl Engine {
                     player_commands,
                     landscape_ops,
                     effect_spawns,
+                    effect_other_objects,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -14568,6 +14577,9 @@ impl Engine {
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
+                }
+                if !effect_other_objects.is_empty() {
+                    self.apply_nested_object_outcomes(effect_other_objects)?;
                 }
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
@@ -15363,6 +15375,7 @@ impl Engine {
                 player_commands,
                 landscape_ops,
                 effect_spawns,
+                effect_other_objects,
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,
@@ -15388,6 +15401,9 @@ impl Engine {
             self.sync_next_object_id(effect_next_object_id);
             if !effect_spawns.is_empty() {
                 self.process_spawn_queue(effect_spawns)?;
+            }
+            if !effect_other_objects.is_empty() {
+                self.apply_nested_object_outcomes(effect_other_objects)?;
             }
             if !landscape_ops.is_empty() {
                 self.apply_landscape_operations(landscape_ops);
@@ -15538,6 +15554,7 @@ impl Engine {
                     player_commands,
                     landscape_ops,
                     effect_spawns,
+                    effect_other_objects,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -15563,6 +15580,9 @@ impl Engine {
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
+                }
+                if !effect_other_objects.is_empty() {
+                    self.apply_nested_object_outcomes(effect_other_objects)?;
                 }
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
@@ -16303,6 +16323,7 @@ impl Engine {
             Vec<PlayerCommand>,
             Vec<LandscapeOperation>,
             Vec<SpawnConfig>,
+            Vec<compat::NestedObjectOutcome>,
             u64,
             bool,
             Option<bool>,
@@ -16317,6 +16338,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 PhysicsDelta::default(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -16347,6 +16369,10 @@ impl Engine {
         let mut current_audio = audio;
         let mut pending_player_commands = Vec::new();
         let mut pending_landscape_ops = Vec::new();
+        // Nested-call mutations to OTHER objects (the copy-in/copy-out
+        // model's deferred fold; C++ mutates live state mid-call): the
+        // CALLER applies them via apply_nested_object_outcomes.
+        let mut pending_other_objects = Vec::new();
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
         let mut checked_started: HashSet<String> = HashSet::new();
@@ -16557,6 +16583,7 @@ impl Engine {
                 context_locals,
                 spawns,
                 next_object_id,
+                other_objects: event_other_objects,
                 ..
             } = outcome;
 
@@ -16570,6 +16597,9 @@ impl Engine {
 
             if !spawns.is_empty() {
                 pending_spawns.extend(spawns);
+            }
+            if !event_other_objects.is_empty() {
+                pending_other_objects.extend(event_other_objects);
             }
             world = world.with_next_object_id(next_object_id);
 
@@ -16658,6 +16688,7 @@ impl Engine {
             pending_player_commands,
             pending_landscape_ops,
             pending_spawns,
+            pending_other_objects,
             next_object_id,
             game_over_requested,
             script_go_requested,
@@ -24995,6 +25026,7 @@ impl Engine {
                 player_commands,
                 landscape_ops,
                 effect_spawns,
+                effect_other_objects,
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,
@@ -25020,6 +25052,9 @@ impl Engine {
             self.sync_next_object_id(effect_next_object_id);
             if !effect_spawns.is_empty() {
                 self.process_spawn_queue(effect_spawns)?;
+            }
+            if !effect_other_objects.is_empty() {
+                self.apply_nested_object_outcomes(effect_other_objects)?;
             }
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
@@ -37612,6 +37647,59 @@ protected func Script1() { StartTheMovie(); }
         );
     }
 
+    // FnLocal (C4Script.cpp:3423-3433) returns `pObj->Local[iIndex].
+    // GetRef()` — the two-argument form reads AND writes a FOREIGN
+    // object's numbered Local slot through the reference. The GoldRush
+    // rifle chain depends on it: WINC::ControlThrow does
+    // `Local(0, GetCrosshair(pClonk)) = 84` and ActualizePhase reads
+    // `Local(0, GetCrosshair(pClonk))` (Winchester.c4d/Script.c:19,119).
+    #[test]
+    fn foreign_numbered_local_reads_and_writes_through_like_cpp() {
+        let cross_script = r#"#strict
+"#;
+        let rider_script = r#"#strict
+local iRead;
+func Probe(pOther) {
+    Local(0, pOther) = 84;
+    iRead = Local(0, pOther);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let cross =
+            Definition::from_script("WCHR", "Cross", cross_script).expect("cross compiles");
+        engine.register_definition(cross).expect("cross registers");
+        let rider =
+            Definition::from_script("RIDR", "Rider", rider_script).expect("rider compiles");
+        engine.register_definition(rider).expect("rider registers");
+
+        let cross_id = engine
+            .spawn_object(SpawnConfig::new("WCHR").with_category(CATEGORY_OBJECT))
+            .expect("cross spawns");
+        let rider_id = engine
+            .spawn_object(SpawnConfig::new("RIDR").with_category(CATEGORY_OBJECT))
+            .expect("rider spawns");
+
+        let idx = engine.find_object_index(rider_id).expect("rider exists");
+        engine
+            .call_object_function(idx, "Probe", vec![Value::Object(cross_id.as_u64())])
+            .expect("Probe runs");
+
+        let idx = engine.find_object_index(rider_id).expect("rider exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iRead"),
+            Some(&Value::Int(84)),
+            "the cross-object read sees the cross-object write \
+             (FnLocal by-reference, C4Script.cpp:3423-3433)"
+        );
+        let cross_idx = engine.find_object_index(cross_id).expect("cross exists");
+        assert_eq!(
+            engine.objects[cross_idx].state.local_vars.get("__local_0"),
+            Some(&Value::Int(84)),
+            "the write landed in the TARGET's numbered slot 0"
+        );
+    }
+
     // `g_pIntroHorse->SetGait(3)` (M_Mov_Intro.c:19): an arrow call to a
     // PRIVATE function on another object, with an argument. CR resolves
     // it (C4AulExec object calls) and the argument arrives intact.
@@ -39633,6 +39721,143 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
                 .iter()
                 .any(|effect| effect.name == "Broken"),
             "the erroring effect stays installed"
+        );
+    }
+
+    // Effect callbacks run through the same C4AulExec as any other call:
+    // an arrow call onto ANOTHER object mutates that object for real —
+    // C4Effect::Execute (C4Effect.cpp:342-360) does not sandbox nested
+    // targets. GoldRush's f30 rifle load depends on it: FxOrderDefendTimer
+    // calls WINC::ControlThrow, which ends in the rifle's own
+    // RemoveObject() (Winchester.c4d/Script.c:29).
+    #[test]
+    fn effect_timer_nested_call_mutates_the_foreign_object() {
+        let holder_script = r#"#strict
+local iGot;
+public func Boot() { AddEffect("Probe", this(), 1, 5, this()); return(1); }
+func FxProbeTimer(pThis, iNumber) {
+  var pItem = FindContents(ITEM);
+  if (pItem) iGot = pItem->Consume();
+  return(-1);
+}
+"#;
+        let item_script = r#"#strict
+public func Consume() { RemoveObject(); return(7); }
+"#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("HOLD", "Holder", holder_script)
+                    .expect("holder compiles"),
+            )
+            .expect("holder registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
+            )
+            .expect("item registers");
+
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
+            .expect("holder spawns");
+        let item = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(holder),
+            )
+            .expect("item spawns");
+        let idx = engine.find_object_index(holder).expect("holder exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        for _ in 0..6 {
+            engine.tick().expect("tick");
+        }
+
+        let idx = engine.find_object_index(holder).expect("holder exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iGot"),
+            Some(&Value::Int(7)),
+            "the nested call's return value reaches the effect callback"
+        );
+        assert!(
+            engine.find_object_index(item).is_none(),
+            "the foreign object's self-RemoveObject inside the effect \
+             timer's nested call folds (C4Effect.cpp:342-360 exec)"
+        );
+    }
+
+    // C++ mutates the live object mid-call: after a nested callback on
+    // the suspended caller changes its action, a foreign GetAction /
+    // GetPhase read sees the NEW values immediately. The GoldRush rifle
+    // chain depends on this: WINC::CheckAmmo gates on
+    // `GetAction(pClonk) ne "AimRifle"` right after FireRifle's
+    // SetAction("AimRifle")+SetPhase(6) (Winchester.c4d/Script.c:292,
+    // Cowboy.c4d/Script.c:442-443).
+    #[test]
+    fn foreign_action_reads_see_the_suspended_scopes_pending_action() {
+        let holder_script = r#"#strict
+public func Boot() { AddEffect("Probe", this(), 1, 5, this()); return(1); }
+func FxProbeTimer(pThis, iNumber) {
+  var pItem = FindContents(ITEM);
+  if (pItem) pItem->Poke(this());
+  return(-1);
+}
+public func Rise() { SetAction("Rise"); SetPhase(6); return(1); }
+"#;
+        let item_script = r#"#strict
+public func Poke(pClonk) {
+  pClonk->~Rise();
+  LocalN("sSeen", pClonk) = GetAction(pClonk);
+  LocalN("iSeenPhase", pClonk) = GetPhase(pClonk);
+  return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(3);
+        let mut holder =
+            Definition::from_script("HOLD", "Holder", holder_script).expect("holder compiles");
+        holder.configure_actions(
+            None,
+            HashMap::from([("Rise".to_string(), ActionSpec::default().with_length(10))]),
+        );
+        engine.register_definition(holder).expect("holder registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
+            )
+            .expect("item registers");
+
+        let holder_id = engine
+            .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
+            .expect("holder spawns");
+        engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(holder_id),
+            )
+            .expect("item spawns");
+        let idx = engine.find_object_index(holder_id).expect("holder exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        for _ in 0..6 {
+            engine.tick().expect("tick");
+        }
+
+        let idx = engine.find_object_index(holder_id).expect("holder exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("sSeen"),
+            Some(&Value::String("Rise".to_string())),
+            "GetAction(pTarget) reads the in-flight action (C++ live state)"
+        );
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iSeenPhase"),
+            Some(&Value::Int(6)),
+            "GetPhase(pTarget) reads the in-flight phase (C++ live state)"
         );
     }
 
