@@ -255,18 +255,38 @@
 - The headless xtask world skips the player join: GoldRush intro-driven
   state (cavalry recruitment draws, coach splash) reproduces only with
   the live pinned harness.
-- **14 scenarios hang in a join/tick script loop** now that their worlds
-  are real (previously-flat landscapes never exercised these paths):
-  Fantasy/Alchemy, FarWorlds/Arctic, Missions/Funnel, Tutorial04/07/10,
-  Western/GoldenCanyon + TotemHunt, Worlds/ArcticOcean + Ashlands +
-  FoggyCliffs + Mountains + SkyIslands + Tropical (45s join+3-tick
-  smoke, 2026-07-03). Two sampled shapes: SkyIslands hangs INSIDE
-  join_player in a spawned object's Initialize (nested script frames
-  hot-looping GetX/GetY host calls); Tropical hangs in an action
-  StartCall loop of FindObject + RemoveObject (suspect: removal not
-  visible to the same-call FindObject cursor, C++ Status=0 objects drop
-  out immediately). Load+apply is NOT affected (sweep and audit stay
-  green); this is a script-VM/world-removal semantics follow-up epic.
+- **14-scenario script-loop hang epic: RESOLVED 2026-07-06.** All 14
+  formerly-hanging scenarios now join + run 100 ticks headless with zero
+  tick failures. Root cause was one class — the copy-in/copy-out host
+  seam did not read back mid-call staged mutations, so script loops that
+  terminate in C++ (which mutates the live C4Object) never saw their own
+  progress. Three shapes, all fixed at the staging boundary
+  (`EffectHostContext::get_world_object` + the writer host fns):
+  - FindObject + RemoveObject dedup (`Time.c4d`/`Driftwood.c4d`
+    `Initialized`: `while(pOther=FindObject(GetID()))
+    RemoveObject(pOther)`) — C++ AssignRemoval sets Status=0 IMMEDIATELY
+    (C4Object.cpp:282) and C4Game::FindObject skips Status==0
+    (C4Game.cpp:1360-1365); nested-scope destroys now overlay as Deleted
+    status. Fixed: Tropical, Alchemy, Funnel, Ashlands (TIME);
+    GoldenCanyon, ArcticOcean, FarWorlds/Arctic (DFTW).
+  - Foreign SetPosition + GetX/GetY/Stuck loop (`Basement72.c4d` BAS7
+    `MoveOutClonk`: `while(Stuck(pObj) && Inside(...))
+    SetPosition(...,pObj)`) — FnSetPosition force-positions ANY pObj
+    (C4Script.cpp:462-477); the Rust host fn silently no-opped on
+    foreign targets and reads came from the stale snapshot. Foreign
+    writes now land in the target's scope; position/vertices read
+    through it (FnStuck/FnGetX/FnGetY, C4Script.cpp:1197,1292,1858).
+    Fixed: SkyIslands, Tutorial04/07/10, FoggyCliffs, Mountains.
+  - Contents + Exit eject loop (TotemHunt `_PLO.DoPlrLaunch`:
+    `while(Contents()) Exit(Contents())`) — C4Object::Exit removes from
+    the container's Contents IMMEDIATELY (C4Object.cpp:1529-1533); the
+    contents list now re-checks each child's live container/status.
+    Fixed: TotemHunt.
+  Remaining same-call staging divergences (non-hang, documented):
+  same-call Enter does not APPEND to the container's contents list
+  (removals are visible, additions are not); the nested-seam Exit drops
+  FnExit's caller-relative position/dir args (C4Script.cpp:372-388);
+  velocity/owner/OCF are not yet overlaid in `get_world_object`.
 
 ## Changelog
 
@@ -280,4 +300,6 @@ landscape → Tick10 mobile gate → frame-1 live-parity epic (393→0, complete
 creation at every C++ call site, no surface re-seek, C++ Count/CreatePtr
 ledger, 2026-07-03) → scenario-worlds epic (C4MapCreator +
 C4MapCreatorS2 dynamic maps, C4Game init placements, scenario-audit
-harness, 92/93 content fidelity, 2026-07-03).
+harness, 92/93 content fidelity, 2026-07-03) → same-call staging
+read-through (host fns see mid-call RemoveObject/SetPosition/Exit like
+the live C4Object; 14 scenario hangs resolved, 2026-07-06).
