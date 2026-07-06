@@ -519,6 +519,30 @@ impl Engine {
             .map(Some)
     }
 
+    /// Like [`call_effect_callback_in_context`], but against SHARED live
+    /// cells: nested calls that the host routes back onto the same object
+    /// mutate the identical storage mid-call (C++ mutates the one live
+    /// C4Object). Returns the result and the final cell snapshot.
+    #[allow(clippy::type_complexity)]
+    pub fn call_effect_callback_in_context_with_cells(
+        &self,
+        effect_name: &str,
+        event: &str,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<Option<(Value, std::collections::HashMap<String, Value>)>, ScriptError> {
+        let mut function_name = String::with_capacity(effect_name.len() + event.len() + 2);
+        function_name.push_str("Fx");
+        function_name.push_str(effect_name);
+        function_name.push_str(event);
+        if !self.has_function_or_global(&function_name) {
+            return Ok(None);
+        }
+        let value = self.call_with_cells_and_this(&function_name, args, cells, this)?;
+        Ok(Some((value, cells.snapshot())))
+    }
+
     pub fn has_effect_callback(&self, effect_name: &str, event: &str) -> bool {
         let mut function_name = String::with_capacity(effect_name.len() + event.len() + 2);
         function_name.push_str("Fx");

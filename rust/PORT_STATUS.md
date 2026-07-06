@@ -32,6 +32,25 @@
   `LC_XTASK_DUMP_LANDSCAPE` (xtask). RNG ledger traces:
   `LC_RNG_TRACE=<file>` (C++ temp probe in C4Random.h, re-add when
   needed) + `LC_RUST_RNG_TRACE=<file>` (committed, ledger-gated).
+- **Frame-30 bandit LoadRifle wall CLOSED (2026-07-06).** The GoldRush
+  bandits now walk the full OrderDefend rifle-load chain at the first
+  timer tick (FxOrderDefendTimer -> ExecuteWatch -> WINC::ControlThrow ->
+  FireRifle -> CheckAmmo -> LoadRifle; Cowboy.c4d/Script.c:641-703,
+  436-456, 499-504; Winchester.c4d/Script.c:7-31,289-299): action
+  LoadRifle, rifles removed, WCHR crosshairs created, matching the C++
+  f30 state. Five behavioral fixes landed: (1) Enter sorts contents like
+  C4ObjectList::Add stContents (C4ObjectList.cpp:110-176 — Contents(0)
+  is the newest equal-category item; loads stay verbatim); (2)
+  cross-object numbered Local(i, pObj) by reference (FnLocal,
+  C4Script.cpp:3423-3433); (3) effect callbacks fold nested-call
+  outcomes to OTHER objects (run_effect_events_for_object dropped them)
+  and get_world_object overlays the in-flight scope's action/damage;
+  (4) effect callbacks run on LIVE session cells (nested write-backs and
+  the outer call share storage chronologically); (5) newly-reached host
+  fns: GetDamage, GetPlrColorDw, eval-as-DirectExec
+  (C4AulExec.cpp:1658-1707) + int RemoveEffect fDoNoCalls. Goldrush
+  headless 1000 ticks: zero warnings. Object-id skew (cpp 1534-1537 vs
+  rust 1531-1534 for the crosshairs) is the separate numbering epic.
 - **Frame-21 rider-xdir wall forensics (2026-07-03).** The coach movement
   friction chain is now PINNED bit-exact against C4Movement.cpp and cannot
   be the wall: `pushed_wagon_loses_xdir_by_wheel_friction_quanta_*`,
@@ -198,9 +217,12 @@
 - `lc-script` accepts comma sequences in any expression context; C++ only
   inside `return (...)`. Rust accepts strictly more; real content uses the
   legal form.
-- Nested-call locals: VM sessions own their locals — nested calls onto an
-  in-flight scope read the pre-call snapshot; outer-call errors drop partial
-  outcomes (C++ keeps pre-error mutations).
+- Nested-call locals: EFFECT callbacks now run on live session cells
+  (2026-07-06) — nested calls and cross-object LocalN/Local references
+  onto the effect's command target share its storage like C++. Other
+  outer-call kinds (object callbacks) still hand nested calls a pre-call
+  snapshot, and outer-call errors drop partial outcomes (C++ keeps
+  pre-error mutations).
 - Host-call par conversion (`CheckConvertFunctionParameters` strict-level
   matrix) is not ported; padding/nil rules cover real content.
 - mrfScript material reactions resolve against the scenario script (C++ uses

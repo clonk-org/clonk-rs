@@ -8006,6 +8006,10 @@ impl Definition {
         let context_locals = context_is_self
             .then(|| state.local_vars.clone())
             .unwrap_or_default();
+        // The callback's LIVE local cells: registered as the object's
+        // session so nested calls / cross-object references back onto it
+        // share the storage (C++ mutates the one live C4Object).
+        let context_cells = lc_script::LocalCells::from_local_vars(&context_locals);
 
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
@@ -8062,6 +8066,16 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
+                if context_is_self {
+                    compat::register_session_local_cells(object_id, context_cells.clone());
+                    return self.script.call_effect_callback_in_context_with_cells(
+                        &effect.name,
+                        event,
+                        &args,
+                        &context_cells,
+                        context_this,
+                    );
+                }
                 self.script.call_effect_callback_in_context(
                     &effect.name,
                     event,
@@ -14079,7 +14093,7 @@ impl Engine {
             self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
 
             for update in container_updates {
-                self.apply_container_change(update.object_id, update.previous, update.new)?;
+                self.apply_container_change(update.object_id, update.previous, update.new, false)?;
             }
 
             for event in command_events {
@@ -14100,6 +14114,7 @@ impl Engine {
                     player_commands,
                     landscape_ops,
                     effect_spawns,
+                    effect_other_objects,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -14133,6 +14148,9 @@ impl Engine {
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
+                }
+                if !effect_other_objects.is_empty() {
+                    self.apply_nested_object_outcomes(effect_other_objects)?;
                 }
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
@@ -14194,6 +14212,7 @@ impl Engine {
                     player_commands,
                     landscape_ops,
                     effect_spawns,
+                    effect_other_objects,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -14227,6 +14246,9 @@ impl Engine {
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
+                }
+                if !effect_other_objects.is_empty() {
+                    self.apply_nested_object_outcomes(effect_other_objects)?;
                 }
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
@@ -14611,7 +14633,7 @@ impl Engine {
             }
             self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
             if let Some((previous_container, new_container)) = container_change {
-                self.apply_container_change(object_id, previous_container, new_container)?;
+                self.apply_container_change(object_id, previous_container, new_container, false)?;
             }
 
             self.apply_particle_commands(particles);
@@ -14635,6 +14657,7 @@ impl Engine {
                     player_commands,
                     landscape_ops,
                     effect_spawns,
+                    effect_other_objects,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -14671,6 +14694,9 @@ impl Engine {
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
                 }
+                if !effect_other_objects.is_empty() {
+                    self.apply_nested_object_outcomes(effect_other_objects)?;
+                }
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
@@ -14700,7 +14726,7 @@ impl Engine {
                 }
                 self.apply_particle_commands(emitted_particles);
                 if previous_container != new_container {
-                    self.apply_container_change(object_id, previous_container, new_container)?;
+                    self.apply_container_change(object_id, previous_container, new_container, false)?;
                 }
             }
             self.update_sector_for_index(idx);
@@ -15100,7 +15126,7 @@ impl Engine {
         }
         self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
         if let Some((previous_container, new_container)) = container_change {
-            self.apply_container_change(object_id, previous_container, new_container)?;
+            self.apply_container_change(object_id, previous_container, new_container, false)?;
         }
         // Host-driven changes are SetOCF events (SetAlive C4Object.h:361,
         // DoCon C4Object.cpp:1417, status C4Object.cpp:4139).
@@ -15473,6 +15499,7 @@ impl Engine {
                 player_commands,
                 landscape_ops,
                 effect_spawns,
+                effect_other_objects,
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,
@@ -15498,6 +15525,9 @@ impl Engine {
             self.sync_next_object_id(effect_next_object_id);
             if !effect_spawns.is_empty() {
                 self.process_spawn_queue(effect_spawns)?;
+            }
+            if !effect_other_objects.is_empty() {
+                self.apply_nested_object_outcomes(effect_other_objects)?;
             }
             if !landscape_ops.is_empty() {
                 self.apply_landscape_operations(landscape_ops);
@@ -15534,7 +15564,7 @@ impl Engine {
         self.update_sector_for_index(index);
 
         for (previous, new) in container_changes {
-            self.apply_container_change(object_id, previous, new)?;
+            self.apply_container_change(object_id, previous, new, false)?;
         }
 
         self.apply_nested_object_outcomes(other_objects)?;
@@ -15648,6 +15678,7 @@ impl Engine {
                     player_commands,
                     landscape_ops,
                     effect_spawns,
+                    effect_other_objects,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -15673,6 +15704,9 @@ impl Engine {
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
+                }
+                if !effect_other_objects.is_empty() {
+                    self.apply_nested_object_outcomes(effect_other_objects)?;
                 }
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
@@ -15709,7 +15743,7 @@ impl Engine {
             self.update_sector_for_index(index);
 
             for (previous, new) in container_changes {
-                self.apply_container_change(object_id, previous, new)?;
+                self.apply_container_change(object_id, previous, new, false)?;
             }
         }
         Ok(())
@@ -16302,7 +16336,7 @@ impl Engine {
         self.reset_sectors_from_landscape();
 
         for (object_id, container) in container_assignments {
-            self.apply_container_change(object_id, None, Some(container))?;
+            self.apply_container_change(object_id, None, Some(container), true)?;
             // Restores denumerate Contained without running Enter — the
             // snapshot controller stays authoritative (no C4Object.cpp:1582
             // transfer on load).
@@ -16415,6 +16449,7 @@ impl Engine {
             Vec<PlayerCommand>,
             Vec<LandscapeOperation>,
             Vec<SpawnConfig>,
+            Vec<compat::NestedObjectOutcome>,
             u64,
             bool,
             Option<bool>,
@@ -16429,6 +16464,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 PhysicsDelta::default(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -16459,6 +16495,10 @@ impl Engine {
         let mut current_audio = audio;
         let mut pending_player_commands = Vec::new();
         let mut pending_landscape_ops = Vec::new();
+        // Nested-call mutations to OTHER objects (the copy-in/copy-out
+        // model's deferred fold; C++ mutates live state mid-call): the
+        // CALLER applies them via apply_nested_object_outcomes.
+        let mut pending_other_objects = Vec::new();
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
         let mut checked_started: HashSet<String> = HashSet::new();
@@ -16669,6 +16709,7 @@ impl Engine {
                 context_locals,
                 spawns,
                 next_object_id,
+                other_objects: event_other_objects,
                 ..
             } = outcome;
 
@@ -16682,6 +16723,9 @@ impl Engine {
 
             if !spawns.is_empty() {
                 pending_spawns.extend(spawns);
+            }
+            if !event_other_objects.is_empty() {
+                pending_other_objects.extend(event_other_objects);
             }
             world = world.with_next_object_id(next_object_id);
 
@@ -16770,6 +16814,7 @@ impl Engine {
             pending_player_commands,
             pending_landscape_ops,
             pending_spawns,
+            pending_other_objects,
             next_object_id,
             game_over_requested,
             script_go_requested,
@@ -17380,7 +17425,7 @@ impl Engine {
             );
         }
         for (changed_object_id, previous, new) in contact_container_changes {
-            self.apply_container_change(changed_object_id, previous, new)?;
+            self.apply_container_change(changed_object_id, previous, new, false)?;
         }
         for outcome in contact_outcomes {
             self.apply_callback_outcome(
@@ -19274,7 +19319,7 @@ impl Engine {
 
         if previous_container != target_container
             && self
-                .apply_container_change(object_id, previous_container, target_container)
+                .apply_container_change(object_id, previous_container, target_container, false)
                 .is_err()
         {
             self.reset_action_to_default(idx, definition_id, true);
@@ -22483,11 +22528,64 @@ impl Engine {
             .map(|(index, id, _)| (index, id))
     }
 
+    /// C4ObjectList::Add stContents insertion (C4ObjectList.cpp:110-176,
+    /// reached from C4Object::Enter, C4Object.cpp:1587), forward order —
+    /// index 0 is the C++ list head `First` (= `Contents(0)`):
+    /// - line defs skip sorting (`fUnsorted`, :148) and append at the tail;
+    /// - pass 1 (:150-162, skipped for C4D_StaticBack): insert before the
+    ///   forward-first live entry with the same sorted category AND the
+    ///   same def — the same-id cluster;
+    /// - pass 2 (:164-173): insert before the forward-first live entry
+    ///   whose (Category & C4D_SortLimit) <= the entering object's; with
+    ///   no such entry the object appends at the tail.
+    /// The transient `Unsorted` flag is not modeled (same note as
+    /// `insert_into_exec_list`); rust contents hold live objects only.
+    fn contents_insert_position(&self, container_index: usize, object_index: usize) -> usize {
+        let contents = &self.objects[container_index].state.contents;
+        let is_line = self
+            .definitions
+            .get(&self.objects[object_index].definition_id)
+            .map(|definition| definition.line() != 0)
+            .unwrap_or(false);
+        if is_line {
+            return contents.len();
+        }
+        let category = self.objects[object_index].state.category;
+        let sort_category = category & CATEGORY_SORT_LIMIT;
+        let definition_id = &self.objects[object_index].definition_id;
+        if category & CATEGORY_STATIC_BACK == 0 {
+            let cluster_position = contents.iter().position(|&other| {
+                self.find_object_index(other).is_some_and(|other_index| {
+                    let object = &self.objects[other_index];
+                    object.state.category & CATEGORY_SORT_LIMIT == sort_category
+                        && object.definition_id == *definition_id
+                })
+            });
+            if let Some(position) = cluster_position {
+                return position;
+            }
+        }
+        contents
+            .iter()
+            .position(|&other| {
+                self.find_object_index(other).is_some_and(|other_index| {
+                    self.objects[other_index].state.category & CATEGORY_SORT_LIMIT
+                        <= sort_category
+                })
+            })
+            .unwrap_or(contents.len())
+    }
+
+    /// `loaded`: a compiled load rebuilds contents verbatim — C4ObjectList::
+    /// DenumerateRead appends in saved order (Add stNone, C4ObjectList.cpp:
+    /// 457-464) — while runtime entries sort in (Add stContents,
+    /// C4Object.cpp:1587; see `contents_insert_position`).
     fn apply_container_change(
         &mut self,
         object_id: ObjectId,
         previous: Option<ObjectId>,
         new: Option<ObjectId>,
+        loaded: bool,
     ) -> Result<(), EngineError> {
         if previous == new {
             return Ok(());
@@ -22534,9 +22632,20 @@ impl Engine {
                     });
                 }
 
-                let contents = &mut self.objects[container_index].state.contents;
-                if !contents.contains(&object_id) {
-                    contents.push(object_id);
+                if !self.objects[container_index]
+                    .state
+                    .contents
+                    .contains(&object_id)
+                {
+                    let position = if loaded {
+                        self.objects[container_index].state.contents.len()
+                    } else {
+                        self.contents_insert_position(container_index, object_index)
+                    };
+                    self.objects[container_index]
+                        .state
+                        .contents
+                        .insert(position, object_id);
                 }
 
                 self.objects[object_index].state.container = Some(container_id);
@@ -22762,7 +22871,7 @@ impl Engine {
         }
 
         for (object_id, previous) in updates {
-            self.apply_container_change(object_id, previous, None)?;
+            self.apply_container_change(object_id, previous, None, false)?;
         }
 
         for object in &mut self.objects {
@@ -25048,6 +25157,7 @@ impl Engine {
                 player_commands,
                 landscape_ops,
                 effect_spawns,
+                effect_other_objects,
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,
@@ -25073,6 +25183,9 @@ impl Engine {
             self.sync_next_object_id(effect_next_object_id);
             if !effect_spawns.is_empty() {
                 self.process_spawn_queue(effect_spawns)?;
+            }
+            if !effect_other_objects.is_empty() {
+                self.apply_nested_object_outcomes(effect_other_objects)?;
             }
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
@@ -25121,7 +25234,7 @@ impl Engine {
         self.update_sector_for_index(index);
         self.update_solid_mask(index);
         for (previous, new) in container_changes {
-            self.apply_container_change(id, previous, new)?;
+            self.apply_container_change(id, previous, new, loaded)?;
         }
         if loaded {
             // Loaded Contained placement is denumeration, not Enter — the
@@ -37685,6 +37798,59 @@ protected func Script1() { StartTheMovie(); }
         );
     }
 
+    // FnLocal (C4Script.cpp:3423-3433) returns `pObj->Local[iIndex].
+    // GetRef()` — the two-argument form reads AND writes a FOREIGN
+    // object's numbered Local slot through the reference. The GoldRush
+    // rifle chain depends on it: WINC::ControlThrow does
+    // `Local(0, GetCrosshair(pClonk)) = 84` and ActualizePhase reads
+    // `Local(0, GetCrosshair(pClonk))` (Winchester.c4d/Script.c:19,119).
+    #[test]
+    fn foreign_numbered_local_reads_and_writes_through_like_cpp() {
+        let cross_script = r#"#strict
+"#;
+        let rider_script = r#"#strict
+local iRead;
+func Probe(pOther) {
+    Local(0, pOther) = 84;
+    iRead = Local(0, pOther);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let cross =
+            Definition::from_script("WCHR", "Cross", cross_script).expect("cross compiles");
+        engine.register_definition(cross).expect("cross registers");
+        let rider =
+            Definition::from_script("RIDR", "Rider", rider_script).expect("rider compiles");
+        engine.register_definition(rider).expect("rider registers");
+
+        let cross_id = engine
+            .spawn_object(SpawnConfig::new("WCHR").with_category(CATEGORY_OBJECT))
+            .expect("cross spawns");
+        let rider_id = engine
+            .spawn_object(SpawnConfig::new("RIDR").with_category(CATEGORY_OBJECT))
+            .expect("rider spawns");
+
+        let idx = engine.find_object_index(rider_id).expect("rider exists");
+        engine
+            .call_object_function(idx, "Probe", vec![Value::Object(cross_id.as_u64())])
+            .expect("Probe runs");
+
+        let idx = engine.find_object_index(rider_id).expect("rider exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iRead"),
+            Some(&Value::Int(84)),
+            "the cross-object read sees the cross-object write \
+             (FnLocal by-reference, C4Script.cpp:3423-3433)"
+        );
+        let cross_idx = engine.find_object_index(cross_id).expect("cross exists");
+        assert_eq!(
+            engine.objects[cross_idx].state.local_vars.get("__local_0"),
+            Some(&Value::Int(84)),
+            "the write landed in the TARGET's numbered slot 0"
+        );
+    }
+
     // `g_pIntroHorse->SetGait(3)` (M_Mov_Intro.c:19): an arrow call to a
     // PRIVATE function on another object, with an argument. CR resolves
     // it (C4AulExec object calls) and the argument arrives intact.
@@ -39133,6 +39299,64 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         assert_eq!(stop_calls, 1);
     }
 
+    // C4Object::Enter adds to the container's contents with
+    // C4ObjectList::Add stContents (C4Object.cpp:1587): a sorted insert
+    // (C4ObjectList.cpp:110-176) — before the forward-first live link
+    // with the same sorted category AND the same def (the same-id
+    // cluster, :150-162), else before the forward-first live link whose
+    // (Category & C4D_SortLimit) <= the entering object's (:164-173).
+    // Equal-category items therefore enter at the FRONT: Contents(0) is
+    // the newest item. The GoldRush bandits arm via CreateContents(AMBO)
+    // x2 + CreateContents(WINC) (Goldrush.c4s/Locals.c4d/AI.c4d/Script.c:
+    // 103-105) and FireRifle checks `Contents()->~IsRifle()`
+    // (Cowboy.c4d/Script.c:439) — the rifle must be first.
+    #[test]
+    fn runtime_contents_enter_inserts_before_equal_category_like_cpp() {
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(simple_definition("Ches"))
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("AMBO"))
+            .expect("ammo registers");
+        engine
+            .register_definition(simple_definition("WINC"))
+            .expect("rifle registers");
+
+        let chest = engine
+            .spawn_object(SpawnConfig::new("Ches").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let ammo_a = engine
+            .spawn_object(
+                SpawnConfig::new("AMBO")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("ammo a spawns");
+        let ammo_b = engine
+            .spawn_object(
+                SpawnConfig::new("AMBO")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("ammo b spawns");
+        let rifle = engine
+            .spawn_object(
+                SpawnConfig::new("WINC")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("rifle spawns");
+
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![rifle, ammo_b, ammo_a],
+            "each Enter inserts at the front of its category bracket, \
+             same-id entries cluster (C4ObjectList.cpp:150-173)"
+        );
+    }
+
     // FnShiftContents (C4Script.cpp:1784-1797): the regular shift rotates
     // the contents CYCLICALLY to the next different item
     // (C4Object::ShiftContents C4Object.cpp:5728-5752,
@@ -39146,7 +39370,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         global func Initialize(state, random) { return nil; }
         global func Step(state, frame, random) { return nil; }
         global func Cycle() { return ShiftContents(); }
-        global func Pick() { return ShiftContents(0, 0, SWRD); }
+        global func Pick() { return ShiftContents(0, 0, REVR); }
         "#;
         let mut engine = Engine::with_seed(3);
         engine
@@ -39186,14 +39410,17 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             )
             .expect("revolver b spawns");
 
+        // Each Enter front-inserts within its category bracket / id
+        // cluster (C4ObjectList::Add stContents, C4ObjectList.cpp:150-173).
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![sword, revolver_a, revolver_b]
+            vec![revolver_b, revolver_a, sword]
         );
 
-        // Regular shift: the next DIFFERENT item after the sword is
-        // revolver_a; the rotation keeps relative order.
+        // Regular shift: the next DIFFERENT item after revolver_b is the
+        // sword (revolver_a picture-concats); the rotation keeps relative
+        // order.
         let result = engine
             .call_object_function(chest_idx, "Cycle", Vec::new())
             .expect("cycle runs");
@@ -39201,11 +39428,12 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![revolver_a, revolver_b, sword],
+            vec![sword, revolver_b, revolver_a],
             "cyclic rotation to the next different item (C4ObjectList.cpp:815-833)"
         );
 
-        // idTarget form: bring the sword back to the front.
+        // idTarget form: bring the forward-first REVR back to the front
+        // (Contents.Find, C4Script.cpp:1791).
         let result = engine
             .call_object_function(chest_idx, "Pick", Vec::new())
             .expect("pick runs");
@@ -39213,7 +39441,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![sword, revolver_a, revolver_b],
+            vec![revolver_b, revolver_a, sword],
             "DirectComContents rotates the target to the front (C4Object.cpp:5765)"
         );
     }
@@ -39263,8 +39491,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![revolver_a, revolver_b],
-            "a uniform stack keeps its order"
+            vec![revolver_b, revolver_a],
+            "a uniform stack keeps its (Enter-sorted, newest-first) order"
         );
     }
 
@@ -39323,8 +39551,9 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![revolver, sword],
-            "the foreign chest rotated (C4Object.cpp:5730-5752)"
+            vec![sword, revolver],
+            "the foreign chest rotated the sword to the front \
+             (Enter-sorted [revolver, sword], C4Object.cpp:5730-5752)"
         );
     }
 
@@ -39382,12 +39611,13 @@ func ControlContents(id) { iSeen = id; return 1; }
         let chest_idx = engine.find_object_index(chest).expect("chest exists");
         assert_eq!(
             engine.objects[chest_idx].state.contents,
-            vec![sword, revolver],
-            "a truthy ~ControlContents vetoes the rotation (C4Object.cpp:5762)"
+            vec![revolver, sword],
+            "a truthy ~ControlContents vetoes the rotation (C4Object.cpp:5762); \
+             Enter sorted the later revolver to the front"
         );
         assert_eq!(
             engine.objects[chest_idx].state.local_vars.get("iSeen"),
-            Some(&Value::C4Id("REVR".into())),
+            Some(&Value::C4Id("SWRD".into())),
             "~ControlContents receives the new front's id (C4VID(pTarget->id))"
         );
     }
@@ -39419,16 +39649,12 @@ func Selection(pFrom) { iSel = 1; return 1; }
             .register_definition(simple_definition("REVR"))
             .expect("revolver registers");
 
+        // Spawn the sword first: the later revolver Enter-sorts to the
+        // front (C4ObjectList.cpp:164-173), giving contents
+        // [revolver, sword].
         let chest = engine
             .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
             .expect("chest spawns");
-        let revolver = engine
-            .spawn_object(
-                SpawnConfig::new("REVR")
-                    .with_category(CATEGORY_OBJECT)
-                    .with_container(chest),
-            )
-            .expect("revolver spawns");
         let sword = engine
             .spawn_object(
                 SpawnConfig::new("SWRD")
@@ -39436,6 +39662,13 @@ func Selection(pFrom) { iSel = 1; return 1; }
                     .with_container(chest),
             )
             .expect("sword spawns");
+        let revolver = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver spawns");
 
         // First shift: SWRD comes to the front, its Selection returns 1 —
         // no Grab sound (C4Object.cpp:5767).
@@ -39478,6 +39711,103 @@ func Selection(pFrom) { iSel = 1; return 1; }
                     if name == "Grab" && *target == Some(chest)
             )),
             "a falsy Selection plays Grab on the container (StartSoundEffect, C4Object.cpp:5767)"
+        );
+    }
+
+    // FnGetDamage (C4Script.cpp:1366-1370): `pObj->Damage` — the optional
+    // object parameter reads a FOREIGN object's damage; the GoldRush
+    // telegraph's Damage callback self-checks `GetDamage()>100`
+    // (Telegraph.c4d/Script.c:9) once bandit fire lands.
+    #[test]
+    fn get_damage_reads_own_and_foreign_damage_like_cpp() {
+        let script = r#"#strict
+local iOwn, iOther;
+public func Probe(pOther) {
+  DoDamage(7);
+  DoDamage(9, pOther);
+  iOwn = GetDamage();
+  iOther = GetDamage(pOther);
+  return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("Targ"))
+            .expect("target registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("Targ").with_category(CATEGORY_OBJECT))
+            .expect("target spawns");
+
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(idx, "Probe", vec![Value::Object(target.as_u64())])
+            .expect("probe runs");
+
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iOwn"),
+            Some(&Value::Int(7)),
+            "GetDamage() reads the caller's damage"
+        );
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iOther"),
+            Some(&Value::Int(9)),
+            "GetDamage(pObj) reads the foreign object's damage"
+        );
+    }
+
+    // FnEval (C4Script.cpp:4507-4520) -> C4AulScript::DirectExec
+    // (C4AulExec.cpp:1658-1707): the string parses as ONE expression
+    // (ParseFn fExprOnly, C4AulParse.cpp:1417-1424 — trailing text like a
+    // stray ';' is ignored) and runs in the calling object's context.
+    // The planet Schedule() helper drives GoldRush's intro-movie end
+    // through it: FxIntScheduleTimer does eval(EffectVar(0, ...))
+    // (planet/System.c4g/Helpers.c:125-132).
+    #[test]
+    fn eval_direct_execs_an_expression_in_the_object_context_like_cpp() {
+        let script = r#"#strict
+local iGot, iSum;
+public func Poke() { iGot = 7; return(iGot); }
+public func Boot() {
+  iSum = eval("1+2");
+  eval("Poke();");
+  return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let idx = engine.find_object_index(id).expect("actor exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        let idx = engine.find_object_index(id).expect("actor exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iSum"),
+            Some(&Value::Int(3)),
+            "eval returns the expression value"
+        );
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iGot"),
+            Some(&Value::Int(7)),
+            "the eval'd call runs in the object's own context \
+             (cthr->Obj->Def->Script.DirectExec, C4Script.cpp:4514) — \
+             a trailing ';' is tolerated like ParseFn fExprOnly"
         );
     }
 
@@ -39842,6 +40172,216 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
                 .iter()
                 .any(|effect| effect.name == "Broken"),
             "the erroring effect stays installed"
+        );
+    }
+
+    // Effect callbacks run through the same C4AulExec as any other call:
+    // an arrow call onto ANOTHER object mutates that object for real —
+    // C4Effect::Execute (C4Effect.cpp:342-360) does not sandbox nested
+    // targets. GoldRush's f30 rifle load depends on it: FxOrderDefendTimer
+    // calls WINC::ControlThrow, which ends in the rifle's own
+    // RemoveObject() (Winchester.c4d/Script.c:29).
+    #[test]
+    fn effect_timer_nested_call_mutates_the_foreign_object() {
+        let holder_script = r#"#strict
+local iGot;
+public func Boot() { AddEffect("Probe", this(), 1, 5, this()); return(1); }
+func FxProbeTimer(pThis, iNumber) {
+  var pItem = FindContents(ITEM);
+  if (pItem) iGot = pItem->Consume();
+  return(-1);
+}
+"#;
+        let item_script = r#"#strict
+public func Consume() { RemoveObject(); return(7); }
+"#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("HOLD", "Holder", holder_script)
+                    .expect("holder compiles"),
+            )
+            .expect("holder registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
+            )
+            .expect("item registers");
+
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
+            .expect("holder spawns");
+        let item = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(holder),
+            )
+            .expect("item spawns");
+        let idx = engine.find_object_index(holder).expect("holder exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        for _ in 0..6 {
+            engine.tick().expect("tick");
+        }
+
+        let idx = engine.find_object_index(holder).expect("holder exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iGot"),
+            Some(&Value::Int(7)),
+            "the nested call's return value reaches the effect callback"
+        );
+        assert!(
+            engine.find_object_index(item).is_none(),
+            "the foreign object's self-RemoveObject inside the effect \
+             timer's nested call folds (C4Effect.cpp:342-360 exec)"
+        );
+    }
+
+    // C++ mutates the live object mid-call: after a nested callback on
+    // the suspended caller changes its action, a foreign GetAction /
+    // GetPhase read sees the NEW values immediately. The GoldRush rifle
+    // chain depends on this: WINC::CheckAmmo gates on
+    // `GetAction(pClonk) ne "AimRifle"` right after FireRifle's
+    // SetAction("AimRifle")+SetPhase(6) (Winchester.c4d/Script.c:292,
+    // Cowboy.c4d/Script.c:442-443).
+    #[test]
+    fn foreign_action_reads_see_the_suspended_scopes_pending_action() {
+        let holder_script = r#"#strict
+public func Boot() { AddEffect("Probe", this(), 1, 5, this()); return(1); }
+func FxProbeTimer(pThis, iNumber) {
+  var pItem = FindContents(ITEM);
+  if (pItem) pItem->Poke(this());
+  return(-1);
+}
+public func Rise() { SetAction("Rise"); SetPhase(6); return(1); }
+"#;
+        let item_script = r#"#strict
+public func Poke(pClonk) {
+  pClonk->~Rise();
+  LocalN("sSeen", pClonk) = GetAction(pClonk);
+  LocalN("iSeenPhase", pClonk) = GetPhase(pClonk);
+  return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(3);
+        let mut holder =
+            Definition::from_script("HOLD", "Holder", holder_script).expect("holder compiles");
+        holder.configure_actions(
+            None,
+            HashMap::from([("Rise".to_string(), ActionSpec::default().with_length(10))]),
+        );
+        engine.register_definition(holder).expect("holder registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
+            )
+            .expect("item registers");
+
+        let holder_id = engine
+            .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
+            .expect("holder spawns");
+        engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(holder_id),
+            )
+            .expect("item spawns");
+        let idx = engine.find_object_index(holder_id).expect("holder exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        for _ in 0..6 {
+            engine.tick().expect("tick");
+        }
+
+        let idx = engine.find_object_index(holder_id).expect("holder exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("sSeen"),
+            Some(&Value::String("Rise".to_string())),
+            "GetAction(pTarget) reads the in-flight action (C++ live state)"
+        );
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iSeenPhase"),
+            Some(&Value::Int(6)),
+            "GetPhase(pTarget) reads the in-flight phase (C++ live state)"
+        );
+    }
+
+    // One live object (C4AulExec): the outer effect callback's own local
+    // writes, a nested call's write-back to the caller, and a subsequent
+    // outer READ of that write-back all see the same storage. GoldRush's
+    // FxOrderDefendTimer writes pOrdrTarget around the nested
+    // WINC::ControlThrow chain (Cowboy.c4d/Script.c:641-669).
+    #[test]
+    fn outer_effect_locals_and_nested_write_backs_share_live_storage() {
+        let holder_script = r#"#strict
+local iBefore, iFromItem, iAfter;
+public func Boot() { AddEffect("Probe", this(), 1, 5, this()); return(1); }
+func FxProbeTimer(pThis, iNumber) {
+  iBefore = 1;
+  var pItem = FindContents(ITEM);
+  if (pItem) pItem->Tag(this());
+  iAfter = iFromItem + 1;
+  return(-1);
+}
+"#;
+        let item_script = r#"#strict
+public func Tag(pClonk) { LocalN("iFromItem", pClonk) = 7; return(1); }
+"#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("HOLD", "Holder", holder_script)
+                    .expect("holder compiles"),
+            )
+            .expect("holder registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
+            )
+            .expect("item registers");
+
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
+            .expect("holder spawns");
+        engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(holder),
+            )
+            .expect("item spawns");
+        let idx = engine.find_object_index(holder).expect("holder exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        for _ in 0..6 {
+            engine.tick().expect("tick");
+        }
+
+        let idx = engine.find_object_index(holder).expect("holder exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(
+            locals.get("iBefore"),
+            Some(&Value::Int(1)),
+            "the outer callback's own pre-nested write persists"
+        );
+        assert_eq!(
+            locals.get("iFromItem"),
+            Some(&Value::Int(7)),
+            "the nested call's write-back to the caller persists"
+        );
+        assert_eq!(
+            locals.get("iAfter"),
+            Some(&Value::Int(8)),
+            "the outer callback READS the nested write-back live \
+             (C++ mutates the one live object mid-call)"
         );
     }
 
@@ -40211,6 +40751,51 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
 
         assert!(timer_calls >= 1);
         assert_eq!(stop_calls, 0);
+    }
+
+    // FnRemoveEffect's fDoNoCalls is a C++ bool parameter
+    // (C4Script.cpp:5493): C4Value converts ints freely, and CR content
+    // passes `1` — the GoldRush Talker's movie timer does
+    // RemoveEffect("Movie", ..., 0, 1).
+    #[test]
+    fn remove_effect_accepts_int_no_calls_flag_like_cpp() {
+        let script = r#"#strict
+local iStopped;
+public func Boot() { AddEffect("Pulse", this(), 1, 1, this()); return(1); }
+func FxPulseTimer(pThis, iNumber) {
+  RemoveEffect("Pulse", this(), 0, 1);
+  return(1);
+}
+func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
+"#;
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        for _ in 0..2 {
+            engine.tick().expect("tick");
+        }
+
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert!(
+            engine.objects[idx].state.effects.is_empty(),
+            "the int flag converts like C++ and the effect is removed"
+        );
+        assert_ne!(
+            engine.objects[idx].state.local_vars.get("iStopped"),
+            Some(&Value::Int(1)),
+            "a truthy no-calls flag skips FxPulseStop"
+        );
     }
 
     #[test]
