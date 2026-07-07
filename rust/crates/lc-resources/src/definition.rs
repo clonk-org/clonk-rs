@@ -1738,7 +1738,10 @@ fn parse_action_facet(value: &str) -> Option<ActionFacet> {
         .map(|part| part.trim())
         .filter(|part| !part.is_empty())
         .collect();
-    if parts.len() != 4 && parts.len() != 6 {
+    // C4TargetRect: x,y,wdt,hgt with mkDefaultAdapt(0) tx,ty — 4 to 6
+    // entries are valid (C4TargetRect::CompileFunc, C4Rect.cpp:80-86;
+    // Mage.c4d AimMagic uses the 5-value form).
+    if parts.len() < 4 || parts.len() > 6 {
         return None;
     }
     let mut numbers = Vec::with_capacity(parts.len());
@@ -1749,11 +1752,8 @@ fn parse_action_facet(value: &str) -> Option<ActionFacet> {
     let y = numbers[1];
     let width = numbers[2];
     let height = numbers[3];
-    let (target_x, target_y) = if numbers.len() == 6 {
-        (numbers[4], numbers[5])
-    } else {
-        (0, 0)
-    };
+    let target_x = numbers.get(4).copied().unwrap_or(0);
+    let target_y = numbers.get(5).copied().unwrap_or(0);
     Some(ActionFacet {
         x,
         y,
@@ -1807,6 +1807,23 @@ mod tests {
     // (C4Def.cpp) — CR DefCores carry no combined Shape= key. The GoldRush
     // wagon COAC (Width=48 Height=40 Offset=-24,-20) needs this rect for
     // the NewObject bottom-growth adjust.
+    // Facet= is a C4TargetRect: x,y,wdt,hgt plus DEFAULTED tx,ty — partial
+    // lists are valid (C4TargetRect::CompileFunc mkDefaultAdapt,
+    // C4Rect.cpp:80-86). Mage.c4d AimMagic uses the 5-value form
+    // "0,328,24,20,-4".
+    #[test]
+    fn action_facet_accepts_partial_target_offsets_like_c4targetrect() {
+        let five = parse_action_facet("0,328,24,20,-4").expect("5-value facet parses");
+        assert_eq!(
+            (five.x, five.y, five.width, five.height, five.target_x, five.target_y),
+            (0, 328, 24, 20, -4, 0)
+        );
+        let six = parse_action_facet("0,260,16,24,0,-4").expect("6-value facet parses");
+        assert_eq!((six.target_x, six.target_y), (0, -4));
+        let four = parse_action_facet("0,0,16,20").expect("4-value facet parses");
+        assert_eq!((four.target_x, four.target_y), (0, 0));
+    }
+
     #[test]
     fn defcore_width_height_offset_compose_the_shape_rect() {
         let core = parse_def_core(
