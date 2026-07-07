@@ -51,6 +51,14 @@
   (C4AulExec.cpp:1658-1707) + int RemoveEffect fDoNoCalls. Goldrush
   headless 1000 ticks: zero warnings. Object-id skew (cpp 1534-1537 vs
   rust 1531-1534 for the crosshairs) is the separate numbering epic.
+  2026-07-06 residuals closed: SetAction now zeroes Action.Phase
+  unconditionally (C4Object.cpp:4132 — FireRifle's SetPhase(6) leaked
+  into LoadRifle, the 'phase rust 6 cpp 0' wall), and GetDir honors an
+  explicit target with NO object context (FnGetDir prologue,
+  C4Script.cpp:1118-1122 — WINC->ActualizePhase is a definition call;
+  the Nil bail flipped every crosshair vertex to +40, the 'object 1536
+  vertices' wall: a real dir bug, not the id skew — the live comparator
+  pairing was consistent).
 - **Frame-21 rider-xdir wall forensics (2026-07-03).** The coach movement
   friction chain is now PINNED bit-exact against C4Movement.cpp and cannot
   be the wall: `pushed_wagon_loses_xdir_by_wheel_friction_quanta_*`,
