@@ -20885,6 +20885,70 @@ impl Engine {
                             candidate_position
                         ));
                     }
+                    // C4Object::Collect routes through Enter
+                    // (C4Object.cpp:5698 -> :1552), whose veto chain runs
+                    // BEFORE any state change: RejectEntrance on the
+                    // collected object, arg = the container (:1564).
+                    let reject_entrance = self.call_object_function(
+                        candidate_idx,
+                        "RejectEntrance",
+                        vec![object_reference_value(obj1_id)],
+                    )?;
+                    // The callback may tamper with either object
+                    // (C4GameObjects.cpp:191-193 rechecks obj1 after
+                    // Collect returns — veto or not).
+                    if self.find_object_index(candidate_id).is_none() {
+                        continue;
+                    }
+                    let Some(obj1_idx) = self.find_object_index(obj1_id) else {
+                        continue 'outer;
+                    };
+                    {
+                        let obj1 = &self.objects[obj1_idx];
+                        if obj1.destroyed
+                            || !obj1.state.status.is_active()
+                            || obj1.state.container.is_some()
+                            || self.object_ocf_at_index(obj1_idx) & focf == 0
+                        {
+                            continue 'outer;
+                        }
+                    }
+                    if reject_entrance.as_bool() {
+                        continue;
+                    }
+                    // Second gate: RejectCollect on the COLLECTOR with
+                    // (idObject, pObject) — C4Object.cpp:1569-1577;
+                    // PSF_RejectCollection = "~RejectCollect"
+                    // (C4Script.h:82).
+                    let candidate_def_id = self.objects[candidate_idx].definition_id.clone();
+                    let reject_collect = self.call_object_function(
+                        obj1_idx,
+                        "RejectCollect",
+                        vec![
+                            Value::C4Id(candidate_def_id.as_str().to_string()),
+                            object_reference_value(candidate_id),
+                        ],
+                    )?;
+                    if self.find_object_index(candidate_id).is_none() {
+                        continue;
+                    }
+                    let Some(obj1_idx) = self.find_object_index(obj1_id) else {
+                        continue 'outer;
+                    };
+                    {
+                        let obj1 = &self.objects[obj1_idx];
+                        if obj1.destroyed
+                            || !obj1.state.status.is_active()
+                            || obj1.state.container.is_some()
+                            || self.object_ocf_at_index(obj1_idx) & focf == 0
+                        {
+                            continue 'outer;
+                        }
+                    }
+                    let _ = obj1_idx;
+                    if reject_collect.as_bool() {
+                        continue;
+                    }
                     let update = ObjectUpdate::new()
                         .with_container(obj1_id)
                         .with_position(obj1_position)
@@ -45706,6 +45770,127 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
 
         let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
         assert_eq!(item_snapshot.container, Some(crew));
+        Ok(())
+    }
+
+    // CrossCheck collection routes through C4Object::Collect -> Enter
+    // (C4GameObjects.cpp:190, C4Object.cpp:5698 -> :1552): the FIRST gate is
+    // the collected object's RejectEntrance callback (C4Object.cpp:1564) —
+    // a truthy return aborts BEFORE any state change. The GoldRush wipf 564
+    // "collecting" walking wipf 563 (HitSpeed2 carryable) is vetoed exactly
+    // here (ANIM's RejectEntrance) — C++ leaves 563's position/velocity
+    // untouched; teleporting it to the collector was the f41 wall.
+    #[test]
+    fn cross_check_collection_reject_entrance_veto_leaves_object_untouched_like_cpp(
+    ) -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        let mut collector = Definition::from_script("Croc", "Croc", "#strict\n")?;
+        collector.set_shape_rect(Some(DefinitionRect::new(-12, -9, 24, 18)));
+        collector.set_collection_rect(Some(DefinitionRect::new(-12, -9, 24, 18)));
+        engine.register_definition(collector)?;
+
+        let item_script = r#"#strict
+protected func RejectEntrance(pContainer) { return(1); }
+"#;
+        let mut item = Definition::from_script("Chip", "Chip", item_script)?;
+        item.set_c4_callback_convention(true);
+        item.set_collectible(true);
+        engine.register_definition(item)?;
+
+        let collector_id = engine.spawn_object(
+            SpawnConfig::new("Croc")
+                .with_alive(true)
+                .with_position(Vector2::new(100, 100)),
+        )?;
+        // A fast carryable INSIDE the collector's shape: OCF_HitSpeed2 makes
+        // it a reverse-pass candidate on EVERY frame (tocf |= OCF_HitSpeed2,
+        // C4GameObjects.cpp:148), and the collection arm checks the RAW OCFs
+        // (:186) — no Tick3 gate applies to this pairing.
+        // Spawn y bottom-anchors the SHAPED collector (C4Object.cpp:1462-
+        // 1468): its center lands at (100, 91); the shapeless item keeps its
+        // spawn point as center — y=95 puts it inside the shape (dy=4).
+        let item_id = engine.spawn_object(
+            SpawnConfig::new("Chip")
+                .with_category(CATEGORY_VEHICLE)
+                .with_position(Vector2::new(100, 95)),
+        )?;
+        let item_idx = engine.find_object_index(item_id).expect("item exists");
+        engine.objects[item_idx].fixed_velocity.x = C4Fixed::from_raw(147456); // 2.25
+        engine.objects[item_idx].state.mobile = true;
+
+        engine.tick()?;
+
+        let item_idx = engine.find_object_index(item_id).expect("item exists");
+        let item = &engine.objects[item_idx];
+        assert_eq!(item.state.container, None, "entrance vetoed");
+        assert_eq!(
+            item.state.position,
+            Vector2::new(102, 95),
+            "vetoed collection must not teleport the object (C4Object.cpp:1564 \
+             returns before any state change) — it keeps its own movement"
+        );
+        assert_eq!(
+            item.fixed_velocity.x.val(),
+            147456,
+            "vetoed collection must not zero the velocity"
+        );
+        let collector_idx = engine
+            .find_object_index(collector_id)
+            .expect("collector exists");
+        assert!(
+            engine.objects[collector_idx].state.contents.is_empty(),
+            "nothing entered the collector"
+        );
+        Ok(())
+    }
+
+    // The second Enter gate: RejectCollect on the COLLECTOR with
+    // (idObject, pObject) — truthy aborts before any state change
+    // (C4Object.cpp:1569-1577; PSF_RejectCollection = "~RejectCollect",
+    // C4Script.h:82). The GoldRush wipf's script ends its RejectCollect
+    // with return(1) — a wipf never auto-collects.
+    #[test]
+    fn cross_check_collection_reject_collect_veto_leaves_object_untouched_like_cpp(
+    ) -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        let collector_script = r#"#strict
+protected func RejectCollect(id, pObject) { return(1); }
+"#;
+        let mut collector = Definition::from_script("Croc", "Croc", collector_script)?;
+        collector.set_c4_callback_convention(true);
+        collector.set_shape_rect(Some(DefinitionRect::new(-12, -9, 24, 18)));
+        collector.set_collection_rect(Some(DefinitionRect::new(-12, -9, 24, 18)));
+        engine.register_definition(collector)?;
+
+        let mut item = Definition::from_script("Chip", "Chip", "#strict\n")?;
+        item.set_collectible(true);
+        engine.register_definition(item)?;
+
+        let collector_id = engine.spawn_object(
+            SpawnConfig::new("Croc")
+                .with_alive(true)
+                .with_position(Vector2::new(100, 100)),
+        )?;
+        let item_id = engine.spawn_object(
+            SpawnConfig::new("Chip")
+                .with_category(CATEGORY_VEHICLE)
+                .with_position(Vector2::new(100, 95)),
+        )?;
+        let item_idx = engine.find_object_index(item_id).expect("item exists");
+        engine.objects[item_idx].fixed_velocity.x = C4Fixed::from_raw(147456); // 2.25
+        engine.objects[item_idx].state.mobile = true;
+
+        engine.tick()?;
+
+        let item_idx = engine.find_object_index(item_id).expect("item exists");
+        let item = &engine.objects[item_idx];
+        assert_eq!(item.state.container, None, "collection vetoed");
+        assert_eq!(item.state.position, Vector2::new(102, 95));
+        assert_eq!(item.fixed_velocity.x.val(), 147456);
+        let collector_idx = engine
+            .find_object_index(collector_id)
+            .expect("collector exists");
+        assert!(engine.objects[collector_idx].state.contents.is_empty());
         Ok(())
     }
 
