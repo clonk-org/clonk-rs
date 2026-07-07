@@ -14004,6 +14004,17 @@ impl Engine {
                 }
             }
         }
+        if std::env::var("LC_COACHDBG").is_ok() && (28..=41).contains(&frame) {
+            if let Some(idx) = self.find_object_index(ObjectId::new(1450)) {
+                let object = &self.objects[idx];
+                crate::rng::rng_trace_line(&format!(
+                    "RCOACH f{frame} x={} fix_x={} xdir={} contact_snap?",
+                    object.state.position.x,
+                    object.fixed_position.x.val(),
+                    object.fixed_velocity.x.val()
+                ));
+            }
+        }
         if std::env::var("LC_EXECDBG").is_ok() && (1..=2).contains(&frame) {
             for &idx in &exec_order {
                 let id = self.objects[idx].id.as_u64();
