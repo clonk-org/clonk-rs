@@ -4024,7 +4024,10 @@ impl LegacyObjectRecord {
                     ))
                 })?);
             }
-            "con" => {
+            // C++ saves Con under the key "Size" (C4Object::CompileFunc,
+            // C4Object.cpp:2763); the GoldRush bushes carry Size=25610
+            // and grow toward FullCon from there.
+            "con" | "size" => {
                 let value = parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
                         "Objects.txt line {}: invalid Con `{}` ({})",

@@ -20930,8 +20930,74 @@ impl Engine {
     /// the MVehic forcefield arm (needs the solid-mask material layer), the
     /// FXB1 bubble object (the synced `Random(5)` x-argument draw IS
     /// consumed), the DeepBreath callback's sound, and the corrosion/
+    /// C4Object::DoCon on a live object (C4Object.cpp:1414-1483),
+    /// growth-path subset: clamp Con into [0, FullCon] (Oversize
+    /// unmodeled), keep the shape bottom anchored when unrotated
+    /// (`strgt_con_b = y + Shape.y + Shape.Hgt` from the PRE-change
+    /// stretched shape; on a shape resize `y = strgt_con_b - Hgt - y`).
+    /// Un-ported arms (rare for growth): component gain/cutoff,
+    /// contents loss below FullCon, rotated-structure lift, decay
+    /// solid-mask removal.
+    fn do_con(&mut self, idx: usize, change: i32) {
+        let (shape, stretch_growth, line, rotateable) = self
+            .definitions
+            .get(&self.objects[idx].definition_id)
+            .map(|definition| {
+                (
+                    definition.shape_rect(),
+                    definition.stretch_growth(),
+                    definition.line(),
+                    definition.rotateable(),
+                )
+            })
+            .unwrap_or((None, false, 0, 0));
+        let object = &self.objects[idx];
+        let before = object.state.construction;
+        let after = (before + change).clamp(0, FULL_CON);
+        if after == before {
+            return;
+        }
+        let rotation = object.state.rotation;
+        let old_rect = transformed_shape_rect(shape, before, stretch_growth, rotateable, rotation);
+        let new_rect = transformed_shape_rect(shape, after, stretch_growth, rotateable, rotation);
+        let y = object.state.position.y;
+        self.objects[idx].state.construction = after;
+        self.refresh_object_ocf(idx);
+        if line == 0 && rotation == 0 {
+            if let (Some(old_rect), Some(new_rect)) = (old_rect, new_rect) {
+                if old_rect.height != new_rect.height || old_rect.y != new_rect.y {
+                    let bottom = y + old_rect.y + old_rect.height;
+                    let new_y = bottom - new_rect.height - new_rect.y;
+                    // C++ writes the INT y only (C4Object.cpp:1479-1481);
+                    // fix_y keeps its stale value until the next motion or
+                    // Synchronize — the live comparator confirms cpp fix_y
+                    // stays put while int y moves (bush f35: int 309,
+                    // fix 310.0). Match the desync bit-for-bit.
+                    self.objects[idx].state.position.y = new_y;
+                }
+            }
+        }
+    }
+
     /// InMat-incineration/base/birthday arms (need InMat and base models).
     fn exec_object_life(&mut self, idx: usize, frame: u64) {
+        // Growth (C4Object.cpp:824-837): every Tick35, Def Growth on an
+        // incomplete, unburning alive Living or StaticBack gains
+        // DoCon(Growth*100).
+        if frame % 35 == 0 {
+            let object = &self.objects[idx];
+            let category = object.state.category;
+            let eligible = (category & CATEGORY_LIVING != 0 && object.state.alive)
+                || category & CATEGORY_STATIC_BACK != 0;
+            let growth = self
+                .definitions
+                .get(&object.definition_id)
+                .map(|definition| definition.growth())
+                .unwrap_or(0);
+            if eligible && growth != 0 && object.state.construction < FULL_CON {
+                self.do_con(idx, growth * 100);
+            }
+        }
         // Tick5, alive, breathing definitions only (C4Object.cpp:879-880).
         if frame % 5 != 0 || !self.objects[idx].state.alive {
             return;
@@ -44803,6 +44869,63 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
     // the counter and Execs Def->TimerCall (no pars, fail-safe). DefCore
     // Timer= defaults to 35 (C4Def.cpp:298); Objects.txt saves the
     // mid-cycle per-object counter (Timer=, default 0, C4Object.cpp:2738).
+    // C4Object::ExecLife growth (C4Object.cpp:824-837): every Tick35,
+    // an incomplete StaticBack (or alive Living) with Def Growth and no
+    // fire gains DoCon(Growth*100); DoCon keeps the shape bottom
+    // anchored (strgt_con_b, C4Object.cpp:1419,1476-1483) so the
+    // GoldRush bushes creep upward as they grow (the f35 live class:
+    // BUSH 1276 y 310 -> 309 in C++ while rust never grew it).
+    #[test]
+    fn static_back_growth_ticks_con_and_keeps_the_bottom_anchored() {
+        let mut definition = simple_definition("Bush");
+        // The real BUSH shape (Bush1.c4d DefCore: 41x39 at -20,-19) —
+        // this step (25610 -> 26010) grows the stretched height 9 -> 10
+        // while the stretched top offset stays -4, so y shifts -1.
+        definition.set_shape_rect(Some(DefinitionRect {
+            x: -20,
+            y: -19,
+            width: 41,
+            height: 39,
+        }));
+        definition.set_category(CATEGORY_STATIC_BACK);
+        definition.set_growth(4);
+        definition.set_stretch_growth(true);
+        let mut engine = Engine::with_seed(0);
+        engine.set_physics(PhysicsSettings::new(0, 200, -200));
+        engine.set_environment(EnvironmentSettings::new(0));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let bush = engine
+            .spawn_object(
+                SpawnConfig::new("Bush")
+                    .with_position(Vector2::new(100, 310))
+                    .with_construction(25610),
+            )
+            .expect("bush spawns");
+
+        for _ in 0..34 {
+            engine.tick().expect("tick");
+        }
+        let idx = engine.find_object_index(bush).expect("exists");
+        assert_eq!(
+            engine.objects[idx].state.construction, 25610,
+            "no growth before the Tick35 boundary"
+        );
+        let y_before = engine.objects[idx].state.position.y;
+        engine.tick().expect("tick 35");
+        let idx = engine.find_object_index(bush).expect("exists");
+        assert_eq!(
+            engine.objects[idx].state.construction, 26010,
+            "DoCon(Growth*100) at Tick35 (C4Object.cpp:837)"
+        );
+        assert_eq!(
+            engine.objects[idx].state.position.y,
+            y_before - 1,
+            "bottom-anchored stretch shifts y up (C4Object.cpp:1476-1483)"
+        );
+    }
+
     #[test]
     fn def_timer_call_fires_on_the_def_interval_like_cpp() {
         let script = r#"
