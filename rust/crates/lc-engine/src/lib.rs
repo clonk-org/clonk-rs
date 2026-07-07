@@ -15288,8 +15288,19 @@ impl Engine {
         };
 
         let mut energy_died = false;
-        let mut pending_change_def: Option<String> = None;
         let mut solid_mask_refresh = false;
+        // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply it
+        // BEFORE the staged fields so an action write in the same update
+        // resolves against the NEW def's ActMap.
+        let action_library = change_def
+            .as_ref()
+            .and_then(|new_def| {
+                self.change_object_def(index, new_def);
+                self.definitions
+                    .get(&self.objects[index].definition_id)
+                    .map(|definition| definition.action_library().clone())
+            })
+            .unwrap_or(action_library);
         let (object_id, previous_owner, new_owner, new_crew, container_change) = {
             let object = &mut self.objects[index];
             let previous_owner = object.state.owner;
@@ -15413,9 +15424,6 @@ impl Engine {
                 object.state.solid_mask_override = Some(rect);
                 solid_mask_refresh = true;
             }
-            if let Some(new_def) = change_def.clone() {
-                pending_change_def = Some(new_def);
-            }
             if let Some(alive) = alive {
                 object.state.alive = alive;
             }
@@ -15500,13 +15508,6 @@ impl Engine {
         }
         self.refresh_elimination_state();
         self.check_game_over()?;
-
-        // FnChangeDef -> C4Object::ChangeDef (C4Object.cpp:1180-1231):
-        // executed after the scoped mutations so the swap sees the final
-        // state of this update.
-        if let Some(new_def) = pending_change_def {
-            self.change_object_def(index, &new_def);
-        }
 
         Ok(())
     }
@@ -15766,6 +15767,24 @@ impl Engine {
             (object.state.owner, object.state.crew_member)
         };
 
+        // FnChangeDef swaps the definition INLINE at the call site
+        // (C4Object::ChangeDef, C4Object.cpp:1205-1231, incl. the
+        // SetAction(ActIdle) pre-reset :1214) — the staged writes that
+        // follow it (the horse Death's SetAction("Dead")) must resolve
+        // against the NEW def's ActMap, so the swap applies BEFORE the
+        // delta and the action library is re-resolved (the f147 wall:
+        // cpp "Dead" vs rust "Idle" fallback against the old library).
+        let changed_library = object_update
+            .as_ref()
+            .and_then(|update| update.change_def.clone())
+            .and_then(|new_def| {
+                self.change_object_def(index, &new_def);
+                self.definitions
+                    .get(&self.objects[index].definition_id)
+                    .map(|definition| definition.action_library().clone())
+            });
+        let action_library = changed_library.as_ref().unwrap_or(action_library);
+
         {
             let object = &mut self.objects[index];
 
@@ -15962,12 +15981,24 @@ impl Engine {
                 let object = &self.objects[index];
                 (object.state.owner, object.state.crew_member)
             };
-            let mut nested_change_def = None;
             let mut energy_died = false;
+            // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply the
+            // def change BEFORE the staged delta so a following
+            // SetAction resolves against the NEW ActMap.
+            let action_library = outcome
+                .update
+                .as_ref()
+                .and_then(|update| update.change_def.clone())
+                .and_then(|new_def| {
+                    self.change_object_def(index, &new_def);
+                    self.definitions
+                        .get(&self.objects[index].definition_id)
+                        .map(|definition| definition.action_library().clone())
+                })
+                .unwrap_or(action_library);
             {
                 let object = &mut self.objects[index];
                 if let Some(update) = outcome.update {
-                    nested_change_def = update.change_def.clone();
                     let delta: ObjectDelta = update.into();
                     let apply_outcome = object.apply_delta(&delta, &action_library);
                     energy_died = apply_outcome.energy_died;
@@ -15991,10 +16022,6 @@ impl Engine {
                     let mut applied = object.apply_effect_commands(&outcome.effects);
                     effect_events.append(&mut applied);
                 }
-            }
-            // FnChangeDef from a nested call (C4Object.cpp:1180-1231)
-            if let Some(new_def) = nested_change_def {
-                self.change_object_def(index, &new_def);
             }
             self.update_sector_for_index(index);
             if energy_died {
@@ -39423,6 +39450,73 @@ func Trigger(object pLayered) {
     // and the shape/vertices rebuild from the new def (WGTW/CTWR tower
     // handlers rely on it during the game-start UpdateTransferZone
     // broadcast).
+    // The horse-death pattern: Death() runs `ChangeDef(ID_Dead())` then
+    // `SetAction("Dead")` (Horse.c4d Script.c). C++ ChangeDef swaps the
+    // definition INLINE at the call site (C4Object.cpp:1205-1231, incl.
+    // the SetAction(ActIdle) pre-reset :1214), so the following
+    // SetAction("Dead") resolves against the NEW def's ActMap
+    // (SetActionByName -> Def->ActMap). Deferring the swap past the
+    // staged action apply validated "Dead" against the OLD def (no such
+    // action -> default fallback) — the f147 wall: cpp horse action
+    // "Dead" vs rust "Idle" (def DHRS in both).
+    #[test]
+    fn change_def_then_set_action_resolves_against_the_new_def_like_cpp() {
+        let mut engine = Engine::with_seed(0);
+        let live_script = r#"#strict
+public func Death()
+{
+  ChangeDef(CRPS);
+  SetAction("Dead");
+  return(1);
+}
+"#;
+        let mut live = Definition::from_script("HRSX", "Horse", live_script).expect("compiles");
+        live.set_c4_callback_convention(true);
+        live.configure_actions(
+            None,
+            HashMap::from([("Gallop".to_string(), ActionSpec::default().with_delay(1))]),
+        );
+        engine.register_definition(live).expect("registers");
+        let mut corpse = Definition::from_script("CRPS", "Corpse", "#strict\n").expect("compiles");
+        corpse.configure_actions(
+            None,
+            HashMap::from([("Dead".to_string(), ActionSpec::default().with_delay(3000))]),
+        );
+        engine.register_definition(corpse).expect("registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("HRSX")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 50))
+                    .with_alive(true)
+                    .with_action(ActionState::new("Gallop")),
+            )
+            .expect("spawns");
+        let idx = engine.find_object_index(id).expect("exists");
+        engine.objects[idx].state.energy = 30;
+
+        // The kill: energy to zero -> AssignDeath -> Death() script
+        // (C4Object.cpp:1363, :1173).
+        engine.change_object_energy(idx, -30, 0, OWNER_NONE);
+        engine.assign_death(idx, false).expect("death runs");
+
+        let idx = engine.find_object_index(id).expect("exists");
+        let object = &engine.objects[idx];
+        assert_eq!(
+            object.definition_id.as_str(),
+            "CRPS",
+            "ChangeDef swapped the definition"
+        );
+        assert_eq!(
+            object.state.action.name, "Dead",
+            "SetAction after ChangeDef resolves against the NEW def's ActMap \
+             (C4Object.cpp:1205-1231 swaps inline; SetActionByName then finds \
+             \"Dead\")"
+        );
+        assert!(!object.state.alive);
+    }
+
     #[test]
     fn change_def_swaps_definition_in_place_like_cpp() {
         let mut engine = Engine::with_seed(0);
