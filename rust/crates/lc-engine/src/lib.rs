@@ -3487,7 +3487,7 @@ impl Object {
                 movement.contact_density,
             );
             if contact.is_contact() {
-                if coach_debug_enabled() && movement.object_id.as_u64() == 1450 {
+                if coach_debug_id() == Some(movement.object_id.as_u64()) {
                     let details: Vec<String> = self
                         .state
                         .vertices
@@ -3549,7 +3549,7 @@ impl Object {
                 movement.contact_density,
             );
             if contact.is_contact() {
-                if coach_debug_enabled() && movement.object_id.as_u64() == 1450 {
+                if coach_debug_id() == Some(movement.object_id.as_u64()) {
                     crate::rng::rng_trace_line(&format!(
                         "VCONTACT cand=({},{}) first_friction={} xdir_before={} ydir_before={}",
                         candidate.x,
@@ -3675,7 +3675,7 @@ impl Object {
                 movement.contact_density,
             );
             if contact.is_contact() {
-                if coach_debug_enabled() && movement.object_id.as_u64() == 1450 {
+                if coach_debug_id() == Some(movement.object_id.as_u64()) {
                     crate::rng::rng_trace_line(&format!(
                         "ACONTACT cand=({},{}) orig=({},{}) attach={} pos=({},{})",
                         candidate.x,
@@ -3701,8 +3701,7 @@ impl Object {
             let override_x = candidate.x != original.x;
             let override_y = candidate.y != original.y;
             if (override_x || override_y)
-                && coach_debug_enabled()
-                && movement.object_id.as_u64() == 1450
+                && coach_debug_id() == Some(movement.object_id.as_u64())
             {
                 crate::rng::rng_trace_line(&format!(
                     "ATTOVR cand=({},{}) orig=({},{}) attach={}",
@@ -9155,8 +9154,18 @@ fn sign_i32(value: i32) -> i32 {
 /// LC_COACHDBG forensics gate (diagnostic only) — cached so the movement
 /// contact loops don't pay an env lookup per abort.
 fn coach_debug_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("LC_COACHDBG").is_ok())
+    coach_debug_id().is_some()
+}
+
+/// LC_COACHDBG's traced object id: `LC_COACHDBG=<id>`, any non-numeric
+/// value keeps the original coach target 1450 (diagnostic only).
+fn coach_debug_id() -> Option<u64> {
+    static ID: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| {
+        std::env::var("LC_COACHDBG")
+            .ok()
+            .map(|raw| raw.trim().parse::<u64>().unwrap_or(1450))
+    })
 }
 
 fn redirect_force(from: &mut C4Fixed, to: &mut C4Fixed, direction: i32) {
@@ -14103,11 +14112,11 @@ impl Engine {
                 }
             }
         }
-        if coach_debug_enabled() && (20..=60).contains(&frame) {
-            if let Some(idx) = self.find_object_index(ObjectId::new(1450)) {
+        if let Some(traced) = coach_debug_id().filter(|_| (1..=80).contains(&frame)) {
+            if let Some(idx) = self.find_object_index(ObjectId::new(traced)) {
                 let object = &self.objects[idx];
                 crate::rng::rng_trace_line(&format!(
-                    "RCOACH f{frame} x={} fix_x={} xdir={} y={} fix_y={} ydir={} mobile={} t_attach={} act={}",
+                    "RCOACH f{frame} x={} fix_x={} xdir={} y={} fix_y={} ydir={} mobile={} t_attach={} act={} ph={} comdir={:?} dir={:?} liq={}",
                     object.state.position.x,
                     object.fixed_position.x.val(),
                     object.fixed_velocity.x.val(),
@@ -14116,7 +14125,11 @@ impl Engine {
                     object.fixed_velocity.y.val(),
                     object.state.mobile,
                     object.frame_t_attach,
-                    object.state.action.name
+                    object.state.action.name,
+                    object.state.action.phase,
+                    object.state.command_direction,
+                    object.state.direction,
+                    object.state.in_liquid
                 ));
             }
         }
@@ -20859,6 +20872,18 @@ impl Engine {
                     };
                     if !collection_rect.contains_offset(dx, dy) {
                         continue;
+                    }
+                    if coach_debug_id() == Some(candidate_id.as_u64())
+                        || coach_debug_id() == Some(obj1_id.as_u64())
+                    {
+                        crate::rng::rng_trace_line(&format!(
+                            "XCOLLECT collector={} ({:?}) at {:?} takes {} at {:?}",
+                            obj1_id.as_u64(),
+                            self.objects[idx].definition_id,
+                            obj1_position,
+                            candidate_id.as_u64(),
+                            candidate_position
+                        ));
                     }
                     let update = ObjectUpdate::new()
                         .with_container(obj1_id)
