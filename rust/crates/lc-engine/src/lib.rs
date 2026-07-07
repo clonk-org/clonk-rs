@@ -3694,10 +3694,15 @@ impl Object {
                 break;
             }
 
-            if candidate == self.state.position {
-                break;
-            }
-
+            // NO candidate==position early exit: C++'s do-loop still runs
+            // the ctco override bookkeeping when the attach-corrected step
+            // lands exactly on the current position (DoMotion(0,0) is a
+            // no-op but at_xovr/at_yovr zero the dirs, resync the fixed
+            // coords and retarget ctco to the current pixel so the while
+            // condition exits, C4Movement.cpp:337-369). Skipping it left a
+            // freshly-turned walker's Turn-carried ydir alive (the
+            // GoldRush snake f57 wall: rust fell ballistic at fix_y
+            // 383.8/ydir 0.8 where cpp settled at 383.0/0).
             let override_x = candidate.x != original.x;
             let override_y = candidate.y != original.y;
             if (override_x || override_y)
@@ -39327,6 +39332,88 @@ func Trigger(object pLayered) {
         assert_eq!(
             engine.objects[idx].state.position.y, 91,
             "walk attach snaps the stander up one pixel (C4Shape::Attach)"
+        );
+    }
+
+    // Attached movement's zero-step iteration: when Shape.Attach pulls the
+    // step candidate BACK to the current position (ctx==x, cty attach-
+    // corrected to y), C++ still runs the ctco override bookkeeping —
+    // `if (at_yovr) { ctcoy = y; ydir = Fix0; fix_y = itofix(y); }`
+    // (C4Movement.cpp:351/:367-368; the do-loop has NO candidate==position
+    // early exit) — the carried ydir is zeroed and fix_y resyncs to the
+    // pixel. The GoldRush snake pinned this: freshly turned (xdir -0.5,
+    // fix_x on the .5 boundary so no x step), its Turn-carried ydir 52428
+    // must die in the first Walk frame — cpp (fix_y 383.0, ydir 0) vs
+    // rust falling ballistic (fix_y 383.8, ydir 52428) at the f57 wall.
+    #[test]
+    fn attach_pullback_to_current_position_zeroes_ydir_and_resyncs_fix_y() {
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(200, 15)); // ground from y=15
+        let mut snake = Definition::from_script("SNKE", "Snake", "#strict\n").expect("compiles");
+        snake.set_shape_rect(Some(DefinitionRect::new(-14, -5, 28, 10)));
+        snake.set_shape_vertices(vec![
+            ObjectVertex {
+                x: -4,
+                y: -3,
+                cnat: CNAT_LEFT,
+                friction: 100,
+            },
+            ObjectVertex {
+                x: 0,
+                y: 4,
+                cnat: CNAT_BOTTOM,
+                friction: 100,
+            },
+            ObjectVertex {
+                x: 4,
+                y: -3,
+                cnat: CNAT_RIGHT,
+                friction: 100,
+            },
+        ]);
+        snake.configure_actions(
+            None,
+            HashMap::from([(
+                "Walk".to_string(),
+                ActionSpec::default()
+                    .with_procedure("WALK")
+                    .with_delay(1)
+                    .with_length(8),
+            )]),
+        );
+        engine.register_definition(snake).expect("registers");
+
+        // Resting crawl position: bottom vertex (0,+4) at 14, ground at 15.
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("SNKE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(100, 10))
+                    .with_action(ActionState::new("Walk"))
+                    .with_loaded(true),
+            )
+            .expect("spawns");
+        let idx = engine.find_object_index(id).expect("exists");
+        // The post-Turn state: no horizontal step this frame, a carried
+        // vertical dir from the Turn's gravity accumulation.
+        engine.objects[idx].state.command_direction = CommandDirection::Stop;
+        engine.objects[idx].fixed_velocity = FixedVec2::new(C4Fixed::ZERO, C4Fixed::from_raw(52428));
+        engine.objects[idx].state.mobile = true;
+
+        engine.tick().expect("tick");
+        let idx = engine.find_object_index(id).expect("exists");
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.position, Vector2::new(100, 10), "no net motion");
+        assert_eq!(
+            object.fixed_velocity.y,
+            C4Fixed::ZERO,
+            "at_yovr zeroes ydir even when the attach-corrected step equals \
+             the current position (C4Movement.cpp:367-368)"
+        );
+        assert_eq!(
+            object.fixed_position.y,
+            itofix(10),
+            "fix_y resyncs to the pixel on the attachment override"
         );
     }
 
