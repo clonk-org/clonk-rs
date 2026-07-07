@@ -76,7 +76,9 @@ pub use message::{
     FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
 };
 pub use pathfinder::{PathFinder, PathWaypoint};
-pub use player::{Player, PlayerConfig, PlayerState, PlayerStatus, PlayerViewport};
+pub use player::{
+    Player, PlayerConfig, PlayerControlState, PlayerState, PlayerStatus, PlayerViewport,
+};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{
     LegacyC4SVal, PlayerStart, Scenario, ScenarioError, ScenarioObjectives, SkyConfig,

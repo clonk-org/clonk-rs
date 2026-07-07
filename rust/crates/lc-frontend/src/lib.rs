@@ -836,7 +836,7 @@ impl GraphicsSystem {
             origin_y,
             zoom,
         );
-        self.draw_selection_marks(snapshot, &highlight_ids, origin_x, origin_y, zoom);
+        self.draw_selection_marks(snapshot, &highlight_ids, input.owner, origin_x, origin_y, zoom);
         self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom);
 
         let content_surface = std::mem::replace(&mut self.surface, main_surface);
@@ -1028,20 +1028,37 @@ impl GraphicsSystem {
         }
     }
 
+    /// `C4Object::DrawSelectMark` (src/C4Object.cpp:3839-3857): the four
+    /// PHASES of fctSelectMark (square cells of sheet height) sit at the
+    /// shape corners offset by -2. Gated on the owning player's SelectFlash
+    /// (src/C4Object.cpp:2497-2502).
     fn draw_selection_marks(
         &mut self,
         snapshot: &SimulationSnapshot,
         highlights: &HashSet<ObjectId>,
+        owner: i32,
         origin_x: f32,
         origin_y: f32,
         zoom: f32,
     ) {
-        let Some(image) = self.hud_graphics.select_mark.as_ref() else {
+        let Some(image) = self.hud_graphics.select_mark.clone() else {
             return;
         };
+        // `Game.Players.Get(Owner)->SelectFlash` (src/C4Object.cpp:2501);
+        // fixture snapshots without player entries keep the marks visible.
+        if snapshot
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .map(|player| player.control.select_flash <= 0)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let cell = image.height() as i32;
         let surface_width = self.surface_width as f32;
         let surface_height = self.surface_height as f32;
-        let margin = (image.width().max(image.height()) as f32).max(16.0);
+        let margin = (cell as f32).max(16.0);
         for id in highlights {
             let Some(object) = snapshot.object(*id) else {
                 continue;
@@ -1056,13 +1073,34 @@ impl GraphicsSystem {
                 continue;
             }
 
-            let width = image.width() as f32;
-            let height = image.height() as f32;
-            let rect = GuiRect::from_origin_size(
-                GuiPoint::new(screen_x - width / 2.0, screen_y - height / 2.0),
-                GuiSize::new(width, height),
-            );
-            draw_image(&mut self.surface, &rect, image);
+            let shape = self
+                .object_sprites
+                .get(&sprite_map_key(&object.definition_id, None))
+                .map(Self::sprite_def_shape)
+                .filter(|shape| shape.width > 0 && shape.height > 0)
+                .unwrap_or_else(|| DefinitionRect::new(-6, -6, 12, 12));
+            // cox/coy = x + Shape.x - 2 (src/C4Object.cpp:3850-3856).
+            let cox = screen_x + (shape.x as f32) * zoom - 2.0;
+            let coy = screen_y + (shape.y as f32) * zoom - 2.0;
+            let shape_width = shape.width as f32 * zoom;
+            let shape_height = shape.height as f32 * zoom;
+            let corners = [
+                (cox, coy, 0),
+                (cox + shape_width, coy, 1),
+                (cox, coy + shape_height, 2),
+                (cox + shape_width, coy + shape_height, 3),
+            ];
+            for (px, py, phase) in corners {
+                let source = SourceRect::new(phase * cell, 0, cell, cell);
+                if !Self::source_within_image(&image, &source) {
+                    continue;
+                }
+                let rect = GuiRect::from_origin_size(
+                    GuiPoint::new(px, py),
+                    GuiSize::new(cell as f32, cell as f32),
+                );
+                draw_image_region(&mut self.surface, &rect, &image, None, &source, false, None);
+            }
         }
     }
 
@@ -1780,6 +1818,11 @@ impl GraphicsSystem {
 
         for object in objects {
             if object.status != ObjectStatus::Normal {
+                continue;
+            }
+            // `if (Contained && !eDrawMode) return;` (src/C4Object.cpp:2363):
+            // carried objects never draw into the landscape.
+            if object.container.is_some() {
                 continue;
             }
             if object.category & CATEGORY_BACKGROUND_FLAG != 0 {
@@ -2643,6 +2686,11 @@ impl GraphicsSystem {
             && rect.y + rect.height <= height
     }
 
+    /// `C4Game::DrawCursors` (src/C4Game.cpp:1852-1874): while a player's
+    /// CursorFlash/SelectFlash timer runs, the fctCursor mark — the 35th
+    /// square cell of the mouse-cursor sheet, phase +1 when the crew is
+    /// contained (src/C4GraphicsResource.cpp:328-336, src/C4Game.cpp:1868)
+    /// — is drawn centered above the cursor clonk's def shape.
     fn draw_player_cursors(
         &mut self,
         snapshot: &SimulationSnapshot,
@@ -2655,23 +2703,34 @@ impl GraphicsSystem {
             return;
         };
 
-        let cursor_id = snapshot
-            .players
-            .iter()
-            .find(|player| player.id == owner)
-            .and_then(|player| player.cursor)
-            .or_else(|| {
-                snapshot
-                    .crew_selection
-                    .get(&owner)
-                    .and_then(|selection| selection.cursor)
-            });
+        let player = snapshot.players.iter().find(|player| player.id == owner);
+        // `if (pPlr->CursorFlash || pPlr->SelectFlash)` (src/C4Game.cpp:1863).
+        if player
+            .map(|player| player.control.cursor_flash <= 0 && player.control.select_flash <= 0)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let cursor_id = player.and_then(|player| player.cursor).or_else(|| {
+            snapshot
+                .crew_selection
+                .get(&owner)
+                .and_then(|selection| selection.cursor)
+        });
         let Some(cursor_id) = cursor_id else {
             return;
         };
         let Some(object) = snapshot.object(cursor_id) else {
             return;
         };
+
+        // fctCursor: cell size = sheet height; phase 1 while contained.
+        let cell = image.height() as i32;
+        let phase = i32::from(object.container.is_some());
+        let source = SourceRect::new((35 + phase) * cell, 0, cell, cell);
+        if !Self::source_within_image(&image, &source) {
+            return;
+        }
 
         let content_width = self.surface_width as f32;
         let content_height = self.surface_height as f32;
@@ -2686,13 +2745,16 @@ impl GraphicsSystem {
             return;
         }
 
+        // `coy - cursor->Def->Shape.Hgt / 2 - fctCursor.Hgt`
+        // (src/C4Game.cpp:1872): offset by the def shape height, not the
+        // sprite-sheet image height.
         let (cursor_definition_id, cursor_graphics_name) =
             if let Some(base) = object.base_graphics.as_ref() {
                 (base.definition.clone(), base.graphics_name.clone())
             } else {
                 (object.definition_id.clone(), None)
             };
-        let sprite_height = {
+        let shape_height = {
             let mut sprite = self.object_sprites.get(&sprite_map_key(
                 &cursor_definition_id,
                 cursor_graphics_name.as_deref(),
@@ -2708,20 +2770,19 @@ impl GraphicsSystem {
                     .get(&sprite_map_key(&object.definition_id, None));
             }
             sprite
-                .map(|sprite| (sprite.image.height() as f32 * zoom).max(1.0))
+                .map(|sprite| (Self::sprite_def_shape(sprite).height as f32 * zoom).max(1.0))
                 .unwrap_or(12.0 * zoom)
         };
-        let cursor_width = image.width() as f32;
-        let cursor_height = image.height() as f32;
+        let cursor_size = cell as f32;
 
         let rect = GuiRect::from_origin_size(
             GuiPoint::new(
-                screen_x - cursor_width / 2.0,
-                screen_y - sprite_height / 2.0 - cursor_height,
+                screen_x - cursor_size / 2.0,
+                screen_y - shape_height / 2.0 - cursor_size,
             ),
-            GuiSize::new(cursor_width, cursor_height),
+            GuiSize::new(cursor_size, cursor_size),
         );
-        draw_image(&mut self.surface, &rect, &image);
+        draw_image_region(&mut self.surface, &rect, &image, None, &source, false, None);
     }
 
     /// `Game.GraphicsResource.FontRegular` for HUD text.
@@ -4498,6 +4559,51 @@ mod tests {
         assert_eq!(pixel, Some(expected));
     }
 
+    #[test]
+    fn contained_objects_are_not_drawn_in_the_world() {
+        // `if (Contained && !eDrawMode) return;` (src/C4Object.cpp:2363):
+        // carried items (e.g. the Mage's starting FLAG) never blit into the
+        // landscape — they only appear in HUD inventory/menus.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].vertices = vec![
+            ObjectVertex::new(-6, -6),
+            ObjectVertex::new(6, -6),
+            ObjectVertex::new(6, 6),
+            ObjectVertex::new(-6, 6),
+        ];
+        snapshot.objects[0].container = Some(ObjectId::new(999));
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Contained Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let lighting = GraphicsSystem::lighting_factor(snapshot.environment.settings.time_of_day);
+        let filled = GraphicsSystem::apply_lighting(object_color(&snapshot.objects[0]), lighting);
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let screen_x = snapshot.objects[0].position.x - viewport_x;
+        let screen_y = snapshot.objects[0].position.y - viewport_y;
+        let pixel = graphics
+            .surface()
+            .get_pixel(screen_x as u32, screen_y as u32);
+        assert_ne!(
+            pixel,
+            Some(filled),
+            "contained object must not paint its debug polygon"
+        );
+    }
+
     fn solid_sprite(
         definition_id: &str,
         width: u32,
@@ -4857,21 +4963,38 @@ mod tests {
 
     #[test]
     fn render_frame_draws_player_cursor() {
+        // C4Game::DrawCursors (src/C4Game.cpp:1852-1874): while CursorFlash
+        // or SelectFlash runs, ONE cell of the mouse-cursor sheet is drawn
+        // above the cursor clonk — fctCursor is the 35th square cell (cell
+        // size = sheet height, C4GraphicsResource::ApplyCursorGfx,
+        // src/C4GraphicsResource.cpp:328-336), NOT the whole sheet.
         let mut snapshot = make_snapshot();
         snapshot.objects[0].owner = 1;
         let object_id = snapshot.objects[0].id;
         snapshot.players.push(PlayerState {
             id: 1,
             cursor: Some(object_id),
+            control: lc_engine::PlayerControlState {
+                cursor_flash: 30,
+                ..Default::default()
+            },
             ..PlayerState::default()
         });
 
+        // 40-cell sheet, 4px cells: cell 35 magenta-ish, everything else green.
+        let cell = 4u32;
         let mut cursor_pixels = Vec::new();
-        for _ in 0..4 {
-            cursor_pixels.extend_from_slice(&[123, 45, 210, 255]);
+        for _y in 0..cell {
+            for x in 0..40 * cell {
+                if (35 * cell..36 * cell).contains(&x) {
+                    cursor_pixels.extend_from_slice(&[123, 45, 210, 255]);
+                } else {
+                    cursor_pixels.extend_from_slice(&[0, 200, 0, 255]);
+                }
+            }
         }
         let cursor_pixels = Arc::from(cursor_pixels.into_boxed_slice());
-        let cursor_image = ImageData::from_arc(2, 2, cursor_pixels);
+        let cursor_image = ImageData::from_arc(40 * cell, cell, cursor_pixels);
         let mut cursor_entries = vec![None; 8];
         cursor_entries[5] = Some(cursor_image);
         let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
@@ -4890,17 +5013,189 @@ mod tests {
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
-        let cursor_color = [123u8, 45, 210, 255];
+        let cell_color = [123u8, 45, 210, 255];
+        let other_cells = [0u8, 200, 0, 255];
         let mut found = false;
+        let mut leaked = false;
         for chunk in graphics.surface().pixels().chunks_exact(4) {
-            if chunk == cursor_color {
+            if chunk == cell_color {
                 found = true;
-                break;
+            }
+            if chunk == other_cells {
+                leaked = true;
             }
         }
+        assert!(found, "expected the fctCursor cell above the cursor crew");
+        assert!(!leaked, "other sheet cells must not be drawn");
+    }
+
+    #[test]
+    fn select_marks_draw_four_corner_phases_while_select_flash_runs() {
+        // C4Object::DrawSelectMark (src/C4Object.cpp:3839-3857): the four
+        // PHASES of fctSelectMark (SelectMark.png, 4 square cells of sheet
+        // height) sit at the shape corners offset by -2 — never the whole
+        // sheet blitted over the object. Gated on the owner's SelectFlash
+        // (src/C4Object.cpp:2497-2502).
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].owner = 1;
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+        snapshot.players.push(PlayerState {
+            id: 1,
+            cursor: Some(snapshot.objects[0].id),
+            control: lc_engine::PlayerControlState {
+                select_flash: 30,
+                ..Default::default()
+            },
+            ..PlayerState::default()
+        });
+
+        let corner_colors = [
+            [200u8, 10, 10, 255],
+            [10, 200, 10, 255],
+            [10, 10, 200, 255],
+            [200, 200, 10, 255],
+        ];
+        let mut pixels = Vec::new();
+        for _y in 0..5 {
+            for x in 0..20 {
+                pixels.extend_from_slice(&corner_colors[(x / 5) as usize]);
+            }
+        }
+        let hud = HudGraphics {
+            select_mark: Some(ImageData::new(20, 5, pixels)),
+            ..Default::default()
+        };
+
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "SelectMark Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            Arc::new(hud),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let sx = snapshot.objects[0].position.x - viewport_x;
+        let sy = snapshot.objects[0].position.y - viewport_y;
+        // Fallback shape (-6,-6,12,12): cox = sx - 6 - 2, corners 12 apart.
+        let expected = [
+            (sx - 6, sy - 6, corner_colors[0]),
+            (sx + 6, sy - 6, corner_colors[1]),
+            (sx - 6, sy + 6, corner_colors[2]),
+            (sx + 6, sy + 6, corner_colors[3]),
+        ];
+        for (px, py, color) in expected {
+            assert_eq!(
+                graphics.surface().get_pixel(px as u32, py as u32),
+                Some(Color::new(color[0], color[1], color[2], color[3])),
+                "corner phase at ({px}, {py})"
+            );
+        }
+        // The whole-sheet regression put cell colors at the object center.
+        let center = graphics.surface().get_pixel(sx as u32, sy as u32);
         assert!(
-            found,
-            "expected to find player cursor color in surface pixels"
+            corner_colors
+                .iter()
+                .all(|c| center != Some(Color::new(c[0], c[1], c[2], c[3]))),
+            "no sheet cells across the object center"
+        );
+    }
+
+    #[test]
+    fn select_marks_stay_hidden_without_select_flash() {
+        // `Game.Players.Get(Owner)->SelectFlash` gate (src/C4Object.cpp:2501).
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].owner = 1;
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+        snapshot.players.push(PlayerState {
+            id: 1,
+            cursor: Some(snapshot.objects[0].id),
+            ..PlayerState::default()
+        });
+
+        let mark = [200u8, 10, 10, 255];
+        let pixels: Vec<u8> = (0..20 * 5).flat_map(|_| mark).collect();
+        let hud = HudGraphics {
+            select_mark: Some(ImageData::new(20, 5, pixels)),
+            ..Default::default()
+        };
+
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "SelectMark Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            Arc::new(hud),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        assert!(
+            graphics
+                .surface()
+                .pixels()
+                .chunks_exact(4)
+                .all(|chunk| chunk != mark),
+            "no flash → no select marks"
+        );
+    }
+
+    #[test]
+    fn player_cursor_mark_stays_hidden_without_flash() {
+        // The `pPlr->CursorFlash || pPlr->SelectFlash` gate
+        // (src/C4Game.cpp:1863): expired flash timers draw no mark.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].owner = 1;
+        let object_id = snapshot.objects[0].id;
+        snapshot.players.push(PlayerState {
+            id: 1,
+            cursor: Some(object_id),
+            ..PlayerState::default()
+        });
+
+        let cell = 4u32;
+        let pixels: Vec<u8> = (0..40 * cell * cell)
+            .flat_map(|_| [123, 45, 210, 255])
+            .collect();
+        let cursor_image = ImageData::from_arc(40 * cell, cell, Arc::from(pixels.into_boxed_slice()));
+        let mut cursor_entries = vec![None; 8];
+        cursor_entries[5] = Some(cursor_image);
+        let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
+
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Cursor Scenario",
+            test_font(),
+            empty_sprites(),
+            cursor_atlas,
+            empty_hud_graphics(),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let cell_color = [123u8, 45, 210, 255];
+        assert!(
+            graphics
+                .surface()
+                .pixels()
+                .chunks_exact(4)
+                .all(|chunk| chunk != cell_color),
+            "no flash → no cursor mark"
         );
     }
 
