@@ -40385,6 +40385,113 @@ public func Tag(pClonk) { LocalN("iFromItem", pClonk) = 7; return(1); }
         );
     }
 
+    // FnGetDir (C4Script.cpp:1118-1122): `if (!pObj) pObj = cthr->Obj;
+    // if (!pObj) return {};` — the context object is only the DEFAULT; an
+    // explicit target needs NO object context. GoldRush reads it from a
+    // DEFINITION call: WINC->ActualizePhase(pClonk) computes the
+    // crosshair vertex sign from GetDir(pClonk)
+    // (Winchester.c4d/Script.c:118-121) — the f30 live wall showed every
+    // rust crosshair at x=+40 because the Nil bail made iDir -1 for
+    // Right-facing bandits too.
+    #[test]
+    fn foreign_get_dir_works_without_an_object_context() {
+        let actor_script = r#"#strict
+local iDir;
+public func Boot() {
+  iDir = HELP->ReadDir(this());
+  return(1);
+}
+"#;
+        let helper_script = r#"#strict
+public func ReadDir(pClonk) { return(GetDir(pClonk)); }
+"#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", actor_script).expect("actor compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(
+                Definition::from_script("HELP", "Helper", helper_script)
+                    .expect("helper compiles"),
+            )
+            .expect("helper registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Actr")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_direction(Direction::Right),
+            )
+            .expect("actor spawns");
+        let idx = engine.find_object_index(id).expect("actor exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        let idx = engine.find_object_index(id).expect("actor exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iDir"),
+            Some(&Value::Int(1)),
+            "GetDir(pObj) resolves the explicit target even from a \
+             definition-call scope (C4Script.cpp:1120)"
+        );
+    }
+
+    // C4Object::SetAction zeroes the phase UNCONDITIONALLY on every
+    // successful call — `Action.Phase = Action.PhaseDelay = 0`
+    // (C4Object.cpp:4132) sits outside the action-change guard;
+    // FnSetAction's fDirect is only the NoOtherAction fForce
+    // (C4Script.cpp:747-753). GoldRush pins it: FireRifle leaves AimRifle
+    // at phase 6 (Cowboy.c4d/Script.c:443) and the immediate
+    // SetAction("LoadRifle") (Cowboy:502) must enter at phase 0 — the
+    // f30 live wall showed rust carrying the stale 6 into LoadRifle.
+    #[test]
+    fn set_action_resets_the_phase_like_cpp() {
+        let script = r#"#strict
+public func Boot() { AddEffect("Probe", this(), 1, 5, this()); return(1); }
+func FxProbeTimer(pThis, iNumber) {
+  SetAction("Aim");
+  SetPhase(6);
+  SetAction("Load");
+  return(-1);
+}
+"#;
+        let mut engine = Engine::with_seed(3);
+        let mut actor =
+            Definition::from_script("Actr", "Actor", script).expect("script compiles");
+        actor.configure_actions(
+            None,
+            HashMap::from([
+                ("Aim".to_string(), ActionSpec::default().with_length(10)),
+                ("Load".to_string(), ActionSpec::default().with_length(10)),
+            ]),
+        );
+        engine.register_definition(actor).expect("actor registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let idx = engine.find_object_index(id).expect("actor exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        for _ in 0..6 {
+            engine.tick().expect("tick");
+        }
+
+        let idx = engine.find_object_index(id).expect("actor exists");
+        assert_eq!(
+            engine.objects[idx].state.action.name, "Load",
+            "the second SetAction landed"
+        );
+        assert_eq!(
+            engine.objects[idx].state.action.phase, 0,
+            "SetAction zeroes the phase (C4Object.cpp:4132) — the \
+             pre-change SetPhase(6) must not leak into the new action"
+        );
+    }
+
     #[test]
     fn effect_timer_kill_semantics_follow_cpp() {
         // C4Effect::Execute (C4Effect.cpp:342-360): an FxTimer returning

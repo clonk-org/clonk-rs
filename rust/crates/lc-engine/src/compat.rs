@@ -9090,6 +9090,11 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         if changed_action {
             object.reset_action_ticks();
         }
+        // `Action.Phase = Action.PhaseDelay = 0` runs UNCONDITIONALLY on
+        // every successful SetAction (C4Object.cpp:4132, outside the
+        // change guard) — a pre-change SetPhase must not leak into the
+        // new action (the GoldRush FireRifle ph6 -> LoadRifle ph0 case).
+        object.set_action_phase(0);
 
         let procedure_changed = object.update_effective_action(&name);
         if procedure_changed {
@@ -12288,26 +12293,29 @@ fn get_dir(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(context) => context,
             None => return Ok(Value::Nil),
         };
-        let object = match context.object_context() {
-            Some(object) => object,
-            None => return Ok(Value::Nil),
-        };
-
         if let Some(target) = target_id {
-            if target != object.id() {
-                // FnGetDir reads ANY pObj's Action.Dir (C4Script.cpp:790
-                // area; every object fn carries the `if (!pObj) pObj =
-                // cthr->Obj` prologue and no self-only gate). The CLNK
-                // Riding() PhaseCall does SetDir(GetDir(GetActionTarget()))
-                // on the ridden vehicle — a Nil here flipped riders Left.
-                return Ok(context
-                    .get_world_object(target)
-                    .map(|other| Value::Int(other.direction))
-                    .unwrap_or(Value::Nil));
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    return Ok(Value::Int(object.direction().to_script_value()));
+                }
             }
+            // FnGetDir reads ANY pObj's Action.Dir (C4Script.cpp:1118-1122;
+            // `if (!pObj) pObj = cthr->Obj` is only the local-call default —
+            // an explicit target needs NO object context: GoldRush's
+            // WINC->ActualizePhase(pClonk) reads GetDir(pClonk) from a
+            // DEFINITION call, Winchester.c4d/Script.c:118-121). The CLNK
+            // Riding() PhaseCall does SetDir(GetDir(GetActionTarget()))
+            // on the ridden vehicle — a Nil here flipped riders Left.
+            return Ok(context
+                .get_world_object(target)
+                .map(|other| Value::Int(other.direction))
+                .unwrap_or(Value::Nil));
         }
 
-        Ok(Value::Int(object.direction().to_script_value()))
+        match context.object_context() {
+            Some(object) => Ok(Value::Int(object.direction().to_script_value())),
+            None => Ok(Value::Nil),
+        }
     })
 }
 
@@ -17277,6 +17285,7 @@ impl EffectHostContext {
             object.action_target2 = scope.current_action_target2;
             object.action_data = scope.current_action_data;
             object.damage = scope.current_damage;
+            object.direction = scope.current_direction.to_script_value();
         }
         // The snapshot contents list re-checks each child's live state:
         // C4Object::Exit removes the child from its container's Contents
