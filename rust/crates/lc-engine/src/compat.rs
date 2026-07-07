@@ -4641,6 +4641,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
     script.register_host_function("CreateConstruction", create_construction);
+    // FnFindConstructionSite (C4Script.cpp:1958-1981) — the caller-Var
+    // staging seam behind the System.c4g FindConstructionSiteX wrapper.
+    script.register_host_function("FindConstructionSite", find_construction_site);
     script.register_host_function("CreateParticle", create_particle);
     script.register_host_function("CastParticles", cast_particles);
     script.register_host_function("CastBackParticles", cast_back_particles);
@@ -14232,6 +14235,122 @@ fn construction_check(
     Ok(true)
 }
 
+/// `C4AUL_MAX_Par` (C4Aul.h:54): the NumVars/Par slot count that bounds
+/// FindConstructionSite's var indices.
+const AUL_MAX_PAR: i32 = 10;
+
+/// `C4Value::getInt` tolerance on the staged Var slots: non-numeric
+/// values read as 0.
+fn value_as_int(value: &Value) -> i32 {
+    match value {
+        Value::Int(int) => *int,
+        Value::Bool(flag) => i32::from(*flag),
+        _ => 0,
+    }
+}
+
+/// `Game.OverlapObject` (C4Game.cpp:1298-1313) over the host world: any
+/// active, uncontained object whose category intersects `category` within
+/// C4D_SortLimit and whose shape rect overlaps the given rect
+/// (C4Rect::Overlap, C4Rect.cpp:92-99).
+fn host_overlap_object(
+    context: &EffectHostContext,
+    x: i32,
+    y: i32,
+    wdt: i32,
+    hgt: i32,
+    category: i32,
+) -> bool {
+    context.world_object_ids().into_iter().any(|id| {
+        let Some(object) = context.get_world_object(id) else {
+            return false;
+        };
+        if !object.is_present() || !object.status().is_active() {
+            return false;
+        }
+        if object.container().is_some() {
+            return false;
+        }
+        if object.category() & category & CATEGORY_SORT_LIMIT == 0 {
+            return false;
+        }
+        let metadata = context.definition_metadata(object.definition_id());
+        let Some((left, top, right, bottom)) = compute_object_bounds(&object, metadata) else {
+            return false;
+        };
+        x < right && left < x + wdt && y < bottom && top < y + hgt
+    })
+}
+
+/// `FnFindConstructionSite` (C4Script.cpp:1958-1981): stages coordinates
+/// through the CALLER's Var slots — reads the start position from
+/// `Caller->NumVars[iVarX/iVarY]`, accepts it when ConstructionCheck
+/// passes, else runs the FindConSiteSpot landscape probe
+/// (C4Landscape.cpp:1987-2043, hrange 20) with the Game.OverlapObject
+/// veto and writes the coordinates back into the caller's slots. The
+/// planet System.c4g FindConstructionSiteX wrapper (Commits.c:384-390)
+/// drives it — 10x DLAR Initialize in SkiesOfFire.
+fn find_construction_site(args: &[Value]) -> Result<Value, RuntimeError> {
+    // C4Id2Def failure yields the empty optional (:1962).
+    let definition = match args.first().unwrap_or(&Value::Nil) {
+        Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
+        _ => return Ok(Value::Nil),
+    };
+    let var_x = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "FindConstructionSite",
+        "iVarX",
+    )?;
+    let var_y = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "FindConstructionSite",
+        "iVarY",
+    )?;
+    // Var indices out of range (:1964).
+    if !(0..AUL_MAX_PAR).contains(&var_x) || !(0..AUL_MAX_PAR).contains(&var_y) {
+        return Ok(Value::Nil);
+    }
+    // `if (!cthr->Caller) return {}` (:1966).
+    let Some(slots) = lc_script::caller_var_slots() else {
+        return Ok(Value::Nil);
+    };
+    let v1 = value_as_int(&slots.get(var_x));
+    let v2 = value_as_int(&slots.get(var_y));
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref().ok_or_else(|| {
+            RuntimeError::new("FindConstructionSite requires an active engine context")
+        })?;
+        let Some(metadata) = context.definition_metadata(&definition) else {
+            return Ok(Value::Nil);
+        };
+        // Construction check at the starting position (:1970-1971): the
+        // caller's vars stay untouched on an immediate hit.
+        if construction_check(context, &definition, metadata, Vector2::new(v1, v2))? {
+            return Ok(Value::Bool(true));
+        }
+        // Search for real (:1973-1977) with pDef->Shape.Wdt/Hgt and
+        // Category.
+        let (wdt, hgt) = metadata
+            .shape
+            .map(|rect| (rect.width, rect.height))
+            .unwrap_or((0, 0));
+        let category = metadata.category;
+        let found = context.landscape_ref().and_then(|landscape| {
+            landscape.find_con_site_spot(v1, v2, wdt, hgt, 20, |x, y, w, h| {
+                host_overlap_object(context, x, y, w, h, category)
+            })
+        });
+        // V1 = C4VInt(v1); V2 = C4VInt(v2) — written back even when the
+        // probe found nothing (:1978).
+        let (out_x, out_y) = found.unwrap_or((v1, v2));
+        slots.set(var_x, Value::Int(out_x));
+        slots.set(var_y, Value::Int(out_y));
+        Ok(Value::Bool(found.is_some()))
+    })
+}
+
 fn compute_object_bounds(
     object: &HostWorldObject,
     metadata: Option<&DefinitionMetadata>,
@@ -19252,6 +19371,7 @@ mod tests {
         "Enter",
         "Exit",
         "ExtractMaterialAmount",
+        "FindConstructionSite",
         "FindContents",
         "FindObject",
         "FindObject2",
@@ -20652,6 +20772,108 @@ mod tests {
             outcome.player_commands.as_slice(),
             [PlayerCommand::SetExtraData { player_id: 3, .. }]
         ));
+    }
+
+    #[test]
+    fn find_construction_site_stages_through_the_callers_vars_like_cpp() {
+        // FnFindConstructionSite (C4Script.cpp:1958-1981): the start
+        // position reads from Caller->NumVars[iVarX/iVarY]; a failing
+        // ConstructionCheck runs FindConSiteSpot (hrange 20) and writes
+        // the found spot back into the caller's slots; an immediate
+        // ConstructionCheck hit returns true WITHOUT touching them.
+        let mut landscape = Landscape::flat(200, 100);
+        landscape.set_world_height(400);
+        let expected = landscape
+            .find_con_site_spot(50, 40, 20, 20, 20, |_, _, _, _| false)
+            .expect("the flat surface has a site");
+        let mut definitions = HashMap::new();
+        definitions.insert(
+            DefinitionId::from("HUT1"),
+            DefinitionMetadata {
+                category: 1,
+                constructable: true,
+                shape: Some(DefinitionRect::new(-10, -20, 20, 20)),
+                ..DefinitionMetadata::default()
+            },
+        );
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let mut script = lc_script::Engine::new();
+            script.register_host_function("FindConstructionSite", find_construction_site);
+            script
+                .load_script(
+                    r#"#strict 2
+func Probe(id) {
+  // Start in mid-air (no ground support): the check fails, the
+  // probe searches for the surface.
+  Var(0) = 50; Var(1) = 40;
+  var r = FindConstructionSite(id, 0, 1);
+  return([r, Var(0), Var(1)]);
+}
+func ProbeValid(id) {
+  // Free ground-level spot: the start-position check accepts and the
+  // vars stay untouched (C4Script.cpp:1970-1971).
+  Var(0) = 50; Var(1) = 100;
+  return([FindConstructionSite(id, 0, 1), Var(0), Var(1)]);
+}
+func ProbeBadIndex(id) {
+  // Var indices outside 0..C4AUL_MAX_Par-1 yield nil (:1964).
+  return(FindConstructionSite(id, 10, 1));
+}
+"#,
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            let probed = script
+                .call("Probe", &[Value::C4Id("HUT1".into())])
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            assert_eq!(
+                probed,
+                Value::Array(vec![
+                    Value::Bool(true),
+                    Value::Int(expected.0),
+                    Value::Int(expected.1)
+                ])
+            );
+            let valid = script
+                .call("ProbeValid", &[Value::C4Id("HUT1".into())])
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            assert_eq!(
+                valid,
+                Value::Array(vec![Value::Bool(true), Value::Int(50), Value::Int(100)])
+            );
+            let bad_index = script
+                .call("ProbeBadIndex", &[Value::C4Id("HUT1".into())])
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            assert_eq!(bad_index, Value::Nil);
+            // Unknown definition ids fail like C4Id2Def (:1962).
+            let unknown = script
+                .call("Probe", &[Value::C4Id("XXXX".into())])
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            assert_eq!(
+                unknown,
+                Value::Array(vec![Value::Nil, Value::Int(50), Value::Int(40)])
+            );
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+        result.expect("scripted probes succeed");
+    }
+
+    #[test]
+    fn find_construction_site_without_a_script_caller_yields_nil() {
+        // `if (!cthr->Caller) return {}` (C4Script.cpp:1966).
+        let (result, _) = with_object_host_context(|| {
+            find_construction_site(&[Value::C4Id("HUT1".into()), Value::Int(0), Value::Int(1)])
+        });
+        assert_eq!(result.expect("direct host call runs"), Value::Nil);
     }
 
     #[test]
