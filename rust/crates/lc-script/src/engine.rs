@@ -108,6 +108,11 @@ pub struct Engine {
     /// The shared `static` table; `None` keeps the legacy per-host
     /// fallback (fixtures without an engine).
     globals_named: Option<GlobalVariables>,
+    /// The shared `static const` registry (C4AulScriptEngine's global
+    /// constants, RegisterGlobalConstant C4Aul.cpp:484): script-declared
+    /// constants every host sees. Cells are SHARED with `globals_named`
+    /// so identifier reads and old-style constant calls agree.
+    globals_consts: Option<GlobalVariables>,
     /// Cross-object LocalN cell supplier (see [`LocalCellHook`]).
     local_cell_hook: Option<LocalCellHook>,
 }
@@ -123,6 +128,7 @@ impl Engine {
             global_functions: None,
             method_dispatch: None,
             globals_named: None,
+            globals_consts: None,
             local_cell_hook: None,
         }
     }
@@ -287,13 +293,23 @@ impl Engine {
         self.globals_named = Some(table);
     }
 
+    /// Attaches the engine-global `static const` registry (the C4Aul
+    /// global-constant table, C4Aul.cpp:484). Scripts adopted afterwards
+    /// register their constants here so every host resolves them — both
+    /// as identifiers and via the pre-#strict-2 `NAME()` call idiom
+    /// (C4AulParse.cpp:2834-2864).
+    pub fn set_global_constants(&mut self, table: GlobalVariables) {
+        self.globals_consts = Some(table);
+    }
+
     /// Moves `static` declarations that were compiled BEFORE the table was
     /// attached out of the per-object locals and into the shared table
     /// (existing values persist).
     pub fn adopt_statics_into_globals(&mut self) {
-        let Some(table) = &self.globals_named else {
+        let Some(table) = self.globals_named.clone() else {
             return;
         };
+        let globals_consts = self.globals_consts.clone();
         self.var_decls.retain(|var_decl| {
             match var_decl.kind {
                 crate::ast::VarDeclKind::Static => {
@@ -320,10 +336,21 @@ impl Engine {
                             .unwrap_or(Value::Nil),
                         _ => Value::Nil,
                     };
-                    table
+                    let cell = table
                         .borrow_mut()
                         .entry(var_decl.name.clone())
-                        .or_insert_with(|| crate::vm::value_cell(value));
+                        .or_insert_with(|| crate::vm::value_cell(value))
+                        .clone();
+                    // Also register the SAME cell as a global constant so
+                    // the old-style `NAME()` call idiom resolves it
+                    // (GetGlobalConstant, C4AulParse.cpp:2834-2864) —
+                    // plain `static` variables stay uncallable.
+                    if let Some(consts) = &globals_consts {
+                        consts
+                            .borrow_mut()
+                            .entry(var_decl.name.clone())
+                            .or_insert(cell);
+                    }
                     false
                 }
                 _ => true,
@@ -352,6 +379,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref());
         vm.call(name, args).map_err(ScriptError::from)
     }
@@ -377,6 +405,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref());
         let cells: Vec<crate::vm::ValueCell> =
             args.iter().cloned().map(crate::vm::value_cell).collect();
@@ -407,6 +436,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref());
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
@@ -435,6 +465,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_this(this);
         vm.call_with_cells(name, args, cells).map_err(ScriptError::from)
@@ -457,6 +488,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_this(this);
         vm.call_with_locals(name, args, local_vars)

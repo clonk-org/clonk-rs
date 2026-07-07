@@ -83,3 +83,87 @@ fn unknown_identifiers_still_error() {
     );
     assert!(engine.call("Probe", &[]).is_err());
 }
+
+#[test]
+fn script_static_consts_are_callable_across_hosts_below_strict2() {
+    // `static const` names are ENGINE-GLOBAL constants (the preparser
+    // registers them via RegisterGlobalConstant, C4Aul.cpp:484); below
+    // #strict 2 a constant used as `NAME()` yields the constant with the
+    // empty call parens consumed ("old-style usage", C4AulParse.cpp:
+    // 2834-2864) — MagiClonk.c4d/Script.c:76 reads
+    // `GetPlrExtraData(iPlayer, MCLK_ComboExtraDataName())` where the
+    // constant is declared in MagiClonk's script but the call runs in the
+    // MAGE host that merged it.
+    let globals = lc_script::new_global_variables();
+    let consts = lc_script::new_global_variables();
+
+    let mut declarer = Engine::new();
+    declarer.set_global_variables(globals.clone());
+    declarer.set_global_constants(consts.clone());
+    declarer.add_script(
+        Script::compile(
+            "#strict\n\nstatic const MCLK_ComboExtraDataName = \"MCLK_PrefCombo\";\n",
+        )
+        .expect("declaring script compiles"),
+    );
+    declarer.adopt_statics_into_globals();
+
+    let mut caller = Engine::new();
+    caller.set_global_variables(globals.clone());
+    caller.set_global_constants(consts.clone());
+    caller.add_script(
+        Script::compile(
+            "#strict\n\nfunc Probe() { return(MCLK_ComboExtraDataName()); }\n",
+        )
+        .expect("calling script compiles"),
+    );
+    caller.adopt_statics_into_globals();
+
+    assert_eq!(
+        caller.call("Probe", &[]).expect("constant call succeeds"),
+        Value::String("MCLK_PrefCombo".to_string())
+    );
+}
+
+#[test]
+fn plain_static_variables_are_not_callable() {
+    // Only CONSTANTS resolve through the call idiom (the C++ parser's
+    // constant fallback checks GetGlobalConstant, C4AulParse.cpp:2834;
+    // a `static` variable followed by parens never parses as a call).
+    let globals = lc_script::new_global_variables();
+    let consts = lc_script::new_global_variables();
+    let mut engine = Engine::new();
+    engine.set_global_variables(globals.clone());
+    engine.set_global_constants(consts.clone());
+    engine.add_script(
+        Script::compile("#strict\n\nstatic someVar;\n\nfunc Probe() { return(someVar()); }\n")
+            .expect("script compiles"),
+    );
+    engine.adopt_statics_into_globals();
+    assert!(
+        engine.call("Probe", &[]).is_err(),
+        "static variables never resolve as functions"
+    );
+}
+
+#[test]
+fn constant_calls_reject_parameters_like_cpp() {
+    // "parameters not allowed in functional usage of constants" —
+    // C4AulParse.cpp:2860 requires the immediate ')' after '('.
+    let mut engine = Engine::new();
+    engine.register_constant("OCF_Chop", Value::Int(256));
+    engine.add_script(
+        Script::compile(
+            r#"
+            #strict
+            global func Probe() { return OCF_Chop(5); }
+            "#,
+        )
+        .expect("script compiles"),
+    );
+    let error = engine.call("Probe", &[]).expect_err("parameters are rejected");
+    assert!(
+        error.to_string().contains("parameters not allowed"),
+        "unexpected error: {error}"
+    );
+}

@@ -8615,6 +8615,12 @@ pub struct Engine {
     /// one shared named-variable table for every script host (scenario
     /// script, definitions, appended scripts). pub(crate) for tests.
     pub(crate) script_globals: lc_script::GlobalVariables,
+    /// The engine-global `static const` registry (the C4Aul global
+    /// constant table, RegisterGlobalConstant C4Aul.cpp:484): shared into
+    /// every script host so pre-#strict-2 constant calls (`NAME()`)
+    /// resolve constants declared by OTHER scripts (MagiClonk's
+    /// `MCLK_ComboExtraDataName()` running in the MAGE host).
+    pub(crate) script_global_consts: lc_script::GlobalVariables,
     /// Global (System.c4g) scripts that carry `#appendto` directives:
     /// retained at install, resolved with the definition appends (system
     /// hosts register before definitions in C++, so their appends apply
@@ -10189,6 +10195,7 @@ impl Engine {
             definitions: HashMap::new(),
             definition_load_order: Vec::new(),
             script_globals: lc_script::new_global_variables(),
+            script_global_consts: lc_script::new_global_variables(),
             system_append_scripts: Vec::new(),
             objects_generation: std::cell::Cell::new(1),
             object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
@@ -11881,6 +11888,7 @@ impl Engine {
         {
             let host = Arc::make_mut(&mut script.script);
             host.set_global_variables(self.script_globals.clone());
+            host.set_global_constants(self.script_global_consts.clone());
             host.adopt_statics_into_globals();
         }
         let snapshot = self.snapshot();
@@ -13125,6 +13133,7 @@ impl Engine {
             // declarations compiled into the definition move to it.
             let script = Arc::make_mut(&mut definition.script);
             script.set_global_variables(self.script_globals.clone());
+            script.set_global_constants(self.script_global_consts.clone());
             script.adopt_statics_into_globals();
         }
         self.definition_load_order

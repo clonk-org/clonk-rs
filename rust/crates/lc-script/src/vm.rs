@@ -422,6 +422,10 @@ pub struct Vm<'a> {
     /// The engine-global `static` table (GlobalNamed); resolved after
     /// locals, before global constants (C4AulParse.cpp:2836-2839).
     globals_named: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
+    /// The engine-global `static const` registry (GetGlobalConstant,
+    /// C4Aul.cpp:494): script-declared constants shared across hosts,
+    /// resolvable via the pre-#strict-2 `NAME()` call idiom.
+    globals_consts: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
     /// Cross-object LocalN cell supplier (crate::engine::LocalCellHook).
     local_cell_hook: Option<&'a crate::engine::LocalCellHook>,
 }
@@ -443,6 +447,7 @@ impl<'a> Vm<'a> {
             this_value: Value::Nil,
             method_dispatch: None,
             globals_named: None,
+            globals_consts: None,
             local_cell_hook: None,
         }
     }
@@ -479,6 +484,16 @@ impl<'a> Vm<'a> {
         table: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
     ) -> Self {
         self.globals_named = table;
+        self
+    }
+
+    /// Attach the engine-global `static const` registry (GetGlobalConstant,
+    /// C4Aul.cpp:494) consulted by the old-style constant-call idiom.
+    pub fn with_global_constants(
+        mut self,
+        table: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
+    ) -> Self {
+        self.globals_consts = table;
         self
     }
 
@@ -1282,6 +1297,9 @@ impl<'a> Vm<'a> {
                             // global constant used as `OCF_Chop()` yields the
                             // constant with the call parens ignored
                             // (C4AulParse.cpp:2838-2860, "old-style usage").
+                            // Script `static const`s resolve here too via the
+                            // shared registry (GetGlobalConstant) — MagiClonk's
+                            // `MCLK_ComboExtraDataName()`.
                             if env.strict_level.unwrap_or(0) < 2
                                 && !self.functions.contains_key(name)
                                 && !self
@@ -1290,10 +1308,27 @@ impl<'a> Vm<'a> {
                                     .unwrap_or(false)
                                 && !self.host_functions.contains_key(name)
                             {
-                                if let Some(value) =
-                                    self.constants.and_then(|constants| constants.get(name))
+                                if let Some(value) = self
+                                    .constants
+                                    .and_then(|constants| constants.get(name).cloned())
+                                    .or_else(|| {
+                                        self.globals_consts.and_then(|table| {
+                                            table
+                                                .borrow()
+                                                .get(name)
+                                                .map(|cell| cell.borrow().clone())
+                                        })
+                                    })
                                 {
-                                    return Ok(value.clone());
+                                    // C++ requires an immediate ')' after
+                                    // the '(' (Match(ATT_BCLOSE),
+                                    // C4AulParse.cpp:2860).
+                                    if !args.is_empty() {
+                                        return Err(RuntimeError::new(
+                                            "parameters not allowed in functional usage of constants",
+                                        ));
+                                    }
+                                    return Ok(value);
                                 }
                             }
                             let function = self.functions.get(name);
