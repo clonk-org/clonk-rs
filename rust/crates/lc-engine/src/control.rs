@@ -115,6 +115,7 @@ pub const COM_SINGLE: u8 = 64;
 pub const COM_DOUBLE: u8 = 128;
 pub const COM_RELEASE_OFFSET: u8 = 16;
 
+pub const COM_NONE: u8 = 0;
 pub const COM_LEFT: u8 = 1;
 pub const COM_RIGHT: u8 = 2;
 pub const COM_UP: u8 = 3;
@@ -123,9 +124,15 @@ pub const COM_THROW: u8 = 5;
 pub const COM_DIG: u8 = 6;
 pub const COM_SPECIAL: u8 = 7;
 pub const COM_SPECIAL2: u8 = 8;
+/// COM_Contents (C4Constants.h:187).
+pub const COM_CONTENTS: u8 = 9;
+pub const COM_WHEEL_UP: u8 = 10;
+pub const COM_WHEEL_DOWN: u8 = 11;
 pub const COM_CURSOR_LEFT: u8 = 12;
 pub const COM_CURSOR_RIGHT: u8 = 13;
 pub const COM_CURSOR_TOGGLE: u8 = 14;
+pub const COM_CURSOR_FIRST: u8 = COM_CURSOR_LEFT;
+pub const COM_CURSOR_LAST: u8 = COM_CURSOR_TOGGLE;
 pub const COM_PLAYER_MENU: u8 = 36;
 pub const COM_MENU_ENTER: u8 = 38;
 pub const COM_MENU_ENTER_ALL: u8 = 39;
@@ -137,6 +144,14 @@ pub const COM_MENU_UP: u8 = 54;
 pub const COM_MENU_DOWN: u8 = 55;
 pub const COM_MENU_SELECT: u8 = 60;
 pub const COM_CLEAR_PRESSED_COMS: u8 = 61;
+
+/// COM_MenuFirst..COM_MenuLast (C4Constants.h:249-250).
+pub const COM_MENU_FIRST: u8 = COM_MENU_ENTER;
+pub const COM_MENU_LAST: u8 = COM_MENU_SELECT;
+/// COM_MenuNavigation1/2 (C4Constants.h:252-253): the menu-only coms a
+/// closed menu leaves behind in the control queue.
+pub const COM_MENU_NAVIGATION1: u8 = COM_MENU_SHOW_TEXT;
+pub const COM_MENU_NAVIGATION2: u8 = COM_MENU_SELECT;
 
 pub const COM_RELEASE_FIRST: u8 = COM_LEFT + COM_RELEASE_OFFSET;
 pub const COM_RELEASE_LAST: u8 = 14 + COM_RELEASE_OFFSET;

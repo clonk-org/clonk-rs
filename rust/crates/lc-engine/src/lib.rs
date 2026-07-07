@@ -19,6 +19,7 @@ mod chunky;
 mod command;
 mod compat;
 mod control;
+mod direct_com;
 mod effect;
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -75,7 +76,9 @@ pub use message::{
     FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
 };
 pub use pathfinder::{PathFinder, PathWaypoint};
-pub use player::{Player, PlayerConfig, PlayerState, PlayerStatus, PlayerViewport};
+pub use player::{
+    Player, PlayerConfig, PlayerControlState, PlayerState, PlayerStatus, PlayerViewport,
+};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{
     LegacyC4SVal, PlayerStart, Scenario, ScenarioError, ScenarioObjectives, SkyConfig,
@@ -149,9 +152,10 @@ use lc_resources::definition::{
     ActionFacet as ResourceActionFacet, TargetRect as ResourceTargetRect,
 };
 use lc_resources::{
-    ActionDefinition as ResourceActionDefinition, PhysicalInfo, PictureRect as ResourcePictureRect,
+    ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
     ResourceDefinition as ResourceDefinitionData, C4_MAX_PHYSICAL,
 };
+pub use lc_resources::PhysicalInfo;
 pub use lc_script::ScriptError;
 
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, Value};
@@ -623,6 +627,10 @@ pub struct JoinPlayerConfig {
     pub pref_position: i32,
     /// The crew roster from the player file (C4Player::CrewInfoList).
     pub crew: Vec<player_file::CrewInfo>,
+    /// `PrefControlStyle` (AutoStopControl): Jump'n'Run control when true
+    /// (C4Player::InitControl, C4Player.cpp:2371-2380; the scenario
+    /// ForcedControlStyle head override is not parsed yet).
+    pub control_style: bool,
     /// `Game.Parameters.StartupPlayerCount` — gates the standard-position
     /// distribution (C4Player.cpp:719).
     pub startup_player_count: i32,
@@ -10352,7 +10360,12 @@ impl Engine {
         if config.team.is_some() {
             player_config = player_config.with_team(config.team);
         }
-        let player = player_config.with_color(Some(color)).build();
+        let mut player = player_config.with_color(Some(color)).build();
+        // C4Player::InitControl (C4Player.cpp:1747, 2371-2380): flash both
+        // markers at the join and take the AutoStopControl preference.
+        player.control.select_flash = 30;
+        player.control.cursor_flash = 30;
+        player.control.control_style = config.control_style;
         self.players.insert(number, player);
         self.players_registered = true;
         self.crew_rosters.insert(number, config.crew.clone());
@@ -11118,7 +11131,11 @@ impl Engine {
         if self.players.contains_key(&id) {
             return Err(EngineError::PlayerAlreadyExists(id));
         }
-        let player = config.build();
+        let mut player = config.build();
+        // C4Player::InitControl flashes both markers at the join
+        // (C4Player.cpp:1747).
+        player.control.select_flash = 30;
+        player.control.cursor_flash = 30;
         self.players.insert(id, player);
         self.players_registered = true;
         self.sync_player_cursor(id);
@@ -12392,6 +12409,11 @@ impl Engine {
         for id in validated {
             selection.select(id);
         }
+        // Crew selection flashes the select marks (C4Player::SelectCrew,
+        // C4Player.cpp:1846 / SelectSingleByCursor, :1317).
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.control.select_flash = 30;
+        }
         self.sync_player_cursor(owner);
         Ok(())
     }
@@ -12452,6 +12474,11 @@ impl Engine {
                 let selection = self.crew_selection.entry(owner).or_default();
                 selection.select(id);
                 selection.set_cursor(Some(id));
+                // Cursor changes flash the cursor arrow (C4Player::SetCursor
+                // with fSelectArrow, C4Player.cpp:1836-1845).
+                if let Some(player) = self.players.get_mut(&owner) {
+                    player.control.cursor_flash = 30;
+                }
             }
             None => {
                 if let Some(selection) = self.crew_selection.get_mut(&owner) {
@@ -13868,6 +13895,7 @@ impl Engine {
                         })
                     },
                     shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
+                    shape: self.object_shape_rect(object),
                     status: object.state.status,
                     destroyed: object.destroyed,
                     category: object.state.category,
@@ -14819,6 +14847,7 @@ impl Engine {
                         .current_shape_rect()
                         .map(|rect| rect.y)
                         .unwrap_or(0),
+                    shape: self.object_shape_rect(&self.objects[idx]),
                     status: self.objects[idx].state.status,
                     destroyed: self.objects[idx].destroyed,
                     category: self.objects[idx].state.category,
@@ -14873,6 +14902,9 @@ impl Engine {
         }
         self.apply_landscape_temperature_conversions();
         self.tick_player_systems();
+        // The control half of Players.Execute (C4Game.cpp:822): flash
+        // decrements plus the LastCom COM_Single timeout dispatch.
+        self.execute_player_controls()?;
         self.messages.tick(&alive);
         // C4GameScriptHost::Execute (C4ScriptHost.cpp:222-232): while
         // Game.Script.Go, every 10th frame calls Script%d with the counter
@@ -39015,6 +39047,51 @@ func Probe() {
             engine.objects[idx].state.local_vars.get("iSeen"),
             Some(&Value::Int(1)),
             "the caller is excluded: 2 huds minus self (FnObjectCount pExclude)"
+        );
+    }
+
+    // C4Aul include linking sets OwnerOverloaded across #include boundaries
+    // (C4AulLink.cpp), so `_inherited()` in COWB::ControlDownDouble reaches
+    // CLNK::ControlDownDouble when TRPR includes COWB includes CLNK
+    // (Trapper.c4d/Cowboy.c4d/Clonk.c4d) — the GoldRush dismount chain.
+    #[test]
+    fn underscore_inherited_chains_through_a_two_level_include() {
+        let base = r#"#strict
+local hits;
+protected func Poke() { hits = hits + 1; return(7); }
+"#;
+        let mid = r#"#strict
+#include BASE
+public func Poke() { return(_inherited()); }
+"#;
+        let top = r#"#strict
+#include MIDD
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(Definition::from_script("BASE", "Base", base).expect("base"))
+            .expect("base registers");
+        engine
+            .register_definition(Definition::from_script("MIDD", "Mid", mid).expect("mid"))
+            .expect("mid registers");
+        engine
+            .register_definition(Definition::from_script("TOPP", "Top", top).expect("top"))
+            .expect("top registers");
+        engine.resolve_includes().expect("includes resolve");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("TOPP").with_category(CATEGORY_OBJECT))
+            .expect("top spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        let result = engine
+            .call_object_function(idx, "Poke", Vec::new())
+            .expect("Poke runs without an inherited error");
+        assert_eq!(result, Value::Int(7), "the BASE implementation answered");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("hits"),
+            Some(&Value::Int(1)),
+            "the BASE body executed once"
         );
     }
 

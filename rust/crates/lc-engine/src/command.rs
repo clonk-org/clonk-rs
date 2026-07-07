@@ -3,9 +3,10 @@ use std::collections::{HashMap, VecDeque};
 use crate::math::{self, FixedVec2};
 use crate::transfer::{TransferZone, TransferZoneTable};
 use crate::{
-    ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction, ObjectId,
-    ObjectStatus, ObjectUpdate, PlayerStatus, Vector2, CATEGORY_OBJECT, CATEGORY_STATIC_BACK,
-    CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON, LINE_CONNECT_POWER_INPUT, OWNER_NONE,
+    ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, DefinitionRect, Direction,
+    ObjectId, ObjectStatus, ObjectUpdate, PlayerStatus, Vector2, CATEGORY_OBJECT,
+    CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON,
+    LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
 use lc_resources::PhysicalInfo;
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,17 @@ pub struct CommandObjectSnapshot {
     /// Current shape top (C4Object Shape.y) for the top-free scans
     /// (C4Command.cpp:1867).
     pub shape_top: i32,
+    /// The absolute (position-applied) shape rect for `C4Object::At`
+    /// point-in-shape tests (C4Object.cpp At(), used by C4Command::Enter
+    /// :587-588 and Grab :690-691).
+    pub shape: DefinitionRect,
+}
+
+impl CommandObjectSnapshot {
+    /// `C4Object::At(ctx, cty)` without the OCF mask: point in shape.
+    pub fn at_point(&self, x: i32, y: i32) -> bool {
+        self.shape.contains_point(x, y)
+    }
 }
 
 impl CommandObjectSnapshot {
@@ -224,6 +236,7 @@ mod tests {
         CommandObjectSnapshot {
             contact: 0,
             shape_top: 0,
+            shape: DefinitionRect::new(-8, -10, 16, 20),
             id: ObjectId::new(id),
             definition_id: format!("DEF{id}"),
             position: Vector2::ZERO,
@@ -1551,6 +1564,9 @@ mod tests {
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(18, 16);
+        // C4Command::Enter checks Target->At(cx, cy) — the actor point in
+        // the target's absolute shape (C4Command.cpp:586-588).
+        target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
         target.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
         target.category = CATEGORY_STRUCTURE;
 
@@ -1602,6 +1618,7 @@ mod tests {
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(120, 0);
+        target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
         target.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
         target.category = CATEGORY_STRUCTURE;
 
@@ -1662,6 +1679,7 @@ mod tests {
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(60, 0);
+        target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
         target.ocf = ocf::GRAB | ocf::AVAILABLE;
 
         let mut objects = HashMap::new();
@@ -1722,6 +1740,9 @@ mod tests {
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(14, 12);
+        // C4Command::Grab tests the actor point in the target's shape
+        // (Target->At, C4Command.cpp:689-691).
+        target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
         target.ocf = ocf::GRAB | ocf::AVAILABLE;
 
         let mut objects = HashMap::new();
@@ -7347,7 +7368,10 @@ impl EnterState {
             return CommandStepResult::failed(self.update_to_stop(ctx));
         };
 
-        if !target_snapshot.is_active() {
+        // C4Command::Enter has no aliveness gate on the target — dead
+        // structures are entered fine; only removal clears the pointer
+        // (C4Command.cpp:545-560).
+        if target_snapshot.destroyed || !target_snapshot.status.is_active() {
             return CommandStepResult::completed(self.update_to_stop(ctx));
         }
 
@@ -7365,10 +7389,10 @@ impl EnterState {
             }
         }
 
-        const ENTRANCE_RANGE: i32 = 12;
-        let dx = target_snapshot.position.x - ctx.position.x;
-        let dy = target_snapshot.position.y - ctx.position.y;
-        if dx.abs() <= ENTRANCE_RANGE && dy.abs() <= ENTRANCE_RANGE {
+        // "If in entrance range": C4Command::Enter tests the clonk point
+        // against the target's shape (Target->At(cx, cy, ocf),
+        // C4Command.cpp:586-588).
+        if target_snapshot.at_point(ctx.position.x, ctx.position.y) {
             let mut update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
             update.container = Some(Some(self.target));
             update.position = Some(target_snapshot.position);
@@ -8404,7 +8428,9 @@ impl GrabState {
             }
         };
 
-        if !target_snapshot.is_active() {
+        // C4Command::Grab checks only the target pointer — no aliveness
+        // gate on the grabbed vehicle (C4Command.cpp:667-695).
+        if target_snapshot.destroyed || !target_snapshot.status.is_active() {
             let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
             return CommandStepResult::failed(Some(update));
         }
@@ -8444,12 +8470,10 @@ impl GrabState {
             target_snapshot.position.y + self.offset_y,
         );
 
-        let dx = target_snapshot.position.x - ctx.position.x;
-        let dy = target_snapshot.position.y - ctx.position.y;
-        const GRAB_RANGE: i32 = 8;
+        // "At target object: grab": point-in-shape like C4Command::Grab
+        // (Target->At(cObj->x, cObj->y, ocf), C4Command.cpp:689-691).
         let can_grab_here = ctx.object.container.is_none()
-            && dx.abs() <= GRAB_RANGE
-            && dy.abs() <= GRAB_RANGE
+            && target_snapshot.at_point(ctx.position.x, ctx.position.y)
             && (target_snapshot.ocf & ocf::GRAB) != 0;
 
         if can_grab_here {

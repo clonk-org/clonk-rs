@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 
 use lc_engine::{
-    CommandDirection, CommandKind, ControlButton, ControlCommand, ControlEvent, CrewCommandTarget,
-    Engine, EngineError, ObjectUpdate, PlayerInputState,
+    CommandDirection, CommandKind, ControlButton, ControlCommand, ControlEvent, Engine,
+    EngineError, COM_CLEAR_PRESSED_COMS, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT,
+    COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
 };
 
-/// Centralises player input handling for the Rust frontend. Each player receives their own state
-/// machine that mirrors the legacy `Coms2ComDir` mapping, and the latest direction is forwarded to
-/// the currently selected crew members.
+/// Player input routing for the Rust frontend. Object-directed coms run the
+/// engine's `C4Player::InCom` port (single/double synthesis + the full
+/// `C4Object::DirectCom` chain, C4Player.cpp:1490-1554 /
+/// C4Object.cpp:3327-3557); cursor cycling and menu coms are handled here
+/// like `C4Player::DirectCom`'s cursor half (C4Player.cpp:1479-1487).
 pub struct InputDispatcher {
     players: HashMap<i32, PlayerInputContext>,
 }
@@ -25,8 +28,9 @@ impl InputDispatcher {
         }
     }
 
-    /// Applies a control event for the given player. When the directional state changes, the engine
-    /// receives the corresponding `ComDir` update. Returns the new direction when one was issued.
+    /// Applies a control event for the given player. Returns the direction
+    /// change the event caused, if any (informational; movement itself is
+    /// applied by the engine's ObjectComMovement fallback).
     pub fn handle_event(
         &mut self,
         engine: &mut Engine,
@@ -38,66 +42,77 @@ impl InputDispatcher {
             .players
             .entry(owner)
             .or_insert_with(PlayerInputContext::new);
-        let maybe_direction = match event {
-            ControlEvent::Press(button) => match button {
-                ControlButton::Down => {
-                    if context.interaction.register_down(frame) {
-                        handle_down_interaction(engine, owner)?;
-                    }
-                    context.directional.press(button)
-                }
-                ControlButton::Up => {
-                    if engine.try_enter_nearby(owner)? {
-                        context.interaction.clear();
-                        None
-                    } else {
-                        context.directional.press(button)
-                    }
-                }
-                _ => context.directional.press(button),
-            },
-            ControlEvent::Release(button) => context.directional.release(button),
+        match event {
+            ControlEvent::Press(button) => {
+                engine.player_in_com(owner, button_com(button), 0)?;
+            }
+            ControlEvent::Release(button) => {
+                engine.player_in_com(owner, button_com(button) + COM_RELEASE_OFFSET, 0)?;
+            }
             ControlEvent::ClearPressed => {
-                context.interaction.clear();
-                context.directional.clear()
+                context.selection.clear();
+                engine.player_in_com(owner, COM_CLEAR_PRESSED_COMS, 0)?;
             }
             ControlEvent::Command { command, kind } => {
                 let handled = handle_command(engine, owner, context, command, kind, frame)?;
                 if !handled {
-                    let _ = engine.handle_control_command(owner, command, kind)?;
+                    if let Some(com) = command_com(command, kind) {
+                        engine.player_in_com(owner, com, 0)?;
+                    }
                 }
-                None
             }
-        };
-        if let Some(direction) = maybe_direction {
-            apply_direction(engine, owner, direction)?;
         }
-        Ok(maybe_direction)
+        Ok(None)
     }
 
-    /// Returns the last known command direction for the given player.
-    pub fn command_direction(&self, owner: i32) -> CommandDirection {
-        self.players
-            .get(&owner)
-            .map(|context| context.directional.direction())
+    /// Returns the cursor crew's current command direction for the player.
+    pub fn command_direction(&self, engine: &Engine, owner: i32) -> CommandDirection {
+        engine
+            .crew_cursor(owner)
+            .and_then(|cursor| engine.object_snapshot(cursor))
+            .map(|snapshot| snapshot.command_direction)
             .unwrap_or(CommandDirection::Stop)
     }
+}
+
+/// The plain com byte for a directional button (C4Constants.h:178-181).
+fn button_com(button: ControlButton) -> u8 {
+    match button {
+        ControlButton::Left => COM_LEFT,
+        ControlButton::Right => COM_RIGHT,
+        ControlButton::Up => COM_UP,
+        ControlButton::Down => COM_DOWN,
+    }
+}
+
+/// The com byte for a non-directional control event; cursor and menu coms
+/// are handled by `handle_command` before this runs.
+fn command_com(command: ControlCommand, kind: CommandKind) -> Option<u8> {
+    let base = match command {
+        ControlCommand::Throw => COM_THROW,
+        ControlCommand::Dig => COM_DIG,
+        ControlCommand::Special => COM_SPECIAL,
+        ControlCommand::Special2 => COM_SPECIAL2,
+        _ => return None,
+    };
+    Some(match kind {
+        CommandKind::Press => base,
+        CommandKind::Release => base + COM_RELEASE_OFFSET,
+        CommandKind::Single => base | COM_SINGLE,
+        CommandKind::Double => base | COM_DOUBLE,
+    })
 }
 
 const DOUBLE_CLICK_WINDOW: u64 = 10;
 
 struct PlayerInputContext {
-    directional: PlayerInputState,
     selection: SelectionControlState,
-    interaction: InteractionControlState,
 }
 
 impl PlayerInputContext {
     fn new() -> Self {
         Self {
-            directional: PlayerInputState::new(),
             selection: SelectionControlState::new(),
-            interaction: InteractionControlState::new(),
         }
     }
 }
@@ -137,65 +152,10 @@ enum ToggleOutcome {
     Double,
 }
 
-#[derive(Debug)]
-struct InteractionControlState {
-    last_down_press: Option<u64>,
-}
-
-impl InteractionControlState {
-    fn new() -> Self {
-        Self {
-            last_down_press: None,
-        }
-    }
-
-    fn register_down(&mut self, frame: u64) -> bool {
-        match self.last_down_press {
-            Some(previous) if frame.saturating_sub(previous) <= DOUBLE_CLICK_WINDOW => {
-                self.last_down_press = None;
-                true
-            }
-            _ => {
-                self.last_down_press = Some(frame);
-                false
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        self.last_down_press = None;
-    }
-}
-
 #[derive(Clone, Copy)]
 enum CycleDirection {
     Next,
     Previous,
-}
-
-fn apply_direction(
-    engine: &mut Engine,
-    owner: i32,
-    direction: CommandDirection,
-) -> Result<(), EngineError> {
-    engine.ensure_cursor(owner)?;
-    let update = ObjectUpdate::new().with_command_direction(direction);
-    let mut applied = false;
-
-    let selected = engine.selected_crew(owner);
-    if !selected.is_empty() {
-        match engine.apply_command(owner, CrewCommandTarget::selection(), update.clone()) {
-            Ok(()) => applied = true,
-            Err(EngineError::CrewSelection { .. }) => {}
-            Err(error) => return Err(error),
-        }
-    }
-
-    if !applied {
-        engine.apply_command(owner, CrewCommandTarget::cursor(), update)?;
-    }
-
-    Ok(())
 }
 
 fn cycle_cursor(
@@ -314,21 +274,13 @@ fn handle_command(
     Ok(false)
 }
 
-fn handle_down_interaction(engine: &mut Engine, owner: i32) -> Result<(), EngineError> {
-    if engine.try_grab_nearby(owner)? {
-        return Ok(());
-    }
-    let _ = engine.try_drop_held_object(owner)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use lc_engine::ocf;
     use lc_engine::{
-        ActionSpec, ActionState, ControlButton, Definition, MovementProfile, ObjectId,
-        PlayerConfig, SpawnConfig, Vector2, OWNER_NONE,
+        ActionSpec, ActionState, Definition, MovementProfile, ObjectId, ObjectUpdate,
+        PhysicalInfo, PlayerConfig, SpawnConfig, Vector2, OWNER_NONE,
     };
     use std::collections::HashMap;
 
@@ -337,14 +289,41 @@ global func Initialize(state, random) { return nil; }
 global func Step(state, frame, random) { return nil; }
 "#;
 
+    fn walker_actions() -> HashMap<String, ActionSpec> {
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "Jump".to_string(),
+            ActionSpec::default().with_procedure("flight"),
+        );
+        actions.insert(
+            "Push".to_string(),
+            ActionSpec::default().with_procedure("push"),
+        );
+        actions
+    }
+
     fn setup_engine() -> Engine {
         let mut engine = Engine::new();
         let mut definition =
             Definition::from_script("Walker", "Walker", WALKER_SCRIPT).expect("valid script");
+        definition.configure_actions(Some("Walk".to_string()), walker_actions());
         definition.set_movement_profile(MovementProfile::default());
+        let physical = PhysicalInfo {
+            walk: 70_000,
+            jump: 40_000,
+            ..Default::default()
+        };
+        definition.set_physical(physical);
         engine
             .register_definition(definition)
             .expect("register definition");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("register player");
         engine
     }
 
@@ -353,21 +332,17 @@ global func Step(state, frame, random) { return nil; }
             SpawnConfig::new("Walker")
                 .with_owner(owner)
                 .with_crew_member(true)
+                .with_action(ActionState::new("Walk"))
                 .with_position(Vector2::new(x, 0)),
         )
     }
 
     #[test]
     fn forwards_direction_to_cursor() -> Result<(), EngineError> {
+        // COM_Right in DFA_WALK reaches ObjectComMovement(COMD_Right)
+        // through the engine chain (C4Object.cpp:3412).
         let mut engine = setup_engine();
-        let crew_id = engine
-            .spawn_object(
-                SpawnConfig::new("Walker")
-                    .with_owner(1)
-                    .with_crew_member(true)
-                    .with_position(Vector2::new(0, 0)),
-            )
-            .expect("spawn crew");
+        let crew_id = spawn_crew_member(&mut engine, 1, 0)?;
         let mut dispatcher = InputDispatcher::new();
 
         dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Right))?;
@@ -383,7 +358,10 @@ global func Step(state, frame, random) { return nil; }
     }
 
     #[test]
-    fn direction_updates_entire_selection() -> Result<(), EngineError> {
+    fn direction_moves_the_cursor_and_makes_selection_follow() -> Result<(), EngineError> {
+        // C4Player::ObjectCom applies the com to the CURSOR only
+        // (C4Player.cpp:1380-1387); other selected crew receive a Follow
+        // command via ObjectComMovement (C4ObjectCom.cpp:224).
         let mut engine = setup_engine();
         let first = spawn_crew_member(&mut engine, 1, 0)?;
         let second = spawn_crew_member(&mut engine, 1, 10)?;
@@ -394,43 +372,43 @@ global func Step(state, frame, random) { return nil; }
         dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Right))?;
 
         let snapshot = engine.snapshot();
-        for &crew_id in &[first, second] {
-            let crew = snapshot
-                .object(crew_id)
-                .expect("crew should exist after direction update");
-            assert_eq!(crew.command_direction, CommandDirection::Right);
-        }
+        assert_eq!(
+            snapshot.object(first).expect("cursor").command_direction,
+            CommandDirection::Right
+        );
+        let second_snapshot = snapshot.object(second).expect("selected crew");
+        assert_eq!(
+            second_snapshot.command_direction,
+            CommandDirection::Stop,
+            "non-cursor crew get no direct com"
+        );
+        assert_eq!(
+            second_snapshot.command_stack.command_names(),
+            vec!["Follow"],
+            "selected crew follow the moving cursor (C4ObjectCom.cpp:224)"
+        );
         Ok(())
     }
 
     #[test]
-    fn clear_event_resets_direction() -> Result<(), EngineError> {
+    fn clear_event_resets_pressed_coms_without_stopping() -> Result<(), EngineError> {
+        // COM_ClearPressedComs resets the input state only
+        // (C4Player::InCom, C4Player.cpp:1496-1501); classic control keeps
+        // the last ComDir until a stopping com arrives.
         let mut engine = setup_engine();
-        engine
-            .spawn_object(
-                SpawnConfig::new("Walker")
-                    .with_owner(1)
-                    .with_crew_member(true)
-                    .with_position(Vector2::new(0, 0)),
-            )
-            .expect("spawn crew");
+        let crew_id = spawn_crew_member(&mut engine, 1, 0)?;
         let mut dispatcher = InputDispatcher::new();
 
         dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Up))?;
         dispatcher.handle_event(&mut engine, 1, ControlEvent::ClearPressed)?;
 
-        assert_eq!(
-            dispatcher.command_direction(1),
-            CommandDirection::Stop,
-            "dispatcher tracked stop state"
-        );
         let snapshot = engine.snapshot();
-        let crew = snapshot
-            .objects
-            .iter()
-            .find(|object| object.owner == 1)
-            .expect("crew present");
-        assert_eq!(crew.command_direction, CommandDirection::Stop);
+        let crew = snapshot.object(crew_id).expect("crew present");
+        assert_eq!(
+            crew.command_direction,
+            CommandDirection::Stop,
+            "COM_Up in WALK jumps instead of steering (C4Object.cpp:3414)"
+        );
         Ok(())
     }
 
@@ -544,97 +522,145 @@ global func Step(state, frame, random) { return nil; }
             OWNER_NONE,
             ControlEvent::Press(ControlButton::Left),
         )?;
-        assert_eq!(
-            dispatcher.command_direction(OWNER_NONE),
-            CommandDirection::Left
-        );
         Ok(())
     }
 
     #[test]
-    fn double_down_grabs_nearby_object() -> Result<(), EngineError> {
+    fn double_down_grabs_nearby_vehicle_into_push() -> Result<(), EngineError> {
+        // COM_Down_D in DFA_WALK → ObjectComDownDouble → C4CMD_Grab on the
+        // OCF_Grab object at the clonk (C4Object.cpp:3415,
+        // C4ObjectCom.cpp:573-589); grabbing puts the clonk into Push
+        // toward the target (ObjectComGrab, C4ObjectCom.cpp:247-259).
         let mut engine = setup_engine();
-        let mut item_definition =
-            Definition::from_script("Gem", "Gem", WALKER_SCRIPT).expect("valid script");
-        item_definition.set_ocf_base(ocf::GRAB | ocf::CARRYABLE);
+        let mut cart_definition =
+            Definition::from_script("Cart", "Cart", WALKER_SCRIPT).expect("valid script");
+        cart_definition.set_ocf_base(ocf::GRAB);
+        cart_definition.set_shape_rect(Some(lc_engine::DefinitionRect::new(-8, -8, 16, 16)));
         engine
-            .register_definition(item_definition)
+            .register_definition(cart_definition)
             .expect("register grabbable definition");
         let crew = spawn_crew_member(&mut engine, 1, 0)?;
         engine.select_crew(1, vec![crew])?;
         engine.set_crew_cursor(1, Some(crew))?;
-        let item =
-            engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(6, 0)))?;
+        let cart =
+            engine.spawn_object(SpawnConfig::new("Cart").with_position(Vector2::new(6, 2)))?;
         let mut dispatcher = InputDispatcher::new();
 
         dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
         dispatcher.handle_event(&mut engine, 1, ControlEvent::Release(ControlButton::Down))?;
         dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
 
-        let snapshot = engine.object_snapshot(item).expect("item snapshot");
-        assert_eq!(snapshot.container, Some(crew));
-        Ok(())
-    }
-
-    #[test]
-    fn double_down_drops_carried_object() -> Result<(), EngineError> {
-        let mut engine = setup_engine();
-        let mut item_definition =
-            Definition::from_script("Gem", "Gem", WALKER_SCRIPT).expect("valid script");
-        item_definition.set_ocf_base(ocf::GRAB | ocf::CARRYABLE);
-        engine
-            .register_definition(item_definition)
-            .expect("register grabbable definition");
-        let crew = spawn_crew_member(&mut engine, 1, 0)?;
-        engine.select_crew(1, vec![crew])?;
-        engine.set_crew_cursor(1, Some(crew))?;
-        let item =
-            engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(6, 0)))?;
-        let mut dispatcher = InputDispatcher::new();
-
-        // Grab the item first.
-        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
-        dispatcher.handle_event(&mut engine, 1, ControlEvent::Release(ControlButton::Down))?;
-        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
-        dispatcher.handle_event(&mut engine, 1, ControlEvent::Release(ControlButton::Down))?;
-
-        // Drop it on the next double down.
-        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
-        dispatcher.handle_event(&mut engine, 1, ControlEvent::Release(ControlButton::Down))?;
-        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
-
+        for _ in 0..10 {
+            engine.tick()?;
+        }
         let crew_snapshot = engine.object_snapshot(crew).expect("crew snapshot");
+        assert_eq!(
+            crew_snapshot.action.name, "Push",
+            "grabbing enters the Push action (C4ObjectCom.cpp:247-259)"
+        );
+        assert_eq!(crew_snapshot.action.target, Some(cart));
+        Ok(())
+    }
+
+    #[test]
+    fn down_down_throw_drops_carried_object() -> Result<(), EngineError> {
+        // The classic drop: COM_Down_D arms LastComDownDouble and the next
+        // throw converts to C4CMD_Drop (PlayerObjectCommand,
+        // C4ObjectCom.cpp:1020-1036) which exits the carried object
+        // (ObjectComDrop, C4ObjectCom.cpp:640-676).
+        let mut engine = setup_engine();
+        let mut item_definition =
+            Definition::from_script("Gem", "Gem", WALKER_SCRIPT).expect("valid script");
+        item_definition.set_ocf_base(ocf::CARRYABLE);
+        engine
+            .register_definition(item_definition)
+            .expect("register item definition");
+        let crew = spawn_crew_member(&mut engine, 1, 0)?;
+        engine.select_crew(1, vec![crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+        let item = engine.spawn_object(SpawnConfig::new("Gem"))?;
+        engine.apply_object_update(item, ObjectUpdate::new().with_container(crew))?;
+        assert_eq!(
+            engine.object_snapshot(item).expect("item").container,
+            Some(crew)
+        );
+        let mut dispatcher = InputDispatcher::new();
+
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Release(ControlButton::Down))?;
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Release(ControlButton::Down))?;
+        dispatcher.handle_event(
+            &mut engine,
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::Throw,
+                kind: CommandKind::Press,
+            },
+        )?;
+
+        for _ in 0..10 {
+            engine.tick()?;
+        }
         let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
         assert!(
             item_snapshot.container.is_none(),
-            "item should no longer be contained after drop"
-        );
-        assert_ne!(
-            item_snapshot.position, crew_snapshot.position,
-            "dropped item should not share crew position"
+            "down-down-throw drops the carried object"
         );
         Ok(())
     }
 
     #[test]
     fn press_up_enters_nearby_structure() -> Result<(), EngineError> {
+        // COM_Up in DFA_WALK → ObjectComUp → C4CMD_Enter on the entrance at
+        // the clonk (C4ObjectCom.cpp:335-345).
         let mut engine = setup_engine();
         let mut structure_definition =
             Definition::from_script("Hut", "Hut", WALKER_SCRIPT).expect("valid script");
         structure_definition.set_ocf_base(ocf::ENTRANCE | ocf::CONTAINER);
+        structure_definition.set_shape_rect(Some(lc_engine::DefinitionRect::new(-16, -16, 32, 32)));
         engine
             .register_definition(structure_definition)
             .expect("register structure definition");
         let crew = spawn_crew_member(&mut engine, 1, 0)?;
         engine.select_crew(1, vec![crew])?;
         engine.set_crew_cursor(1, Some(crew))?;
-        let hut = engine.spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(0, 0)))?;
+        let hut = engine.spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(0, 2)))?;
         let mut dispatcher = InputDispatcher::new();
 
         dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Up))?;
+        for _ in 0..20 {
+            engine.tick()?;
+        }
 
         let crew_snapshot = engine.object_snapshot(crew).expect("crew snapshot");
         assert_eq!(crew_snapshot.container, Some(hut));
+        Ok(())
+    }
+
+    #[test]
+    fn press_up_without_entrance_jumps() -> Result<(), EngineError> {
+        // COM_Up with no entrance issues C4CMD_Jump (C4ObjectCom.cpp:347-348)
+        // which launches the clonk upward (ObjectComJump,
+        // C4ObjectCom.cpp:280-308).
+        let mut engine = setup_engine();
+        let crew = spawn_crew_member(&mut engine, 1, 0)?;
+        engine.select_crew(1, vec![crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+        let mut dispatcher = InputDispatcher::new();
+
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Up))?;
+        engine.tick()?;
+
+        let crew_snapshot = engine.object_snapshot(crew).expect("crew snapshot");
+        assert_eq!(
+            crew_snapshot.action.name, "Jump",
+            "the jump command launched the clonk"
+        );
+        assert!(
+            crew_snapshot.velocity.y < 0,
+            "jump velocity points upward (ObjectComJump ydir)"
+        );
         Ok(())
     }
 
@@ -778,125 +804,143 @@ public func FxGunControlControlThrow(pTarget, iNumber)
     }
 
     #[test]
-    fn command_events_update_actions_via_control_scripts() -> Result<(), EngineError> {
-        let script = r#"
-global func Initialize(state, random) { return nil; }
-global func ControlThrow() { SetAction("ThrowCtl"); return true; }
-global func ControlDig() { SetAction("DigCtl"); return true; }
-global func ControlSpecial() { SetAction("SpecialCtl"); return true; }
-global func ControlSpecial2() { SetAction("Special2Ctl"); return true; }
+    fn fantasy_style_clonk_walks_jumps_digs_and_casts_over_50_ticks() -> Result<(), EngineError> {
+        // Fantasy MAGE-style crew (MAGE→SCLK→MCLK→CLNK): the directional
+        // Control* overrides return 0 (Clonk.c4d/Script.c:62-105) so the
+        // CLASSIC per-procedure fallbacks must move, jump and dig the mage
+        // (C4Object.cpp:3406-3424), while ControlSpecial stays a script
+        // matter (MagiClonk.c4d/Script.c:89-114). Runs without script
+        // errors and with the C++-expected actions firing.
+        let mage_script = r#"
+#strict
+protected func ControlLeft() { return(0); }
+protected func ControlRight() { return(0); }
+protected func ControlUp() { return(0); }
+protected func ControlUpReleased() { return(0); }
+protected func ControlDown() { return(0); }
+protected func ControlDig() { return(0); }
+protected func ControlThrow() { return(0); }
+protected func ControlSpecial() { Sound("Magic1"); return(1); }
 "#;
-        let mut definition =
-            Definition::from_script("CLNK", "Clonk", script).expect("control script compiles");
+        let mut mage =
+            Definition::from_script("MAGE", "Mage", mage_script).expect("mage script compiles");
         let mut actions = HashMap::new();
         actions.insert(
-            "Idle".to_string(),
+            "Walk".to_string(),
             ActionSpec::default().with_procedure("walk"),
         );
         actions.insert(
-            "ThrowCtl".to_string(),
-            ActionSpec::default().with_procedure("walk"),
+            "Jump".to_string(),
+            ActionSpec::default().with_procedure("flight"),
         );
         actions.insert(
-            "DigCtl".to_string(),
+            "Dig".to_string(),
             ActionSpec::default().with_procedure("dig"),
         );
-        actions.insert(
-            "SpecialCtl".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        actions.insert(
-            "Special2Ctl".to_string(),
-            ActionSpec::default().with_procedure("walk"),
-        );
-        definition.configure_actions(Some("Idle".to_string()), actions);
-        definition.set_movement_profile(MovementProfile::default());
+        mage.configure_actions(Some("Walk".to_string()), actions);
+        mage.set_movement_profile(MovementProfile::default());
+        let physical = PhysicalInfo {
+            walk: 70_000,
+            jump: 40_000,
+            dig: 40_000,
+            can_dig: 1,
+            ..Default::default()
+        };
+        mage.set_physical(physical);
 
         let mut engine = Engine::new();
-        engine.register_definition(definition)?;
+        engine.register_definition(mage)?;
         engine.register_player(PlayerConfig::new(1, "Test"))?;
-
-        let crew = engine
-            .spawn_object(
-                SpawnConfig::new("CLNK")
-                    .with_owner(1)
-                    .with_crew_member(true)
-                    .with_action(ActionState::new("Idle")),
-            )
-            .expect("spawn crew");
+        let crew = engine.spawn_object(
+            SpawnConfig::new("MAGE")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_action(ActionState::new("Walk")),
+        )?;
         engine.select_crew(1, vec![crew])?;
         engine.set_crew_cursor(1, Some(crew))?;
 
         let mut dispatcher = InputDispatcher::new();
+        let mut saw_walk_right = false;
+        let mut saw_jump = false;
+        let mut saw_dig = false;
 
-        dispatcher.handle_event(
-            &mut engine,
-            1,
-            ControlEvent::Command {
-                command: ControlCommand::Throw,
-                kind: CommandKind::Press,
-            },
-        )?;
-        assert_eq!(
-            engine
-                .object_snapshot(crew)
-                .expect("crew snapshot after throw")
-                .action
-                .name,
-            "ThrowCtl"
-        );
+        for tick in 0..50u64 {
+            match tick {
+                2 => {
+                    dispatcher.handle_event(
+                        &mut engine,
+                        1,
+                        ControlEvent::Press(ControlButton::Right),
+                    )?;
+                }
+                6 => {
+                    dispatcher.handle_event(
+                        &mut engine,
+                        1,
+                        ControlEvent::Release(ControlButton::Right),
+                    )?;
+                }
+                8 => {
+                    // Jump: Up in DFA_WALK (C4Object.cpp:3414).
+                    dispatcher.handle_event(
+                        &mut engine,
+                        1,
+                        ControlEvent::Press(ControlButton::Up),
+                    )?;
+                }
+                9 => {
+                    dispatcher.handle_event(
+                        &mut engine,
+                        1,
+                        ControlEvent::Release(ControlButton::Up),
+                    )?;
+                }
+                24 => {
+                    // Land again, then dig via the COM_Dig_S timeout
+                    // (C4Player.cpp:1215-1229 → C4Object.cpp:3416-3421).
+                    dispatcher.handle_event(
+                        &mut engine,
+                        1,
+                        ControlEvent::Command {
+                            command: ControlCommand::Dig,
+                            kind: CommandKind::Press,
+                        },
+                    )?;
+                }
+                40 => {
+                    // Spell key: the MCLK ControlSpecial override consumes
+                    // the com (C4Object.cpp:3385-3389).
+                    dispatcher.handle_event(
+                        &mut engine,
+                        1,
+                        ControlEvent::Command {
+                            command: ControlCommand::Special,
+                            kind: CommandKind::Press,
+                        },
+                    )?;
+                }
+                _ => {}
+            }
+            engine.tick()?;
+            let snapshot = engine.object_snapshot(crew).expect("crew snapshot");
+            match snapshot.action.name.as_str() {
+                "Walk" if snapshot.command_direction == CommandDirection::Right => {
+                    saw_walk_right = true;
+                }
+                "Jump" => saw_jump = true,
+                "Dig" => saw_dig = true,
+                _ => {}
+            }
+            if tick == 22 {
+                // Reset to walking so the dig fallback applies in DFA_WALK.
+                engine.apply_object_update(crew, ObjectUpdate::new().with_action("Walk"))?;
+            }
+        }
 
-        dispatcher.handle_event(
-            &mut engine,
-            1,
-            ControlEvent::Command {
-                command: ControlCommand::Dig,
-                kind: CommandKind::Press,
-            },
-        )?;
-        assert_eq!(
-            engine
-                .object_snapshot(crew)
-                .expect("crew snapshot after dig")
-                .action
-                .name,
-            "DigCtl"
-        );
-
-        dispatcher.handle_event(
-            &mut engine,
-            1,
-            ControlEvent::Command {
-                command: ControlCommand::Special,
-                kind: CommandKind::Press,
-            },
-        )?;
-        assert_eq!(
-            engine
-                .object_snapshot(crew)
-                .expect("crew snapshot after special")
-                .action
-                .name,
-            "SpecialCtl"
-        );
-
-        dispatcher.handle_event(
-            &mut engine,
-            1,
-            ControlEvent::Command {
-                command: ControlCommand::Special2,
-                kind: CommandKind::Press,
-            },
-        )?;
-        assert_eq!(
-            engine
-                .object_snapshot(crew)
-                .expect("crew snapshot after special2")
-                .action
-                .name,
-            "Special2Ctl"
-        );
-
+        assert!(saw_walk_right, "COM_Right walked the mage right");
+        assert!(saw_jump, "COM_Up jumped via the classic fallback");
+        assert!(saw_dig, "COM_Dig dug via the COM_Dig_S timeout");
         Ok(())
     }
 }

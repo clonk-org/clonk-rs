@@ -1257,9 +1257,10 @@ impl<'a> Vm<'a> {
                                 return if name == "_inherited" {
                                     Ok(Value::Nil)
                                 } else {
-                                    Err(RuntimeError::new(
-                                        "inherited: no overloaded function".to_string(),
-                                    ))
+                                    Err(RuntimeError::new(format!(
+                                        "inherited: no overloaded function (in {})",
+                                        env.function_name
+                                    )))
                                 };
                             };
                             let mut evaluated_args =

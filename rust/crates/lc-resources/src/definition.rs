@@ -1434,12 +1434,24 @@ fn extract_mask_from_overlay(
         return None;
     }
 
+    // Overlay.png IS the ClrByOwner surface (C4DefGraphics.cpp:74-94 +
+    // C4Surface::SetAsClrByOwnerOf, C4Surface.cpp:320-331): its pixels are
+    // blitted owner-modulated OVER the base with the OVERLAY's alpha. Baked
+    // into the single-image + scalar-mask model: the base contribution
+    // shrinks by the overlay coverage (exactly black under an opaque
+    // overlay), the sprite alpha is the over-composite, and the mask keeps
+    // the coverage-scaled overlay intensity so the draw-time
+    // `blend_color_by_owner` reproduces `overlay ⊗ owner` for gray overlays.
     let mut pixels = vec![0u8; (width * height) as usize];
     let mut has_mask = false;
     for y in 0..height {
         for x in 0..width {
             let overlay_pixel = overlay.get_pixel(x, y);
-            let mask_value = overlay_pixel[0];
+            let coverage = u16::from(overlay_pixel[3]);
+            if coverage == 0 {
+                continue;
+            }
+            let mask_value = (u16::from(overlay_pixel[0]) * coverage / 255) as u8;
             if mask_value == 0 {
                 continue;
             }
@@ -1447,8 +1459,14 @@ fn extract_mask_from_overlay(
             pixels[idx] = mask_value;
             has_mask = true;
             let base_pixel = base.get_pixel_mut(x, y);
-            let alpha = base_pixel[3];
-            *base_pixel = image::Rgba([255, 255, 255, alpha]);
+            let keep = 255 - coverage;
+            let base_alpha = u16::from(base_pixel[3]);
+            *base_pixel = image::Rgba([
+                (u16::from(base_pixel[0]) * keep / 255) as u8,
+                (u16::from(base_pixel[1]) * keep / 255) as u8,
+                (u16::from(base_pixel[2]) * keep / 255) as u8,
+                (base_alpha + coverage * (255 - base_alpha) / 255) as u8,
+            ]);
         }
     }
 
@@ -1738,7 +1756,10 @@ fn parse_action_facet(value: &str) -> Option<ActionFacet> {
         .map(|part| part.trim())
         .filter(|part| !part.is_empty())
         .collect();
-    if parts.len() != 4 && parts.len() != 6 {
+    // C4TargetRect: x,y,wdt,hgt with mkDefaultAdapt(0) tx,ty — 4 to 6
+    // entries are valid (C4TargetRect::CompileFunc, C4Rect.cpp:80-86;
+    // Mage.c4d AimMagic uses the 5-value form).
+    if parts.len() < 4 || parts.len() > 6 {
         return None;
     }
     let mut numbers = Vec::with_capacity(parts.len());
@@ -1749,11 +1770,8 @@ fn parse_action_facet(value: &str) -> Option<ActionFacet> {
     let y = numbers[1];
     let width = numbers[2];
     let height = numbers[3];
-    let (target_x, target_y) = if numbers.len() == 6 {
-        (numbers[4], numbers[5])
-    } else {
-        (0, 0)
-    };
+    let target_x = numbers.get(4).copied().unwrap_or(0);
+    let target_y = numbers.get(5).copied().unwrap_or(0);
     Some(ActionFacet {
         x,
         y,
@@ -1807,6 +1825,23 @@ mod tests {
     // (C4Def.cpp) — CR DefCores carry no combined Shape= key. The GoldRush
     // wagon COAC (Width=48 Height=40 Offset=-24,-20) needs this rect for
     // the NewObject bottom-growth adjust.
+    // Facet= is a C4TargetRect: x,y,wdt,hgt plus DEFAULTED tx,ty — partial
+    // lists are valid (C4TargetRect::CompileFunc mkDefaultAdapt,
+    // C4Rect.cpp:80-86). Mage.c4d AimMagic uses the 5-value form
+    // "0,328,24,20,-4".
+    #[test]
+    fn action_facet_accepts_partial_target_offsets_like_c4targetrect() {
+        let five = parse_action_facet("0,328,24,20,-4").expect("5-value facet parses");
+        assert_eq!(
+            (five.x, five.y, five.width, five.height, five.target_x, five.target_y),
+            (0, 328, 24, 20, -4, 0)
+        );
+        let six = parse_action_facet("0,260,16,24,0,-4").expect("6-value facet parses");
+        assert_eq!((six.target_x, six.target_y), (0, -4));
+        let four = parse_action_facet("0,0,16,20").expect("4-value facet parses");
+        assert_eq!((four.target_x, four.target_y), (0, 0));
+    }
+
     #[test]
     fn defcore_width_height_offset_compose_the_shape_rect() {
         let core = parse_def_core(
@@ -1820,6 +1855,35 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+
+    // Overlay.png is the ClrByOwner surface itself: C4DefGraphics::LoadGraphics
+    // keeps it as BitmapClr with the base as pMainSfc (C4DefGraphics.cpp:74-94,
+    // C4Surface::SetAsClrByOwnerOf, C4Surface.cpp:320-331), so drawing blits
+    // the overlay pixel modulated by the owner color OVER the base using the
+    // OVERLAY's alpha. The Mage body lives only in Overlay.png (base cells are
+    // transparent apart from the staff) — the baked sprite must make those
+    // pixels visible with the overlay intensity as mask.
+    #[test]
+    fn overlay_only_pixels_become_visible_owner_masked_pixels() {
+        let mut base = image::RgbaImage::from_pixel(2, 1, image::Rgba([100, 64, 35, 0]));
+        // The "staff": opaque base content without overlay coverage.
+        base.put_pixel(1, 0, image::Rgba([80, 50, 20, 255]));
+        let mut overlay = image::RgbaImage::from_pixel(2, 1, image::Rgba([100, 100, 100, 0]));
+        // The "robe": opaque gray overlay over a transparent base pixel.
+        overlay.put_pixel(0, 0, image::Rgba([136, 136, 136, 255]));
+
+        let mask = extract_mask_from_overlay(&overlay, &mut base).expect("mask extracted");
+
+        // Robe pixel: fully covered by the overlay — the sprite must be
+        // opaque, contribute no untinted color (black base term) and carry
+        // the overlay intensity in the mask.
+        assert_eq!(base.get_pixel(0, 0), &image::Rgba([0, 0, 0, 255]));
+        assert_eq!(mask.pixels[0], 136);
+        // Staff pixel: overlay alpha 0 must neither mask (its RGB is the
+        // keyed-out background) nor touch the base.
+        assert_eq!(base.get_pixel(1, 0), &image::Rgba([80, 50, 20, 255]));
+        assert_eq!(mask.pixels[1], 0);
+    }
 
     #[test]
     fn parse_def_core_basic_fields() {

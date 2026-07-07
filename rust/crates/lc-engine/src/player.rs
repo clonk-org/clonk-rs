@@ -103,6 +103,48 @@ pub struct PlayerState {
     /// deterministic serialization.
     #[serde(default)]
     pub hostility: Vec<i32>,
+    /// Direct-com input state (C4Player.h:118-121, serialized by
+    /// C4Player::CompileFunc "LastCom"/"LastComDel"/"LastComDownDouble"/
+    /// "PressedComs"/"AutoStopControl"/"CursorFlash", C4Player.cpp:1596-1604).
+    #[serde(default)]
+    pub control: PlayerControlState,
+}
+
+/// C4Player's per-player direct-com bookkeeping (C4Player.h:118-121):
+/// the LastCom single/double synthesis buffer, the pressed-com bitmask
+/// for Jump'n'Run control, and the cursor/select flash timers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PlayerControlState {
+    /// `LastCom` — the com buffered for COM_Single/COM_Double synthesis
+    /// (C4Player::InCom, C4Player.cpp:1522-1536).
+    #[serde(default)]
+    pub last_com: u8,
+    /// `LastComDelay` — frames since LastCom was buffered; > C4DoubleClick
+    /// flushes the COM_Single (C4Player::Execute, C4Player.cpp:1215-1229).
+    #[serde(default)]
+    pub last_com_delay: i32,
+    /// `LastComDownDouble` — countdown after a COM_Down_D that converts the
+    /// next throw command to a drop (PlayerObjectCommand,
+    /// C4ObjectCom.cpp:1024-1036).
+    #[serde(default)]
+    pub last_com_down_double: i32,
+    /// `PressedComs` — bit per held plain com (C4Player::InCom,
+    /// C4Player.cpp:1520-1521, 1541-1548).
+    #[serde(default)]
+    pub pressed_coms: i32,
+    /// `ControlStyle` — Jump'n'Run (AutoStopControl) control when true
+    /// (C4Player.cpp:2373; default 0 = classic, C4InfoCore.cpp:84).
+    #[serde(default)]
+    pub control_style: bool,
+    /// `CursorFlash` — frames the cursor arrow above the cursor clonk stays
+    /// visible (C4Game::DrawCursors gate, C4Game.cpp:1863; set to 30 on
+    /// cursor changes, decremented in C4Player::Execute, C4Player.cpp:242).
+    #[serde(default)]
+    pub cursor_flash: i32,
+    /// `SelectFlash` — frames the crew select marks stay visible
+    /// (C4Object::Draw gate, C4Object.cpp:2497-2502).
+    #[serde(default)]
+    pub select_flash: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +179,8 @@ pub struct Player {
     /// The startup position slot taken at ScenarioInit
     /// (C4Player.cpp:717-732; C4PlayerList::PositionTaken). -1 when unset.
     position_index: i32,
+    /// Direct-com input state (C4Player.h:118-121).
+    pub(crate) control: PlayerControlState,
 }
 
 impl Player {
@@ -167,6 +211,7 @@ impl Player {
             hostility: HashSet::new(),
             color_index: -1,
             position_index: -1,
+            control: PlayerControlState::default(),
         }
     }
 
@@ -220,6 +265,7 @@ impl Player {
             hostility: HashSet::new(),
             color_index: -1,
             position_index: -1,
+            control: PlayerControlState::default(),
         };
         player.sort_crew();
         player
@@ -250,6 +296,7 @@ impl Player {
             production_unit,
             color,
             hostility,
+            control,
         } = state;
         let mut player = Self {
             id,
@@ -277,6 +324,7 @@ impl Player {
             hostility: hostility.into_iter().collect(),
             color_index: -1,
             position_index: -1,
+            control,
         };
         player.sort_crew();
         player
@@ -313,6 +361,7 @@ impl Player {
                 hostility.sort_unstable();
                 hostility
             },
+            control: self.control,
         }
     }
 

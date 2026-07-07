@@ -88,3 +88,25 @@ fn include_parent_function_is_reachable_via_inherited() {
         "includes never copy global funcs (C4AulLink.cpp:127)"
     );
 }
+
+#[test]
+fn same_script_redefinition_reaches_the_earlier_definition_via_inherited() {
+    // C4AulScript::ParseFn links a redefinition in the SAME script to the
+    // earlier definition (`Fn->OwnerOverloaded = Fn->Owner->
+    // GetOverloadedFunc(Fn)`, C4AulParse.cpp:1404-1406). The Coach.c4d menu
+    // idiom relies on it: the implementation is followed by
+    // `public func ControlDownDouble(pByObject) { [$TxtGetoff$]
+    // return(inherited(pByObject)); }` (Coach.c4d/Script.c) — the wrapper
+    // adds the menu description and forwards to the real body.
+    let source = r#"
+        public func F(a) { return a + 1; }
+        public func F(a) { return inherited(a) * 10; }
+    "#;
+    let mut engine = Engine::new();
+    engine.add_script(Script::compile(source).expect("script compiles"));
+    assert_eq!(
+        engine.call("F", &[Value::Int(2)]).expect("call succeeds"),
+        Value::Int(30),
+        "the later definition wins and inherited() reaches the earlier one"
+    );
+}
