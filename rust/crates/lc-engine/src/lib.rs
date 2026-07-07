@@ -21336,26 +21336,22 @@ impl Engine {
         if after == before {
             return;
         }
-        let rotation = object.state.rotation;
-        let old_rect = transformed_shape_rect(shape, before, stretch_growth, rotateable, rotation);
-        let new_rect = transformed_shape_rect(shape, after, stretch_growth, rotateable, rotation);
-        let y = object.state.position.y;
+        let _ = (shape, stretch_growth, line, rotateable);
+        let previous_rect = self.objects[idx].current_shape_rect();
         self.objects[idx].state.construction = after;
         self.refresh_object_ocf(idx);
-        if line == 0 && rotation == 0 {
-            if let (Some(old_rect), Some(new_rect)) = (old_rect, new_rect) {
-                if old_rect.height != new_rect.height || old_rect.y != new_rect.y {
-                    let bottom = y + old_rect.y + old_rect.height;
-                    let new_y = bottom - new_rect.height - new_rect.y;
-                    // C++ writes the INT y only (C4Object.cpp:1479-1481);
-                    // fix_y keeps its stale value until the next motion or
-                    // Synchronize — the live comparator confirms cpp fix_y
-                    // stays put while int y moves (bush f35: int 309,
-                    // fix 310.0). Match the desync bit-for-bit.
-                    self.objects[idx].state.position.y = new_y;
-                }
-            }
-        }
+        // UpdateFace(true) re-derives the shape AND vertices at the new
+        // Con (C4Object::UpdateShape stretch/jolt with bUpdateVertices,
+        // C4Object.cpp:320-341 — trees grow their vertex rings too) and
+        // the straight-con bottom anchor writes the INT y only
+        // (C4Object.cpp:1476-1483; fix_y keeps its stale value until the
+        // next motion — confirmed live: bush f35 int y 309, fix 310.0).
+        // refresh_shape_after_state_change re-syncs fixed coords via
+        // set_position, so restore the stale fixed pair afterward.
+        let stale_fixed = self.objects[idx].fixed_position;
+        self.objects[idx]
+            .refresh_shape_after_state_change(before, previous_rect, true);
+        self.objects[idx].fixed_position = stale_fixed;
     }
 
     /// InMat-incineration/base/birthday arms (need InMat and base models).

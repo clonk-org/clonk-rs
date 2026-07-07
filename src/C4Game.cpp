@@ -809,6 +809,13 @@ bool C4Game::Execute() // Returns true if the game is over
 
 	if (getenv("LC_RNG_TRACE")) LcRngTraceMarker(FrameCounter);
 	EXEC_S(ExecObjects();, ExecObjectsStat)
+	if (getenv("LC_RNG_TRACE") && FrameCounter >= 59 && FrameCounter <= 60)
+	{
+		if (FILE *f = LcRngTraceFile())
+			for (int n : {1554, 1559, 1564, 1571})
+				if (C4Object *o = Objects.ObjectPointer(n))
+					fprintf(f, "WHO60 f=%d n=%d id=%s x=%d y=%d cont=%d mob=%d act=%s\n", FrameCounter, n, C4IdText(o->Def->id), o->x, o->y, o->Contained ? o->Contained->Number : -1, (int)o->Mobile, +o->Action.Name);
+	}
 	if (getenv("LC_RNG_TRACE") && FrameCounter >= 20 && FrameCounter <= 22)
 	{
 		if (FILE *f = LcRngTraceFile())
