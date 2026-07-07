@@ -6161,7 +6161,15 @@ impl Definition {
             for x in 0..mask.width {
                 let source_x = (mask.x + x) as usize;
                 let alpha_index = source_y * stride + source_x * 4 + 3;
-                pixels.push(u8::from(source.get(alpha_index).copied().unwrap_or(0) != 0));
+                // Solid where the pixel is NOT transparent (C4SolidMask.cpp:
+                // 411): IsPixTransparent = internal alpha >= 128
+                // (C4Surface.cpp:718-724) on the INVERTED channel
+                // (png_set_invert_alpha, StdPNGLibpng.cpp:139-140) —
+                // PNG alpha >= 128 is solid; anti-aliased edges (1..127)
+                // stay passable (the GoldRush _FWS posts).
+                pixels.push(u8::from(
+                    source.get(alpha_index).copied().unwrap_or(0) >= 128,
+                ));
             }
         }
         SolidMaskPixels::Alpha(Rc::new(pixels))
@@ -6197,7 +6205,15 @@ impl Definition {
             for x in 0..mask.width {
                 let source_x = (mask.x + x) as usize;
                 let alpha_index = source_y * stride + source_x * 4 + 3;
-                pixels.push(u8::from(source.get(alpha_index).copied().unwrap_or(0) != 0));
+                // Solid where the pixel is NOT transparent (C4SolidMask.cpp:
+                // 411): IsPixTransparent = internal alpha >= 128
+                // (C4Surface.cpp:718-724) on the INVERTED channel
+                // (png_set_invert_alpha, StdPNGLibpng.cpp:139-140) —
+                // PNG alpha >= 128 is solid; anti-aliased edges (1..127)
+                // stay passable (the GoldRush _FWS posts).
+                pixels.push(u8::from(
+                    source.get(alpha_index).copied().unwrap_or(0) >= 128,
+                ));
             }
         }
         self.solid_mask_pixels = SolidMaskPixels::Alpha(Rc::new(pixels));
@@ -9201,9 +9217,7 @@ fn coach_debug_enabled() -> bool {
     coach_debug_id().is_some()
 }
 
-/// LC_COACHDBG per-exec-stage state line for the traced object
-/// (diagnostic only) — brackets ExecuteCommand/ExecAction/DoMovement so
-/// a mid-frame kinematics change pins to a stage.
+/// TEMP stage probe for the traced object.
 fn dbg_stage(object: &Object, stage: &str) {
     if coach_debug_id() == Some(object.id.as_u64()) {
         crate::rng::rng_trace_line(&format!(
@@ -42602,6 +42616,93 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
         assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        Ok(())
+    }
+
+    // C4SolidMask is built from def-graphics transparency
+    // (C4SolidMask.cpp:411): IsPixTransparent is `(dwPix >> 24) >= 128` on
+    // the INVERTED internal alpha (C4Surface.cpp:718-724;
+    // png_set_invert_alpha, StdPNGLibpng.cpp:139-140) — solid <=> PNG
+    // alpha >= 128. Anti-aliased mask edges (alpha 1..127) stay passable:
+    // the GoldRush _FWS force-field posts carry 126-alpha edge columns,
+    // and baking those walled the bison one pixel early (f48 wall: rust
+    // 4230.0 vs cpp 4231.0 — C++ contacts the 204-alpha core column).
+    #[test]
+    fn solid_mask_semitransparent_pixels_stay_passable_like_cpp() -> Result<(), EngineError> {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Post.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=POST\nName=Post\nCategory=C4D_Object\nShape=0,0,3,1\nSolidMask=0,0,3,1,0,0\n",
+        )
+        .expect("write defcore");
+        let mut image = image::RgbaImage::new(3, 1);
+        image.put_pixel(0, 0, image::Rgba([255, 255, 255, 126])); // anti-aliased edge
+        image.put_pixel(1, 0, image::Rgba([255, 255, 255, 128])); // threshold: lowest solid
+        image.put_pixel(2, 0, image::Rgba([255, 255, 255, 204])); // body
+        image
+            .save(def_dir.join("Graphics.png"))
+            .expect("write graphics");
+
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let post_definition = Definition::from_resource(&resource)?;
+
+        let mut mover_definition = simple_definition("Mover");
+        mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_RIGHT)]);
+        mover_definition.set_contact_density(50);
+
+        let mut engine = Engine::with_seed(69);
+        engine.set_landscape(Landscape::flat(20, 20));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine.register_definition(post_definition)?;
+        engine.register_definition(mover_definition)?;
+
+        // The post's mask row tracks its FIXED position (oy = obj->y +
+        // Shape.y + ty, C4SolidMask.cpp:67): spawned at (5,6) the 3x1 mask
+        // covers x=5..7 at y=6 (alpha 126 / 128 / 204); the mover probes
+        // that row.
+        let mover_id = engine.spawn_object(
+            SpawnConfig::new("Mover")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(4, 6)),
+        )?;
+        engine.spawn_object(
+            SpawnConfig::new("POST")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(5, 6)),
+        )?;
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
+        engine.objects[idx].state.mobile = true;
+
+        // Tick 1: the step onto the 126-alpha column is FREE — C++ sees a
+        // transparent mask pixel there (C4Surface.cpp:723) and DoMotions.
+        engine.tick()?;
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        assert_eq!(
+            engine.objects[idx].state.position,
+            Vector2::new(5, 6),
+            "alpha 126 < 128 must not bake solid — the mover walks onto it"
+        );
+        assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+
+        // Tick 2: the step onto the 128-alpha column contacts — 128 is the
+        // lowest solid PNG alpha (255-128=127 < 128 is not transparent).
+        engine.tick()?;
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        assert_eq!(
+            engine.objects[idx].state.position,
+            Vector2::new(5, 6),
+            "alpha 128 bakes solid — the horizontal move aborts"
+        );
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
         Ok(())
     }
 
