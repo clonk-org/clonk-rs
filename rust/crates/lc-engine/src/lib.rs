@@ -1966,6 +1966,15 @@ fn u32_is_zero(value: &u32) -> bool {
 pub struct ObjectState {
     pub position: Vector2,
     pub velocity: Vector2,
+    /// Transient script-call mirror of the object's TRUE sub-pixel dirs:
+    /// C++ Fn(Get|Set)XDir/YDir read/write the LIVE C4Fixed xdir/ydir
+    /// (C4Script.cpp:697-732, :1160-1180) — an INT-seeded scope reads a
+    /// 0.4 px/f drift as 0 and mis-takes script guards (the GoldRush
+    /// fish's `if (GetXDir() > 0) SetXDir(0)`, f100 wall). Set only on
+    /// script-call snapshots (`Object::script_state_snapshot`); never
+    /// persisted.
+    #[serde(skip)]
+    pub script_fixed_velocity: Option<FixedVec2>,
     #[serde(default)]
     pub rotation: i32,
     pub energy: i32,
@@ -2161,6 +2170,7 @@ pub(crate) fn preview_spawn_state(
     vertices: Vec<ObjectVertex>,
 ) -> ObjectState {
     ObjectState {
+        script_fixed_velocity: None,
         position,
         velocity: Vector2::ZERO,
         rotation: 0,
@@ -3338,6 +3348,15 @@ impl Object {
     fn set_fixed_velocity(&mut self, velocity: FixedVec2) {
         self.fixed_velocity = velocity;
         self.state.velocity = self.velocity_pixels();
+    }
+
+    /// Script/host-call snapshot: carries the TRUE sub-pixel dirs so the
+    /// scope's GetXDir/GetYDir read the live C4Fixed values like C++
+    /// (C4Script.cpp:1160-1180) instead of the int-quantized mirror.
+    fn script_state_snapshot(&self) -> ObjectState {
+        let mut state = self.state.clone();
+        state.script_fixed_velocity = Some(self.fixed_velocity);
+        state
     }
 
     fn clamp_velocity(&mut self, physics: &PhysicsSettings) {
@@ -6550,6 +6569,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
                 .with_ocf(state.ocf),
             ),
@@ -6729,6 +6749,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
                 .with_ocf(state.ocf),
             ),
@@ -6900,6 +6921,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
                 .with_ocf(state.ocf),
             ),
@@ -7095,6 +7117,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
                 .with_ocf(state.ocf),
             ),
@@ -7216,6 +7239,7 @@ impl Definition {
         )
         .with_base_graphics(state.base_graphics.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
         .with_ocf(state.ocf);
         let (result, outcome) = compat::with_effect_context_with_state(
@@ -7353,6 +7377,7 @@ impl Definition {
         )
         .with_base_graphics(state.base_graphics.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
@@ -7474,6 +7499,7 @@ impl Definition {
             *self.physical(),
         )
         .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
@@ -7598,6 +7624,7 @@ impl Definition {
             *self.physical(),
         )
         .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
@@ -7727,6 +7754,7 @@ impl Definition {
         )
         .with_base_graphics(state.base_graphics.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
@@ -8188,6 +8216,7 @@ impl Definition {
                 )
                 .with_base_graphics(state.base_graphics.clone())
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
                 .with_ocf(state.ocf),
             ),
@@ -12683,7 +12712,7 @@ impl Engine {
             .position(|object| object.id == object_id)
             .ok_or(EngineError::UnknownObject(object_id))?;
         let definition_id = self.objects[index].definition_id.clone();
-        let state_snapshot = self.objects[index].state.clone();
+        let state_snapshot = self.objects[index].script_state_snapshot();
         let definition = self
             .definitions
             .get(&definition_id)
@@ -12721,7 +12750,7 @@ impl Engine {
             .position(|object| object.id == crew_id)
             .ok_or(EngineError::UnknownObject(crew_id))?;
         let definition_id = self.objects[index].definition_id.clone();
-        let state_snapshot = self.objects[index].state.clone();
+        let state_snapshot = self.objects[index].script_state_snapshot();
         let definition = self
             .definitions
             .get(&definition_id)
@@ -12768,7 +12797,7 @@ impl Engine {
             .position(|object| object.id == object_id)
             .ok_or(EngineError::UnknownObject(object_id))?;
         let definition_id = self.objects[index].definition_id.clone();
-        let state_snapshot = self.objects[index].state.clone();
+        let state_snapshot = self.objects[index].script_state_snapshot();
         let definition = self
             .definitions
             .get(&definition_id)
@@ -12817,7 +12846,7 @@ impl Engine {
             (
                 object.id,
                 object.definition_id.clone(),
-                object.state.clone(),
+                object.script_state_snapshot(),
             )
         };
         let definition = self
@@ -12979,7 +13008,7 @@ impl Engine {
         }
 
         let definition_id = self.objects[index].definition_id.clone();
-        let state_snapshot = self.objects[index].state.clone();
+        let state_snapshot = self.objects[index].script_state_snapshot();
         let definition = self
             .definitions
             .get(&definition_id)
@@ -14530,7 +14559,7 @@ impl Engine {
                         // POST-advance phase under the OLD action. The
                         // event snapshot carries exactly that pair; the
                         // rest of the state is live.
-                        let mut state_snapshot = self.objects[idx].state.clone();
+                        let mut state_snapshot = self.objects[idx].script_state_snapshot();
                         state_snapshot.action.name = event.action.clone();
                         state_snapshot.action.phase = event.phase;
                         self.invoke_action_callback(
@@ -14789,7 +14818,7 @@ impl Engine {
                 .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
                 .has_step;
             let command = if definition_has_step {
-                let state_snapshot = self.objects[idx].state.clone();
+                let state_snapshot = self.objects[idx].script_state_snapshot();
                 let random = self.next_random_i32();
 
                 let rng_state = self.rng.clone();
@@ -15186,6 +15215,8 @@ impl Engine {
             position,
             velocity,
             fixed_velocity,
+            fixed_velocity_x,
+            fixed_velocity_y,
             rotation,
             rotation_velocity,
             energy,
@@ -15251,6 +15282,22 @@ impl Engine {
             if let Some(fixed_velocity) = fixed_velocity {
                 object.fixed_velocity = fixed_velocity;
                 object.state.velocity = object.velocity_pixels();
+            }
+            // Component dir writes land on the TRUE fixed velocity — the
+            // untouched component keeps its sub-pixel value, and the write
+            // mobilizes like FnSetXDir/FnSetYDir (`pObj->Mobile = 1`,
+            // C4Script.cpp:697-732). Dropping these here lost script
+            // SetXDir(0)s whose INT mirror didn't change (|xdir| < 0.5 —
+            // the GoldRush fish's 0.4 drift surviving TurnLeft, f100 wall).
+            if let Some(x) = fixed_velocity_x {
+                object.fixed_velocity.x = x;
+                object.state.velocity = object.velocity_pixels();
+                object.state.mobile = true;
+            }
+            if let Some(y) = fixed_velocity_y {
+                object.fixed_velocity.y = y;
+                object.state.velocity = object.velocity_pixels();
+                object.state.mobile = true;
             }
             if let Some(rotation) = rotation {
                 let previous_rect = object.current_shape_rect();
@@ -15547,7 +15594,7 @@ impl Engine {
         let object_id = self.objects[index].id;
         let state_snapshot = match state_override {
             Some(state) => state,
-            None => self.objects[index].state.clone(),
+            None => self.objects[index].script_state_snapshot(),
         };
         let definition = self
             .definitions
@@ -16533,6 +16580,7 @@ impl Engine {
                 snapshot.id,
                 snapshot.definition_id.clone(),
                 ObjectState {
+                    script_fixed_velocity: None,
                     position: snapshot.position,
                     velocity: snapshot.velocity,
                     rotation: snapshot.rotation.rem_euclid(360),
@@ -16768,7 +16816,7 @@ impl Engine {
         let mut world = world;
         let mut pending_spawns: Vec<SpawnConfig> = Vec::new();
         let mut queue: VecDeque<EffectEvent> = VecDeque::from(events);
-        let mut state_snapshot = object.state.clone();
+        let mut state_snapshot = object.script_state_snapshot();
         let mut global_commands = Vec::new();
         let mut current_environment = *environment;
         let mut current_physics = physics;
@@ -17002,7 +17050,7 @@ impl Engine {
             // apply first; host-command updates below may override.
             if let Some(locals) = context_locals {
                 object.state.local_vars = locals;
-                state_snapshot = object.state.clone();
+                state_snapshot = object.script_state_snapshot();
             }
 
             if !spawns.is_empty() {
@@ -17036,7 +17084,7 @@ impl Engine {
                 if let Some(change) = outcome.action_change {
                     object.record_action_event(change.previous, ActionTransitionKind::Forced);
                 }
-                state_snapshot = object.state.clone();
+                state_snapshot = object.script_state_snapshot();
             }
 
             if !command_operations.is_empty() {
@@ -17056,7 +17104,7 @@ impl Engine {
 
             if !object_effect_commands.is_empty() {
                 let mut generated = object.apply_effect_commands(&object_effect_commands);
-                state_snapshot = object.state.clone();
+                state_snapshot = object.script_state_snapshot();
                 if !generated.is_empty() {
                     queue.extend(generated.drain(..));
                 }
@@ -17639,7 +17687,7 @@ impl Engine {
                             object.state.position.x, object.state.position.y
                         ));
                     }
-                    let state_snapshot = object.state.clone();
+                    let state_snapshot = object.script_state_snapshot();
                     let world = contact_world
                         .clone()
                         .with_next_object_id(contact_next_object_id);
@@ -21565,7 +21613,7 @@ impl Engine {
                 .get(&host_definition_id)
                 .map(|definition| definition.action_library().clone())
                 .unwrap_or_default();
-            let state_snapshot = self.objects[idx].state.clone();
+            let state_snapshot = self.objects[idx].script_state_snapshot();
             let rng_state = self.rng.clone();
             let global_view = self.global_effects.clone();
             let world = self.host_world_context();
@@ -25226,6 +25274,7 @@ impl Engine {
             id,
             definition_id.clone(),
             ObjectState {
+                script_fixed_velocity: None,
                 position,
                 velocity,
                 rotation: rotation.rem_euclid(360),
@@ -26081,6 +26130,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
 /// denumeration is needed for a read-mostly scope seed).
 fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
     ObjectState {
+        script_fixed_velocity: None,
         position: snapshot.position,
         velocity: snapshot.velocity,
         rotation: snapshot.rotation.rem_euclid(360),
@@ -35925,6 +35975,110 @@ func Trigger() {
             );
             assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
         }
+    }
+
+    // The fish's TurnLeft chain executed from a TimerCall Activity
+    // (post-movement, C4Object.cpp:1094-1102): Stuck() (quiet
+    // Shape.CheckContact, C4Script.cpp:1858-1861), GetXDir() at default
+    // precision 10 (0.4 px/f reads as 4, C4Script.cpp:1167), SetXDir(0),
+    // then SetDir(DIR_Left) firing the Swim TurnAction
+    // (C4Object.cpp:4236-4256) and SetComDir — the drifting xdir must be
+    // ZERO afterwards even though the SetDir switches the action.
+    #[test]
+    fn timer_call_turn_left_zeroes_a_small_positive_swim_drift() {
+        let script = r#"#strict
+protected func Activity()
+{
+  if (Stuck() || (GetAction() ne "Walk" && GetAction() ne "Swim")) return();
+  if (GetXDir() > 0) SetXDir(0);
+  SetDir(DIR_Left());
+  SetComDir(COMD_Left());
+  return(1);
+}
+"#;
+        let mut fish = Definition::from_script("FISH", "Fish", script).expect("compiles");
+        fish.set_c4_callback_convention(true);
+        fish.set_shape_rect(Some(DefinitionRect::new(-8, -6, 16, 12)));
+        fish.set_shape_vertices(vec![
+            ObjectVertex {
+                x: -4,
+                y: 0,
+                cnat: CNAT_LEFT,
+                friction: 100,
+            },
+            ObjectVertex {
+                x: 0,
+                y: -3,
+                cnat: CNAT_TOP,
+                friction: 100,
+            },
+            ObjectVertex {
+                x: 4,
+                y: 0,
+                cnat: CNAT_RIGHT,
+                friction: 100,
+            },
+            ObjectVertex {
+                x: 0,
+                y: 4,
+                cnat: CNAT_BOTTOM,
+                friction: 100,
+            },
+        ]);
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Swim".to_string(),
+            ActionSpec::default().with_procedure("SWIM"),
+        );
+        actions.insert(
+            "Turn".to_string(),
+            ActionSpec::default()
+                .with_procedure("SWIM")
+                .with_delay(3)
+                .with_length(15)
+                .with_next("Swim"),
+        );
+        let mut swim_spec = actions.get("Swim").cloned().expect("swim spec");
+        swim_spec = swim_spec.with_turn_action("Turn");
+        actions.insert("Swim".to_string(), swim_spec);
+        fish.configure_actions(Some("Swim".to_string()), actions);
+        fish.set_physical(PhysicalInfo {
+            swim: 100_000,
+            ..PhysicalInfo::default()
+        });
+        fish.set_timer(1);
+        fish.set_timer_call(Some("Activity".to_string()));
+
+        let mut engine = Engine::with_seed(5);
+        engine.set_physics(PhysicsSettings::new(2, 20, -20));
+        engine.register_definition(fish).expect("registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("FISH")
+                    .with_position(Vector2::new(100, 50))
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("spawns");
+        let idx = engine.find_object_index(id).expect("exists");
+        engine.objects[idx].state.in_liquid = true;
+        engine.objects[idx].state.direction = Direction::Right;
+        engine.objects[idx].fixed_velocity.x = C4Fixed::from_raw(13107);
+        engine.objects[idx].state.mobile = true;
+
+        // One tick: the swim arm accelerates 13107 -> 26214 (comdir
+        // Right), movement integrates it, THEN the TimerCall Activity
+        // turns: SetXDir(0) must survive the TurnAction switch.
+        engine.tick().expect("tick");
+        let idx = engine.find_object_index(id).expect("exists");
+        let object = &engine.objects[idx];
+        assert_eq!(
+            object.fixed_velocity.x,
+            C4Fixed::ZERO,
+            "TurnLeft's SetXDir(0) zeroes the 26214 drift (C4Script SetXDir \
+             + C4Object::SetDir TurnAction, C4Object.cpp:4236-4256)"
+        );
+        assert_eq!(object.state.action.name, "Turn", "TurnAction fired");
+        assert_eq!(object.state.command_direction, CommandDirection::Left);
     }
 
     #[test]

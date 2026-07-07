@@ -5803,6 +5803,10 @@ pub(crate) struct HostObjectContext<'a> {
     pub physical_changes: Vec<(String, i32)>,
     pub definition_physical: PhysicalInfo,
     pub walk_rotation: WalkRotationSeed,
+    /// The TRUE sub-pixel dirs at call time (C++ Fn(Get|Set)XDir read the
+    /// live C4Fixed xdir/ydir, C4Script.cpp:697-732/:1160-1180); None
+    /// falls back to the int-velocity reconstruction.
+    pub script_fixed_velocity: Option<FixedVec2>,
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -5931,11 +5935,17 @@ impl<'a> HostObjectContext<'a> {
             physical_changes: Vec::new(),
             definition_physical: PhysicalInfo::default(),
             walk_rotation: WalkRotationSeed::default(),
+            script_fixed_velocity: None,
         }
     }
 
     pub fn with_walk_rotation(mut self, walk_rotation: WalkRotationSeed) -> Self {
         self.walk_rotation = walk_rotation;
+        self
+    }
+
+    pub fn with_script_fixed_velocity(mut self, velocity: Option<FixedVec2>) -> Self {
+        self.script_fixed_velocity = velocity;
         self
     }
 
@@ -17497,6 +17507,7 @@ impl EffectHostContext {
                 physical_changes,
                 definition_physical,
                 walk_rotation,
+                script_fixed_velocity,
             } = ctx;
             {
                 let mut scope = ObjectScopeContext::new(
@@ -17540,6 +17551,12 @@ impl EffectHostContext {
                 scope.definition_id = definition_id;
                 scope.walk_rotation = walk_rotation;
                 scope.current_magic_energy = magic_energy;
+                // Seed the TRUE fixed dirs when the caller provided them —
+                // GetXDir must see a 0.4 px/f drift as 4 at precision 10
+                // like C++ reading pObj->xdir (C4Script.cpp:1167).
+                if let Some(velocity) = script_fixed_velocity {
+                    scope.current_fixed_velocity = velocity;
+                }
                 scope
             }
         });
