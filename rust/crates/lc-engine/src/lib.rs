@@ -3710,6 +3710,19 @@ impl Object {
                 on_contact(self, contact.contact_cnat)?;
                 self.fixed_position =
                     FixedVec2::from_ints(self.state.position.x, self.state.position.y);
+                // The at_xovr/at_yovr override bookkeeping runs AFTER the
+                // contact arm, UNCONDITIONALLY (C4Movement.cpp:363-368):
+                // an attach-adjusted step that then contacts still zeroes
+                // the dirs on the adjusted axes — the resting coach's
+                // re-arm gravity quantum dies here and the wagon
+                // demobilizes (rust f138 wall: ydir 13107/Mobile alive
+                // where cpp rested at 0/false).
+                if candidate.x != original.x {
+                    self.fixed_velocity.x = C4Fixed::ZERO;
+                }
+                if candidate.y != original.y {
+                    self.fixed_velocity.y = C4Fixed::ZERO;
+                }
                 break;
             }
 
@@ -46082,6 +46095,96 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
             itofix(100).val() + 45875,
             "SetAction's fix_x resync (C4Object.cpp:4155) happens BEFORE \
              DoMovement adds xdir — the sub-pixel remainder survives the wrap"
+        );
+    }
+
+    // The attached do-loop applies the at_xovr/at_yovr override
+    // bookkeeping AFTER the contact arm, UNCONDITIONALLY
+    // (C4Movement.cpp:355-368): when Shape.Attach adjusts the step
+    // (at_yovr=1) and the contact check at the adjusted candidate then
+    // HITS, C++ aborts (fix snap, :359-361) and STILL zeroes ydir via
+    // the override (:367-368) — the object demobilizes. Rust broke out
+    // of the loop on contact before the override ran, keeping the
+    // re-arm frame's gravity quantum alive: the f138 wall — the resting
+    // coach cycled (ydir 13107, Mobile true) in rust where cpp rested
+    // (0, false), and every contained cargo copied the difference.
+    #[test]
+    fn attached_contact_after_attach_adjustment_still_zeroes_ydir_like_cpp() {
+        let mut engine = Engine::with_seed(0);
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        engine.set_materials(materials);
+        // Ground under the wheel column at 117 (wheel vertex rests 2px
+        // above -> Attach pulls DOWN one, ycnt=+1); a pillar under the
+        // seat column at 102 blocks the pulled-down candidate.
+        let mut surface = vec![117i32; 200];
+        surface[124] = 102;
+        let landscape = Landscape::with_default_material(200, surface, Some(earth))
+            .expect("landscape builds");
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(100, 100, -100));
+
+        let mut wagon = Definition::from_script("Wagn", "Wagon", "#strict\n").expect("compiles");
+        wagon.set_shape_rect(Some(DefinitionRect::new(-27, -20, 55, 40)));
+        wagon.set_shape_vertices(vec![
+            ObjectVertex {
+                x: 24,
+                y: 1,
+                cnat: 0,
+                friction: 100,
+            },
+            ObjectVertex {
+                x: 0,
+                y: 15,
+                cnat: CNAT_BOTTOM,
+                friction: 10,
+            },
+        ]);
+        wagon.set_upright_attach(CNAT_BOTTOM);
+        let mut actions = HashMap::new();
+        actions.insert("Stand".to_string(), ActionSpec::default());
+        wagon.configure_actions(Some("Stand".to_string()), actions);
+        engine.register_definition(wagon).expect("registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Wagn")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(100, 100))
+                    .with_loaded(true),
+            )
+            .expect("spawns");
+        let idx = engine.find_object_index(id).expect("exists");
+        // A parked wagon: dirs zero, fixed coords pixel-exact, Mobile off
+        // — the UprightAttach re-arm (C4Object.cpp:4712-4718) mobilizes
+        // it next ExecAction and the default-arm DoGravity adds one
+        // quantum.
+        engine.objects[idx].fixed_velocity = FixedVec2::ZERO;
+        engine.objects[idx].state.velocity = Vector2::ZERO;
+        engine.objects[idx].state.mobile = false;
+
+        engine.tick().expect("tick");
+        let idx = engine.find_object_index(id).expect("exists");
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.position, Vector2::new(100, 100), "no motion");
+        assert_eq!(
+            object.fixed_velocity.y,
+            C4Fixed::ZERO,
+            "the at_yovr override zeroes ydir even though the adjusted step \
+             contacted (C4Movement.cpp:367-368 runs after the abort arm)"
+        );
+        assert_eq!(object.fixed_position.y, itofix(100), "abort resynced fix_y");
+        assert!(
+            !object.state.mobile,
+            "all dirs zero after the override -> demobilized (C4Movement.cpp:577)"
         );
     }
 
