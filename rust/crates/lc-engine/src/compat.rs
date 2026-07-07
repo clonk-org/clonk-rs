@@ -4728,6 +4728,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DoDamage", do_damage);
     script.register_host_function("GetDamage", get_damage);
     script.register_host_function("GetPlrColorDw", get_plr_color_dw);
+    script.register_host_function("GetPlrJumpAndRunControl", get_plr_jump_and_run_control);
     script.register_host_function("DoHomebaseMaterial", do_homebase_material);
     script.register_host_function("DoHomebaseProduction", do_homebase_production);
     script.register_host_function("Random", random);
@@ -9137,6 +9138,26 @@ fn get_plr_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
                 })
                 .unwrap_or(0),
         ))
+    })
+}
+
+/// FnGetPlrJumpAndRunControl (C4Script.cpp:2579-2583): the player's
+/// ControlStyle (0 classic / 1 Jump'n'Run, C4Player.cpp:2373); an absent
+/// player yields -1. The return type is C4ValueInt — there is no nil path.
+fn get_plr_jump_and_run_control(args: &[Value]) -> Result<Value, RuntimeError> {
+    // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetPlrJumpAndRunControl",
+        "player",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let control_style = borrow
+            .as_ref()
+            .and_then(|context| context.player_state(player_id))
+            .map(|player| i32::from(player.control.control_style));
+        Ok(Value::Int(control_style.unwrap_or(-1)))
     })
 }
 
@@ -19472,6 +19493,7 @@ mod tests {
         "GetPlrColorDw",
         "GetPlrDownDouble",
         "GetPlrExtraData",
+        "GetPlrJumpAndRunControl",
         "GetPlrKnowledge",
         "GetPlrValue",
         "GetPlrValueGain",
@@ -20675,6 +20697,45 @@ mod tests {
         let args = [Value::Int(7)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_player_team(&args));
         assert_eq!(result.expect("GetPlayerTeam succeeds"), Value::Nil);
+    }
+
+    #[test]
+    fn get_plr_jump_and_run_control_returns_control_style() {
+        // FnGetPlrJumpAndRunControl (C4Script.cpp:2579-2583): returns
+        // plr->ControlStyle (0 classic / 1 Jump'n'Run) for a valid player.
+        let mut player = PlayerState {
+            id: 9,
+            ..PlayerState::default()
+        };
+        player.control.control_style = true;
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let args = [Value::Int(9)];
+        let (result, _) =
+            with_effect_context(None, &[], world, 1, || get_plr_jump_and_run_control(&args));
+        assert_eq!(
+            result.expect("GetPlrJumpAndRunControl succeeds"),
+            Value::Int(1)
+        );
+    }
+
+    #[test]
+    fn get_plr_jump_and_run_control_missing_player_is_minus_one() {
+        // `plr ? plr->ControlStyle : -1` (C4Script.cpp:2582): an absent
+        // player yields -1, never nil — the return type is C4ValueInt.
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            Vec::<PlayerState>::new(),
+        );
+        let args = [Value::Int(42)];
+        let (result, _) =
+            with_effect_context(None, &[], world, 1, || get_plr_jump_and_run_control(&args));
+        assert_eq!(
+            result.expect("GetPlrJumpAndRunControl succeeds"),
+            Value::Int(-1)
+        );
     }
 
     #[test]
