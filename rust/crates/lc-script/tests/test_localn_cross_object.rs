@@ -60,6 +60,39 @@ fn cross_object_localn_reads_and_writes_through_the_host_cell() {
 }
 
 #[test]
+fn arrow_form_localn_read_resolves_the_target_object_local() {
+    // `pObj->LocalN("iWater")`: the `->` operator supplies Obj=pObj, so
+    // FnLocalN reads pObj's named local (C4Script.cpp:4598-4611, pObj
+    // defaulting to cthr->Obj). The method-call READ form must resolve
+    // through the same host cell as the two-argument form — Goal.c4d's
+    // `curr_goal->LocalN("missionPassword")` depends on it.
+    let (mut engine, cells) = engine_with_stub_hook();
+    engine.add_script(
+        Script::compile(
+            "public func Peek(target) {\n\
+                 LocalN(\"iWater\", target) = 77;\n\
+                 return target->LocalN(\"iWater\");\n\
+             }",
+        )
+        .expect("compiles"),
+    );
+    assert_eq!(
+        engine
+            .call("Peek", &[Value::Object(4)])
+            .expect("call succeeds"),
+        Value::Int(77),
+        "the arrow-form read resolved the target's named local"
+    );
+    assert_eq!(
+        cells
+            .borrow()
+            .get(&(4, "iWater".to_string()))
+            .map(|cell| cell.borrow().clone()),
+        Some(Value::Int(77))
+    );
+}
+
+#[test]
 fn falsy_target_falls_back_to_the_executing_object() {
     // FnLocalN: `if (!pObj) pObj = cthr->Obj` (C4Script.cpp:4593-4596) —
     // a nil/0 target means the executing object, NOT the hook.

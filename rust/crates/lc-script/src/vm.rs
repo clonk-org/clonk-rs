@@ -1843,6 +1843,34 @@ impl<'a> Vm<'a> {
                 }
             }
         }
+        // `pObj->LocalN("name")`: the `->` operator supplies Obj=pObj, so the
+        // global engine function FnLocalN reads pObj's named local
+        // (C4Script.cpp:4598-4611, pObj defaulting to cthr->Obj). It is not an
+        // object script method, so it resolves through the cross-object cell
+        // hook here — never through world method dispatch, which would raise
+        // "No function LocalN in object N" (Goal.c4d's
+        // `curr_goal->LocalN("missionPassword")`, of which content has 14
+        // call sites). Matches the two-argument `LocalN("name", pObj)` form.
+        // A zero target still falls through to the "target is zero" guard, as
+        // the C++ arrow-call check fires before FnLocalN runs.
+        if matches!(target, Value::Object(_))
+            && name == "LocalN"
+            && args.len() == 1
+            && !self.functions.contains_key(name)
+        {
+            let local_name = match self.evaluate(&args[0], env, depth + 1)? {
+                Value::String(local_name) => local_name,
+                other => {
+                    return Err(RuntimeError::new(format!(
+                        "LocalN: expected string for name, got {}",
+                        other.type_name()
+                    )))
+                }
+            };
+            let cell = self.localn_cell(env, &local_name, Some(target));
+            let value = cell.borrow().clone();
+            return Ok(value);
+        }
         match &target {
             Value::Nil | Value::Int(0) | Value::Bool(false) => Err(RuntimeError::new(
                 "Object call: target is zero!".to_string(),
