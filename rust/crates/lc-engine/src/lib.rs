@@ -14193,91 +14193,6 @@ impl Engine {
                 continue;
             }
 
-            let timer_events = {
-                let object = &mut self.objects[idx];
-                object.tick_effects()
-            };
-
-            if !timer_events.is_empty() {
-                let object_id = self.objects[idx].id;
-                let global_view = self.global_effects.clone();
-                let rng_state = self.rng.clone();
-                let world = self.host_world_context();
-                let (
-                    global_cmds,
-                    emitted_particles,
-                    physics_delta,
-                    audio_events,
-                    event_messages,
-                    player_commands,
-                    landscape_ops,
-                    effect_spawns,
-                    effect_other_objects,
-                    effect_next_object_id,
-                    triggered_game_over,
-                    effect_script_go,
-                    audio_state,
-                    new_rng,
-                ) = {
-                    let definition = self
-                        .definitions
-                        .get(&definition_id)
-                        .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
-                    let object = &mut self.objects[idx];
-                    Self::run_effect_events_for_object(
-                        definition,
-                        definitions_ref,
-                        self.game_over_triggered,
-                        rng_state,
-                        object_id,
-                        object,
-                        timer_events,
-                        global_view,
-                        &mut self.environment,
-                        self.physics,
-                        self.frame,
-                        world.clone(),
-                        self.audio_registry.clone(),
-                    )?
-                };
-                self.rng = new_rng;
-                self.audio_registry = audio_state;
-                self.sync_next_object_id(effect_next_object_id);
-                if !effect_spawns.is_empty() {
-                    self.process_spawn_queue(effect_spawns)?;
-                }
-                if !effect_other_objects.is_empty() {
-                    self.apply_nested_object_outcomes(effect_other_objects)?;
-                }
-                if !landscape_ops.is_empty() {
-                    self.apply_landscape_operations(landscape_ops);
-                }
-                if !player_commands.is_empty() {
-                    self.apply_player_commands(player_commands)?;
-                }
-                if !audio_events.is_empty() {
-                    self.pending_audio.extend(audio_events);
-                }
-                if !event_messages.is_empty() {
-                    for command in event_messages {
-                        self.messages.apply_command(command);
-                    }
-                }
-                if let Some(go) = effect_script_go {
-                    self.scenario_script_go = go;
-                }
-                if triggered_game_over {
-                    self.request_game_over()?;
-                }
-                if !physics_delta.is_empty() {
-                    self.apply_physics_delta(physics_delta);
-                }
-                if !global_cmds.is_empty() {
-                    self.apply_global_effect_commands(&global_cmds);
-                }
-                self.apply_particle_commands(emitted_particles);
-            }
 
             // DFA_CONNECT line tracking (C4Object.cpp:5341-5420) runs in
             // ExecAction; broken targets fire LineBreak and remove the
@@ -14452,6 +14367,105 @@ impl Engine {
             // Exit/DoCon; the end-of-exec update covers the net state).
             self.update_solid_mask(idx);
             self.update_sector_for_index(idx);
+            // Script effect timers execute HERE in C++ — pEffects->Execute
+            // follows ExecAction and ExecMovement inside C4Object::Execute
+            // (C4Object.cpp:1069-1090): an action set by a timer callback
+            // gets its first PhaseDelay increment the NEXT frame, and the
+            // callbacks read POST-movement state. Script effects (low
+            // priority) run before the internal fire (priority 100 —
+            // C4Effect execution is priority-ordered).
+            let timer_events = {
+                let object = &mut self.objects[idx];
+                object.tick_effects()
+            };
+
+            if !timer_events.is_empty() {
+                let object_id = self.objects[idx].id;
+                let global_view = self.global_effects.clone();
+                let rng_state = self.rng.clone();
+                let world = self.host_world_context();
+                let (
+                    global_cmds,
+                    emitted_particles,
+                    physics_delta,
+                    audio_events,
+                    event_messages,
+                    player_commands,
+                    landscape_ops,
+                    effect_spawns,
+                    effect_other_objects,
+                    effect_next_object_id,
+                    triggered_game_over,
+                    effect_script_go,
+                    audio_state,
+                    new_rng,
+                ) = {
+                    let definition = self
+                        .definitions
+                        .get(&definition_id)
+                        .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
+                    let object = &mut self.objects[idx];
+                    Self::run_effect_events_for_object(
+                        definition,
+                        definitions_ref,
+                        self.game_over_triggered,
+                        rng_state,
+                        object_id,
+                        object,
+                        timer_events,
+                        global_view,
+                        &mut self.environment,
+                        self.physics,
+                        self.frame,
+                        world.clone(),
+                        self.audio_registry.clone(),
+                    )?
+                };
+                self.rng = new_rng;
+                self.audio_registry = audio_state;
+                self.sync_next_object_id(effect_next_object_id);
+                if !effect_spawns.is_empty() {
+                    self.process_spawn_queue(effect_spawns)?;
+                }
+                if !effect_other_objects.is_empty() {
+                    self.apply_nested_object_outcomes(effect_other_objects)?;
+                }
+                if !landscape_ops.is_empty() {
+                    self.apply_landscape_operations(landscape_ops);
+                }
+                if !player_commands.is_empty() {
+                    self.apply_player_commands(player_commands)?;
+                }
+                if !audio_events.is_empty() {
+                    self.pending_audio.extend(audio_events);
+                }
+                if !event_messages.is_empty() {
+                    for command in event_messages {
+                        self.messages.apply_command(command);
+                    }
+                }
+                if let Some(go) = effect_script_go {
+                    self.scenario_script_go = go;
+                }
+                if triggered_game_over {
+                    self.request_game_over()?;
+                }
+                if !physics_delta.is_empty() {
+                    self.apply_physics_delta(physics_delta);
+                }
+                if !global_cmds.is_empty() {
+                    self.apply_global_effect_commands(&global_cmds);
+                }
+                self.apply_particle_commands(emitted_particles);
+            }
+            if self.objects[idx].destroyed
+                || !self.objects[idx].state.status.is_active()
+            {
+                // pEffects->Execute may remove the object; C++ returns
+                // before ExecLife/ExecBase/Timer (C4Object.cpp:1087-1090).
+                continue;
+            }
             // effects (fire) run after movement (C4Object.cpp:1073-1077)
             self.exec_object_fire(idx, frame);
             // ExecLife runs after the fire effect (C4Object.cpp:1074-1080)
@@ -40435,6 +40449,68 @@ public func ReadDir(pClonk) { return(GetDir(pClonk)); }
             Some(&Value::Int(1)),
             "GetDir(pObj) resolves the explicit target even from a \
              definition-call scope (C4Script.cpp:1120)"
+        );
+    }
+
+    // C4Object::Execute order (C4Object.cpp:1069-1090): ExecuteCommand ->
+    // ExecAction -> ExecMovement -> particles -> pEffects->Execute -> …
+    // Effect timers run AFTER the frame's action exec, so an action set
+    // INSIDE a timer callback gets its first PhaseDelay increment the
+    // NEXT frame (PhaseDelay += 1; advance at >= Delay,
+    // C4Object.cpp:5458-5466). GoldRush f32 wall: the bandits' LoadRifle
+    // (Delay=3, Bandit.c4d/ActMap.txt) must still be phase 0 two frames
+    // after the OrderDefend SetAction — rust advanced one exec early by
+    // running effect timers before ExecAction.
+    #[test]
+    fn action_set_in_an_effect_timer_starts_its_phase_cadence_next_frame() {
+        let script = r#"#strict
+public func Boot() { AddEffect("Probe", this(), 1, 5, this()); return(1); }
+func FxProbeTimer(pThis, iNumber) {
+  SetAction("Load");
+  return(-1);
+}
+"#;
+        let mut engine = Engine::with_seed(3);
+        let mut actor =
+            Definition::from_script("Actr", "Actor", script).expect("script compiles");
+        actor.configure_actions(
+            None,
+            HashMap::from([(
+                "Load".to_string(),
+                ActionSpec::default().with_length(10).with_delay(3),
+            )]),
+        );
+        engine.register_definition(actor).expect("actor registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let idx = engine.find_object_index(id).expect("actor exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        // The interval-5 timer fires on tick 5 and sets the action AFTER
+        // that tick's ExecAction; ticks 6 and 7 increment PhaseDelay to
+        // 1 and 2 (< Delay 3) — phase stays 0.
+        for _ in 0..7 {
+            engine.tick().expect("tick");
+        }
+        let idx = engine.find_object_index(id).expect("actor exists");
+        assert_eq!(engine.objects[idx].state.action.name, "Load");
+        assert_eq!(
+            engine.objects[idx].state.action.phase, 0,
+            "two frames after the effect-timer SetAction the phase is \
+             still 0 (first increment lands the FRAME AFTER entry — \
+             pEffects->Execute follows ExecAction, C4Object.cpp:1073,1085)"
+        );
+
+        // Tick 8 is the third post-entry exec: PhaseDelay reaches 3 and
+        // the phase advances (C4Object.cpp:5458-5466).
+        engine.tick().expect("tick");
+        let idx = engine.find_object_index(id).expect("actor exists");
+        assert_eq!(
+            engine.objects[idx].state.action.phase, 1,
+            "the third post-entry exec advances the phase"
         );
     }
 
