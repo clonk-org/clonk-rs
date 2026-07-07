@@ -44,6 +44,7 @@ pub use lc_gui::{
     Point as GuiPoint, ScenarioEntry, ScenarioKind,
 };
 pub use clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
+pub use hud::{CommandIcon, CommandImage, CommandOverlayIcon};
 pub use startup_about::{AboutAction, StartupAboutDialog};
 pub use startup_main_menu::{MainMenuAction, MainMenuItem, StartupMainMenu};
 pub use startup_menu::{ScenarioSummary, StartupMenu, StartupMenuAction};
@@ -358,6 +359,12 @@ pub struct GraphicsOverlay<'a> {
     /// The current message board log line (C4MessageBoard LogBuffer tail,
     /// src/C4MessageBoard.cpp:271-303).
     pub message_board_line: Option<String>,
+    /// `Config.Graphics.ShowCommands` (src/C4Config.cpp:449) — gates the
+    /// per-viewport command rows (src/C4Viewport.cpp:948).
+    pub show_commands: bool,
+    /// `Config.Graphics.ShowCommandKeys` (src/C4Config.cpp:450) — key names
+    /// on the command key caps (src/C4ObjectCom.cpp:942).
+    pub show_command_keys: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -376,6 +383,10 @@ pub struct PlayerOverlay {
     /// control com (src/C4Player.cpp:1376, src/C4Viewport.cpp:1450).
     pub show_startup: bool,
     pub crew: Vec<CrewOverlay>,
+    /// The cursor object's contextual command icons
+    /// (C4Object::DrawCommands, src/C4Object.cpp:2940-3098), resolved by
+    /// the app; drawn into the viewport command rows when ShowCommands.
+    pub commands: Vec<CommandIcon>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -450,6 +461,10 @@ pub struct GraphicsSystem {
     hud_players: Vec<PlayerOverlay>,
     game_time_seconds: u64,
     message_board_line: Option<String>,
+    /// `Config.Graphics.ShowCommands` / `ShowCommandKeys`
+    /// (src/C4Config.cpp:449-450, default true).
+    show_commands: bool,
+    show_command_keys: bool,
     /// Debug FRAME/STATUS lines; `None` hides them (default HUD).
     debug_hud_text: Option<(String, String)>,
     viewport_x: f32,
@@ -505,6 +520,8 @@ impl GraphicsSystem {
             hud_players: Vec::new(),
             game_time_seconds: 0,
             message_board_line: None,
+            show_commands: true,
+            show_command_keys: true,
             debug_hud_text: None,
             viewport_x: 0.0,
             viewport_y: 0.0,
@@ -652,6 +669,8 @@ impl GraphicsSystem {
         self.hud_players = overlay.players.clone();
         self.game_time_seconds = overlay.game_time_seconds;
         self.message_board_line = overlay.message_board_line.clone();
+        self.show_commands = overlay.show_commands;
+        self.show_command_keys = overlay.show_command_keys;
         self.debug_hud_text = overlay
             .debug_hud
             .then(|| (overlay.frame_text.to_string(), overlay.status_text.to_string()));
@@ -2794,6 +2813,25 @@ impl GraphicsSystem {
                 );
             }
 
+            // Command rows (src/C4Viewport.cpp:947-961), gated on
+            // Config.Graphics.ShowCommands; 23px key caps pick FontTiny
+            // (`cgo.Hgt <= C4MN_SymbolSize`, src/C4ObjectCom.cpp:940).
+            if self.show_commands && !player.commands.is_empty() {
+                let tiny = self
+                    .clonk_fonts
+                    .as_deref()
+                    .map(|set| hud::HudFont::Clonk(&set.mini))
+                    .unwrap_or(hud::HudFont::Fallback(self.font.as_ref()));
+                hud::draw_commands(
+                    &mut self.surface,
+                    &tiny,
+                    &self.hud_graphics,
+                    rect,
+                    &player.commands,
+                    self.show_command_keys,
+                );
+            }
+
             hud::draw_player_fixed_items(
                 &mut self.surface,
                 &font,
@@ -4285,6 +4323,8 @@ mod tests {
             players: Vec::new(),
             game_time_seconds: 61,
             message_board_line: Some("Player join: Test".to_string()),
+            show_commands: true,
+            show_command_keys: true,
         });
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -5016,6 +5056,7 @@ mod tests {
                 info_name: info_name.map(str::to_string),
                 rank_name: None,
             }],
+            commands: Vec::new(),
         }];
         graphics.update_overlay(&GraphicsOverlay {
             frame_text: "",
@@ -5024,6 +5065,8 @@ mod tests {
             players,
             game_time_seconds: 0,
             message_board_line: None,
+            show_commands: true,
+            show_command_keys: true,
         });
         (snapshot, graphics)
     }
@@ -5098,6 +5141,8 @@ mod tests {
             players,
             game_time_seconds: 0,
             message_board_line: None,
+            show_commands: true,
+            show_command_keys: true,
         });
         let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
         graphics.render_frame(&snapshot, &viewports);
