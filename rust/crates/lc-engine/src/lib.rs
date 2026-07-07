@@ -3487,6 +3487,39 @@ impl Object {
                 movement.contact_density,
             );
             if contact.is_contact() {
+                if coach_debug_enabled() && movement.object_id.as_u64() == 1450 {
+                    let details: Vec<String> = self
+                        .state
+                        .vertices
+                        .iter()
+                        .map(|vertex| {
+                            let vx = candidate.x + vertex.x;
+                            let vy = candidate.y + vertex.y;
+                            let density = movement_density_at(
+                                landscape,
+                                materials,
+                                movement.solid_masks,
+                                excluded_solid_mask,
+                                vx,
+                                vy,
+                            );
+                            format!(
+                                "v({},{})@({vx},{vy}) d={density} byte={:?}",
+                                vertex.x,
+                                vertex.y,
+                                landscape.grid_byte_at(vx, vy)
+                            )
+                        })
+                        .collect();
+                    crate::rng::rng_trace_line(&format!(
+                        "HCONTACT cand=({},{}) excl={:?} masks={} {}",
+                        candidate.x,
+                        candidate.y,
+                        excluded_solid_mask,
+                        movement.solid_masks.len(),
+                        details.join(" | ")
+                    ));
+                }
                 outcome.any_contact = true;
                 outcome.contact_cnat |= contact.contact_cnat;
                 on_contact(self, contact.contact_cnat)?;
@@ -3516,6 +3549,16 @@ impl Object {
                 movement.contact_density,
             );
             if contact.is_contact() {
+                if coach_debug_enabled() && movement.object_id.as_u64() == 1450 {
+                    crate::rng::rng_trace_line(&format!(
+                        "VCONTACT cand=({},{}) first_friction={} xdir_before={} ydir_before={}",
+                        candidate.x,
+                        candidate.y,
+                        contact.first_friction(),
+                        self.fixed_velocity.x.val(),
+                        self.fixed_velocity.y.val()
+                    ));
+                }
                 outcome.any_contact = true;
                 outcome.contact_cnat |= contact.contact_cnat;
                 on_contact(self, contact.contact_cnat)?;
@@ -3632,6 +3675,18 @@ impl Object {
                 movement.contact_density,
             );
             if contact.is_contact() {
+                if coach_debug_enabled() && movement.object_id.as_u64() == 1450 {
+                    crate::rng::rng_trace_line(&format!(
+                        "ACONTACT cand=({},{}) orig=({},{}) attach={} pos=({},{})",
+                        candidate.x,
+                        candidate.y,
+                        original.x,
+                        original.y,
+                        movement.attach,
+                        self.state.position.x,
+                        self.state.position.y
+                    ));
+                }
                 any_contact = true;
                 on_contact(self, contact.contact_cnat)?;
                 self.fixed_position =
@@ -3645,6 +3700,15 @@ impl Object {
 
             let override_x = candidate.x != original.x;
             let override_y = candidate.y != original.y;
+            if (override_x || override_y)
+                && coach_debug_enabled()
+                && movement.object_id.as_u64() == 1450
+            {
+                crate::rng::rng_trace_line(&format!(
+                    "ATTOVR cand=({},{}) orig=({},{}) attach={}",
+                    candidate.x, candidate.y, original.x, original.y, movement.attach
+                ));
+            }
             self.state.position = candidate;
 
             if override_x {
@@ -9088,6 +9152,13 @@ fn sign_i32(value: i32) -> i32 {
     value.signum()
 }
 
+/// LC_COACHDBG forensics gate (diagnostic only) — cached so the movement
+/// contact loops don't pay an env lookup per abort.
+fn coach_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("LC_COACHDBG").is_ok())
+}
+
 fn redirect_force(from: &mut C4Fixed, to: &mut C4Fixed, direction: i32) {
     let redirect = fixed100(50);
     let magnitude =
@@ -14032,14 +14103,20 @@ impl Engine {
                 }
             }
         }
-        if std::env::var("LC_COACHDBG").is_ok() && (28..=41).contains(&frame) {
+        if coach_debug_enabled() && (20..=60).contains(&frame) {
             if let Some(idx) = self.find_object_index(ObjectId::new(1450)) {
                 let object = &self.objects[idx];
                 crate::rng::rng_trace_line(&format!(
-                    "RCOACH f{frame} x={} fix_x={} xdir={} contact_snap?",
+                    "RCOACH f{frame} x={} fix_x={} xdir={} y={} fix_y={} ydir={} mobile={} t_attach={} act={}",
                     object.state.position.x,
                     object.fixed_position.x.val(),
-                    object.fixed_velocity.x.val()
+                    object.fixed_velocity.x.val(),
+                    object.state.position.y,
+                    object.fixed_position.y.val(),
+                    object.fixed_velocity.y.val(),
+                    object.state.mobile,
+                    object.frame_t_attach,
+                    object.state.action.name
                 ));
             }
         }
@@ -14336,6 +14413,20 @@ impl Engine {
                         }
                     }
                 }
+            }
+
+            // ExecAction's action transitions fire their EndCall/StartCall
+            // INSIDE SetAction (C4Object.cpp:4160-4185), i.e. BEFORE
+            // ExecMovement (C4Object::Execute order, :1074/:1079). A
+            // StartCall that SetActions again (the coach's Driving ->
+            // "Drive2") must take its fix_x/fix_y resync (:4154-4155) at
+            // the PRE-movement pixel — draining only after movement let
+            // the snap eat the sub-pixel remainder DoMovement just built.
+            // Transitions recorded during movement/effects still drain at
+            // the post-movement call below.
+            self.trigger_action_callbacks(idx, Some(previous_action_name.clone()))?;
+            if self.objects[idx].destroyed {
+                continue;
             }
 
             // C4Object::ExecMovement (C4Movement.cpp:553-616): contained
@@ -44925,6 +45016,89 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             object.fixed_position.x.val(),
             itofix(103).val(),
             "horizontal abort snaps fix_x to the integer pixel"
+        );
+    }
+
+    // The phase-end NextAction transition runs through SetAction INSIDE
+    // ExecAction (C4Object.cpp:5473-5480), which resyncs fix_x/fix_y to
+    // the integer position (:4154-4155) and runs the new action's
+    // StartCall INLINE (:4160-4171) — all BEFORE ExecMovement
+    // (C4Object::Execute order, C4Object.cpp:1074/1079). A StartCall that
+    // SetActions again (the GoldRush coach's Driving -> "Drive2") snaps
+    // the fixed coords at the PRE-movement pixel, so the frame's xdir
+    // still lands on top of the snap: fix_x ends at itofix(x0) + xdir.
+    // Deferring the StartCall until after DoMovement would snap away the
+    // sub-pixel remainder the movement just accumulated (the GoldRush
+    // coach wall: cpp 67.209 vs rust 67.000 at the Turn->Drive2 wrap).
+    #[test]
+    fn phase_wrap_start_call_set_action_resyncs_fixed_coords_before_movement() {
+        let script = r#"#strict
+protected func StartGlide() { SetAction("Glide2"); return(1); }
+"#;
+        let mut coach = coach_fixture_definition();
+        let mut wrap_def =
+            Definition::from_script("Wagn", "Wagon", script).expect("script compiles");
+        wrap_def.set_c4_callback_convention(true);
+        wrap_def.set_shape_rect(coach.shape_rect());
+        wrap_def.set_shape_vertices(coach.shape_vertices().to_vec());
+        wrap_def.set_upright_attach(CNAT_BOTTOM);
+        wrap_def.set_mass(150);
+        wrap_def.set_grab(1);
+        let mut actions = HashMap::new();
+        // Roll wraps on its first exec (Delay 1, Length 1) into Glide,
+        // whose StartCall immediately SetActions to Glide2 — the coach's
+        // Turn -> Drive0 -> Driving() -> "Drive2" chain in miniature.
+        actions.insert(
+            "Roll".to_string(),
+            ActionSpec::default()
+                .with_delay(1)
+                .with_length(1)
+                .with_next("Glide"),
+        );
+        actions.insert(
+            "Glide".to_string(),
+            ActionSpec::default().with_start_call("StartGlide"),
+        );
+        actions.insert("Glide2".to_string(), ActionSpec::default());
+        wrap_def.configure_actions(None, actions);
+        coach = wrap_def;
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(400, 276));
+        engine.set_physics(PhysicsSettings::new(100, 100, -100));
+        engine.register_definition(coach).expect("registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Wagn")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(100, 260)),
+            )
+            .expect("spawns");
+        for _ in 0..3 {
+            engine.tick().expect("tick");
+        }
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(engine.objects[idx].state.position, Vector2::new(100, 260));
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(100), "settled");
+
+        // Arm the wrap frame: rolling right at 0.7 px/frame in Roll's
+        // final phase tick.
+        engine.objects[idx].state.action = ActionState::new("Roll");
+        engine.objects[idx].fixed_velocity.x = C4Fixed::from_raw(45875);
+        engine.objects[idx].state.mobile = true;
+
+        engine.tick().expect("wrap tick");
+        let object = &engine.objects[engine.find_object_index(id).expect("exists")];
+        assert_eq!(
+            object.state.action.name, "Glide2",
+            "wrap ran Glide's StartCall, which SetActioned Glide2"
+        );
+        assert_eq!(object.state.position.x, 101, "fixtoi(100.7) rounds to 101");
+        assert_eq!(
+            object.fixed_position.x.val(),
+            itofix(100).val() + 45875,
+            "SetAction's fix_x resync (C4Object.cpp:4155) happens BEFORE \
+             DoMovement adds xdir — the sub-pixel remainder survives the wrap"
         );
     }
 
