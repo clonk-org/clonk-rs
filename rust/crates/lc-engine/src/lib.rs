@@ -14264,7 +14264,7 @@ impl Engine {
             if let Some(idx) = self.find_object_index(ObjectId::new(traced)) {
                 let object = &self.objects[idx];
                 crate::rng::rng_trace_line(&format!(
-                    "RCOACH f{frame} x={} fix_x={} xdir={} y={} fix_y={} ydir={} mobile={} t_attach={} act={} ph={} comdir={:?} dir={:?} liq={}",
+                    "RCOACH f{frame} x={} fix_x={} xdir={} y={} fix_y={} ydir={} mobile={} t_attach={} act={} ph={} comdir={:?} dir={:?} liq={} tgt={} tgt2={}",
                     object.state.position.x,
                     object.fixed_position.x.val(),
                     object.fixed_velocity.x.val(),
@@ -14277,8 +14277,14 @@ impl Engine {
                     object.state.action.phase,
                     object.state.command_direction,
                     object.state.direction,
-                    object.state.in_liquid
+                    object.state.in_liquid,
+                    object.state.action.target.map(|id| id.as_u64()).unwrap_or(0),
+                    object.state.action.target2.map(|id| id.as_u64()).unwrap_or(0)
                 ));
+                let commands = object.commands.snapshot().command_names();
+                if !commands.is_empty() {
+                    crate::rng::rng_trace_line(&format!("RCMD f{frame} {}", commands.join(",")));
+                }
             }
         }
         if std::env::var("LC_EXECDBG").is_ok() && (1..=2).contains(&frame) {

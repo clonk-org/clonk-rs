@@ -1060,10 +1060,11 @@ void C4Object::Execute()
 	if (const char *coachdbg = getenv("LC_COACHDBG"); coachdbg && atoi(coachdbg) == Number && Game.FrameCounter <= 300)
 	{
 		if (FILE *f = LcRngTraceFile())
-			fprintf(f, "CCOACH f%d x=%d fix_x=%d xdir=%d y=%d fix_y=%d ydir=%d mobile=%d t_attach=%d act=%s ph=%d comdir=%d dir=%d liq=%d cmd=%s\n",
+			fprintf(f, "CCOACH f%d x=%d fix_x=%d xdir=%d y=%d fix_y=%d ydir=%d mobile=%d t_attach=%d act=%s ph=%d comdir=%d dir=%d liq=%d cmd=%s tgt=%d tgt2=%d\n",
 				static_cast<int>(Game.FrameCounter), x, fixtoi(fix_x, 65536), fixtoi(xdir, 65536), y, fixtoi(fix_y, 65536), fixtoi(ydir, 65536),
 				Mobile, Action.t_attach, +Action.Name, Action.Phase, Action.ComDir, Action.Dir, InLiquid,
-				Command ? CommandName(Command->Command) : "");
+				Command ? CommandName(Command->Command) : "",
+				Action.Target ? Action.Target->Number : 0, Action.Target2 ? Action.Target2->Number : 0);
 	}
 
 #ifdef DEBUGREC
