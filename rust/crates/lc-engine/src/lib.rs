@@ -21096,8 +21096,17 @@ impl Engine {
                     if reject_collect.as_bool() {
                         continue;
                     }
+                    let update = ObjectUpdate::new().with_container(obj1_id);
+                    match self.apply_object_update(candidate_id, update) {
+                        Ok(_) => {}
+                        Err(EngineError::UnknownObject(_)) => continue,
+                        Err(err) => return Err(err),
+                    }
+                    // C4Object::Collect enters with fCopyMotion=false
+                    // (C4Object.cpp:5698): the pinned stand-in re-applies
+                    // the explicit position and zero velocity AFTER the
+                    // enter's default motion copy.
                     let update = ObjectUpdate::new()
-                        .with_container(obj1_id)
                         .with_position(obj1_position)
                         .with_velocity(Vector2::ZERO);
                     match self.apply_object_update(candidate_id, update) {
@@ -23106,6 +23115,34 @@ impl Engine {
                 let entering = &mut self.objects[object_index].state;
                 if !(entering.alive && entering.category & CATEGORY_LIVING != 0) {
                     entering.controller = container_controller;
+                }
+                if !loaded {
+                    // C4Object::Enter's runtime semantics (loads are
+                    // denumeration): a TRANSFER exits first (`if (Contained)
+                    // if (!Exit(x, y))`, C4Object.cpp:1579) and Exit
+                    // mobilizes (`Mobile = 1; InLiquid = 0;`, :1540-1541);
+                    // then fCopyMotion (default true, C4Object.h:313)
+                    // copies the NEW container's motion IMMEDIATELY
+                    // (:1598-1606; CopyMotion, C4Movement.cpp:523-534).
+                    // The COLLECT path (fCopyMotion=false, C4Object.cpp:
+                    // 5698) re-applies its explicit position/velocity
+                    // AFTER this change.
+                    if previous.is_some() {
+                        let entering = &mut self.objects[object_index].state;
+                        entering.mobile = true;
+                        entering.in_liquid = false;
+                    }
+                    let (container_position, container_velocity) = {
+                        let container = &self.objects[container_index];
+                        (container.state.position, container.fixed_velocity)
+                    };
+                    let object = &mut self.objects[object_index];
+                    object.state.position = container_position;
+                    object.fixed_position =
+                        FixedVec2::from_ints(container_position.x, container_position.y);
+                    object.fixed_velocity = container_velocity;
+                    object.state.velocity = object.velocity_pixels();
+                    self.update_sector_for_index(object_index);
                 }
                 // Enter refreshes the new container too (C4Object.cpp:1518).
                 self.refresh_object_ocf(container_index);
@@ -41112,6 +41149,183 @@ public func ReadDir(pClonk) { return(GetDir(pClonk)); }
             Some(&Value::Int(1)),
             "GetDir(pObj) resolves the explicit target even from a \
              definition-call scope (C4Script.cpp:1120)"
+        );
+    }
+
+    // C4Object::Enter (C4Object.cpp:1552-1612): a transfer EXITS first
+    // (`if (Contained) if (!Exit(x, y))`, :1579) — and Exit mobilizes
+    // (`Mobile = 1; InLiquid = 0;`, :1540-1541) — then fCopyMotion
+    // (default true, C4Object.h:313) copies the NEW container's motion
+    // IMMEDIATELY (:1598-1606, "so the position will be correct when OCF
+    // is set"). GoldRush f60: AimAgain transfers the fresh CSHO from the
+    // bandit into the WCHR crosshair (Cowboy.c4d/Script.c:270-273) — cpp
+    // reports them at the crosshair's position with Mobile=1 the same
+    // frame; rust left them at the bandit's spot with mobile=false.
+    #[test]
+    fn enter_transfer_mobilizes_and_copies_the_containers_motion_like_cpp() {
+        let holder_script = r#"#strict
+public func Stash(pItem, pBox) { Enter(pBox, pItem); return(1); }
+"#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("HOLD", "Holder", holder_script)
+                    .expect("holder compiles"),
+            )
+            .expect("holder registers");
+        engine
+            .register_definition(simple_definition("ITEM"))
+            .expect("item registers");
+        engine
+            .register_definition(simple_definition("BOXX"))
+            .expect("box registers");
+
+        let holder = engine
+            .spawn_object(
+                SpawnConfig::new("HOLD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(100, 50)),
+            )
+            .expect("holder spawns");
+        let item = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(holder),
+            )
+            .expect("item spawns");
+        let idx = engine.find_object_index(item).expect("item exists");
+        assert!(
+            !engine.objects[idx].state.mobile,
+            "a FIRST Enter (CreateContents birth) has no Exit — Mobile \
+             stays 0 (C4Object::Init, C4Object.cpp:182-185)"
+        );
+        let boxx = engine
+            .spawn_object(
+                SpawnConfig::new("BOXX")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(300, 80)),
+            )
+            .expect("box spawns");
+
+        let holder_idx = engine.find_object_index(holder).expect("holder exists");
+        engine
+            .call_object_function(
+                holder_idx,
+                "Stash",
+                vec![
+                    Value::Object(item.as_u64()),
+                    Value::Object(boxx.as_u64()),
+                ],
+            )
+            .expect("stash runs");
+
+        let idx = engine.find_object_index(item).expect("item exists");
+        assert_eq!(
+            engine.objects[idx].state.container,
+            Some(boxx),
+            "the transfer landed"
+        );
+        assert!(
+            engine.objects[idx].state.mobile,
+            "the transfer's internal Exit mobilizes (C4Object.cpp:1540)"
+        );
+        assert_eq!(
+            engine.objects[idx].state.position,
+            Vector2::new(300, 80),
+            "fCopyMotion snaps the position to the NEW container \
+             immediately (C4Object.cpp:1598-1606)"
+        );
+    }
+
+    // FnLocal returns a live reference (C4Script.cpp:3423-3433): a write
+    // to a JUST-CREATED object's numbered slot persists into later frames.
+    // GoldRush: WINC::ControlThrow creates the WCHR crosshair and stores
+    // the aim angle in its slot 0 (`Local(0, GetCrosshair(pClonk)) = 84`,
+    // Winchester.c4d/Script.c:18-19); thirty frames later ExecuteWatch
+    // re-reads it for the vertex rewrite
+    // (`Local(0,obj)`, Cowboy.c4d/Script.c:699-700) — the f60 live wall
+    // showed rust reading nil there (Sin(0,40)=0 flattened the crosshair
+    // offset to the owner's x).
+    #[test]
+    fn foreign_numbered_local_write_to_a_pending_object_persists() {
+        let script = r#"#strict
+local pCross;
+local iGot;
+public func Boot() { AddEffect("Probe", this(), 1, 5, this()); return(1); }
+func FxProbeTimer(pThis, iNumber) {
+  if (!pCross) {
+    var pItem = FindContents(ITEM);
+    if (pItem) pItem->Make(this());
+    return(1);
+  }
+  iGot = Local(0, pCross);
+  return(-1);
+}
+public func TakeCross(pObj) { pCross = pObj; return(1); }
+"#;
+        // The rifle shape: a NESTED call on a contained item creates the
+        // marker, writes its slot 0 and removes itself (WINC::ControlThrow,
+        // Winchester.c4d/Script.c:18-29).
+        let item_script = r#"#strict
+public func Make(pClonk) {
+  var pCross = CreateObject(MARK, 0, 0, -1);
+  Local(0, pCross) = 84;
+  pClonk->TakeCross(pCross);
+  RemoveObject();
+  return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
+            )
+            .expect("item registers");
+        engine
+            .register_definition(simple_definition("MARK"))
+            .expect("marker registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(id),
+            )
+            .expect("item spawns");
+        let idx = engine.find_object_index(id).expect("actor exists");
+        engine
+            .call_object_function(idx, "Boot", Vec::new())
+            .expect("boot runs");
+
+        for _ in 0..12 {
+            engine.tick().expect("tick");
+        }
+
+        let marker_idx = engine
+            .objects
+            .iter()
+            .position(|object| object.definition_id == "MARK")
+            .expect("marker exists");
+        assert_eq!(
+            engine.objects[marker_idx].state.local_vars.get("__local_0"),
+            Some(&Value::Int(84)),
+            "the write to the pending object's slot 0 landed on the \
+             materialized object"
+        );
+        let idx = engine.find_object_index(id).expect("actor exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iGot"),
+            Some(&Value::Int(84)),
+            "a later callback reads the stored slot back \
+             (FnLocal by-reference, C4Script.cpp:3423-3433)"
         );
     }
 

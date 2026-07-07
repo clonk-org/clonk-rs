@@ -7806,6 +7806,7 @@ local iRifleAmmo;
 local iAimPhase;
 local pOrdrTarget;
 local ordrData1, ordrData2;
+local iRewrites, iLastAngle;
 
 public func Boot() {
   SetAction("Walk");
@@ -7855,7 +7856,12 @@ private func ExecuteWatch()
     if(idWeapon == WINC && !iRifleAmmo) return(LoadRifle());
   }
   if (Random(3)) return(1);
-  SetDir(Random(2));
+  if (GetAction() eq "Walk" || GetAction() eq "AimRifle")
+  {
+    SetDir(Random(2));
+    var obj = FindObject(WCHR, 0, 0, 0, 0, 0, "Crosshair", this());
+    if(obj) { iRewrites++; iLastAngle = Local(0,obj); SetVertexXY(0,-Sin(Local(0,obj),40)*(GetDir()*2-1),Cos(Local(0,obj),40),obj); }
+  }
   return(1);
 }
 
@@ -7896,7 +7902,43 @@ public func LoadRifle()
   if(GetAction() eq "AimRifle") { Sound("RifleLoad"); return(SetAction("LoadRifle")); }
 }
 
-protected func AimAgain() { return(1); }
+// Cowboy.c4d/Script.c:266-282: reload the crosshair from the ammo packs
+// and resume aiming; Clonk.c4d/Script.c:396-405 GetCartridge.
+protected func AimAgain() {
+  if(idWeapon == WINC)
+    {
+    var obj;
+    while(iRifleAmmo < 6 && GetCartridgeCount())
+      {
+      obj = GetCartridge();
+      Enter(WINC->GetCrosshair(this()), obj);
+      iRifleAmmo++;
+      Sound("RifleLoad2");
+      }
+    SetAction("AimRifle");
+    }
+  SetPhase(iAimPhase);
+  Sound("RifleLoad2");
+}
+
+public func GetCartridge()
+  {
+  var pObj;
+  for(var i = 0; pObj = Contents(i); i++)
+    if(pObj->~IsCartridgePack())
+      return(pObj->~GetItem());
+  return(0);
+  }
+
+// The post-reload watch idle (ExecuteWatch's Random-gated branch,
+// Cowboy.c4d/Script.c:696-701): re-aims the crosshair vertex from the
+// stored angle — the f60 live wall read Local(0,obj) here.
+public func DoWatchRewrite() {
+  SetDir(1);
+  var obj = FindObject(WCHR, 0, 0, 0, 0, 0, "Crosshair", this());
+  if(obj) SetVertexXY(0,-Sin(Local(0,obj),40)*(GetDir()*2-1),Cos(Local(0,obj),40),obj);
+  return(Local(0,obj));
+}
 "#,
         )
         .expect("write bandit script");
@@ -8060,6 +8102,71 @@ public func ActualizePhase(pClonk)
                 .any(|object| object.definition_id == "WINC"),
             "the rifle removed itself at the end of ControlThrow \
              (Winchester:29 - cpp removes the bandits' rifles at f30)"
+        );
+
+        // The f60 class, effect-scope form: keep ticking until the
+        // Random-gated watch idle (Cowboy.c4d/Script.c:694-702) fires at
+        // least once INSIDE FxOrderDefendTimer; the re-read of the stored
+        // angle must be 84, never nil (a nil read flattens the vertex to
+        // Sin(0,40)=0 — the f60 live wall's crosshairs at owner+0).
+        let bandit_id = bandit.id;
+        for _ in 0..200 {
+            engine.tick().expect("tick");
+        }
+        let bandit_idx = engine.find_object_index(bandit_id).expect("bandit exists");
+        let rewrites = engine.objects[bandit_idx]
+            .state
+            .local_vars
+            .get("iRewrites")
+            .cloned()
+            .unwrap_or(lc_script::Value::Nil);
+        assert!(
+            matches!(rewrites, lc_script::Value::Int(n) if n >= 1),
+            "the watch idle rewrite fired at least once in 200 ticks \
+             (got {rewrites:?})"
+        );
+        assert_eq!(
+            engine.objects[bandit_idx].state.local_vars.get("iLastAngle"),
+            Some(&lc_script::Value::Int(84)),
+            "the effect-scope Local(0,obj) re-read sees the stored angle"
+        );
+        let snapshot = engine.snapshot();
+        let cross_state = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "WCHR")
+            .expect("crosshair exists");
+        let vertex = cross_state.vertices.first().expect("crosshair vertex");
+        assert_eq!(
+            vertex.x.abs(),
+            40,
+            "the rewritten vertex keeps the Sin(84,40) magnitude \
+             (got {:?})",
+            (vertex.x, vertex.y)
+        );
+
+        let bandit_idx = engine.find_object_index(bandit_id).expect("bandit exists");
+        let angle = engine
+            .call_object_function(bandit_idx, "DoWatchRewrite", Vec::new())
+            .expect("watch rewrite runs");
+        assert_eq!(
+            angle,
+            lc_script::Value::Int(84),
+            "Local(0, FindObject(WCHR, ..., \"Crosshair\", this())) reads \
+             the angle stored at load time (Winchester.c4d/Script.c:19)"
+        );
+        let snapshot = engine.snapshot();
+        let cross = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "WCHR")
+            .expect("crosshair exists");
+        let vertex = cross.vertices.first().expect("crosshair vertex");
+        assert_eq!(
+            (vertex.x, vertex.y),
+            (-40, 4),
+            "the rewrite recomputes the vertex from the stored 84 and the \
+             Right facing (-Sin(84,40)*1, Cos(84,40))"
         );
     }
 
