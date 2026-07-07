@@ -93,6 +93,29 @@ fn arrow_form_localn_read_resolves_the_target_object_local() {
 }
 
 #[test]
+fn arrow_form_numbered_local_read_resolves_the_target_object_slot() {
+    // `pObj->Local(0)`: `->` supplies Obj=pObj, so FnLocal returns
+    // pObj->Local[0] (C4Script.cpp:3423-3433, pObj defaulting to cthr->Obj).
+    // The method-call READ form must resolve through the same host cell as
+    // `Local(0, pObj)` — Hazard's Ammo.c `return(ammo->Local(0))` depends on
+    // it. The numbered hook key is `__local_{index}`.
+    let (mut engine, cells) = engine_with_stub_hook();
+    cells
+        .borrow_mut()
+        .insert((8, "__local_0".to_string()), value_cell(Value::Int(55)));
+    engine.add_script(
+        Script::compile("public func Peek(target) { return target->Local(0); }").expect("compiles"),
+    );
+    assert_eq!(
+        engine
+            .call("Peek", &[Value::Object(8)])
+            .expect("call succeeds"),
+        Value::Int(55),
+        "the arrow-form read resolved the target's numbered local slot"
+    );
+}
+
+#[test]
 fn falsy_target_falls_back_to_the_executing_object() {
     // FnLocalN: `if (!pObj) pObj = cthr->Obj` (C4Script.cpp:4593-4596) —
     // a nil/0 target means the executing object, NOT the hook.

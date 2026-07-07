@@ -1871,6 +1871,25 @@ impl<'a> Vm<'a> {
             let value = cell.borrow().clone();
             return Ok(value);
         }
+        // `pObj->Local(n)`: the numbered-slot analogue (FnLocal by-reference,
+        // C4Script.cpp:3423-3433). Same routing as LocalN — resolve the
+        // TARGET's `__local_{n}` slot through the cross-object cell hook, not
+        // world dispatch. A negative index reads nil like FnLocal. Hazard's
+        // Ammo.c `return(ammo->Local(0))` depends on it.
+        if matches!(target, Value::Object(_))
+            && name == "Local"
+            && args.len() == 1
+            && !self.functions.contains_key(name)
+            && !self.host_functions.contains_key(name)
+        {
+            let index = self.evaluate_slot_index("Local()", &args[0], env, depth)?;
+            if index < 0 {
+                return Ok(Value::Nil);
+            }
+            let cell = self.numbered_local_cell(env, index, Some(target));
+            let value = cell.borrow().clone();
+            return Ok(value);
+        }
         match &target {
             Value::Nil | Value::Int(0) | Value::Bool(false) => Err(RuntimeError::new(
                 "Object call: target is zero!".to_string(),
