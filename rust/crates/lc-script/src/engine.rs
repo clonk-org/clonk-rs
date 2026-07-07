@@ -43,11 +43,18 @@ impl Script {
     }
 
     fn from_ast(ast: AstScript) -> Self {
-        let mut functions = HashMap::new();
+        let mut functions: HashMap<String, Function> = HashMap::new();
         for mut function in ast.functions {
             // Each function carries its owning script's #strict level so the VM
             // can apply level-correct `==`/`!=` (C++ uses Fn->pOrgScript->Strict).
             function.strict_level = ast.strict_level;
+            // A redefinition in the SAME script keeps the earlier definition
+            // as its `inherited` target (`Fn->OwnerOverloaded =
+            // Fn->Owner->GetOverloadedFunc(Fn)`, C4AulParse.cpp:1404-1406) —
+            // the Coach.c4d menu-description wrappers forward through it.
+            if let Some(previous) = functions.remove(&function.name) {
+                function.push_overload(previous);
+            }
             functions.insert(function.name.clone(), function);
         }
         Self {

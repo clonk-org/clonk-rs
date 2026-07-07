@@ -38959,6 +38959,51 @@ func Probe() {
         );
     }
 
+    // C4Aul include linking sets OwnerOverloaded across #include boundaries
+    // (C4AulLink.cpp), so `_inherited()` in COWB::ControlDownDouble reaches
+    // CLNK::ControlDownDouble when TRPR includes COWB includes CLNK
+    // (Trapper.c4d/Cowboy.c4d/Clonk.c4d) — the GoldRush dismount chain.
+    #[test]
+    fn underscore_inherited_chains_through_a_two_level_include() {
+        let base = r#"#strict
+local hits;
+protected func Poke() { hits = hits + 1; return(7); }
+"#;
+        let mid = r#"#strict
+#include BASE
+public func Poke() { return(_inherited()); }
+"#;
+        let top = r#"#strict
+#include MIDD
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(Definition::from_script("BASE", "Base", base).expect("base"))
+            .expect("base registers");
+        engine
+            .register_definition(Definition::from_script("MIDD", "Mid", mid).expect("mid"))
+            .expect("mid registers");
+        engine
+            .register_definition(Definition::from_script("TOPP", "Top", top).expect("top"))
+            .expect("top registers");
+        engine.resolve_includes().expect("includes resolve");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("TOPP").with_category(CATEGORY_OBJECT))
+            .expect("top spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        let result = engine
+            .call_object_function(idx, "Poke", Vec::new())
+            .expect("Poke runs without an inherited error");
+        assert_eq!(result, Value::Int(7), "the BASE implementation answered");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("hits"),
+            Some(&Value::Int(1)),
+            "the BASE body executed once"
+        );
+    }
+
     // Cowboy.c4d Recruitment creates the AHUD with the recruit's owner
     // (`CreateObject(AHUD,0,0,GetOwner())`, Cowboy.c4d/Script.c:13) — the
     // GoldRush AHUD must belong to player 0 or FindObjectOwner misses it
