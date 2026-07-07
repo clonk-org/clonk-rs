@@ -14310,6 +14310,20 @@ impl Engine {
                 }
             }
 
+            // ExecAction's action transitions fire their EndCall/StartCall
+            // INSIDE SetAction (C4Object.cpp:4160-4185), i.e. BEFORE
+            // ExecMovement (C4Object::Execute order, :1074/:1079). A
+            // StartCall that SetActions again (the coach's Driving ->
+            // "Drive2") must take its fix_x/fix_y resync (:4154-4155) at
+            // the PRE-movement pixel — draining only after movement let
+            // the snap eat the sub-pixel remainder DoMovement just built.
+            // Transitions recorded during movement/effects still drain at
+            // the post-movement call below.
+            self.trigger_action_callbacks(idx, Some(previous_action_name.clone()))?;
+            if self.objects[idx].destroyed {
+                continue;
+            }
+
             // C4Object::ExecMovement (C4Movement.cpp:553-616): contained
             // objects copy the container's motion (:556-561), C4D_StaticBack
             // never moves (:564, a MASK test unlike Init's equality), only
@@ -44848,6 +44862,89 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             object.fixed_position.x.val(),
             itofix(103).val(),
             "horizontal abort snaps fix_x to the integer pixel"
+        );
+    }
+
+    // The phase-end NextAction transition runs through SetAction INSIDE
+    // ExecAction (C4Object.cpp:5473-5480), which resyncs fix_x/fix_y to
+    // the integer position (:4154-4155) and runs the new action's
+    // StartCall INLINE (:4160-4171) — all BEFORE ExecMovement
+    // (C4Object::Execute order, C4Object.cpp:1074/1079). A StartCall that
+    // SetActions again (the GoldRush coach's Driving -> "Drive2") snaps
+    // the fixed coords at the PRE-movement pixel, so the frame's xdir
+    // still lands on top of the snap: fix_x ends at itofix(x0) + xdir.
+    // Deferring the StartCall until after DoMovement would snap away the
+    // sub-pixel remainder the movement just accumulated (the GoldRush
+    // coach wall: cpp 67.209 vs rust 67.000 at the Turn->Drive2 wrap).
+    #[test]
+    fn phase_wrap_start_call_set_action_resyncs_fixed_coords_before_movement() {
+        let script = r#"#strict
+protected func StartGlide() { SetAction("Glide2"); return(1); }
+"#;
+        let mut coach = coach_fixture_definition();
+        let mut wrap_def =
+            Definition::from_script("Wagn", "Wagon", script).expect("script compiles");
+        wrap_def.set_c4_callback_convention(true);
+        wrap_def.set_shape_rect(coach.shape_rect());
+        wrap_def.set_shape_vertices(coach.shape_vertices().to_vec());
+        wrap_def.set_upright_attach(CNAT_BOTTOM);
+        wrap_def.set_mass(150);
+        wrap_def.set_grab(1);
+        let mut actions = HashMap::new();
+        // Roll wraps on its first exec (Delay 1, Length 1) into Glide,
+        // whose StartCall immediately SetActions to Glide2 — the coach's
+        // Turn -> Drive0 -> Driving() -> "Drive2" chain in miniature.
+        actions.insert(
+            "Roll".to_string(),
+            ActionSpec::default()
+                .with_delay(1)
+                .with_length(1)
+                .with_next("Glide"),
+        );
+        actions.insert(
+            "Glide".to_string(),
+            ActionSpec::default().with_start_call("StartGlide"),
+        );
+        actions.insert("Glide2".to_string(), ActionSpec::default());
+        wrap_def.configure_actions(None, actions);
+        coach = wrap_def;
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(400, 276));
+        engine.set_physics(PhysicsSettings::new(100, 100, -100));
+        engine.register_definition(coach).expect("registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Wagn")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(100, 260)),
+            )
+            .expect("spawns");
+        for _ in 0..3 {
+            engine.tick().expect("tick");
+        }
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(engine.objects[idx].state.position, Vector2::new(100, 260));
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(100), "settled");
+
+        // Arm the wrap frame: rolling right at 0.7 px/frame in Roll's
+        // final phase tick.
+        engine.objects[idx].state.action = ActionState::new("Roll");
+        engine.objects[idx].fixed_velocity.x = C4Fixed::from_raw(45875);
+        engine.objects[idx].state.mobile = true;
+
+        engine.tick().expect("wrap tick");
+        let object = &engine.objects[engine.find_object_index(id).expect("exists")];
+        assert_eq!(
+            object.state.action.name, "Glide2",
+            "wrap ran Glide's StartCall, which SetActioned Glide2"
+        );
+        assert_eq!(object.state.position.x, 101, "fixtoi(100.7) rounds to 101");
+        assert_eq!(
+            object.fixed_position.x.val(),
+            itofix(100).val() + 45875,
+            "SetAction's fix_x resync (C4Object.cpp:4155) happens BEFORE \
+             DoMovement adds xdir — the sub-pixel remainder survives the wrap"
         );
     }
 
