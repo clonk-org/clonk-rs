@@ -479,6 +479,8 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
                         y,
                         solid = landscape.is_solid_at(x, y),
                         liquid = landscape.is_liquid_at(x, y),
+                        byte = ?engine.debug_landscape_byte(x, y),
+                        material = ?engine.debug_landscape_material_name(x, y),
                         "probe"
                     );
                 }

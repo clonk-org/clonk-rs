@@ -3479,6 +3479,39 @@ impl Object {
                 movement.contact_density,
             );
             if contact.is_contact() {
+                if coach_debug_enabled() && movement.object_id.as_u64() == 1450 {
+                    let details: Vec<String> = self
+                        .state
+                        .vertices
+                        .iter()
+                        .map(|vertex| {
+                            let vx = candidate.x + vertex.x;
+                            let vy = candidate.y + vertex.y;
+                            let density = movement_density_at(
+                                landscape,
+                                materials,
+                                movement.solid_masks,
+                                excluded_solid_mask,
+                                vx,
+                                vy,
+                            );
+                            format!(
+                                "v({},{})@({vx},{vy}) d={density} byte={:?}",
+                                vertex.x,
+                                vertex.y,
+                                landscape.grid_byte_at(vx, vy)
+                            )
+                        })
+                        .collect();
+                    crate::rng::rng_trace_line(&format!(
+                        "HCONTACT cand=({},{}) excl={:?} masks={} {}",
+                        candidate.x,
+                        candidate.y,
+                        excluded_solid_mask,
+                        movement.solid_masks.len(),
+                        details.join(" | ")
+                    ));
+                }
                 outcome.any_contact = true;
                 outcome.contact_cnat |= contact.contact_cnat;
                 on_contact(self, contact.contact_cnat)?;
@@ -3508,6 +3541,16 @@ impl Object {
                 movement.contact_density,
             );
             if contact.is_contact() {
+                if coach_debug_enabled() && movement.object_id.as_u64() == 1450 {
+                    crate::rng::rng_trace_line(&format!(
+                        "VCONTACT cand=({},{}) first_friction={} xdir_before={} ydir_before={}",
+                        candidate.x,
+                        candidate.y,
+                        contact.first_friction(),
+                        self.fixed_velocity.x.val(),
+                        self.fixed_velocity.y.val()
+                    ));
+                }
                 outcome.any_contact = true;
                 outcome.contact_cnat |= contact.contact_cnat;
                 on_contact(self, contact.contact_cnat)?;
@@ -3624,6 +3667,18 @@ impl Object {
                 movement.contact_density,
             );
             if contact.is_contact() {
+                if coach_debug_enabled() && movement.object_id.as_u64() == 1450 {
+                    crate::rng::rng_trace_line(&format!(
+                        "ACONTACT cand=({},{}) orig=({},{}) attach={} pos=({},{})",
+                        candidate.x,
+                        candidate.y,
+                        original.x,
+                        original.y,
+                        movement.attach,
+                        self.state.position.x,
+                        self.state.position.y
+                    ));
+                }
                 any_contact = true;
                 on_contact(self, contact.contact_cnat)?;
                 self.fixed_position =
@@ -3637,6 +3692,15 @@ impl Object {
 
             let override_x = candidate.x != original.x;
             let override_y = candidate.y != original.y;
+            if (override_x || override_y)
+                && coach_debug_enabled()
+                && movement.object_id.as_u64() == 1450
+            {
+                crate::rng::rng_trace_line(&format!(
+                    "ATTOVR cand=({},{}) orig=({},{}) attach={}",
+                    candidate.x, candidate.y, original.x, original.y, movement.attach
+                ));
+            }
             self.state.position = candidate;
 
             if override_x {
@@ -9080,6 +9144,13 @@ fn sign_i32(value: i32) -> i32 {
     value.signum()
 }
 
+/// LC_COACHDBG forensics gate (diagnostic only) — cached so the movement
+/// contact loops don't pay an env lookup per abort.
+fn coach_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("LC_COACHDBG").is_ok())
+}
+
 fn redirect_force(from: &mut C4Fixed, to: &mut C4Fixed, direction: i32) {
     let redirect = fixed100(50);
     let magnitude =
@@ -14004,14 +14075,20 @@ impl Engine {
                 }
             }
         }
-        if std::env::var("LC_COACHDBG").is_ok() && (28..=41).contains(&frame) {
+        if coach_debug_enabled() && (20..=60).contains(&frame) {
             if let Some(idx) = self.find_object_index(ObjectId::new(1450)) {
                 let object = &self.objects[idx];
                 crate::rng::rng_trace_line(&format!(
-                    "RCOACH f{frame} x={} fix_x={} xdir={} contact_snap?",
+                    "RCOACH f{frame} x={} fix_x={} xdir={} y={} fix_y={} ydir={} mobile={} t_attach={} act={}",
                     object.state.position.x,
                     object.fixed_position.x.val(),
-                    object.fixed_velocity.x.val()
+                    object.fixed_velocity.x.val(),
+                    object.state.position.y,
+                    object.fixed_position.y.val(),
+                    object.fixed_velocity.y.val(),
+                    object.state.mobile,
+                    object.frame_t_attach,
+                    object.state.action.name
                 ));
             }
         }
