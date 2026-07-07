@@ -391,6 +391,13 @@ pub struct CrewOverlay {
     /// The def's own rank symbols (`pDef->pRankSymbols`,
     /// src/C4ObjectInfo.cpp:334-341); falls back to the global Rank.png.
     pub rank_symbols: Option<ImageData>,
+    /// `cursor->Info` presence + `Info->sName`: the red cursor label above
+    /// the flashing mark draws only for crew with an object info
+    /// (C4Game::DrawCursors, src/C4Game.cpp:1873-1887).
+    pub info_name: Option<String>,
+    /// `Info->sRankName` for the extra rank line when `Rank > 0`
+    /// (src/C4Game.cpp:1877-1881).
+    pub rank_name: Option<String>,
 }
 
 #[derive(Debug)]
@@ -2660,14 +2667,53 @@ impl GraphicsSystem {
         };
         let cursor_size = cell as f32;
 
+        let mark_top = screen_y - shape_height / 2.0 - cursor_size;
         let rect = GuiRect::from_origin_size(
-            GuiPoint::new(
-                screen_x - cursor_size / 2.0,
-                screen_y - shape_height / 2.0 - cursor_size,
-            ),
+            GuiPoint::new(screen_x - cursor_size / 2.0, mark_top),
             GuiSize::new(cursor_size, cursor_size),
         );
         draw_image_region(&mut self.surface, &rect, &image, None, &source, false, None);
+
+        // Cursor name label (src/C4Game.cpp:1873-1887): with cursor->Info,
+        // the crew name — prefixed by a `sRankName` line when Rank > 0 —
+        // is drawn in FontRegular, red 0xffff0000, centered above the mark
+        // (`coy - Shape.Hgt/2 - fctCursor.Hgt - 2 - texthgt`). TextOut
+        // splits the C++ "rank|name" on '|' into stacked centered lines
+        // (src/StdDDraw2.cpp:1039).
+        let label = self
+            .hud_players
+            .iter()
+            .find(|player| player.owner == owner)
+            .and_then(|player| player.crew.iter().find(|crew| crew.object_id == cursor_id))
+            .and_then(|crew| {
+                crew.info_name
+                    .as_ref()
+                    .map(|name| (name.clone(), crew.rank, crew.rank_name.clone()))
+            });
+        if let Some((name, rank, rank_name)) = label {
+            let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
+            let line_height = font.line_height();
+            // `texthgt = GetLineHeight(); if (Rank > 0) texthgt += texthgt`
+            // (src/C4Game.cpp:1876-1880).
+            let lines: Vec<String> = rank_name
+                .filter(|_| rank > 0)
+                .map(|rank_name| vec![rank_name, name.clone()])
+                .unwrap_or_else(|| vec![name]);
+            let text_height = line_height * lines.len() as i32;
+            let text_x = screen_x.round() as i32;
+            let mut text_y = mark_top.round() as i32 - 2 - text_height;
+            for line in &lines {
+                font.draw(
+                    &mut self.surface,
+                    text_x,
+                    text_y,
+                    line,
+                    Color::opaque(0xff, 0x00, 0x00),
+                    lc_graphics::clonk_font::TextAlign::Center,
+                );
+                text_y += line_height;
+            }
+        }
     }
 
     /// `Game.GraphicsResource.FontRegular` for HUD text.
@@ -4912,6 +4958,155 @@ mod tests {
         }
         assert!(found, "expected the fctCursor cell above the cursor crew");
         assert!(!leaked, "other sheet cells must not be drawn");
+    }
+
+    /// Cursor + flash + a 40-cell atlas sheet so the mark (cell 35) draws.
+    fn cursor_label_fixture(info_name: Option<&str>) -> (SimulationSnapshot, GraphicsSystem) {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].owner = 1;
+        snapshot.objects[0].position = Vector2::new(160, 90);
+        let object_id = snapshot.objects[0].id;
+        snapshot.players.push(PlayerState {
+            id: 1,
+            cursor: Some(object_id),
+            control: lc_engine::PlayerControlState {
+                cursor_flash: 30,
+                ..Default::default()
+            },
+            ..PlayerState::default()
+        });
+
+        let cell = 4u32;
+        let pixels: Vec<u8> = (0..40 * cell * cell)
+            .flat_map(|_| [0u8, 200, 0, 255])
+            .collect();
+        let cursor_image = ImageData::new(40 * cell, cell, pixels);
+        let mut cursor_entries = vec![None; 8];
+        cursor_entries[5] = Some(cursor_image);
+        let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
+
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Cursor Label Scenario",
+            test_font(),
+            empty_sprites(),
+            cursor_atlas,
+            empty_hud_graphics(),
+        );
+        let players = vec![PlayerOverlay {
+            owner: 1,
+            name: "P1".to_string(),
+            wealth: 0,
+            score: 0,
+            cursor: Some(object_id),
+            eliminated: false,
+            owner_color: Color::opaque(0, 100, 200),
+            select_count: 1,
+            show_startup: false,
+            crew: vec![CrewOverlay {
+                object_id,
+                label: "Joe".to_string(),
+                energy_fraction: 1.0,
+                is_focus: true,
+                portrait: None,
+                rank: 0,
+                rank_symbols: None,
+                info_name: info_name.map(str::to_string),
+                rank_name: None,
+            }],
+        }];
+        graphics.update_overlay(&GraphicsOverlay {
+            frame_text: "",
+            status_text: "",
+            debug_hud: false,
+            players,
+            game_time_seconds: 0,
+            message_board_line: None,
+        });
+        (snapshot, graphics)
+    }
+
+    fn count_red_text_pixels(graphics: &GraphicsSystem) -> usize {
+        graphics
+            .surface()
+            .pixels()
+            .chunks_exact(4)
+            .filter(|chunk| *chunk == [255u8, 0, 0, 255])
+            .count()
+    }
+
+    #[test]
+    fn cursor_name_label_drawn_in_red_above_cursor_mark() {
+        // C4Game::DrawCursors (src/C4Game.cpp:1873-1887): with cursor->Info,
+        // the crew name is drawn in FontRegular, color 0xffff0000, centered
+        // above the flashing cursor mark.
+        let (snapshot, mut graphics) = cursor_label_fixture(Some("Joe"));
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+        assert!(
+            count_red_text_pixels(&graphics) > 0,
+            "expected red 0xffff0000 name text above the cursor mark"
+        );
+    }
+
+    #[test]
+    fn cursor_name_label_needs_object_info() {
+        // `if (cursor->Info)` (src/C4Game.cpp:1873): no info, no label.
+        let (snapshot, mut graphics) = cursor_label_fixture(None);
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+        assert_eq!(
+            count_red_text_pixels(&graphics),
+            0,
+            "objects without info draw no cursor label"
+        );
+    }
+
+    #[test]
+    fn cursor_label_rank_line_stacks_above_the_name() {
+        // `Rank > 0` doubles texthgt and prefixes the sRankName line
+        // (src/C4Game.cpp:1877-1881), so the label block starts one line
+        // higher than the rank-0 name-only label.
+        let min_red_y = |graphics: &GraphicsSystem| {
+            graphics
+                .surface()
+                .pixels()
+                .chunks_exact(4)
+                .enumerate()
+                .filter(|(_, chunk)| *chunk == [255u8, 0, 0, 255])
+                .map(|(index, _)| index / graphics.surface().width() as usize)
+                .min()
+        };
+
+        let (snapshot, mut graphics) = cursor_label_fixture(Some("Joe"));
+        let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
+        graphics.render_frame(&snapshot, &viewports);
+        let name_only_top = min_red_y(&graphics).expect("name label drawn");
+
+        let (snapshot, mut graphics) = cursor_label_fixture(Some("Joe"));
+        let mut players = graphics.hud_players.clone();
+        players[0].crew[0].rank = 3;
+        players[0].crew[0].rank_name = Some("Captain".to_string());
+        graphics.update_overlay(&GraphicsOverlay {
+            frame_text: "",
+            status_text: "",
+            debug_hud: false,
+            players,
+            game_time_seconds: 0,
+            message_board_line: None,
+        });
+        let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
+        graphics.render_frame(&snapshot, &viewports);
+        let ranked_top = min_red_y(&graphics).expect("rank|name label drawn");
+
+        assert!(
+            ranked_top < name_only_top,
+            "rank line must raise the label block (ranked_top={ranked_top}, name_only_top={name_only_top})"
+        );
     }
 
     #[test]

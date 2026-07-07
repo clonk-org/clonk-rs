@@ -5582,6 +5582,24 @@ impl GameApp {
         }
     }
 
+    /// Fills the C4ObjectInfo-backed crew fields (`pObj->Info`): name, rank
+    /// and rank name. The cursor label above the flashing mark draws from
+    /// these (C4Game::DrawCursors, src/C4Game.cpp:1873-1887) — independent of
+    /// the ShowPortraits flag gating [`Self::populate_crew_portraits`].
+    fn populate_crew_infos(&self, players: &mut [PlayerOverlay]) {
+        for player in players.iter_mut() {
+            for crew in player.crew.iter_mut() {
+                if let Some(info) = self.engine.crew_object_info(crew.object_id) {
+                    crew.info_name = Some(info.name.clone());
+                    crew.rank = info.rank;
+                    // Def-custom Rank.txt names (C4Def rank overloads) are
+                    // not loaded yet; the standard DEFRANKS table stands in.
+                    crew.rank_name = default_rank_name(info.rank);
+                }
+            }
+        }
+    }
+
     /// Fills the presentation half of the crew overlays: the def portrait
     /// (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-320), the crew name and
     /// rank (src/C4ObjectInfo.cpp:330-370) and the def rank symbols
@@ -8835,6 +8853,7 @@ impl GameApp {
             let startup_hint_owner = self.show_startup_hint.then_some(self.local_owner);
             let mut players =
                 collect_player_overlays(&self.snapshot, self.focus_id, startup_hint_owner);
+            self.populate_crew_infos(&mut players);
             self.populate_crew_portraits(&mut players);
             let overlay = GraphicsOverlay {
                 frame_text: &self.frame_text,
@@ -10481,6 +10500,30 @@ fn scenario_title_from_group(path: &Path) -> Option<String> {
         .find(|title| !title.is_empty())
 }
 
+/// `C4RankSystem::GetRankName` over the default rank list
+/// (`Game.Rank.Init(..., LoadResStr(IDS_GAME_DEFRANKS), 1000)`,
+/// src/C4Game.cpp:3518; planet/System.c4g/LanguageUS.txt IDS_GAME_DEFRANKS;
+/// src/C4RankSystem.cpp:184-213, fReturnLastIfOver). Negative ranks have no
+/// name; ranks past the table clamp to the last entry.
+fn default_rank_name(rank: i32) -> Option<String> {
+    const DEFAULT_RANKS: [&str; 11] = [
+        "Clonk",
+        "Ensign",
+        "Lieutenant",
+        "Captain",
+        "Major",
+        "Lieutenant Colonel",
+        "Colonel",
+        "Brigade General",
+        "Major General",
+        "Lieutenant General",
+        "General",
+    ];
+    usize::try_from(rank)
+        .ok()
+        .map(|rank| DEFAULT_RANKS[rank.min(DEFAULT_RANKS.len() - 1)].to_string())
+}
+
 fn collect_player_overlays(
     snapshot: &SimulationSnapshot,
     focus_id: Option<ObjectId>,
@@ -10524,6 +10567,8 @@ fn collect_player_overlays(
                 portrait: None,
                 rank: 0,
                 rank_symbols: None,
+                info_name: None,
+                rank_name: None,
             });
         }
         // C4Player::SelectCount (src/C4Viewport.cpp:1320); the initial
@@ -12104,6 +12149,20 @@ mod tests {
             }
         }
         assert!(varied, "placeholder preview should contain color variation");
+    }
+
+    #[test]
+    fn default_rank_names_follow_the_c4ranksystem_table() {
+        // C4RankSystem::GetRankName over the IDS_GAME_DEFRANKS list
+        // (src/C4RankSystem.cpp:184-213, src/C4Game.cpp:3518): rank 0 is
+        // "Clonk", ranks past the table clamp to the last entry, negative
+        // ranks have no name.
+        assert_eq!(default_rank_name(0).as_deref(), Some("Clonk"));
+        assert_eq!(default_rank_name(1).as_deref(), Some("Ensign"));
+        assert_eq!(default_rank_name(3).as_deref(), Some("Captain"));
+        assert_eq!(default_rank_name(10).as_deref(), Some("General"));
+        assert_eq!(default_rank_name(99).as_deref(), Some("General"));
+        assert_eq!(default_rank_name(-1), None);
     }
 
     #[test]
