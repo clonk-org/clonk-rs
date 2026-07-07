@@ -14287,14 +14287,23 @@ impl Engine {
                 }
             }
         }
-        if std::env::var("LC_EXECDBG").is_ok() && (1..=2).contains(&frame) {
-            for &idx in &exec_order {
-                let id = self.objects[idx].id.as_u64();
-                if (1449..=1460).contains(&id) {
-                    crate::rng::rng_trace_line(&format!(
-                        "REXEC f{frame} {id} {}",
-                        self.objects[idx].definition_id.as_str()
-                    ));
+        // LC_EXECDBG=<frame>: dump the full exec order for that frame
+        // (bare LC_EXECDBG keeps the legacy f1-2 intro-window dump).
+        if let Ok(raw) = std::env::var("LC_EXECDBG") {
+            let requested: Option<u64> = raw.trim().parse().ok();
+            let hit = match requested {
+                Some(target) => frame == target,
+                None => (1..=2).contains(&frame),
+            };
+            if hit {
+                for &idx in &exec_order {
+                    let id = self.objects[idx].id.as_u64();
+                    if requested.is_some() || (1449..=1460).contains(&id) {
+                        crate::rng::rng_trace_line(&format!(
+                            "REXEC f{frame} {id} {}",
+                            self.objects[idx].definition_id.as_str()
+                        ));
+                    }
                 }
             }
         }
