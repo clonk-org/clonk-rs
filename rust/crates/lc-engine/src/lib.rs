@@ -36087,6 +36087,50 @@ protected func Activity()
         assert_eq!(object.state.command_direction, CommandDirection::Left);
     }
 
+    // FnSetActionTargets assigns Action.Target/Target2 UNCONDITIONALLY
+    // (C4Script.cpp:1108-1116): unfilled parameters are nil, so a bare
+    // `SetActionTargets()` CLEARS both targets. The GoldRush intro's
+    // DisconnectWagon relies on this (Horse.c4d Script.c:398) — treating
+    // missing args as "keep" left the horse's pull target alive, so the
+    // following SetGait(3) saw fPulling and kept Pull3 where C++ galloped
+    // (the f105 wall: rust Pull3 vs cpp Gallop).
+    #[test]
+    fn bare_set_action_targets_clears_both_targets_like_cpp() {
+        let script = r#"#strict
+protected func Activity() { SetActionTargets(); return(1); }
+"#;
+        let mut horse = Definition::from_script("HRSE", "Horse", script).expect("compiles");
+        horse.set_c4_callback_convention(true);
+        let mut actions = HashMap::new();
+        actions.insert("Pull3".to_string(), ActionSpec::default());
+        horse.configure_actions(Some("Pull3".to_string()), actions);
+        horse.set_timer(1);
+        horse.set_timer_call(Some("Activity".to_string()));
+
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(horse).expect("registers");
+        let coach = engine
+            .spawn_object(SpawnConfig::new("HRSE").with_position(Vector2::new(50, 50)))
+            .expect("spawns");
+        let id = engine
+            .spawn_object(SpawnConfig::new("HRSE").with_position(Vector2::new(100, 50)))
+            .expect("spawns");
+        let idx = engine.find_object_index(id).expect("exists");
+        engine.objects[idx].state.action.target = Some(coach);
+        engine.objects[idx].state.action.target2 = Some(coach);
+
+        engine.tick().expect("tick");
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(
+            engine.objects[idx].state.action.target, None,
+            "SetActionTargets() nil-fills pTarget1 -> Action.Target cleared"
+        );
+        assert_eq!(
+            engine.objects[idx].state.action.target2, None,
+            "SetActionTargets() nil-fills pTarget2 -> Action.Target2 cleared"
+        );
+    }
+
     #[test]
     fn swim_procedure_uses_swim_physical_limit_and_trains_on_tick10() {
         let script = r#"

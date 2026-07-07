@@ -9546,20 +9546,24 @@ fn set_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
 fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
 
-    let (target1, update_target1) = if let Some(arg) = args.get(index) {
+    // FnSetActionTargets assigns BOTH targets unconditionally
+    // (C4Script.cpp:1108-1116): unfilled parameter slots are nil, so a
+    // bare `SetActionTargets()` clears them (the horse's DisconnectWagon,
+    // Horse.c4d Script.c:398).
+    let target1 = if let Some(arg) = args.get(index) {
         let target = parse_object_reference_argument(arg, "SetActionTargets", "target1")?;
         index += 1;
-        (target, true)
+        target
     } else {
-        (None, false)
+        None
     };
 
-    let (target2, update_target2) = if let Some(arg) = args.get(index) {
+    let target2 = if let Some(arg) = args.get(index) {
         let target = parse_object_reference_argument(arg, "SetActionTargets", "target2")?;
         index += 1;
-        (target, true)
+        target
     } else {
-        (None, false)
+        None
     };
 
     let mut object_id: Option<ObjectId> = None;
@@ -9590,12 +9594,8 @@ fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
 
-        if update_target1 {
-            object.set_action_target(0, target1);
-        }
-        if update_target2 {
-            object.set_action_target(1, target2);
-        }
+        object.set_action_target(0, target1);
+        object.set_action_target(1, target2);
 
         Ok(Value::Bool(true))
     })
@@ -23388,7 +23388,14 @@ func ProbeBadIndex(id) {
             Some(Some(ObjectId::new(42))),
             "target update recorded",
         );
-        assert!(action.target2.is_none(), "second target untouched");
+        // FnSetActionTargets assigns BOTH slots unconditionally with the
+        // nil-filled parameters (C4Script.cpp:1108-1116): a one-arg call
+        // CLEARS Action.Target2.
+        assert_eq!(
+            action.target2,
+            Some(None),
+            "unfilled pTarget2 clears the second target"
+        );
     }
 
     #[test]
