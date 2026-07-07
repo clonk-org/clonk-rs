@@ -10591,12 +10591,18 @@ fn fling(args: &[Value]) -> Result<Value, RuntimeError> {
         .filter(|&prec| prec != 0)
         .unwrap_or(1);
     let add_speed = matches!(args.get(4), Some(Value::Bool(true)) | Some(Value::Int(1)));
+    // FnFling requires an explicit target — `if (!pObj) return false;`
+    // (C4Script.cpp:347-349), NO caller fallback (unlike FnJump, :358).
+    // The horse/wipf `Fling(GetRider(), ...)` with no rider is a no-op.
+    let Some(target) = target else {
+        return Ok(Value::Bool(false));
+    };
     let active = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
             .and_then(|context| context.object_context().map(|object| object.id()))
     });
-    if let Some(target) = target {
+    {
         if Some(target) != active {
             let mut forwarded = vec![
                 Value::Nil,

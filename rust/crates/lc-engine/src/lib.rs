@@ -39517,6 +39517,58 @@ public func Death()
         assert!(!object.state.alive);
     }
 
+    // FnFling requires an explicit target: `if (!pObj) return false;`
+    // (C4Script.cpp:347-349) — NO fallback to the calling object (unlike
+    // FnJump directly below it, :358-360). The horse's Tumbling()
+    // StartCall runs `Fling(GetRider(), Random(5)-2, -3)` — with no
+    // rider the call is a NO-OP in C++; self-targeting it launched the
+    // riderless GoldRush horse up-right at its death frame (the f147
+    // residual: rust (1,-3) dir Right vs cpp (-0.5,0) dir Left).
+    #[test]
+    fn fling_with_nil_target_is_a_no_op_like_cpp() {
+        let script = r#"#strict
+protected func Activity() { return(Fling(GetActionTarget(), 1, -3)); }
+"#;
+        let mut horse = Definition::from_script("HRSX", "Horse", script).expect("compiles");
+        horse.set_c4_callback_convention(true);
+        horse.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Gallop".to_string(),
+                    ActionSpec::default().with_delay(1).with_length(20).with_next("Gallop"),
+                ),
+                ("Tumble".to_string(), ActionSpec::default().with_delay(1)),
+            ]),
+        );
+        horse.set_timer(1);
+        horse.set_timer_call(Some("Activity".to_string()));
+        let mut engine = Engine::with_seed(0);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine.register_definition(horse).expect("registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("HRSX")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 50))
+                    .with_action(ActionState::new("Gallop")),
+            )
+            .expect("spawns");
+
+        engine.tick().expect("tick");
+        let idx = engine.find_object_index(id).expect("exists");
+        let object = &engine.objects[idx];
+        assert_eq!(
+            object.fixed_velocity,
+            FixedVec2::ZERO,
+            "Fling(nil, 1, -3) must not launch the CALLER (C4Script.cpp:349)"
+        );
+        assert_eq!(
+            object.state.action.name, "Gallop",
+            "no Tumble transition from a nil-target Fling"
+        );
+    }
+
     #[test]
     fn change_def_swaps_definition_in_place_like_cpp() {
         let mut engine = Engine::with_seed(0);
