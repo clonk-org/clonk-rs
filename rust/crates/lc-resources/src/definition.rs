@@ -213,6 +213,9 @@ pub struct DefCore {
     pub line_intersect: i32,
     /// `Grab` (C4Def.cpp): 0 none, 1 grab+push, 2 grab-only.
     pub grab: i32,
+    /// `GrabPutGet` bitfield (src/C4Def.cpp:364-373): C4D_GrabPut=1 |
+    /// C4D_GrabGet=2 — the grabbed-vehicle put/get commands.
+    pub grab_put_get: i32,
     /// `NoBreath` (C4Def.cpp:409): exempt from the ExecLife breathing check.
     pub no_breath: bool,
     /// NoBurnDamage=1: burning deals no damage (C4Object.cpp:780).
@@ -500,6 +503,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut incomplete_activity = false;
     let mut physical = PhysicalInfo::default();
     let mut collectible = false;
+    let mut grab_put_get: i32 = 0;
     let mut constructable = false;
     let mut con_size_off: i32 = 0;
     let mut stretch_growth = false;
@@ -667,6 +671,19 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "grab" => {
                 grab = parse_i32(value).unwrap_or(0).max(0);
             }
+            "grabputget" => {
+                // StdBitfieldAdapt over C4D_GrabPut/C4D_GrabGet tokens
+                // (src/C4Def.cpp:364-373); numeric values pass through.
+                grab_put_get = value
+                    .split('|')
+                    .map(str::trim)
+                    .map(|token| match token {
+                        "C4D_GrabPut" => 1,
+                        "C4D_GrabGet" => 2,
+                        other => other.parse::<i32>().unwrap_or(0),
+                    })
+                    .fold(0, |acc, bit| acc | bit);
+            }
             "noburndamage" => {
                 no_burn_damage = parse_bool(value);
             }
@@ -797,6 +814,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         incomplete_activity,
         physical,
         collectible,
+        grab_put_get,
         constructable,
         con_size_off,
         stretch_growth,
@@ -2185,6 +2203,27 @@ Attach=1
         );
         assert_eq!(parsed.collection_limit, Some(3));
         assert!(parsed.collectible);
+    }
+
+    #[test]
+    fn parse_def_core_grab_put_get_bitfield() {
+        // StdBitfieldAdapt tokens (src/C4Def.cpp:364-373), e.g. the Lorry's
+        // `GrabPutGet=C4D_GrabGet|C4D_GrabPut`.
+        let data = br#"
+            [DefCore]
+            id=LORY
+            GrabPutGet=C4D_GrabGet|C4D_GrabPut
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(parsed.grab_put_get, 3);
+
+        let data = br#"
+            [DefCore]
+            id=CONT
+            GrabPutGet=C4D_GrabPut
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(parsed.grab_put_get, 1);
     }
 
     #[test]

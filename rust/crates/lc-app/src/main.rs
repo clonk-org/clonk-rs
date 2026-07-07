@@ -10,6 +10,7 @@
 
 mod clonk_fonts;
 mod control_options;
+mod draw_commands;
 mod game_over;
 mod gamepad;
 mod ingame_menu;
@@ -5582,6 +5583,24 @@ impl GameApp {
         }
     }
 
+    /// Fills the C4ObjectInfo-backed crew fields (`pObj->Info`): name, rank
+    /// and rank name. The cursor label above the flashing mark draws from
+    /// these (C4Game::DrawCursors, src/C4Game.cpp:1873-1887) — independent of
+    /// the ShowPortraits flag gating [`Self::populate_crew_portraits`].
+    fn populate_crew_infos(&self, players: &mut [PlayerOverlay]) {
+        for player in players.iter_mut() {
+            for crew in player.crew.iter_mut() {
+                if let Some(info) = self.engine.crew_object_info(crew.object_id) {
+                    crew.info_name = Some(info.name.clone());
+                    crew.rank = info.rank;
+                    // Def-custom Rank.txt names (C4Def rank overloads) are
+                    // not loaded yet; the standard DEFRANKS table stands in.
+                    crew.rank_name = default_rank_name(info.rank);
+                }
+            }
+        }
+    }
+
     /// Fills the presentation half of the crew overlays: the def portrait
     /// (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-320), the crew name and
     /// rank (src/C4ObjectInfo.cpp:330-370) and the def rank symbols
@@ -8835,7 +8854,35 @@ impl GameApp {
             let startup_hint_owner = self.show_startup_hint.then_some(self.local_owner);
             let mut players =
                 collect_player_overlays(&self.snapshot, self.focus_id, startup_hint_owner);
+            self.populate_crew_infos(&mut players);
             self.populate_crew_portraits(&mut players);
+            // Command rows for the local player's real cursor
+            // (C4Viewport::DrawCursorInfo, src/C4Viewport.cpp:948-961),
+            // skipped while the cursor's menu is active
+            // (src/C4Object.cpp:2952).
+            if self.display_flags.show_commands && self.object_menu.is_none() {
+                let cursor_id = self
+                    .snapshot
+                    .players
+                    .iter()
+                    .find(|player| player.id == self.local_owner)
+                    .and_then(|player| player.cursor);
+                if let Some(cursor_id) = cursor_id {
+                    let ctx = AppCommandContext {
+                        engine: &self.engine,
+                        bindings: &self.bindings,
+                        snapshot: &self.snapshot,
+                    };
+                    let commands =
+                        draw_commands::build_cursor_commands(&self.snapshot, cursor_id, &ctx);
+                    if let Some(overlay) = players
+                        .iter_mut()
+                        .find(|player| player.owner == self.local_owner)
+                    {
+                        overlay.commands = commands;
+                    }
+                }
+            }
             let overlay = GraphicsOverlay {
                 frame_text: &self.frame_text,
                 status_text: &self.status_text,
@@ -8843,6 +8890,10 @@ impl GameApp {
                 players,
                 game_time_seconds: self.game_time_seconds(),
                 message_board_line: self.message_board_line(),
+                // Config.Graphics.ShowCommands/ShowCommandKeys from the
+                // Display menu (src/C4Config.cpp:449-450).
+                show_commands: self.display_flags.show_commands,
+                show_command_keys: self.display_flags.show_command_keys,
             };
             self.graphics.update_overlay(&overlay);
             self.graphics.render_frame(&self.snapshot, &viewports);
@@ -10481,6 +10532,142 @@ fn scenario_title_from_group(path: &Path) -> Option<String> {
         .find(|title| !title.is_empty())
 }
 
+/// [`draw_commands::CommandContext`] over the live engine, the local
+/// keyboard bindings and the current snapshot.
+struct AppCommandContext<'a> {
+    engine: &'a Engine,
+    bindings: &'a KeyboardBindings,
+    snapshot: &'a SimulationSnapshot,
+}
+
+impl draw_commands::CommandContext for AppCommandContext<'_> {
+    fn def_has_function(&self, definition_id: &str, function: &str) -> bool {
+        self.engine
+            .definition_script_has_function(definition_id, function)
+    }
+
+    fn def_picture(&self, definition_id: &str) -> Option<ImageData> {
+        self.engine
+            .definition_picture_image(definition_id)
+            .map(|picture| ImageData::from_arc(picture.width(), picture.height(), picture.pixels()))
+    }
+
+    fn def_grab_put_get(&self, definition_id: &str) -> i32 {
+        self.engine.definition_grab_put_get(definition_id)
+    }
+
+    fn def_picture_phase(&self, definition_id: &str, phase: i32) -> Option<ImageData> {
+        if phase <= 0 {
+            return self.def_picture(definition_id);
+        }
+        // C4Def::Draw iPhaseX offsets the Picture rect by phase widths in
+        // the def sheet (src/C4Object.cpp:4055).
+        let rect = self.engine.definition_picture(definition_id)?;
+        let sheet = self.engine.definition_sprite_image(definition_id, None)?;
+        let (x0, y0) = (rect.x + phase * rect.width, rect.y);
+        if x0 < 0 || y0 < 0 || rect.width <= 0 || rect.height <= 0 {
+            return self.def_picture(definition_id);
+        }
+        let (w, h) = (rect.width as u32, rect.height as u32);
+        if x0 as u32 + w > sheet.width() || y0 as u32 + h > sheet.height() {
+            return self.def_picture(definition_id);
+        }
+        let src = sheet.pixels();
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for row in 0..h {
+            let start = (((y0 as u32 + row) * sheet.width() + x0 as u32) * 4) as usize;
+            pixels.extend_from_slice(&src[start..start + (w * 4) as usize]);
+        }
+        Some(ImageData::new(w, h, pixels))
+    }
+
+    fn control_image(&self, definition_id: &str, function: &str) -> Option<draw_commands::ImageAnnotation> {
+        // GetSFunc resolves across the #include merge, child shadowing
+        // parent (C4AulScript::GetSFunc); walk the chain in that order.
+        let mut stack = vec![definition_id.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(source) = self.engine.definition_script_source(&id) {
+                if draw_commands::source_defines_function(source, function) {
+                    return draw_commands::control_image_annotation(source, function);
+                }
+            }
+            if let Some(includes) = self.engine.definition_includes(&id) {
+                for include in includes.iter().rev() {
+                    stack.push(include.clone());
+                }
+            }
+        }
+        None
+    }
+
+    fn def_shape(&self, definition_id: &str) -> Option<lc_engine::DefinitionRect> {
+        self.engine.definition_shape_rect(definition_id)
+    }
+
+    fn key_label(&self, _owner: i32, control: i32) -> String {
+        // PlrControlKeyName (src/C4Viewport.cpp:1363-1374): the local
+        // keyboard set's key for the CON_* index, short name. The
+        // ControlBindingId order IS the CON_* order (src/C4Constants.h:158).
+        usize::try_from(control)
+            .ok()
+            .and_then(|index| ControlBindingId::ALL.get(index).copied())
+            .and_then(|binding| self.bindings.key_for(binding))
+            .map(format_key_label)
+            .unwrap_or_default()
+    }
+
+    fn base_owner(&self, _container: &ObjectSnapshot) -> Option<i32> {
+        // C4Object::Base is not modeled by the engine yet — the contained
+        // Buy/Sell commands (src/C4Object.cpp:3020-3034) stay off.
+        None
+    }
+
+    fn base_sell_enabled(&self) -> bool {
+        true
+    }
+
+    fn base_buy_enabled(&self) -> bool {
+        true
+    }
+
+    fn owner_color(&self, owner: i32) -> Color {
+        self.snapshot
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .and_then(|player| player.color.map(|rgb| Color::opaque(rgb.r, rgb.g, rgb.b)))
+            .unwrap_or_else(|| default_owner_color(owner))
+    }
+}
+
+/// `C4RankSystem::GetRankName` over the default rank list
+/// (`Game.Rank.Init(..., LoadResStr(IDS_GAME_DEFRANKS), 1000)`,
+/// src/C4Game.cpp:3518; planet/System.c4g/LanguageUS.txt IDS_GAME_DEFRANKS;
+/// src/C4RankSystem.cpp:184-213, fReturnLastIfOver). Negative ranks have no
+/// name; ranks past the table clamp to the last entry.
+fn default_rank_name(rank: i32) -> Option<String> {
+    const DEFAULT_RANKS: [&str; 11] = [
+        "Clonk",
+        "Ensign",
+        "Lieutenant",
+        "Captain",
+        "Major",
+        "Lieutenant Colonel",
+        "Colonel",
+        "Brigade General",
+        "Major General",
+        "Lieutenant General",
+        "General",
+    ];
+    usize::try_from(rank)
+        .ok()
+        .map(|rank| DEFAULT_RANKS[rank.min(DEFAULT_RANKS.len() - 1)].to_string())
+}
+
 fn collect_player_overlays(
     snapshot: &SimulationSnapshot,
     focus_id: Option<ObjectId>,
@@ -10524,6 +10711,8 @@ fn collect_player_overlays(
                 portrait: None,
                 rank: 0,
                 rank_symbols: None,
+                info_name: None,
+                rank_name: None,
             });
         }
         // C4Player::SelectCount (src/C4Viewport.cpp:1320); the initial
@@ -10567,6 +10756,7 @@ fn collect_player_overlays(
             select_count,
             show_startup: startup_hint_owner == Some(player.owner),
             crew,
+            commands: Vec::new(),
         });
     }
     players
@@ -12104,6 +12294,20 @@ mod tests {
             }
         }
         assert!(varied, "placeholder preview should contain color variation");
+    }
+
+    #[test]
+    fn default_rank_names_follow_the_c4ranksystem_table() {
+        // C4RankSystem::GetRankName over the IDS_GAME_DEFRANKS list
+        // (src/C4RankSystem.cpp:184-213, src/C4Game.cpp:3518): rank 0 is
+        // "Clonk", ranks past the table clamp to the last entry, negative
+        // ranks have no name.
+        assert_eq!(default_rank_name(0).as_deref(), Some("Clonk"));
+        assert_eq!(default_rank_name(1).as_deref(), Some("Ensign"));
+        assert_eq!(default_rank_name(3).as_deref(), Some("Captain"));
+        assert_eq!(default_rank_name(10).as_deref(), Some("General"));
+        assert_eq!(default_rank_name(99).as_deref(), Some("General"));
+        assert_eq!(default_rank_name(-1), None);
     }
 
     #[test]

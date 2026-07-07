@@ -466,6 +466,342 @@ pub fn draw_cursor_info(
     }
 }
 
+/// One contextual command entry of the C4Viewport::DrawCursorInfo command
+/// rows (src/C4Viewport.cpp:947-962): a C4Object::DrawCommand pair — key
+/// cell (fctKey cap + fctCommand symbol + key name) and image cell
+/// (src/C4Object.cpp:4018-4078) — resolved to presentation data by the app.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandIcon {
+    /// The COM_* code incl. the COM_Double bit (src/C4Constants.h:173-235):
+    /// picks the fctCommand phase via Com2Control and the double row.
+    pub com: u8,
+    /// `PlrControlKeyName(iPlayer, Com2Control(iCom), true)`
+    /// (src/C4Object.cpp:4071-4073); empty = no label.
+    pub key_label: String,
+    /// Secondary (right side) area — self activation & specials
+    /// (src/C4Object.cpp:3083-3098); bottom area otherwise.
+    pub side: bool,
+    pub image: CommandImage,
+}
+
+/// What fills a command's image cell.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CommandImage {
+    /// Def picture aspect-fit into the cell (DrawPicture / pDescImageDef,
+    /// src/C4Object.cpp:4053-4068).
+    Picture(Option<ImageData>),
+    /// Picture in GetFraction(85,85,Right,Top) + facet icon in
+    /// GetFraction(85,85,Left,Bottom) (src/C4Object.cpp:2960-2996,3040-3068).
+    Composite {
+        picture: Option<ImageData>,
+        icon: CommandOverlayIcon,
+    },
+    /// `fctExit.Draw(ccgo)` — the contained exit command
+    /// (src/C4Object.cpp:3013-3017).
+    Exit,
+    /// `DrawMenuSymbol(C4MN_Buy, ...)` (src/C4Menu.cpp:61-65).
+    BuyMenu { owner_color: Color },
+    /// `DrawMenuSymbol(C4MN_Sell, ...)` (src/C4Menu.cpp:66-70).
+    SellMenu { owner_color: Color },
+}
+
+/// The overlay icon of a composite image cell.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CommandOverlayIcon {
+    /// `fctBuild` (src/C4Object.cpp:2962).
+    Build,
+    /// `fctHand` phase — 0 put, 1 get, 6 ungrab
+    /// (src/C4Object.cpp:2978-2994).
+    Hand(i32),
+}
+
+/// `Com2Control` (src/C4ObjectCom.cpp:857-877) plus the COM_Double bit:
+/// the fctCommand sheet phase (x = control index, y = double row).
+fn com_control_index(com: u8) -> (i32, bool) {
+    let double = com & 128 != 0; // COM_Double
+    let control = match com & !(64 | 128) {
+        12 => 0,     // COM_CursorLeft   -> CON_CursorLeft
+        14 => 1,     // COM_CursorToggle -> CON_CursorToggle
+        13 => 2,     // COM_CursorRight  -> CON_CursorRight
+        5 => 3,      // COM_Throw        -> CON_Throw
+        3 => 4,      // COM_Up           -> CON_Up
+        6 => 5,      // COM_Dig          -> CON_Dig
+        1 => 6,      // COM_Left         -> CON_Left
+        4 => 7,      // COM_Down         -> CON_Down
+        2 => 8,      // COM_Right        -> CON_Right
+        7 => 10,     // COM_Special      -> CON_Special
+        8 => 11,     // COM_Special2     -> CON_Special2
+        _ => 9,      // default          -> CON_Menu
+    };
+    (control, double)
+}
+
+/// Nearest-neighbour scale of an `image` subregion into `dest` — the
+/// unfiltered C4Facet blit the command cells use.
+fn draw_scaled_region(surface: &mut Surface, image: &ImageData, src: SurfaceRect, dest: SurfaceRect) {
+    if src.width == 0 || src.height == 0 || dest.width == 0 || dest.height == 0 {
+        return;
+    }
+    let pixels = image.pixels();
+    let (img_w, img_h) = (image.width() as i32, image.height() as i32);
+    for dy in 0..dest.height as i32 {
+        let sy = src.y + (dy as i64 * src.height as i64 / dest.height as i64) as i32;
+        if !(0..img_h).contains(&sy) {
+            continue;
+        }
+        for dx in 0..dest.width as i32 {
+            let sx = src.x + (dx as i64 * src.width as i64 / dest.width as i64) as i32;
+            if !(0..img_w).contains(&sx) {
+                continue;
+            }
+            let idx = ((sy * img_w + sx) * 4) as usize;
+            let color = Color::new(pixels[idx], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3]);
+            if color.a == 0 {
+                continue;
+            }
+            let (tx, ty) = (dest.x + dx, dest.y + dy);
+            if tx < 0 || ty < 0 {
+                continue;
+            }
+            let _ = if color.a == 255 {
+                surface.set_pixel(tx as u32, ty as u32, color)
+            } else {
+                surface.blend_pixel(tx as u32, ty as u32, color)
+            };
+        }
+    }
+}
+
+/// Aspect-fit an image subregion into `dest` (C4Facet::Draw fAspect,
+/// src/C4Facet.cpp:99-130): scale preserving ratio, centered.
+fn draw_scaled_region_aspect(
+    surface: &mut Surface,
+    image: &ImageData,
+    src: SurfaceRect,
+    dest: SurfaceRect,
+) {
+    if src.width == 0 || src.height == 0 {
+        return;
+    }
+    let scale = (dest.width as f32 / src.width as f32).min(dest.height as f32 / src.height as f32);
+    let w = ((src.width as f32 * scale) as u32).max(1);
+    let h = ((src.height as f32 * scale) as u32).max(1);
+    let fitted = SurfaceRect::new(
+        dest.x + (dest.width as i32 - w as i32) / 2,
+        dest.y + (dest.height as i32 - h as i32) / 2,
+        w,
+        h,
+    );
+    draw_scaled_region(surface, image, src, fitted);
+}
+
+/// The whole image aspect-fit into `dest`.
+fn draw_image_aspect_fit(surface: &mut Surface, image: &ImageData, dest: SurfaceRect) {
+    let src = SurfaceRect::new(0, 0, image.width(), image.height());
+    draw_scaled_region_aspect(surface, image, src, dest);
+}
+
+/// `C4Facet::GetFraction` (src/C4Facet.cpp:459-474) over a square cell.
+fn get_fraction(
+    cell: SurfaceRect,
+    percent_wdt: i32,
+    percent_hgt: i32,
+    align_right: bool,
+    align_bottom: bool,
+    align_center_y: bool,
+) -> SurfaceRect {
+    let wdt = (cell.width as i32 * percent_wdt / 100).max(1);
+    let hgt = (cell.height as i32 * percent_hgt / 100).max(1);
+    let mut x = cell.x;
+    let mut y = cell.y;
+    if align_right {
+        x += cell.width as i32 - wdt;
+    }
+    if align_bottom {
+        y += cell.height as i32 - hgt;
+    }
+    if align_center_y {
+        y += cell.height as i32 / 2 - hgt / 2;
+    }
+    SurfaceRect::new(x, y, wdt as u32, hgt as u32)
+}
+
+/// A square-by-height sheet cell (C4FCT_Height loads,
+/// src/C4GraphicsResource.cpp:228-233).
+fn sheet_cell(image: &ImageData, phase: i32) -> SurfaceRect {
+    let cell = image.height() as i32;
+    SurfaceRect::new(phase * cell, 0, cell as u32, cell as u32)
+}
+
+/// `DrawCommandKey` (src/C4ObjectCom.cpp:930-944): fctKey cap (Control.png
+/// (0,100) 64x64, phase 0 unpressed), fctCommand symbol (Control.png (0,36)
+/// 32x32 phases; y phase 1 = double coms), key name in the small font when
+/// ShowCommandKeys is set (23px cells <= C4MN_SymbolSize pick FontTiny).
+fn draw_command_key_cell(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    hud: &HudGraphics,
+    cell: SurfaceRect,
+    com: u8,
+    key_label: &str,
+    show_command_keys: bool,
+) {
+    if let Some(control) = hud.control.as_ref() {
+        draw_scaled_region(surface, control, SurfaceRect::new(0, 100, 64, 64), cell);
+        let (control_index, double) = com_control_index(com);
+        draw_scaled_region(
+            surface,
+            control,
+            SurfaceRect::new(32 * control_index, 36 + 32 * i32::from(double), 32, 32),
+            cell,
+        );
+    }
+    if show_command_keys && !key_label.is_empty() {
+        font.draw(
+            surface,
+            cell.x + cell.width as i32 / 2,
+            cell.y + cell.height as i32 - font.line_height() - 2,
+            key_label,
+            MESSAGE_COLOR,
+            TextAlign::Center,
+        );
+    }
+}
+
+/// The image cell of a command (src/C4Object.cpp:4050-4068 plus the
+/// caller-drawn composites).
+fn draw_command_image_cell(
+    surface: &mut Surface,
+    hud: &HudGraphics,
+    cell: SurfaceRect,
+    image: &CommandImage,
+) {
+    match image {
+        CommandImage::Picture(picture) => {
+            if let Some(picture) = picture {
+                draw_image_aspect_fit(surface, picture, cell);
+            }
+        }
+        CommandImage::Composite { picture, icon } => {
+            if let Some(picture) = picture {
+                let frac = get_fraction(cell, 85, 85, true, false, false);
+                draw_image_aspect_fit(surface, picture, frac);
+            }
+            let frac = get_fraction(cell, 85, 85, false, true, false);
+            match icon {
+                CommandOverlayIcon::Build => {
+                    if let Some(build) = hud.build.as_ref() {
+                        draw_image_aspect_fit(surface, build, frac);
+                    }
+                }
+                CommandOverlayIcon::Hand(phase) => {
+                    if let Some(hand) = hud.hand.as_ref() {
+                        draw_scaled_region_aspect(surface, hand, sheet_cell(hand, *phase), frac);
+                    }
+                }
+            }
+        }
+        CommandImage::Exit => {
+            if let Some(exit) = hud.exit.as_ref() {
+                draw_image_aspect_fit(surface, exit, cell);
+            }
+        }
+        CommandImage::BuyMenu { owner_color } | CommandImage::SellMenu { owner_color } => {
+            // DrawMenuSymbol (src/C4Menu.cpp:59-70): owner-colored flag at
+            // GetFraction(75,75), wealth at (100,50,Left,Bottom), arrow
+            // phase 0 buy / 1 sell at (70,70,Right,Center).
+            if let Some(flag) = hud.flag.as_ref() {
+                let colored = colorize_by_owner(flag, *owner_color);
+                draw_image_aspect_fit(surface, &colored, get_fraction(cell, 75, 75, false, false, false));
+            }
+            if let Some(wealth) = hud.wealth.as_ref() {
+                draw_image_aspect_fit(surface, wealth, get_fraction(cell, 100, 50, false, true, false));
+            }
+            if let Some(arrow) = hud.arrow.as_ref() {
+                let phase = i32::from(matches!(image, CommandImage::SellMenu { .. }));
+                draw_scaled_region_aspect(
+                    surface,
+                    arrow,
+                    sheet_cell(arrow, phase),
+                    get_fraction(cell, 70, 70, true, false, true),
+                );
+            }
+        }
+    }
+}
+
+/// The DrawCursorInfo command rows (src/C4Viewport.cpp:947-962): bottom bar
+/// consumed right-to-left, side strip consumed bottom-to-top, both in
+/// `iSize = 2*C4SymbolSize/3` squares via C4Facet::TruncateSection
+/// (src/C4Facet.cpp:182-215). Gated by the caller on
+/// Config.Graphics.ShowCommands.
+pub fn draw_commands(
+    surface: &mut Surface,
+    key_font: &HudFont<'_>,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    icons: &[CommandIcon],
+    show_command_keys: bool,
+) {
+    // `if (cgo.Hgt > C4SymbolSize)` (src/C4Viewport.cpp:950).
+    if viewport.height as i32 <= SYMBOL_SIZE {
+        return;
+    }
+    let size = 2 * SYMBOL_SIZE / 3;
+    let size2 = 2 * size;
+
+    // Primary area (bottom, src/C4Viewport.cpp:956).
+    let bottom_y = viewport.y + viewport.height as i32 - size;
+    let mut bottom_wdt = viewport.width as i32;
+    // Secondary area (side, src/C4Viewport.cpp:958).
+    let side_x = viewport.x + viewport.width as i32 - size2;
+    let mut side_hgt = viewport.height as i32 - size - 5;
+
+    for icon in icons {
+        let (key_cell, image_cell) = if icon.side {
+            // TruncateSection(C4FCT_Bottom|C4FCT_Half) -> 2*iSize x iSize
+            // slice off the strip bottom; then (C4FCT_Left) splits it.
+            if side_hgt < size || size2 > viewport.width as i32 {
+                continue;
+            }
+            side_hgt -= size;
+            let pair_y = viewport.y + side_hgt;
+            (
+                SurfaceRect::new(side_x, pair_y, size as u32, size as u32),
+                SurfaceRect::new(side_x + size, pair_y, size as u32, size as u32),
+            )
+        } else {
+            // Two TruncateSection(C4FCT_Right) squares: image cell first
+            // (rightmost), key cell next (src/C4Object.cpp:4043-4048).
+            if bottom_wdt < size {
+                continue;
+            }
+            bottom_wdt -= size;
+            let image_x = viewport.x + bottom_wdt;
+            if bottom_wdt < size {
+                continue;
+            }
+            bottom_wdt -= size;
+            let key_x = viewport.x + bottom_wdt;
+            (
+                SurfaceRect::new(key_x, bottom_y, size as u32, size as u32),
+                SurfaceRect::new(image_x, bottom_y, size as u32, size as u32),
+            )
+        };
+
+        draw_command_image_cell(surface, hud, image_cell, &icon.image);
+        draw_command_key_cell(
+            surface,
+            key_font,
+            hud,
+            key_cell,
+            icon.com,
+            &icon.key_label,
+            show_command_keys,
+        );
+    }
+}
+
 /// `C4Object::DrawEnergy` → `C4Facet::DrawEnergyLevelEx`
 /// (src/C4Viewport.cpp:921-945, src/C4Facet.cpp:334-389): the vertical
 /// bar left of the viewport. `EnergyBars.png` is a 6x3 cell grid — column
@@ -619,6 +955,241 @@ mod tests {
 
     fn bitmap_font() -> lc_graphics::BitmapFont {
         lc_graphics::BitmapFont::new()
+    }
+
+    /// Control.png stand-in sized like the C++ sheet regions
+    /// (src/C4GraphicsResource.cpp:200-205): key cap cell (0,100,64,64)
+    /// solid blue, fctCommand single row (y=36) transparent, double row
+    /// (y=68) solid green.
+    fn control_sheet() -> ImageData {
+        let width = 512u32;
+        let height = 164u32;
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let idx = ((y * width + x) * 4) as usize;
+                let color: [u8; 4] = if (100..164).contains(&y) && x < 64 {
+                    [10, 10, 200, 255] // fctKey phase 0
+                } else if (68..100).contains(&y) {
+                    [10, 200, 10, 255] // fctCommand double row
+                } else {
+                    [0, 0, 0, 0]
+                };
+                pixels[idx..idx + 4].copy_from_slice(&color);
+            }
+        }
+        ImageData::new(width, height, pixels)
+    }
+
+    #[test]
+    fn bottom_command_pair_sits_right_aligned_in_23px_cells() {
+        // C4Viewport::DrawCursorInfo (src/C4Viewport.cpp:948-961):
+        // iSize = 2*C4SymbolSize/3 = 23; the bottom bar spans the viewport
+        // bottom and each C4Object::DrawCommand truncates TWO squares from
+        // its right end — image cell rightmost, key cell left of it
+        // (src/C4Object.cpp:4043-4048).
+        let mut target = surface(200, 100);
+        let hud = HudGraphics {
+            control: Some(control_sheet()),
+            ..HudGraphics::default()
+        };
+        let font = bitmap_font();
+        let icons = vec![CommandIcon {
+            com: 5, // COM_Throw
+            key_label: String::new(),
+            side: false,
+            image: CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))),
+        }];
+        draw_commands(
+            &mut target,
+            &HudFont::Fallback(&font),
+            &hud,
+            SurfaceRect::new(0, 0, 200, 100),
+            &icons,
+            false,
+        );
+        // Image cell: [177,200) x [77,100), def picture aspect-fit fills it.
+        assert_eq!(
+            target.get_pixel(188, 88),
+            Some(Color::opaque(200, 20, 20)),
+            "picture centered in the rightmost 23px cell"
+        );
+        // Key cell: [154,177) — key cap blue (single-row symbol transparent).
+        assert_eq!(
+            target.get_pixel(160, 88),
+            Some(Color::opaque(10, 10, 200)),
+            "key cap fills the second-from-right 23px cell"
+        );
+        // Nothing further left.
+        assert_eq!(target.get_pixel(140, 88), Some(Color::opaque(0, 0, 0)));
+    }
+
+    #[test]
+    fn double_com_key_uses_second_fctcommand_row() {
+        // DrawCommandKey (src/C4ObjectCom.cpp:938): fctCommand.Draw(...,
+        // Com2Control(iCom), (iCom & COM_Double) != 0) — the double row is
+        // one cell height below the single row.
+        let mut target = surface(200, 100);
+        let hud = HudGraphics {
+            control: Some(control_sheet()),
+            ..HudGraphics::default()
+        };
+        let font = bitmap_font();
+        let icons = vec![CommandIcon {
+            com: 4 | 128, // COM_Down_D
+            key_label: String::new(),
+            side: false,
+            image: CommandImage::Picture(None),
+        }];
+        draw_commands(
+            &mut target,
+            &HudFont::Fallback(&font),
+            &hud,
+            SurfaceRect::new(0, 0, 200, 100),
+            &icons,
+            false,
+        );
+        // Key cell shows the green double-row symbol over the blue cap.
+        assert_eq!(
+            target.get_pixel(160, 88),
+            Some(Color::opaque(10, 200, 10)),
+            "double-row fctCommand phase over the key cap"
+        );
+    }
+
+    #[test]
+    fn side_command_pairs_stack_upward_above_the_bottom_row() {
+        // Secondary area (src/C4Viewport.cpp:958): right side strip of
+        // width 2*iSize, height cgo.Hgt - iSize - 5; DrawCommand with
+        // C4FCT_Bottom|C4FCT_Half takes a 2*iSize x iSize slice from the
+        // strip BOTTOM, key cell left, image cell right
+        // (src/C4Facet.cpp:182-215, src/C4Object.cpp:4044-4047).
+        let mut target = surface(200, 150);
+        let hud = HudGraphics {
+            control: Some(control_sheet()),
+            ..HudGraphics::default()
+        };
+        let font = bitmap_font();
+        let icon = |color: [u8; 4]| CommandIcon {
+            com: 7, // COM_Special
+            key_label: String::new(),
+            side: true,
+            image: CommandImage::Picture(Some(solid_image(8, 8, color))),
+        };
+        let icons = vec![icon([200, 20, 20, 255]), icon([20, 20, 200, 255])];
+        draw_commands(
+            &mut target,
+            &HudFont::Fallback(&font),
+            &hud,
+            SurfaceRect::new(0, 0, 200, 150),
+            &icons,
+            false,
+        );
+        // Strip: x in [154,200), bottom at y = 150 - 23 - 5 = 122.
+        // First pair occupies y [99,122): key at x[154,177), image x[177,200).
+        assert_eq!(
+            target.get_pixel(188, 110),
+            Some(Color::opaque(200, 20, 20)),
+            "first side image cell at the strip bottom"
+        );
+        assert_eq!(
+            target.get_pixel(160, 110),
+            Some(Color::opaque(10, 10, 200)),
+            "first side key cell left of the image cell"
+        );
+        // Second pair stacks above: y [76,99).
+        assert_eq!(
+            target.get_pixel(188, 87),
+            Some(Color::opaque(20, 20, 200)),
+            "second side image cell above the first"
+        );
+    }
+
+    #[test]
+    fn command_rows_need_viewport_taller_than_symbol_size() {
+        // `if (cgo.Hgt > C4SymbolSize)` (src/C4Viewport.cpp:950).
+        let mut target = surface(200, 35);
+        let hud = HudGraphics {
+            control: Some(control_sheet()),
+            ..HudGraphics::default()
+        };
+        let font = bitmap_font();
+        let icons = vec![CommandIcon {
+            com: 5,
+            key_label: String::new(),
+            side: false,
+            image: CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))),
+        }];
+        draw_commands(
+            &mut target,
+            &HudFont::Fallback(&font),
+            &hud,
+            SurfaceRect::new(0, 0, 200, 35),
+            &icons,
+            false,
+        );
+        assert!(
+            target
+                .pixels()
+                .chunks_exact(4)
+                .all(|chunk| chunk == [0, 0, 0, 255]),
+            "35px-high viewports draw no command rows"
+        );
+    }
+
+    #[test]
+    fn composite_image_cell_draws_picture_right_top_and_hand_left_bottom() {
+        // Put/Get/UnGrab image cells (src/C4Object.cpp:2976-2995): def
+        // picture in GetFraction(85,85,Right,Top), fctHand phase in
+        // GetFraction(85,85,Left,Bottom) — 19px fractions of the 23px cell
+        // (23*85/100 = 19, src/C4Facet.cpp:459-474).
+        let mut target = surface(200, 100);
+        // Hand.png: two square cells — phase 0 yellow, phase 1 cyan.
+        let mut hand_pixels = Vec::new();
+        for _y in 0..8 {
+            for x in 0..16 {
+                hand_pixels.extend_from_slice(if x < 8 {
+                    &[200u8, 200, 20, 255]
+                } else {
+                    &[20u8, 200, 200, 255]
+                });
+            }
+        }
+        let hud = HudGraphics {
+            control: Some(control_sheet()),
+            hand: Some(ImageData::new(16, 8, hand_pixels)),
+            ..HudGraphics::default()
+        };
+        let font = bitmap_font();
+        let icons = vec![CommandIcon {
+            com: 5,
+            key_label: String::new(),
+            side: false,
+            image: CommandImage::Composite {
+                picture: Some(solid_image(8, 8, [200, 20, 20, 255])),
+                icon: CommandOverlayIcon::Hand(1),
+            },
+        }];
+        draw_commands(
+            &mut target,
+            &HudFont::Fallback(&font),
+            &hud,
+            SurfaceRect::new(0, 0, 200, 100),
+            &icons,
+            false,
+        );
+        // Image cell [177,200) x [77,100): picture fraction right-top
+        // (x 181..200, y 77..96), hand fraction left-bottom (177..196, 81..100).
+        assert_eq!(
+            target.get_pixel(197, 79),
+            Some(Color::opaque(200, 20, 20)),
+            "picture in the right-top 85% fraction"
+        );
+        assert_eq!(
+            target.get_pixel(178, 97),
+            Some(Color::opaque(20, 200, 200)),
+            "fctHand phase 1 in the left-bottom 85% fraction"
+        );
     }
 
     #[test]

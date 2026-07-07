@@ -5363,6 +5363,10 @@ pub struct Definition {
     /// `Arc` to host functions so nested script calls (Find_Func, GameCall)
     /// can execute another definition's functions mid-VM-call.
     script: Arc<ScriptEngine>,
+    /// The raw Script.c text — read-only presentation support for the
+    /// C4ScriptHost::GetControlDesc `[..|Image=..]` descriptors, which the
+    /// lc-script parser does not retain (C4AulParse.cpp:301-375).
+    script_source: String,
     includes: Vec<String>,
     /// `#appendto` targets of this definition's script
     /// (C4AulScript::Appends; resolved by Engine::resolve_appends).
@@ -5402,6 +5406,9 @@ pub struct Definition {
     collection_rect: Option<DefinitionRect>,
     collection_limit: Option<u32>,
     collectible: bool,
+    /// `GrabPutGet` DefCore bitfield (src/C4Def.cpp:364-373) — read by the
+    /// viewport command-row presentation (C4Object::DrawCommands).
+    grab_put_get: i32,
     constructable: bool,
     construction_offset: i32,
     stretch_growth: bool,
@@ -5526,6 +5533,7 @@ impl Definition {
             id,
             name,
             script: Arc::new(script),
+            script_source: source.to_string(),
             includes,
             appends,
             has_construction,
@@ -5555,6 +5563,7 @@ impl Definition {
             collection_rect: None,
             collection_limit: None,
             collectible: false,
+            grab_put_get: 0,
             constructable: false,
             construction_offset: 0,
             stretch_growth: false,
@@ -5717,6 +5726,7 @@ impl Definition {
         definition.float_line = resource.core.float_line;
         definition.set_physical(resource.core.physical);
         definition.set_collectible(resource.core.collectible);
+        definition.set_grab_put_get(resource.core.grab_put_get);
         definition.set_constructable(resource.core.constructable);
         definition.set_construction_offset(resource.core.con_size_off);
         definition.set_stretch_growth(resource.core.stretch_growth);
@@ -6355,6 +6365,14 @@ impl Definition {
 
     pub fn is_collectible(&self) -> bool {
         self.collectible
+    }
+
+    pub fn grab_put_get(&self) -> i32 {
+        self.grab_put_get
+    }
+
+    pub fn set_grab_put_get(&mut self, grab_put_get: i32) {
+        self.grab_put_get = grab_put_get;
     }
 
     pub fn set_collectible(&mut self, collectible: bool) {
@@ -13461,6 +13479,38 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .map(|definition| definition.name())
+    }
+
+    /// Whether the definition's script defines `function`
+    /// (C4AulScript::GetSFunc; used by the presentation-side
+    /// C4Object::DrawCommands port, src/C4ScriptHost.cpp:100-120).
+    pub fn definition_script_has_function(&self, definition_id: &str, function: &str) -> bool {
+        self.definitions
+            .get(definition_id)
+            .is_some_and(|definition| definition.has_function(function))
+    }
+
+    /// The definition's raw script source — presentation-side descriptor
+    /// extraction (GetControlDesc, src/C4ScriptHost.cpp:151-172).
+    pub fn definition_script_source(&self, definition_id: &str) -> Option<&str> {
+        self.definitions
+            .get(definition_id)
+            .map(|definition| definition.script_source.as_str())
+    }
+
+    /// The definition's `#include` chain ids (C4Def script includes).
+    pub fn definition_includes(&self, definition_id: &str) -> Option<&[String]> {
+        self.definitions
+            .get(definition_id)
+            .map(|definition| definition.includes())
+    }
+
+    /// `Def->GrabPutGet` (src/C4Def.cpp:364-373).
+    pub fn definition_grab_put_get(&self, definition_id: &str) -> i32 {
+        self.definitions
+            .get(definition_id)
+            .map(|definition| definition.grab_put_get())
+            .unwrap_or(0)
     }
 
     /// The definition's DefCore Category bits (C4Def::Category), e.g. for
