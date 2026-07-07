@@ -59,6 +59,12 @@
   the Nil bail flipped every crosshair vertex to +40, the 'object 1536
   vertices' wall: a real dir bug, not the id skew — the live comparator
   pairing was consistent).
+  2026-07-06 f32 residual closed: the per-object script effect TIMER
+  batch now executes where C++ runs pEffects->Execute — after ExecAction
+  and ExecMovement, before fire/ExecLife (C4Object::Execute order,
+  C4Object.cpp:1069-1090) — so an action set inside a timer callback
+  gets its first PhaseDelay increment the NEXT frame
+  (C4Object.cpp:5458-5466) and timer callbacks read post-movement state.
 - **Frame-21 rider-xdir wall forensics (2026-07-03).** The coach movement
   friction chain is now PINNED bit-exact against C4Movement.cpp and cannot
   be the wall: `pushed_wagon_loses_xdir_by_wheel_friction_quanta_*`,
