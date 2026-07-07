@@ -957,10 +957,19 @@ impl Engine {
         ) {
             Ok(value) => Ok(value),
             Err(error) => {
+                // Log the full cause chain — the outer wrap alone only names
+                // the callback, not what failed inside it.
+                let mut chain = error.to_string();
+                let mut source = std::error::Error::source(&error);
+                while let Some(cause) = source {
+                    chain.push_str(": ");
+                    chain.push_str(&cause.to_string());
+                    source = std::error::Error::source(cause);
+                }
                 tracing::warn!(
                     definition = %definition_id,
                     function,
-                    %error,
+                    error = %chain,
                     "script error in control callback; continuing like the C++ fail-safe exec"
                 );
                 Ok(Value::Nil)
