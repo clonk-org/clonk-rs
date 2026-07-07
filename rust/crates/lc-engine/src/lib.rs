@@ -4489,6 +4489,10 @@ pub struct SpawnConfig {
     /// None = the C4Object::Init rule (alive -> GetPhysical()->Energy,
     /// else 0; C4Object.cpp:191-192). Some = explicit raw value (loader).
     pub energy: Option<i32>,
+    /// C4Object::MagicEnergy, compiled verbatim from saves with default 0
+    /// (C4Object.cpp:2768). MagicPhysicalFactor raw scale.
+    #[serde(default)]
+    pub magic_energy: Option<i32>,
     #[serde(default = "default_construction")]
     pub construction: i32,
     pub action: Option<ActionState>,
@@ -4580,6 +4584,7 @@ impl SpawnConfig {
             fixed_velocity: None,
             rotation: 0,
             energy: None,
+            magic_energy: None,
             construction: FULL_CON,
             action: None,
             direction: Direction::default(),
@@ -4675,6 +4680,11 @@ impl SpawnConfig {
 
     pub fn with_energy(mut self, energy: i32) -> Self {
         self.energy = Some(energy);
+        self
+    }
+
+    pub fn with_magic_energy(mut self, magic_energy: i32) -> Self {
+        self.magic_energy = Some(magic_energy);
         self
     }
 
@@ -6519,6 +6529,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_magic_energy(state.magic_energy)
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -6697,6 +6708,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_magic_energy(state.magic_energy)
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -6867,6 +6879,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_magic_energy(state.magic_energy)
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -7061,6 +7074,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_magic_energy(state.magic_energy)
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -7181,6 +7195,7 @@ impl Definition {
         )
         .with_base_graphics(state.base_graphics.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
+        .with_magic_energy(state.magic_energy)
         .with_ocf(state.ocf);
         let (result, outcome) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -7317,6 +7332,7 @@ impl Definition {
         )
         .with_base_graphics(state.base_graphics.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
+        .with_magic_energy(state.magic_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -7437,6 +7453,7 @@ impl Definition {
             *self.physical(),
         )
         .with_walk_rotation(self.walk_rotation_seed(state))
+        .with_magic_energy(state.magic_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -7560,6 +7577,7 @@ impl Definition {
             *self.physical(),
         )
         .with_walk_rotation(self.walk_rotation_seed(state))
+        .with_magic_energy(state.magic_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -7688,6 +7706,7 @@ impl Definition {
         )
         .with_base_graphics(state.base_graphics.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
+        .with_magic_energy(state.magic_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -8148,6 +8167,7 @@ impl Definition {
                 )
                 .with_base_graphics(state.base_graphics.clone())
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_magic_energy(state.magic_energy)
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -8696,6 +8716,12 @@ pub struct Engine {
     /// one shared named-variable table for every script host (scenario
     /// script, definitions, appended scripts). pub(crate) for tests.
     pub(crate) script_globals: lc_script::GlobalVariables,
+    /// The engine-global `static const` registry (the C4Aul global
+    /// constant table, RegisterGlobalConstant C4Aul.cpp:484): shared into
+    /// every script host so pre-#strict-2 constant calls (`NAME()`)
+    /// resolve constants declared by OTHER scripts (MagiClonk's
+    /// `MCLK_ComboExtraDataName()` running in the MAGE host).
+    pub(crate) script_global_consts: lc_script::GlobalVariables,
     /// Global (System.c4g) scripts that carry `#appendto` directives:
     /// retained at install, resolved with the definition appends (system
     /// hosts register before definitions in C++, so their appends apply
@@ -10287,6 +10313,7 @@ impl Engine {
             definitions: HashMap::new(),
             definition_load_order: Vec::new(),
             script_globals: lc_script::new_global_variables(),
+            script_global_consts: lc_script::new_global_variables(),
             system_append_scripts: Vec::new(),
             objects_generation: std::cell::Cell::new(1),
             object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
@@ -11979,6 +12006,7 @@ impl Engine {
         {
             let host = Arc::make_mut(&mut script.script);
             host.set_global_variables(self.script_globals.clone());
+            host.set_global_constants(self.script_global_consts.clone());
             host.adopt_statics_into_globals();
         }
         let snapshot = self.snapshot();
@@ -13223,6 +13251,7 @@ impl Engine {
             // declarations compiled into the definition move to it.
             let script = Arc::make_mut(&mut definition.script);
             script.set_global_variables(self.script_globals.clone());
+            script.set_global_constants(self.script_global_consts.clone());
             script.adopt_statics_into_globals();
         }
         self.definition_load_order
@@ -17173,6 +17202,24 @@ impl Engine {
                 PlayerCommand::SetWealth { player_id, value } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
                         player.set_wealth(value);
+                    }
+                }
+                // FnSetPlrExtraData (C4Script.cpp:4712-4730): update in
+                // place, or append preserving the names-list order.
+                PlayerCommand::SetExtraData {
+                    player_id,
+                    name,
+                    value,
+                } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        match player
+                            .extra_data
+                            .iter_mut()
+                            .find(|(slot, _)| *slot == name)
+                        {
+                            Some((_, stored)) => *stored = value,
+                            None => player.extra_data.push((name, value)),
+                        }
                     }
                 }
             }
@@ -24942,6 +24989,7 @@ impl Engine {
             fixed_velocity,
             rotation,
             energy,
+            magic_energy,
             construction,
             action,
             direction,
@@ -25110,7 +25158,9 @@ impl Engine {
                     0
                 }),
                 damage: 0,
-                magic_energy: 0,
+                // MagicEnergy compiles verbatim, default 0
+                // (C4Object.cpp:2768 / the C4Object ctor, :97).
+                magic_energy: magic_energy.unwrap_or(0),
                 magic_capacity: 0,
                 construction: construction.clamp(0, FULL_CON),
                 action: initial_action,
@@ -25220,6 +25270,7 @@ impl Engine {
         object.clamp_velocity(&self.physics);
 
         let mut additional_spawns = Vec::new();
+        let mut deferred_transfer_zones: Vec<TransferZoneCommand> = Vec::new();
         // C++ Init runs SetOCF before any script callback
         // (C4Object.cpp:215): Construction/Initialize read a live mask.
         object.state.ocf = self
@@ -25331,9 +25382,11 @@ impl Engine {
             let mut applied = object.apply_effect_commands(&effects);
             effect_events.append(&mut applied);
             self.apply_particle_commands(particles);
-            if !transfer_zones.is_empty() {
-                self.apply_transfer_zone_commands(transfer_zones)?;
-            }
+            // The object joins self.objects only after the callbacks, but
+            // C++ adds it to Game.Objects BEFORE Construction/Initialize
+            // fire (C4Game.cpp:1115-1131) — its own SetTransferZone must
+            // land, so the commands defer to right after the push.
+            deferred_transfer_zones.extend(transfer_zones);
             if !global_effects.is_empty() {
                 self.apply_global_effect_commands(&global_effects);
             }
@@ -25466,9 +25519,11 @@ impl Engine {
             let mut applied = object.apply_effect_commands(&effects);
             effect_events.append(&mut applied);
             self.apply_particle_commands(particles);
-            if !transfer_zones.is_empty() {
-                self.apply_transfer_zone_commands(transfer_zones)?;
-            }
+            // The object joins self.objects only after the callbacks, but
+            // C++ adds it to Game.Objects BEFORE Construction/Initialize
+            // fire (C4Game.cpp:1115-1131) — its own SetTransferZone must
+            // land, so the commands defer to right after the push.
+            deferred_transfer_zones.extend(transfer_zones);
             if !global_effects.is_empty() {
                 self.apply_global_effect_commands(&global_effects);
             }
@@ -25583,6 +25638,11 @@ impl Engine {
         self.objects.push(object);
         self.note_objects_changed();
         self.insert_into_exec_list(new_id, loaded);
+        // Deferred SetTransferZone commands from the creation callbacks —
+        // C++ ran them live with the object already in Game.Objects.
+        if !deferred_transfer_zones.is_empty() {
+            self.apply_transfer_zone_commands(deferred_transfer_zones)?;
+        }
         let index = self.objects.len() - 1;
         self.update_sector_for_index(index);
         self.update_solid_mask(index);
@@ -38032,6 +38092,93 @@ func Slay() { DoEnergy(-100); return(1); }
         assert!(
             !engine.objects[idx].state.alive,
             "energy zero from nonzero -> AssignDeath (C4Object.cpp:1363)"
+        );
+    }
+
+    // C4Game::NewObject adds the object to Game.Objects BEFORE the
+    // Construction/Initialize callbacks run (C4Game.cpp:1115-1131), so
+    // FnSetTransferZone's Game.TransferZones.Set (C4Script.cpp:3151-3156)
+    // succeeds from the object's own Initialize — WZKP's
+    // UpdateTransferZone. The rust spawn applies callback batches before
+    // insertion, so the zone command must defer to after the push instead
+    // of failing UnknownObject.
+    #[test]
+    fn set_transfer_zone_from_initialize_registers_on_spawn_like_cpp() {
+        let script = r#"#strict
+func Initialize() { SetTransferZone(-4, -38, 37, 82); return(1); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        let keep = Definition::from_script("WZKP", "WizardKeep", script).expect("compiles");
+        engine.register_definition(keep).expect("registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("WZKP")
+                    .with_position(Vector2::new(100, 200))
+                    .with_category(CATEGORY_OBJECT),
+            )
+            .expect("spawn survives the mid-Initialize transfer zone");
+        let snapshot = engine.snapshot();
+        let zone = snapshot
+            .transfer_zones
+            .iter()
+            .find(|zone| zone.owner == id)
+            .expect("the Initialize transfer zone registered");
+        assert_eq!(
+            (zone.x, zone.y, zone.width, zone.height),
+            (96, 162, 37, 82),
+            "iX/iY are object-relative (C4Script.cpp:3154)"
+        );
+    }
+
+    // SkiesOfFire InitializePlayer refills the crew's magic:
+    // `clonk->DoMagicEnergy(clonk->GetPhysical("Magic")/2000)`
+    // (SkiesOfFire.c4s/Script.c:14) — routed through Fantasy
+    // NoMagicEnergy.c4d's `global func DoMagicEnergy` (Script.c:16-28),
+    // which chains to the ENGINE fn via inherited when the NMGE rule is
+    // absent. FnDoMagicEnergy (C4Script.cpp:517-544) must exist under the
+    // override, its write must fold onto engine state, and
+    // FnGetMagicEnergy (:546-550) must read it back in
+    // MagicPhysicalFactor units.
+    #[test]
+    fn host_do_magic_energy_folds_through_the_global_override_like_cpp() {
+        let script = r#"#strict
+func Refill() { return(DoMagicEnergy(25)); }
+func ReadBack() { return(GetMagicEnergy()); }
+"#;
+        let global = r#"#strict
+global func DoMagicEnergy(int iChange, object pObject, bool fAllowPartial)
+{
+  return(inherited(iChange, pObject, fAllowPartial));
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.install_global_scripts(&[("NoMagicEnergy".to_string(), global.to_string())]);
+        let mut mage = Definition::from_script("MAGE", "Mage", script).expect("compiles");
+        mage.set_physical(PhysicalInfo {
+            magic: 50_000,
+            ..PhysicalInfo::default()
+        });
+        engine.register_definition(mage).expect("registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("MAGE").with_category(CATEGORY_OBJECT))
+            .expect("spawns");
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Refill", Vec::new())
+                .expect("refill runs"),
+            Value::Bool(true)
+        );
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(
+            engine.objects[idx].state.magic_energy, 25_000,
+            "the scope write folds onto engine state"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(idx, "ReadBack", Vec::new())
+                .expect("readback runs"),
+            Value::Int(25)
         );
     }
 

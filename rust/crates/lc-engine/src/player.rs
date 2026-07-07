@@ -108,6 +108,12 @@ pub struct PlayerState {
     /// "PressedComs"/"AutoStopControl"/"CursorFlash", C4Player.cpp:1596-1604).
     #[serde(default)]
     pub control: PlayerControlState,
+    /// C4Player::ExtraData (C4ValueMapData) — the script-managed named
+    /// slots of Fn[Set/Get]PlrExtraData (C4Script.cpp:4692-4747). Only
+    /// nil/int/bool/id values store; insertion order preserved like the
+    /// C4ValueMapNames list.
+    #[serde(default)]
+    pub extra_data: Vec<(String, lc_script::Value)>,
 }
 
 /// C4Player's per-player direct-com bookkeeping (C4Player.h:118-121):
@@ -181,6 +187,8 @@ pub struct Player {
     position_index: i32,
     /// Direct-com input state (C4Player.h:118-121).
     pub(crate) control: PlayerControlState,
+    /// C4Player::ExtraData named slots (Fn[Set/Get]PlrExtraData).
+    pub(crate) extra_data: Vec<(String, lc_script::Value)>,
 }
 
 impl Player {
@@ -212,6 +220,7 @@ impl Player {
             color_index: -1,
             position_index: -1,
             control: PlayerControlState::default(),
+            extra_data: Vec::new(),
         }
     }
 
@@ -266,6 +275,7 @@ impl Player {
             color_index: -1,
             position_index: -1,
             control: PlayerControlState::default(),
+            extra_data: Vec::new(),
         };
         player.sort_crew();
         player
@@ -297,6 +307,7 @@ impl Player {
             color,
             hostility,
             control,
+            extra_data,
         } = state;
         let mut player = Self {
             id,
@@ -325,6 +336,7 @@ impl Player {
             color_index: -1,
             position_index: -1,
             control,
+            extra_data,
         };
         player.sort_crew();
         player
@@ -362,6 +374,7 @@ impl Player {
                 hostility
             },
             control: self.control,
+            extra_data: self.extra_data.clone(),
         }
     }
 

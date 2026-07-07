@@ -151,6 +151,57 @@ fn slot_cell(slots: &SlotMap, index: i32) -> ValueCell {
         .clone()
 }
 
+thread_local! {
+    /// The `Var(n)` slot table of the script function that invoked the
+    /// currently-running HOST function — `cthr->Caller->NumVars`. None
+    /// while no host function with a script caller is executing.
+    static HOST_CALLER_VAR_SLOTS: RefCell<Option<SlotMap>> = const { RefCell::new(None) };
+}
+
+/// The calling script function's numbered `Var(n)` slots, exposed to host
+/// functions — the `cthr->Caller->NumVars` seam (FnFindConstructionSite
+/// reads and writes them, C4Script.cpp:1958-1981). None when the
+/// executing host function has no script caller
+/// (`if (!cthr->Caller) return {}`, :1966).
+pub fn caller_var_slots() -> Option<CallerVarSlots> {
+    HOST_CALLER_VAR_SLOTS
+        .with(|cell| cell.borrow().clone())
+        .map(CallerVarSlots)
+}
+
+/// A live handle onto the caller's numbered var slots; writes go straight
+/// into the suspended call's storage like C++ reference assignment.
+pub struct CallerVarSlots(SlotMap);
+
+impl CallerVarSlots {
+    /// C4ValueList::GetItem semantics: unset slots read nil.
+    pub fn get(&self, index: i32) -> Value {
+        slot_cell(&self.0, index).borrow().clone()
+    }
+
+    pub fn set(&self, index: i32, value: Value) {
+        *slot_cell(&self.0, index).borrow_mut() = value;
+    }
+}
+
+/// Scopes HOST_CALLER_VAR_SLOTS to one host-function invocation,
+/// restoring the previous value on drop (nested host calls through
+/// re-entrant VMs keep correct caller attribution).
+struct CallerSlotsGuard(Option<SlotMap>);
+
+impl CallerSlotsGuard {
+    fn enter(slots: Option<SlotMap>) -> Self {
+        Self(HOST_CALLER_VAR_SLOTS.with(|cell| cell.replace(slots)))
+    }
+}
+
+impl Drop for CallerSlotsGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        HOST_CALLER_VAR_SLOTS.with(|cell| cell.replace(previous));
+    }
+}
+
 #[derive(Clone)]
 enum Binding {
     Direct(ValueCell),
@@ -422,6 +473,10 @@ pub struct Vm<'a> {
     /// The engine-global `static` table (GlobalNamed); resolved after
     /// locals, before global constants (C4AulParse.cpp:2836-2839).
     globals_named: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
+    /// The engine-global `static const` registry (GetGlobalConstant,
+    /// C4Aul.cpp:494): script-declared constants shared across hosts,
+    /// resolvable via the pre-#strict-2 `NAME()` call idiom.
+    globals_consts: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
     /// Cross-object LocalN cell supplier (crate::engine::LocalCellHook).
     local_cell_hook: Option<&'a crate::engine::LocalCellHook>,
 }
@@ -443,6 +498,7 @@ impl<'a> Vm<'a> {
             this_value: Value::Nil,
             method_dispatch: None,
             globals_named: None,
+            globals_consts: None,
             local_cell_hook: None,
         }
     }
@@ -479,6 +535,16 @@ impl<'a> Vm<'a> {
         table: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
     ) -> Self {
         self.globals_named = table;
+        self
+    }
+
+    /// Attach the engine-global `static const` registry (GetGlobalConstant,
+    /// C4Aul.cpp:494) consulted by the old-style constant-call idiom.
+    pub fn with_global_constants(
+        mut self,
+        table: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
+    ) -> Self {
+        self.globals_consts = table;
         self
     }
 
@@ -546,13 +612,13 @@ impl<'a> Vm<'a> {
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::Value).collect();
-        self.invoke_value(name, args, 0, ObjectState::default())
+        self.invoke_value(name, args, 0, ObjectState::default(), None)
     }
 
     /// Call with caller-prepared arguments (reference cells included) — the
     /// host-side C4AulParSet pattern where pars carry `GetRef()` values.
     pub(crate) fn call_args(&self, name: &str, args: Vec<CallArg>) -> Result<Value, RuntimeError> {
-        self.invoke_value(name, args, 0, ObjectState::default())
+        self.invoke_value(name, args, 0, ObjectState::default(), None)
     }
 
     /// Call against SHARED local cells (see [`LocalCells`]): writes land
@@ -564,7 +630,7 @@ impl<'a> Vm<'a> {
         cells: &LocalCells,
     ) -> Result<Value, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::Value).collect();
-        self.invoke_value(name, args, 0, cells.state.clone())
+        self.invoke_value(name, args, 0, cells.state.clone(), None)
     }
 
     /// Call a function with per-object local variable context
@@ -577,7 +643,7 @@ impl<'a> Vm<'a> {
     ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
         let object_state = ObjectState::from_local_vars(local_vars);
         let args = args.iter().cloned().map(CallArg::Value).collect();
-        let value = self.invoke_value(name, args, 0, object_state.clone())?;
+        let value = self.invoke_value(name, args, 0, object_state.clone(), None)?;
         Ok((value, object_state.to_local_vars(self.var_decls)))
     }
 
@@ -587,8 +653,9 @@ impl<'a> Vm<'a> {
         args: Vec<CallArg>,
         depth: usize,
         object_state: ObjectState,
+        caller_slots: Option<SlotMap>,
     ) -> Result<Value, RuntimeError> {
-        self.invoke_raw(name, args, depth, object_state)?
+        self.invoke_raw(name, args, depth, object_state, caller_slots)?
             .into_value()
     }
 
@@ -598,8 +665,9 @@ impl<'a> Vm<'a> {
         args: Vec<CallArg>,
         depth: usize,
         object_state: ObjectState,
+        caller_slots: Option<SlotMap>,
     ) -> Result<LValueRef, RuntimeError> {
-        match self.invoke_raw(name, args, depth, object_state)? {
+        match self.invoke_raw(name, args, depth, object_state, caller_slots)? {
             ReturnValue::Reference(reference) => Ok(reference),
             ReturnValue::Value(_) => Err(RuntimeError::new(format!(
                 "function '{name}' does not return a reference"
@@ -613,6 +681,7 @@ impl<'a> Vm<'a> {
         args: Vec<CallArg>,
         depth: usize,
         object_state: ObjectState,
+        caller_slots: Option<SlotMap>,
     ) -> Result<ReturnValue, RuntimeError> {
         if depth >= MAX_CALL_DEPTH {
             return Err(RuntimeError::new("maximum call depth exceeded"));
@@ -636,6 +705,10 @@ impl<'a> Vm<'a> {
 
             if let Some(function) = self.host_functions.get(name) {
                 let values = self.call_args_to_values(&args)?;
+                // Host functions run under the CALLER's var-slot table
+                // (cthr->Caller->NumVars) for the FindConstructionSite
+                // write-back seam (C4Script.cpp:1966-1978).
+                let _guard = CallerSlotsGuard::enter(caller_slots);
                 return self
                     .invoke_host_function(name, function, &values)
                     .map(ReturnValue::Value);
@@ -1247,6 +1320,10 @@ impl<'a> Vm<'a> {
                                         Self::append_forwarded_args(&mut evaluated_args, env);
                                     }
                                     let values = self.call_args_to_values(&evaluated_args)?;
+                                    // The overriding script function is the
+                                    // host fn's cthr->Caller.
+                                    let _guard =
+                                        CallerSlotsGuard::enter(Some(env.var_slots.clone()));
                                     return self
                                         .invoke_host_function(
                                             &env.function_name.clone(),
@@ -1282,6 +1359,9 @@ impl<'a> Vm<'a> {
                             // global constant used as `OCF_Chop()` yields the
                             // constant with the call parens ignored
                             // (C4AulParse.cpp:2838-2860, "old-style usage").
+                            // Script `static const`s resolve here too via the
+                            // shared registry (GetGlobalConstant) — MagiClonk's
+                            // `MCLK_ComboExtraDataName()`.
                             if env.strict_level.unwrap_or(0) < 2
                                 && !self.functions.contains_key(name)
                                 && !self
@@ -1290,10 +1370,27 @@ impl<'a> Vm<'a> {
                                     .unwrap_or(false)
                                 && !self.host_functions.contains_key(name)
                             {
-                                if let Some(value) =
-                                    self.constants.and_then(|constants| constants.get(name))
+                                if let Some(value) = self
+                                    .constants
+                                    .and_then(|constants| constants.get(name).cloned())
+                                    .or_else(|| {
+                                        self.globals_consts.and_then(|table| {
+                                            table
+                                                .borrow()
+                                                .get(name)
+                                                .map(|cell| cell.borrow().clone())
+                                        })
+                                    })
                                 {
-                                    return Ok(value.clone());
+                                    // C++ requires an immediate ')' after
+                                    // the '(' (Match(ATT_BCLOSE),
+                                    // C4AulParse.cpp:2860).
+                                    if !args.is_empty() {
+                                        return Err(RuntimeError::new(
+                                            "parameters not allowed in functional usage of constants",
+                                        ));
+                                    }
+                                    return Ok(value);
                                 }
                             }
                             let function = self.functions.get(name);
@@ -1307,6 +1404,7 @@ impl<'a> Vm<'a> {
                                 evaluated_args,
                                 depth + 1,
                                 env.object_state.clone(),
+                                Some(env.var_slots.clone()),
                             )
                         }
                         Expr::Property(base, name) => self.invoke_property_call(
@@ -1818,7 +1916,13 @@ impl<'a> Vm<'a> {
         if forward_rest {
             Self::append_forwarded_args(&mut evaluated_args, env);
         }
-        self.invoke_value(name, evaluated_args, depth + 1, env.object_state.clone())
+        self.invoke_value(
+            name,
+            evaluated_args,
+            depth + 1,
+            env.object_state.clone(),
+            Some(env.var_slots.clone()),
+        )
     }
 
     fn build_call_args(
@@ -1884,6 +1988,7 @@ impl<'a> Vm<'a> {
                 // write through the host's set path (4th argument).
                 if let Some(host) = self.host_functions.get("EffectVar") {
                     arg_values.push(value);
+                    let _guard = CallerSlotsGuard::enter(Some(env.var_slots.clone()));
                     return self
                         .invoke_host_function("EffectVar", host, &arg_values)
                         .map(|_| ());
@@ -1985,6 +2090,7 @@ impl<'a> Vm<'a> {
                 // variables (FnEffectVar by-reference, C4Script.cpp) —
                 // compound assignments (--EffectVar) must see live values.
                 if let Some(host) = self.host_functions.get("EffectVar") {
+                    let _guard = CallerSlotsGuard::enter(Some(env.var_slots.clone()));
                     return self.invoke_host_function("EffectVar", host, &arg_values);
                 }
                 // Host-less fixture VMs keep the legacy env-slot shim.
@@ -2121,7 +2227,13 @@ impl<'a> Vm<'a> {
             AssignmentTarget::FunctionCall { name, args } => {
                 let function = self.functions.get(name);
                 let args = self.build_call_args(function, args, env, depth + 1)?;
-                self.invoke_reference(name, args, depth + 1, env.object_state.clone())
+                self.invoke_reference(
+                    name,
+                    args,
+                    depth + 1,
+                    env.object_state.clone(),
+                    Some(env.var_slots.clone()),
+                )
             }
             // `LocalN("name", obj) += v` and friends: the foreign-local
             // cell IS the reference (FnLocalN, C4Script.cpp:4591-4605).

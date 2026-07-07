@@ -183,6 +183,13 @@ pub(crate) enum PlayerCommand {
     },
     /// `FnSetWealth` (C4Script.cpp:2761-2766), already clamped.
     SetWealth { player_id: i32, value: i32 },
+    /// `FnSetPlrExtraData` (C4Script.cpp:4692-4732): a validated named
+    /// slot write on C4Player::ExtraData.
+    SetExtraData {
+        player_id: i32,
+        name: String,
+        value: Value,
+    },
     /// FnSetCursor (C4Script.cpp:2951-2958): pPlr->SetCursor(pObj) and,
     /// unless fNoSelectCrew, SelectCrew(pObj, true).
     SetCursor {
@@ -1517,6 +1524,97 @@ fn set_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
             value: clamped,
         });
         Ok(Value::Bool(true))
+    })
+}
+
+/// The `StdCompiler::IsIdentifier` gate on extra-data names
+/// (StdCompiler.cpp:92-100): alphanumerics, `_` and `-` only.
+fn is_extra_data_identifier(name: &str) -> bool {
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// `FnGetPlrExtraData` (C4Script.cpp:4734-4747): the named
+/// C4Player::ExtraData slot; nil for invalid players and unknown names.
+fn get_plr_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetPlrExtraData",
+        "player",
+    )?;
+    let Some(Value::String(name)) = args.get(1) else {
+        // A nil C4String* dereferences to no name — no slot matches.
+        return Ok(Value::Nil);
+    };
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        Ok(player
+            .extra_data
+            .iter()
+            .find(|(slot, _)| slot == name)
+            .map(|(_, value)| value.clone())
+            .unwrap_or(Value::Nil))
+    })
+}
+
+/// `FnSetPlrExtraData` (C4Script.cpp:4692-4732): validates the name
+/// (IsIdentifier) and the payload type (nil/int/bool/id only), stores the
+/// slot and returns the stored value; every failure yields nil.
+fn set_plr_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetPlrExtraData",
+        "player",
+    )?;
+    let Some(Value::String(name)) = args.get(1) else {
+        return Ok(Value::Nil);
+    };
+    if name.is_empty() {
+        return Ok(Value::Nil);
+    }
+    if !is_extra_data_identifier(name) {
+        tracing::warn!(
+            name,
+            "SetPlrExtraData: ignoring invalid data name; only alphanumerics, _ and - are allowed"
+        );
+        return Ok(Value::Nil);
+    }
+    let data = args.get(2).cloned().unwrap_or(Value::Nil);
+    // C4V_Any/Int/Bool/C4ID only (C4Script.cpp:4706-4710).
+    if !matches!(
+        data,
+        Value::Nil | Value::Int(_) | Value::Bool(_) | Value::C4Id(_)
+    ) {
+        return Ok(Value::Nil);
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state_mut(player_id) else {
+            return Ok(Value::Nil);
+        };
+        match player
+            .extra_data
+            .iter_mut()
+            .find(|(slot, _)| slot == name)
+        {
+            Some((_, value)) => *value = data.clone(),
+            None => player.extra_data.push((name.clone(), data.clone())),
+        }
+        context.record_player_command(PlayerCommand::SetExtraData {
+            player_id,
+            name: name.clone(),
+            value: data.clone(),
+        });
+        Ok(data)
     })
 }
 
@@ -4426,6 +4524,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerID", get_player_id);
     script.register_host_function("GetWealth", get_wealth);
     script.register_host_function("SetWealth", set_wealth);
+    // Fn[Get/Set]PlrExtraData (C4Script.cpp:4692-4747, AddFunc
+    // :6666-6667) — MagiClonk's Recruitment combo preference.
+    script.register_host_function("GetPlrExtraData", get_plr_extra_data);
+    script.register_host_function("SetPlrExtraData", set_plr_extra_data);
     script.register_host_function("GetScenarioVal", get_scenario_val);
     script.register_host_function("GetLeague", get_league);
     script.register_host_function("GetScore", get_score);
@@ -4539,6 +4641,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
     script.register_host_function("CreateConstruction", create_construction);
+    // FnFindConstructionSite (C4Script.cpp:1958-1981) — the caller-Var
+    // staging seam behind the System.c4g FindConstructionSiteX wrapper.
+    script.register_host_function("FindConstructionSite", find_construction_site);
     script.register_host_function("CreateParticle", create_particle);
     script.register_host_function("CastParticles", cast_particles);
     script.register_host_function("CastBackParticles", cast_back_particles);
@@ -4607,6 +4712,11 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("RemoveObject", remove_object);
     script.register_host_function("GetEnergy", get_energy);
     script.register_host_function("DoEnergy", do_energy);
+    // FnDoMagicEnergy/FnGetMagicEnergy (C4Script.cpp:517-550, AddFunc
+    // :6715-6716) — Fantasy's NoMagicEnergy.c4d global overrides chain to
+    // these via inherited.
+    script.register_host_function("DoMagicEnergy", do_magic_energy);
+    script.register_host_function("GetMagicEnergy", get_magic_energy);
     script.register_host_function("GetPhysical", get_physical);
     script.register_host_function("SetPhysical", set_physical);
     script.register_host_function("TrainPhysical", train_physical);
@@ -5653,6 +5763,9 @@ pub(crate) struct HostObjectContext<'a> {
     pub container: Option<ObjectId>,
     pub status: ObjectStatus,
     pub energy: i32,
+    /// C4Object::MagicEnergy (C4Object.h:139), on the
+    /// MagicPhysicalFactor-scaled raw scale.
+    pub magic_energy: i32,
     pub damage: i32,
     pub alive: bool,
     /// C4Object::InLiquid (the cached flag FnInLiquid reads).
@@ -5781,6 +5894,7 @@ impl<'a> HostObjectContext<'a> {
             container,
             status,
             energy,
+            magic_energy: 0,
             damage,
             construction: construction.clamp(0, FULL_CON),
             alive: true,
@@ -5822,6 +5936,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_walk_rotation(mut self, walk_rotation: WalkRotationSeed) -> Self {
         self.walk_rotation = walk_rotation;
+        self
+    }
+
+    pub fn with_magic_energy(mut self, magic_energy: i32) -> Self {
+        self.magic_energy = magic_energy;
         self
     }
 
@@ -8740,6 +8859,130 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// `MagicPhysicalFactor` (C4Object.h:81): raw MagicEnergy units per
+/// script-visible magic point.
+const MAGIC_PHYSICAL_FACTOR: i32 = 1000;
+
+/// Reads DoMagicEnergy/GetMagicEnergy's optional object slot: object
+/// references, positive ints (object numbers), or nil/0 for the
+/// caller-object default.
+fn magic_energy_target(
+    arg: Option<&Value>,
+    function: &str,
+) -> Result<Option<ObjectId>, RuntimeError> {
+    match arg.unwrap_or(&Value::Nil) {
+        value @ (Value::Object(_) | Value::Proplist(_)) => Ok(object_id_from_value(value)),
+        Value::Nil | Value::Int(0) => Ok(None),
+        Value::Int(value) if *value > 0 => Ok(Some(ObjectId::new(*value as u64))),
+        other => Err(RuntimeError::new(format!(
+            "{function}: expected object or nil for target, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// `FnDoMagicEnergy` (C4Script.cpp:517-544): the change scales by
+/// MagicPhysicalFactor; an overload (change > 0 past GetPhysical()->Magic)
+/// or underload (change < 0 past zero) fails the call unless
+/// fAllowPartial clamps it to the remaining headroom — a zero remainder
+/// still fails. The result bounds into 0..GetPhysical()->Magic
+/// (BoundBy, :541). ViewEnergy = C4ViewDelay (:542) is the magic-bar
+/// display flash — presentation-only, not modeled.
+fn do_magic_energy(args: &[Value]) -> Result<Value, RuntimeError> {
+    let change = match args.first().unwrap_or(&Value::Nil) {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "DoMagicEnergy: expected int or nil for change, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let target_id = magic_energy_target(args.get(1), "DoMagicEnergy")?;
+    let allow_partial = match args.get(2).unwrap_or(&Value::Nil) {
+        Value::Bool(flag) => *flag,
+        Value::Int(value) => *value != 0,
+        Value::Nil => false,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "DoMagicEnergy: expected bool or nil for allow-partial flag, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("DoMagicEnergy requires an active engine context"))?;
+        // `if (!pObj) pObj = cthr->Obj; if (!pObj) return false` (:519).
+        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        let Some(scope) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
+        // C++ arithmetic is plain i32 (wrapping on x86) — keep it exact.
+        let mut change = change.wrapping_mul(MAGIC_PHYSICAL_FACTOR);
+        let cap = scope.resolved_physical(false).magic;
+        let current = scope.magic_energy();
+        if change > 0 && current.wrapping_add(change) > cap {
+            if !allow_partial {
+                return Ok(Value::Bool(false));
+            }
+            change = cap - current;
+            if change == 0 {
+                return Ok(Value::Bool(false));
+            }
+        }
+        if change < 0 && current.wrapping_add(change) < 0 {
+            if !allow_partial {
+                return Ok(Value::Bool(false));
+            }
+            change = -current;
+            if change == 0 {
+                return Ok(Value::Bool(false));
+            }
+        }
+        let sum = current.wrapping_add(change);
+        scope.set_magic_energy(if sum < 0 {
+            0
+        } else if sum > cap {
+            cap
+        } else {
+            sum
+        });
+        Ok(Value::Bool(true))
+    })
+}
+
+/// `FnGetMagicEnergy` (C4Script.cpp:546-550): MagicEnergy /
+/// MagicPhysicalFactor; 0 without an object (`return false`).
+fn get_magic_energy(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target_id = magic_energy_target(args.first(), "GetMagicEnergy")?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("GetMagicEnergy requires an active engine context"))?;
+        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
+            return Ok(Value::Int(0));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Int(0));
+        }
+        let Some(scope) = context.object_scope(target) else {
+            return Ok(Value::Int(0));
+        };
+        Ok(Value::Int(scope.magic_energy() / MAGIC_PHYSICAL_FACTOR))
+    })
+}
+
 /// The kill-trace mark of C4Object::DoEnergy (C4Object.cpp:1351-1353):
 /// negative changes (and object hits even at zero) record the causing
 /// player, with the UpdatLastEnergyLossCause guard (:1369-1378) applied
@@ -10790,20 +11033,34 @@ fn set_transfer_zone(args: &[Value]) -> Result<Value, RuntimeError> {
                 })?,
         };
 
-        let world_object = context.get_world_object(owner).ok_or_else(|| {
-            RuntimeError::new(format!(
-                "SetTransferZone: object {} not found in current engine context",
-                owner
-            ))
-        })?;
+        // pObj->x/y off the LIVE object (C4Script.cpp:3154): the executing
+        // scope resolves the object even while its own Initialize runs
+        // before the world snapshot knows it (C4Object::Init fires the
+        // callbacks on the constructed object, C4Object.cpp:215+ — the
+        // WZKP homebase placed at player join).
+        let position = context
+            .object_context()
+            .filter(|object| object.id() == owner)
+            .map(|object| object.effective_position())
+            .or_else(|| {
+                context
+                    .get_world_object(owner)
+                    .map(|object| object.position())
+            })
+            .ok_or_else(|| {
+                RuntimeError::new(format!(
+                    "SetTransferZone: object {} not found in current engine context",
+                    owner
+                ))
+            })?;
 
         if width <= 0 || height <= 0 {
             context.register_transfer_zone_command(TransferZoneCommand::clear(owner));
             return Ok(Value::Bool(true));
         }
 
-        let abs_x = world_object.position.x.saturating_add(x);
-        let abs_y = world_object.position.y.saturating_add(y);
+        let abs_x = position.x.saturating_add(x);
+        let abs_y = position.y.saturating_add(y);
         let rect = TransferZoneRect {
             x: abs_x,
             y: abs_y,
@@ -13978,6 +14235,122 @@ fn construction_check(
     Ok(true)
 }
 
+/// `C4AUL_MAX_Par` (C4Aul.h:54): the NumVars/Par slot count that bounds
+/// FindConstructionSite's var indices.
+const AUL_MAX_PAR: i32 = 10;
+
+/// `C4Value::getInt` tolerance on the staged Var slots: non-numeric
+/// values read as 0.
+fn value_as_int(value: &Value) -> i32 {
+    match value {
+        Value::Int(int) => *int,
+        Value::Bool(flag) => i32::from(*flag),
+        _ => 0,
+    }
+}
+
+/// `Game.OverlapObject` (C4Game.cpp:1298-1313) over the host world: any
+/// active, uncontained object whose category intersects `category` within
+/// C4D_SortLimit and whose shape rect overlaps the given rect
+/// (C4Rect::Overlap, C4Rect.cpp:92-99).
+fn host_overlap_object(
+    context: &EffectHostContext,
+    x: i32,
+    y: i32,
+    wdt: i32,
+    hgt: i32,
+    category: i32,
+) -> bool {
+    context.world_object_ids().into_iter().any(|id| {
+        let Some(object) = context.get_world_object(id) else {
+            return false;
+        };
+        if !object.is_present() || !object.status().is_active() {
+            return false;
+        }
+        if object.container().is_some() {
+            return false;
+        }
+        if object.category() & category & CATEGORY_SORT_LIMIT == 0 {
+            return false;
+        }
+        let metadata = context.definition_metadata(object.definition_id());
+        let Some((left, top, right, bottom)) = compute_object_bounds(&object, metadata) else {
+            return false;
+        };
+        x < right && left < x + wdt && y < bottom && top < y + hgt
+    })
+}
+
+/// `FnFindConstructionSite` (C4Script.cpp:1958-1981): stages coordinates
+/// through the CALLER's Var slots — reads the start position from
+/// `Caller->NumVars[iVarX/iVarY]`, accepts it when ConstructionCheck
+/// passes, else runs the FindConSiteSpot landscape probe
+/// (C4Landscape.cpp:1987-2043, hrange 20) with the Game.OverlapObject
+/// veto and writes the coordinates back into the caller's slots. The
+/// planet System.c4g FindConstructionSiteX wrapper (Commits.c:384-390)
+/// drives it — 10x DLAR Initialize in SkiesOfFire.
+fn find_construction_site(args: &[Value]) -> Result<Value, RuntimeError> {
+    // C4Id2Def failure yields the empty optional (:1962).
+    let definition = match args.first().unwrap_or(&Value::Nil) {
+        Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
+        _ => return Ok(Value::Nil),
+    };
+    let var_x = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "FindConstructionSite",
+        "iVarX",
+    )?;
+    let var_y = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "FindConstructionSite",
+        "iVarY",
+    )?;
+    // Var indices out of range (:1964).
+    if !(0..AUL_MAX_PAR).contains(&var_x) || !(0..AUL_MAX_PAR).contains(&var_y) {
+        return Ok(Value::Nil);
+    }
+    // `if (!cthr->Caller) return {}` (:1966).
+    let Some(slots) = lc_script::caller_var_slots() else {
+        return Ok(Value::Nil);
+    };
+    let v1 = value_as_int(&slots.get(var_x));
+    let v2 = value_as_int(&slots.get(var_y));
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref().ok_or_else(|| {
+            RuntimeError::new("FindConstructionSite requires an active engine context")
+        })?;
+        let Some(metadata) = context.definition_metadata(&definition) else {
+            return Ok(Value::Nil);
+        };
+        // Construction check at the starting position (:1970-1971): the
+        // caller's vars stay untouched on an immediate hit.
+        if construction_check(context, &definition, metadata, Vector2::new(v1, v2))? {
+            return Ok(Value::Bool(true));
+        }
+        // Search for real (:1973-1977) with pDef->Shape.Wdt/Hgt and
+        // Category.
+        let (wdt, hgt) = metadata
+            .shape
+            .map(|rect| (rect.width, rect.height))
+            .unwrap_or((0, 0));
+        let category = metadata.category;
+        let found = context.landscape_ref().and_then(|landscape| {
+            landscape.find_con_site_spot(v1, v2, wdt, hgt, 20, |x, y, w, h| {
+                host_overlap_object(context, x, y, w, h, category)
+            })
+        });
+        // V1 = C4VInt(v1); V2 = C4VInt(v2) — written back even when the
+        // probe found nothing (:1978).
+        let (out_x, out_y) = found.unwrap_or((v1, v2));
+        slots.set(var_x, Value::Int(out_x));
+        slots.set(var_y, Value::Int(out_y));
+        Ok(Value::Bool(found.is_some()))
+    })
+}
+
 fn compute_object_bounds(
     object: &HostWorldObject,
     metadata: Option<&DefinitionMetadata>,
@@ -17089,6 +17462,7 @@ impl EffectHostContext {
                 container,
                 status,
                 energy,
+                magic_energy,
                 damage,
                 construction,
                 alive,
@@ -17165,6 +17539,7 @@ impl EffectHostContext {
                 );
                 scope.definition_id = definition_id;
                 scope.walk_rotation = walk_rotation;
+                scope.current_magic_energy = magic_energy;
                 scope
             }
         });
@@ -17496,6 +17871,7 @@ impl EffectHostContext {
             metadata.physical,
         );
         scope.definition_id = Some(object.definition_id().to_string());
+        scope.current_magic_energy = state.magic_energy;
         Some((scope, state.local_vars.clone()))
     }
 
@@ -18008,6 +18384,8 @@ struct ObjectScopeContext {
     current_action_ticks: u32,
     current_action_phase: i32,
     current_energy: i32,
+    /// C4Object::MagicEnergy (C4Object.h:139), MagicPhysicalFactor scale.
+    current_magic_energy: i32,
     current_damage: i32,
     current_construction: i32,
     current_alive: bool,
@@ -18103,6 +18481,7 @@ impl ObjectScopeContext {
             current_action_ticks: action_ticks,
             current_action_phase: action_phase,
             current_energy: energy,
+            current_magic_energy: 0,
             current_damage: clamped_damage,
             current_construction: clamped_construction,
             current_alive: alive,
@@ -18632,6 +19011,18 @@ impl ObjectScopeContext {
         self.pending_update.energy = Some(energy);
     }
 
+    /// C4Object::MagicEnergy (C4Object.h:139) through the pending overlay.
+    fn magic_energy(&self) -> i32 {
+        self.pending_update
+            .magic_energy
+            .unwrap_or(self.current_magic_energy)
+    }
+
+    fn set_magic_energy(&mut self, magic_energy: i32) {
+        self.current_magic_energy = magic_energy;
+        self.pending_update.magic_energy = Some(magic_energy);
+    }
+
     fn damage(&self) -> i32 {
         self.pending_update.damage.unwrap_or(self.current_damage)
     }
@@ -18973,12 +19364,14 @@ mod tests {
         "DoEnergy",
         "DoHomebaseMaterial",
         "DoHomebaseProduction",
+        "DoMagicEnergy",
         "EffectCall",
         "EffectVar",
         "EnergyCheck",
         "Enter",
         "Exit",
         "ExtractMaterialAmount",
+        "FindConstructionSite",
         "FindContents",
         "FindObject",
         "FindObject2",
@@ -19033,6 +19426,7 @@ mod tests {
         "GetKeys",
         "GetLeague",
         "GetLength",
+        "GetMagicEnergy",
         "GetMass",
         "GetMaterial",
         "GetMaterialVal",
@@ -19054,6 +19448,7 @@ mod tests {
         "GetPlayerType",
         "GetPlrColorDw",
         "GetPlrDownDouble",
+        "GetPlrExtraData",
         "GetPlrKnowledge",
         "GetPlrValue",
         "GetPlrValueGain",
@@ -19140,6 +19535,7 @@ mod tests {
         "SetOwner",
         "SetPhase",
         "SetPhysical",
+        "SetPlrExtraData",
         "SetPlrKnowledge",
         "SetPlrView",
         "SetPlrViewRange",
@@ -20313,6 +20709,174 @@ mod tests {
     }
 
     #[test]
+    fn plr_extra_data_round_trips_like_cpp() {
+        // FnSetPlrExtraData/FnGetPlrExtraData (C4Script.cpp:4692-4747):
+        // named C4Player::ExtraData slots; only nil/int/bool/id values
+        // store; invalid names and players yield nil — MagiClonk's
+        // Recruitment reads `GetPlrExtraData(iPlayer,
+        // MCLK_ComboExtraDataName())` (Script.c:76).
+        let player = PlayerState {
+            id: 3,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            // Unset name reads nil (no name list, :4741).
+            assert_eq!(
+                get_plr_extra_data(&[Value::Int(3), Value::String("MCLK_PrefCombo".into())])?,
+                Value::Nil
+            );
+            // Set returns the stored value (:4731).
+            assert_eq!(
+                set_plr_extra_data(&[
+                    Value::Int(3),
+                    Value::String("MCLK_PrefCombo".into()),
+                    Value::Int(2)
+                ])?,
+                Value::Int(2)
+            );
+            // The same callback reads the write back.
+            assert_eq!(
+                get_plr_extra_data(&[Value::Int(3), Value::String("MCLK_PrefCombo".into())])?,
+                Value::Int(2)
+            );
+            // Invalid player (:4738), string payloads (:4706-4710) and
+            // non-identifier names (:4697-4704) all yield nil.
+            assert_eq!(
+                get_plr_extra_data(&[Value::Int(9), Value::String("MCLK_PrefCombo".into())])?,
+                Value::Nil
+            );
+            assert_eq!(
+                set_plr_extra_data(&[
+                    Value::Int(3),
+                    Value::String("Slot".into()),
+                    Value::String("text".into())
+                ])?,
+                Value::Nil
+            );
+            assert_eq!(
+                set_plr_extra_data(&[
+                    Value::Int(3),
+                    Value::String("bad name!".into()),
+                    Value::Int(1)
+                ])?,
+                Value::Nil
+            );
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+        result.expect("extra data calls succeed");
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [PlayerCommand::SetExtraData { player_id: 3, .. }]
+        ));
+    }
+
+    #[test]
+    fn find_construction_site_stages_through_the_callers_vars_like_cpp() {
+        // FnFindConstructionSite (C4Script.cpp:1958-1981): the start
+        // position reads from Caller->NumVars[iVarX/iVarY]; a failing
+        // ConstructionCheck runs FindConSiteSpot (hrange 20) and writes
+        // the found spot back into the caller's slots; an immediate
+        // ConstructionCheck hit returns true WITHOUT touching them.
+        let mut landscape = Landscape::flat(200, 100);
+        landscape.set_world_height(400);
+        let expected = landscape
+            .find_con_site_spot(50, 40, 20, 20, 20, |_, _, _, _| false)
+            .expect("the flat surface has a site");
+        let mut definitions = HashMap::new();
+        definitions.insert(
+            DefinitionId::from("HUT1"),
+            DefinitionMetadata {
+                category: 1,
+                constructable: true,
+                shape: Some(DefinitionRect::new(-10, -20, 20, 20)),
+                ..DefinitionMetadata::default()
+            },
+        );
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let mut script = lc_script::Engine::new();
+            script.register_host_function("FindConstructionSite", find_construction_site);
+            script
+                .load_script(
+                    r#"#strict 2
+func Probe(id) {
+  // Start in mid-air (no ground support): the check fails, the
+  // probe searches for the surface.
+  Var(0) = 50; Var(1) = 40;
+  var r = FindConstructionSite(id, 0, 1);
+  return([r, Var(0), Var(1)]);
+}
+func ProbeValid(id) {
+  // Free ground-level spot: the start-position check accepts and the
+  // vars stay untouched (C4Script.cpp:1970-1971).
+  Var(0) = 50; Var(1) = 100;
+  return([FindConstructionSite(id, 0, 1), Var(0), Var(1)]);
+}
+func ProbeBadIndex(id) {
+  // Var indices outside 0..C4AUL_MAX_Par-1 yield nil (:1964).
+  return(FindConstructionSite(id, 10, 1));
+}
+"#,
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            let probed = script
+                .call("Probe", &[Value::C4Id("HUT1".into())])
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            assert_eq!(
+                probed,
+                Value::Array(vec![
+                    Value::Bool(true),
+                    Value::Int(expected.0),
+                    Value::Int(expected.1)
+                ])
+            );
+            let valid = script
+                .call("ProbeValid", &[Value::C4Id("HUT1".into())])
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            assert_eq!(
+                valid,
+                Value::Array(vec![Value::Bool(true), Value::Int(50), Value::Int(100)])
+            );
+            let bad_index = script
+                .call("ProbeBadIndex", &[Value::C4Id("HUT1".into())])
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            assert_eq!(bad_index, Value::Nil);
+            // Unknown definition ids fail like C4Id2Def (:1962).
+            let unknown = script
+                .call("Probe", &[Value::C4Id("XXXX".into())])
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            assert_eq!(
+                unknown,
+                Value::Array(vec![Value::Nil, Value::Int(50), Value::Int(40)])
+            );
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+        result.expect("scripted probes succeed");
+    }
+
+    #[test]
+    fn find_construction_site_without_a_script_caller_yields_nil() {
+        // `if (!cthr->Caller) return {}` (C4Script.cpp:1966).
+        let (result, _) = with_object_host_context(|| {
+            find_construction_site(&[Value::C4Id("HUT1".into()), Value::Int(0), Value::Int(1)])
+        });
+        assert_eq!(result.expect("direct host call runs"), Value::Nil);
+    }
+
+    #[test]
     fn get_score_returns_player_points() {
         let player = PlayerState {
             id: 4,
@@ -21278,6 +21842,176 @@ mod tests {
             }
             other => panic!("expected clear command, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn set_transfer_zone_resolves_the_in_flight_object_like_cpp() {
+        // FnSetTransferZone reads pObj->x/y off the LIVE object
+        // (C4Script.cpp:3151-3156). The C4Object exists before its own
+        // Initialize fires (C4Object::Init calls the script AFTER
+        // construction, C4Object.cpp:215+), so a `SetTransferZone` from
+        // Initialize works even when the world snapshot predates the
+        // object — WZKP's UpdateTransferZone via the player-join homebase
+        // placement. The empty default world reproduces the race: the
+        // executing scope is the only knowledge of object 1.
+        let (result, outcome) = with_object_host_context(|| {
+            set_transfer_zone(&[Value::Int(2), Value::Int(3), Value::Int(5), Value::Int(7)])
+        });
+        assert_eq!(result.expect("SetTransferZone succeeds"), Value::Bool(true));
+        assert_eq!(outcome.transfer_zones.len(), 1);
+        match outcome.transfer_zones.first() {
+            Some(TransferZoneCommand::Set { owner, rect }) => {
+                assert_eq!(*owner, ObjectId::new(1));
+                assert_eq!((rect.x, rect.y, rect.width, rect.height), (2, 3, 5, 7));
+            }
+            other => panic!("expected set command, got {:?}", other),
+        }
+    }
+
+    /// An active-object context carrying magic state — the FnDoMagicEnergy/
+    /// FnGetMagicEnergy fixtures (C4Script.cpp:517-550).
+    fn with_magic_object_context<F, T>(
+        magic_energy: i32,
+        physical_magic: i32,
+        func: F,
+    ) -> (Result<T, RuntimeError>, EffectContextOutcome)
+    where
+        F: FnOnce() -> Result<T, RuntimeError>,
+    {
+        with_effect_context(
+            Some(
+                HostObjectContext::new(
+                    ObjectId::new(1),
+                    None,
+                    ObjectStatus::Normal,
+                    100,
+                    OWNER_NONE,
+                    Vector2::ZERO,
+                    Vector2::ZERO,
+                    &[],
+                    "Idle",
+                    0,
+                    0,
+                    ActionLibrary::default(),
+                    Direction::Left,
+                    CommandDirection::Stop,
+                    0,
+                    None,
+                    None,
+                    &[],
+                    crate::FULL_CON,
+                )
+                .with_physicals(
+                    None,
+                    None,
+                    Vec::new(),
+                    PhysicalInfo {
+                        magic: physical_magic,
+                        ..PhysicalInfo::default()
+                    },
+                )
+                .with_magic_energy(magic_energy),
+            ),
+            &[],
+            HostWorldContext::default(),
+            1,
+            func,
+        )
+    }
+
+    #[test]
+    fn do_magic_energy_scales_by_the_physical_factor_like_cpp() {
+        // FnDoMagicEnergy (C4Script.cpp:517-544): iChange *=
+        // MagicPhysicalFactor (1000, C4Object.h:81), then BoundBy into
+        // 0..GetPhysical()->Magic — WizardTower RefillMagic's
+        // DoMagicEnergy(+1).
+        let (result, outcome) =
+            with_magic_object_context(1_500, 200_000, || do_magic_energy(&[Value::Int(1)]));
+        assert_eq!(result.expect("DoMagicEnergy succeeds"), Value::Bool(true));
+        assert_eq!(
+            outcome.object_update.and_then(|update| update.magic_energy),
+            Some(2_500)
+        );
+    }
+
+    #[test]
+    fn do_magic_energy_full_overload_fails_without_partial_like_cpp() {
+        // `if (pObj->MagicEnergy + iChange > pObj->GetPhysical()->Magic)`
+        // without fAllowPartial returns false and writes nothing
+        // (C4Script.cpp:523-526).
+        let (result, outcome) =
+            with_magic_object_context(199_500, 200_000, || do_magic_energy(&[Value::Int(1)]));
+        assert_eq!(result.expect("DoMagicEnergy runs"), Value::Bool(false));
+        assert_eq!(
+            outcome.object_update.and_then(|update| update.magic_energy),
+            None,
+            "a refused change leaves MagicEnergy untouched"
+        );
+    }
+
+    #[test]
+    fn do_magic_energy_partial_overload_clamps_to_the_cap_like_cpp() {
+        // fAllowPartial clamps the gain to the remaining headroom
+        // (C4Script.cpp:527-529); a zero remainder still fails (:528).
+        let (result, outcome) = with_magic_object_context(199_500, 200_000, || {
+            do_magic_energy(&[Value::Int(1), Value::Nil, Value::Bool(true)])
+        });
+        assert_eq!(result.expect("DoMagicEnergy runs"), Value::Bool(true));
+        assert_eq!(
+            outcome.object_update.and_then(|update| update.magic_energy),
+            Some(200_000)
+        );
+
+        let (result, outcome) = with_magic_object_context(200_000, 200_000, || {
+            do_magic_energy(&[Value::Int(1), Value::Nil, Value::Bool(true)])
+        });
+        assert_eq!(
+            result.expect("DoMagicEnergy runs"),
+            Value::Bool(false),
+            "zero headroom fails even with fAllowPartial"
+        );
+        assert_eq!(
+            outcome.object_update.and_then(|update| update.magic_energy),
+            None
+        );
+    }
+
+    #[test]
+    fn do_magic_energy_underload_mirrors_the_cpp_partial_rules() {
+        // `if (pObj->MagicEnergy + iChange < 0)` (C4Script.cpp:532-538):
+        // refused outright without fAllowPartial, clamped to -MagicEnergy
+        // with it, and a zero clamp still fails.
+        let (result, _) =
+            with_magic_object_context(1_500, 200_000, || do_magic_energy(&[Value::Int(-2)]));
+        assert_eq!(result.expect("DoMagicEnergy runs"), Value::Bool(false));
+
+        let (result, outcome) = with_magic_object_context(1_500, 200_000, || {
+            do_magic_energy(&[Value::Int(-2), Value::Nil, Value::Bool(true)])
+        });
+        assert_eq!(result.expect("DoMagicEnergy runs"), Value::Bool(true));
+        assert_eq!(
+            outcome.object_update.and_then(|update| update.magic_energy),
+            Some(0)
+        );
+
+        let (result, _) = with_magic_object_context(0, 200_000, || {
+            do_magic_energy(&[Value::Int(-2), Value::Nil, Value::Bool(true)])
+        });
+        assert_eq!(
+            result.expect("DoMagicEnergy runs"),
+            Value::Bool(false),
+            "an already-empty store fails the drain"
+        );
+    }
+
+    #[test]
+    fn get_magic_energy_reads_in_physical_factor_units_like_cpp() {
+        // FnGetMagicEnergy: MagicEnergy / MagicPhysicalFactor
+        // (C4Script.cpp:546-550) — SkiesOfFire's InitializePlayer refill
+        // reads it back through NoMagicEnergy's global override.
+        let (result, _) =
+            with_magic_object_context(2_500, 200_000, || get_magic_energy(&[]));
+        assert_eq!(result.expect("GetMagicEnergy runs"), Value::Int(2));
     }
 
     #[test]
