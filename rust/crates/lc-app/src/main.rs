@@ -1187,6 +1187,7 @@ fn run_integration_test(
         .context("parse LC_APP_TEST_INPUT")?
         .unwrap_or_default();
     println!("Running {} test frames...", test_frames);
+    let mut last_action: Option<String> = None;
     for frame in 0..test_frames {
         for (when, event) in &scripted_input {
             if *when == frame {
@@ -1198,6 +1199,26 @@ fn run_integration_test(
         }
         app.update()
             .with_context(|| format!("failed to update app at frame {}", frame))?;
+        // Scripted-input forensics: log the cursor crew's action
+        // transitions so control-chain effects are observable per frame.
+        if !scripted_input.is_empty() {
+            if let Some(snapshot) = app
+                .engine
+                .crew_cursor(app.local_owner)
+                .and_then(|cursor| app.engine.object_snapshot(cursor))
+            {
+                if last_action.as_deref() != Some(snapshot.action.name.as_str()) {
+                    println!(
+                        "  frame {frame}: cursor action -> {} pos=({}, {}) comdir={:?}",
+                        snapshot.action.name,
+                        snapshot.position.x,
+                        snapshot.position.y,
+                        snapshot.command_direction
+                    );
+                    last_action = Some(snapshot.action.name.clone());
+                }
+            }
+        }
     }
 
     // Forensics for scripted-input runs: where did the cursor crew end up?
@@ -1269,6 +1290,30 @@ fn run_integration_test(
             .context("encode integration frame")?;
         std::fs::write(&dump, &png).with_context(|| format!("write {dump}"))?;
         println!("  wrote {dump} ({w}x{h})");
+    }
+
+    // Forensics: `LC_APP_DUMP_OBJECTS=1` lists every object with its def,
+    // position, category, container and whether a sprite was registered —
+    // the render-parity companion to LC_APP_DUMP_FRAME.
+    if std::env::var("LC_APP_DUMP_OBJECTS").is_ok() {
+        let snapshot = app.engine.snapshot();
+        for object in &snapshot.objects {
+            let has_sprite = app
+                .object_sprites
+                .contains_key(&sprite_map_key(&object.definition_id, None));
+            println!(
+                "  obj id={} def={} pos=({}, {}) cat={:#x} sprite={} contained={:?} overlays={} action={}",
+                object.id.as_u64(),
+                object.definition_id,
+                object.position.x,
+                object.position.y,
+                object.category,
+                has_sprite,
+                object.container.map(|id| id.as_u64()),
+                object.graphics_overlays.len(),
+                object.action.name,
+            );
+        }
     }
 
     Ok(())
