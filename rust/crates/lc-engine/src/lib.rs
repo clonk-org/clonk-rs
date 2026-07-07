@@ -14231,7 +14231,7 @@ impl Engine {
                 }
             }
         }
-        if let Some(traced) = coach_debug_id().filter(|_| (1..=80).contains(&frame)) {
+        if let Some(traced) = coach_debug_id().filter(|_| (1..=300).contains(&frame)) {
             if let Some(idx) = self.find_object_index(ObjectId::new(traced)) {
                 let object = &self.objects[idx];
                 crate::rng::rng_trace_line(&format!(
@@ -35870,6 +35870,61 @@ func Trigger() {
             engine.objects[idx].state.action.phase, 1,
             "PhaseDelay += fixtoi(ValByPhysical(160,100000)*10)=16 >= Delay 3 on the first exec"
         );
+    }
+
+    // DFA_SWIM COMD_Stop decay (C4Object.cpp:4952-4958): each exec takes
+    // one SwimAccel = FIXED100(20) = raw 13107 off xdir, then the dead
+    // zone `(xdir > -SwimAccel) && (xdir < +SwimAccel)` snaps to 0. From
+    // the FISH's full swim speed lLimit = ValByPhysical(160, 100000) =
+    // raw 104857 the ladder is 91750, 78643, 65536, 52429, 39322, 26215,
+    // 13108, then 13108-13107=1 falls in the dead zone -> EXACTLY 0 on
+    // the 9th exec. NB the ladder passes 26215, never 26214=2*13107 —
+    // a swimmer showing 26214 got there by ACCELERATING from 0 (comdir
+    // Left/Right), not by a Stop decay (the f100 fish-wall tell).
+    #[test]
+    fn swim_stop_decays_fish_xdir_to_exact_zero_on_the_cpp_schedule() {
+        let mut definition =
+            Definition::from_script("FISH", "Fish", "#strict\n").expect("compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Swim".to_string(),
+            ActionSpec::default().with_procedure("SWIM"),
+        );
+        definition.configure_actions(Some("Swim".to_string()), actions);
+        definition.set_physical(PhysicalInfo {
+            swim: 100_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(5);
+        engine.register_definition(definition).expect("registers");
+        engine.set_physics(PhysicsSettings::new(2, 20, -20));
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("FISH")
+                    .with_position(Vector2::new(0, 0))
+                    .with_command_direction(CommandDirection::Stop),
+            )
+            .expect("spawns");
+        let idx = engine.find_object_index(id).expect("exists");
+        engine.objects[idx].state.in_liquid = true;
+        engine.objects[idx].fixed_velocity.x = C4Fixed::from_raw(104857);
+        engine.objects[idx].state.mobile = true;
+
+        let ladder = [
+            91750, 78643, 65536, 52429, 39322, 26215, 13108, 0, 0,
+        ];
+        for (tick, expected) in ladder.iter().enumerate() {
+            engine.tick().expect("tick");
+            let idx = engine.find_object_index(id).expect("exists");
+            assert_eq!(
+                engine.objects[idx].fixed_velocity.x.val(),
+                *expected,
+                "COMD_Stop decay after tick {}",
+                tick + 1
+            );
+            assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        }
     }
 
     #[test]
