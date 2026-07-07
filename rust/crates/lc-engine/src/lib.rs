@@ -9201,6 +9201,27 @@ fn coach_debug_enabled() -> bool {
     coach_debug_id().is_some()
 }
 
+/// LC_COACHDBG per-exec-stage state line for the traced object
+/// (diagnostic only) — brackets ExecuteCommand/ExecAction/DoMovement so
+/// a mid-frame kinematics change pins to a stage.
+fn dbg_stage(object: &Object, stage: &str) {
+    if coach_debug_id() == Some(object.id.as_u64()) {
+        crate::rng::rng_trace_line(&format!(
+            "STG {stage} pos=({},{}) fix=({},{}) dirs=({},{}) act={} comdir={:?} dir={:?} mobile={}",
+            object.state.position.x,
+            object.state.position.y,
+            object.fixed_position.x.val(),
+            object.fixed_position.y.val(),
+            object.fixed_velocity.x.val(),
+            object.fixed_velocity.y.val(),
+            object.state.action.name,
+            object.state.command_direction,
+            object.state.direction,
+            object.state.mobile
+        ));
+    }
+}
+
 /// LC_COACHDBG's traced object id: `LC_COACHDBG=<id>`, any non-numeric
 /// value keeps the original coach target 1450 (diagnostic only).
 fn coach_debug_id() -> Option<u64> {
@@ -14408,7 +14429,9 @@ impl Engine {
             if !self.exec_connect_line(idx)? {
                 continue;
             }
+            dbg_stage(&self.objects[idx], "POSTCMD");
             let exec_action_returned_early = self.apply_physics_at_index(idx);
+            dbg_stage(&self.objects[idx], "POSTACT");
 
             // Phase advance runs at the END of ExecAction
             // (C4Object.cpp:5440-5465) — AFTER the procedure steering
@@ -14520,6 +14543,7 @@ impl Engine {
             if self.objects[idx].destroyed {
                 continue;
             }
+            dbg_stage(&self.objects[idx], "PREMOVE");
 
             // C4Object::ExecMovement (C4Movement.cpp:553-616): contained
             // objects copy the container's motion (:556-561), C4D_StaticBack
@@ -14583,6 +14607,7 @@ impl Engine {
                 }
             }
 
+            dbg_stage(&self.objects[idx], "POSTMOVE");
             self.apply_landscape_at_index(idx);
             // Masks follow every state change this frame
             // (C4Object::UpdateSolidMask fires from UpdatePos/Enter/
@@ -17589,6 +17614,12 @@ impl Engine {
                     let Some(function_name) = contact_callback_name(cnat) else {
                         continue;
                     };
+                    if coach_debug_id() == Some(object.id.as_u64()) {
+                        crate::rng::rng_trace_line(&format!(
+                            "CONTACTCB {function_name} at ({},{})",
+                            object.state.position.x, object.state.position.y
+                        ));
+                    }
                     let state_snapshot = object.state.clone();
                     let world = contact_world
                         .clone()
