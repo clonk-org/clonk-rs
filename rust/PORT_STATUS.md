@@ -65,6 +65,13 @@
   C4Object.cpp:1069-1090) — so an action set inside a timer callback
   gets its first PhaseDelay increment the NEXT frame
   (C4Object.cpp:5458-5466) and timer callbacks read post-movement state.
+  2026-07-07 f60 residual closed: apply_container_change now carries
+  C4Object::Enter's runtime semantics — a transfer's internal Exit
+  mobilizes (C4Object.cpp:1579,1540-1541) and fCopyMotion snaps the
+  entering object to the NEW container's position/velocity immediately
+  (:1598-1606) — the reloaded CSHO cartridges sit at the crosshair with
+  Mobile=1 the same frame like cpp; collect keeps its fCopyMotion=false
+  stand-in (:5698).
 - **Frame-21 rider-xdir wall forensics (2026-07-03).** The coach movement
   friction chain is now PINNED bit-exact against C4Movement.cpp and cannot
   be the wall: `pushed_wagon_loses_xdir_by_wheel_friction_quanta_*`,
