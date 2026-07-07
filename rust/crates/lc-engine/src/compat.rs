@@ -10790,20 +10790,34 @@ fn set_transfer_zone(args: &[Value]) -> Result<Value, RuntimeError> {
                 })?,
         };
 
-        let world_object = context.get_world_object(owner).ok_or_else(|| {
-            RuntimeError::new(format!(
-                "SetTransferZone: object {} not found in current engine context",
-                owner
-            ))
-        })?;
+        // pObj->x/y off the LIVE object (C4Script.cpp:3154): the executing
+        // scope resolves the object even while its own Initialize runs
+        // before the world snapshot knows it (C4Object::Init fires the
+        // callbacks on the constructed object, C4Object.cpp:215+ — the
+        // WZKP homebase placed at player join).
+        let position = context
+            .object_context()
+            .filter(|object| object.id() == owner)
+            .map(|object| object.effective_position())
+            .or_else(|| {
+                context
+                    .get_world_object(owner)
+                    .map(|object| object.position())
+            })
+            .ok_or_else(|| {
+                RuntimeError::new(format!(
+                    "SetTransferZone: object {} not found in current engine context",
+                    owner
+                ))
+            })?;
 
         if width <= 0 || height <= 0 {
             context.register_transfer_zone_command(TransferZoneCommand::clear(owner));
             return Ok(Value::Bool(true));
         }
 
-        let abs_x = world_object.position.x.saturating_add(x);
-        let abs_y = world_object.position.y.saturating_add(y);
+        let abs_x = position.x.saturating_add(x);
+        let abs_y = position.y.saturating_add(y);
         let rect = TransferZoneRect {
             x: abs_x,
             y: abs_y,
@@ -21277,6 +21291,30 @@ mod tests {
                 assert_eq!(*owner, ObjectId::new(1));
             }
             other => panic!("expected clear command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn set_transfer_zone_resolves_the_in_flight_object_like_cpp() {
+        // FnSetTransferZone reads pObj->x/y off the LIVE object
+        // (C4Script.cpp:3151-3156). The C4Object exists before its own
+        // Initialize fires (C4Object::Init calls the script AFTER
+        // construction, C4Object.cpp:215+), so a `SetTransferZone` from
+        // Initialize works even when the world snapshot predates the
+        // object — WZKP's UpdateTransferZone via the player-join homebase
+        // placement. The empty default world reproduces the race: the
+        // executing scope is the only knowledge of object 1.
+        let (result, outcome) = with_object_host_context(|| {
+            set_transfer_zone(&[Value::Int(2), Value::Int(3), Value::Int(5), Value::Int(7)])
+        });
+        assert_eq!(result.expect("SetTransferZone succeeds"), Value::Bool(true));
+        assert_eq!(outcome.transfer_zones.len(), 1);
+        match outcome.transfer_zones.first() {
+            Some(TransferZoneCommand::Set { owner, rect }) => {
+                assert_eq!(*owner, ObjectId::new(1));
+                assert_eq!((rect.x, rect.y, rect.width, rect.height), (2, 3, 5, 7));
+            }
+            other => panic!("expected set command, got {:?}", other),
         }
     }
 
