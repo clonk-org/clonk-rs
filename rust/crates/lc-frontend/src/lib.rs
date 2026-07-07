@@ -826,16 +826,13 @@ impl GraphicsSystem {
             snapshot.frame,
             lighting,
         );
+        // C4Object::Draw attaches no energy/magic bars to world objects —
+        // energy presentation lives in the HUD corner (DrawCursorInfo,
+        // src/C4Viewport.cpp:920-945). The world-space fctEnergy bolt only
+        // blinks (`Tick35 > 12`) over NeedEnergy structures
+        // (src/C4Object.cpp:2505-2510); NeedEnergy is not modeled in the
+        // Rust engine yet, so nothing is drawn here.
         let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, input.focus.id);
-        self.draw_object_energy_bars(
-            snapshot,
-            &highlight_ids,
-            owner_colors,
-            input.owner,
-            origin_x,
-            origin_y,
-            zoom,
-        );
         self.draw_selection_marks(snapshot, &highlight_ids, input.owner, origin_x, origin_y, zoom);
         self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom);
 
@@ -914,118 +911,6 @@ impl GraphicsSystem {
             }
         }
         highlights
-    }
-
-    fn draw_object_energy_bars(
-        &mut self,
-        snapshot: &SimulationSnapshot,
-        highlights: &HashSet<ObjectId>,
-        owner_colors: &HashMap<i32, Color>,
-        owner: i32,
-        origin_x: f32,
-        origin_y: f32,
-        zoom: f32,
-    ) {
-        if self.hud_graphics.energy_bars.is_none() && self.hud_graphics.energy.is_none() {
-            return;
-        }
-        let surface_width = self.surface_width as f32;
-        let surface_height = self.surface_height as f32;
-        for object in &snapshot.objects {
-            if !object.crew_member || !object.status.is_active() || !object.alive {
-                continue;
-            }
-            let highlighted = highlights.contains(&object.id);
-            if object.owner != owner && !highlighted {
-                continue;
-            }
-
-            let screen_x = (object.position.x as f32 - origin_x) * zoom;
-            let screen_y = (object.position.y as f32 - origin_y) * zoom;
-            let margin = 48.0;
-            if screen_x < -margin
-                || screen_x > surface_width + margin
-                || screen_y < -margin
-                || screen_y > surface_height + margin
-            {
-                continue;
-            }
-
-            let base_width = 32.0f32;
-            let base_height = 4.0f32;
-            let width = (base_width * zoom).clamp(18.0, 64.0);
-            let height = (base_height * zoom).clamp(3.0, 10.0);
-            let offset_y = (18.0 * zoom).clamp(12.0, 32.0);
-            let base_origin = GuiPoint::new(screen_x - width / 2.0, screen_y - offset_y);
-
-            let alpha = if highlighted { 255 } else { 220 };
-            let owner_color = owner_colors
-                .get(&object.owner)
-                .copied()
-                .unwrap_or_else(|| default_owner_color(object.owner));
-            let mut energy_fill = if highlighted {
-                owner_color.modulate(1.2)
-            } else {
-                owner_color.modulate(0.85)
-            };
-            energy_fill.a = alpha;
-            let energy_fraction = (object.energy.max(0).min(100) as f32) / 100.0;
-
-            let mut bars: Vec<(f32, Option<&ImageData>, Color)> = Vec::with_capacity(2);
-            bars.push((
-                energy_fraction.clamp(0.0, 1.0),
-                self.hud_graphics.energy.as_ref(),
-                energy_fill,
-            ));
-
-            if object.magic_capacity > 0 {
-                let capacity = object.magic_capacity.max(1);
-                let magic_fraction =
-                    (object.magic_energy.max(0).min(capacity) as f32) / (capacity as f32);
-                let mut magic_fill = Color::opaque(96, 148, 252);
-                if highlighted {
-                    magic_fill = magic_fill.modulate(1.15);
-                }
-                magic_fill.a = alpha;
-                bars.push((
-                    magic_fraction.clamp(0.0, 1.0),
-                    self.hud_graphics.magic.as_ref(),
-                    magic_fill,
-                ));
-            }
-
-            let gap = (height * 0.6).clamp(2.0, 6.0);
-            let background = Color::new(16, 24, 40, 210);
-
-            for (index, &(fraction, icon, fill_color)) in bars.iter().enumerate() {
-                let origin_y = base_origin.y + index as f32 * (height + gap);
-                let origin = GuiPoint::new(base_origin.x, origin_y);
-                let bar_rect = GuiRect::from_origin_size(origin, GuiSize::new(width, height));
-                fill_rect(&mut self.surface, &bar_rect, background);
-
-                if fraction > 0.0 {
-                    let fill_width = (width * fraction).max(1.0);
-                    let energy_rect =
-                        GuiRect::from_origin_size(origin, GuiSize::new(fill_width, height));
-                    fill_rect(&mut self.surface, &energy_rect, fill_color);
-                }
-
-                if let Some(icon) = icon {
-                    let icon_scale = zoom.clamp(0.75, 1.25);
-                    let icon_width = (icon.width() as f32 * icon_scale).clamp(14.0, 28.0);
-                    let icon_height = (icon.height() as f32 * icon_scale).clamp(14.0, 28.0);
-                    let icon_origin = GuiPoint::new(
-                        origin.x - icon_width - 6.0,
-                        origin.y - (icon_height - height) / 2.0,
-                    );
-                    let icon_rect = GuiRect::from_origin_size(
-                        icon_origin,
-                        GuiSize::new(icon_width, icon_height),
-                    );
-                    draw_image(&mut self.surface, &icon_rect, icon);
-                }
-            }
-        }
     }
 
     /// `C4Object::DrawSelectMark` (src/C4Object.cpp:3839-3857): the four
@@ -5027,6 +4912,65 @@ mod tests {
         }
         assert!(found, "expected the fctCursor cell above the cursor crew");
         assert!(!leaked, "other sheet cells must not be drawn");
+    }
+
+    #[test]
+    fn no_floating_energy_bars_or_bolt_over_crew() {
+        // C4Object::Draw (src/C4Object.cpp:2151-2556) draws NO energy or
+        // magic bars attached to the object — energy lives in the HUD
+        // corner (C4Viewport::DrawCursorInfo, src/C4Viewport.cpp:920-945).
+        // The fctEnergy bolt appears world-space only for NeedEnergy
+        // structures, blinking on `Tick35 > 12` (src/C4Object.cpp:2505-2510)
+        // — never as a persistent crew marker.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].owner = 1;
+        snapshot.objects[0].energy = 70;
+        snapshot.objects[0].magic_energy = 30;
+        snapshot.objects[0].magic_capacity = 50;
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+        snapshot.players.push(PlayerState {
+            id: 1,
+            cursor: Some(snapshot.objects[0].id),
+            ..PlayerState::default()
+        });
+
+        let bolt = [230u8, 20, 20, 255];
+        let bolt_pixels: Vec<u8> = (0..8 * 8).flat_map(|_| bolt).collect();
+        let hud = HudGraphics {
+            energy: Some(ImageData::new(8, 8, bolt_pixels.clone())),
+            magic: Some(ImageData::new(8, 8, bolt_pixels)),
+            ..Default::default()
+        };
+
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Energy Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            Arc::new(hud),
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let bar_background = Color::new(16, 24, 40, 210);
+        for chunk in graphics.surface().pixels().chunks_exact(4) {
+            assert_ne!(chunk, bolt, "no floating Energy/Magic bolt icons");
+            assert_ne!(
+                chunk,
+                [
+                    bar_background.r,
+                    bar_background.g,
+                    bar_background.b,
+                    bar_background.a
+                ],
+                "no floating bar backgrounds"
+            );
+        }
     }
 
     #[test]
