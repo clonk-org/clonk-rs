@@ -14735,6 +14735,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             ObjectStatus::Normal,
             false,
             FULL_CON,
+            metadata.category,
         );
         let preview = HostWorldObject::with_category(
             id,
@@ -14971,6 +14972,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             ObjectStatus::Normal,
             false,
             construction_value,
+            metadata.category,
         );
         let preview = HostWorldObject::with_category(
             id,
@@ -16447,6 +16449,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 ObjectStatus::Normal,
                 false,
                 FULL_CON,
+                metadata.category,
             );
             let preview = HostWorldObject::with_category(
                 id,
@@ -17356,6 +17359,7 @@ fn incinerate_landscape(args: &[Value]) -> Result<Value, RuntimeError> {
             ObjectStatus::Normal,
             false,
             FULL_CON,
+            metadata.category,
         );
         let preview = HostWorldObject::with_category(
             id,
@@ -18452,7 +18456,7 @@ impl EffectHostContext {
                 graphics_overlays,
                 base_graphics,
                 category,
-                ocf: _,
+                ocf,
                 ocf_base,
                 crew_member,
                 draw_transform,
@@ -18503,6 +18507,8 @@ impl EffectHostContext {
                     definition_physical,
                 );
                 scope.definition_id = definition_id;
+                // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358).
+                scope.cached_ocf = Some(ocf);
                 scope.walk_rotation = walk_rotation;
                 scope.current_magic_energy = magic_energy;
                 // Seed the TRUE fixed dirs when the caller provided them —
@@ -19380,6 +19386,10 @@ struct ObjectScopeContext {
     current_controller: i32,
     current_category: i32,
     ocf_base: u32,
+    /// The object's CACHED OCF at call entry — FnGetOCF returns pObj->OCF
+    /// verbatim (C4Script.cpp:1354-1358). None for bare fixture scopes,
+    /// which fall back to the preview-grade recompute.
+    cached_ocf: Option<u32>,
     crew_member: bool,
     current_direction: Direction,
     current_command_direction: CommandDirection,
@@ -19475,6 +19485,7 @@ impl ObjectScopeContext {
             current_controller: controller,
             current_category: category,
             ocf_base,
+            cached_ocf: None,
             crew_member,
             current_direction: direction,
             current_command_direction: command_direction,
@@ -19797,17 +19808,23 @@ impl ObjectScopeContext {
     }
 
     fn ocf(&self) -> u32 {
-        let alive = self.alive();
-        let status = self.status();
-        let is_contained = self.container().is_some();
-        ocf::compute(
-            self.ocf_base,
-            self.crew_member,
-            alive,
-            status,
-            is_contained,
-            self.construction(),
-        )
+        // FnGetOCF returns pObj->OCF verbatim (C4Script.cpp:1354-1358):
+        // the engine seeds the cached mask at call entry. Bare fixture
+        // scopes without a seed keep the preview-grade recompute.
+        self.cached_ocf.unwrap_or_else(|| {
+            let alive = self.alive();
+            let status = self.status();
+            let is_contained = self.container().is_some();
+            ocf::compute(
+                self.ocf_base,
+                self.crew_member,
+                alive,
+                status,
+                is_contained,
+                self.construction(),
+                self.current_category,
+            )
+        })
     }
 
     fn container(&self) -> Option<ObjectId> {
@@ -28517,7 +28534,10 @@ func ProbeBadIndex(id) {
 
     #[test]
     fn get_ocf_returns_object_mask() {
-        let ocf_mask = ocf::AVAILABLE | ocf::ALIVE;
+        // FnGetOCF returns pObj->OCF verbatim (C4Script.cpp:1354-1358);
+        // the seeded mask mirrors a real SetOCF result, which always
+        // carries OCF_Normal (C4Object.cpp:547-548).
+        let ocf_mask = ocf::NORMAL | ocf::NOT_CONTAINED | ocf::AVAILABLE | ocf::ALIVE;
         let object_id = ObjectId::new(1);
         let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
             object_id,
@@ -28578,9 +28598,10 @@ func ProbeBadIndex(id) {
             panic!("expected integer mask, got {value:?}");
         };
         let mask = raw as u32;
-        assert_eq!(mask & ocf_mask, ocf_mask);
-        assert_ne!(mask & ocf::NORMAL, 0);
-        assert_ne!(mask & ocf::NOT_CONTAINED, 0);
+        assert_eq!(
+            mask, ocf_mask,
+            "the cached mask comes back verbatim (C4Script.cpp:1357)"
+        );
     }
 
     #[test]

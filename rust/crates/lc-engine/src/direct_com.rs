@@ -297,8 +297,15 @@ impl Engine {
             return Ok(());
         }
 
-        // Decrease NoCollectDelay (:3359-3362): the collection-delay counter
-        // is not modelled yet (see PORT_STATUS player-controls).
+        // Decrease NoCollectDelay (:3359-3362): plain (non-Single/Double,
+        // non-release) coms count the drop's collection delay down; the
+        // ObjectComDrop arm that sets it lives with the command layer.
+        if com & COM_SINGLE == 0 && com & COM_DOUBLE == 0 && !is_release {
+            let delay = &mut self.objects[index].state.no_collect_delay;
+            if *delay > 0 {
+                *delay -= 1;
+            }
+        }
 
         // COM_Contents contents shift (:3364-3372): data carries the target
         // object number; the shift itself runs through the app-side menu and

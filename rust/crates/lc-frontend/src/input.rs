@@ -617,7 +617,11 @@ global func Step(state, frame, random) { return nil; }
         let mut engine = setup_engine();
         let mut structure_definition =
             Definition::from_script("Hut", "Hut", WALKER_SCRIPT).expect("valid script");
-        structure_definition.set_ocf_base(ocf::ENTRANCE | ocf::CONTAINER);
+        // A real Entrance area: AtObject(x, y, OCF_Entrance) verifies the
+        // probe against Def->Entrance (GetOCFForPos, C4Object.cpp:1149-1153),
+        // and OCF_Container follows from the entrance (C4Object.cpp:658-660).
+        structure_definition
+            .set_entrance_rect(Some(lc_engine::DefinitionRect::new(-16, -16, 32, 32)));
         structure_definition.set_shape_rect(Some(lc_engine::DefinitionRect::new(-16, -16, 32, 32)));
         engine
             .register_definition(structure_definition)

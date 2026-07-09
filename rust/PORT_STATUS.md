@@ -84,8 +84,16 @@ shadow, recording the new first mismatch.
 - **Controls:** contents-wheel shifting; `NoCollectDelay`; base buy/sell menus
   and immediate contained throw; DefCore version gates; VehicleControl
   overload; exact crew cycling; linekit DigDouble construction.
-- **Objects / find / OCF:** full OCF computation; permanent object info
-  training; DFA_CONNECT line walking; sector traversal and i32 sort-key wrap.
+- **Objects / find / OCF:** the SetOCF computation gap is CLOSED 2026-07-09 —
+  all 30 C4Object::SetOCF bits compute per C4Object.cpp:526-666 (with new
+  DefCore Entrance/RotatedEntrance/Exclusive/Prey/Edible/Chop/
+  AttractLightning/NoFight ingest, ActMap ObjectDisabled, GetOCFForPos area
+  checks in at_object, and cached-OCF reads for script GetOCF/snapshots);
+  residuals: SetOCF's InMat update (InMat/ClosedContainer unmodeled),
+  NoCollectDelay is never armed (ObjectComDrop=2 and the SetCommand decrement
+  live with the command layer), mid-call creation previews stay preview-grade,
+  C4Object::At lacks addtop. Still open: permanent object info training;
+  DFA_CONNECT line walking; sector traversal and i32 sort-key wrap.
   The engine explosion fallback trio FnExplode/Explosion/Game::BlastObjects +
   FnShakeObjects stays unported (System.c4g overrides make it unreachable for
   shipped content); the host-path incinerate does not add the "Fire" C4Effect

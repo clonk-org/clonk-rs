@@ -28,6 +28,11 @@ pub struct ActionSpec {
     pub abort_call: Option<String>,
     #[serde(default)]
     pub no_other_action: bool,
+    /// `ObjectDisabled=` (C4ActionDef::Disabled, C4Def.cpp:106): the
+    /// action suspends the object — vetoes OCF_Collection and
+    /// OCF_FightReady (SetOCF, C4Object.cpp:597,608).
+    #[serde(default)]
+    pub disabled: bool,
     /// `InLiquidAction` (C4ActionDef): the ExecAction head switches to
     /// it while InLiquid with an early return (C4Object.cpp:4749-4753).
     #[serde(default)]
@@ -62,6 +67,7 @@ impl ActionSpec {
             directions: None,
             turn_action: None,
             no_other_action: false,
+            disabled: false,
             dig_free: None,
             attach: 0,
         }
@@ -114,6 +120,11 @@ impl ActionSpec {
 
     pub fn with_no_other_action(mut self, enabled: bool) -> Self {
         self.no_other_action = enabled;
+        self
+    }
+
+    pub fn with_disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -304,6 +315,16 @@ impl ActionLibrary {
         self.specs
             .get(action)
             .map(|spec| spec.no_other_action)
+            .unwrap_or(false)
+    }
+
+    /// The SetOCF action gate `(Action.Act <= ActIdle) ||
+    /// !ActMap[Act].Disabled` (C4Object.cpp:597,608): idle/unknown
+    /// actions never disable the object.
+    pub fn disables_object(&self, action: &str) -> bool {
+        self.specs
+            .get(action)
+            .map(|spec| spec.disabled)
             .unwrap_or(false)
     }
 

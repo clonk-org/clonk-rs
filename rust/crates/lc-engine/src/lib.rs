@@ -363,6 +363,10 @@ const C4D_BORDER_BOTTOM: i32 = 4;
 const C4D_BORDER_LAYER: i32 = 8;
 const CONTACT_DENSITY_SOLID: i32 = 50;
 const C4M_VEHICLE: i32 = 100;
+/// `C4M_Solid` / `C4M_SemiSolid` (C4Material.h:201-202): the GBackSolid
+/// and GBackSemiSolid density thresholds.
+const C4M_SOLID: i32 = 50;
+const C4M_SEMI_SOLID: i32 = 25;
 const ATTACH_RANGE: i32 = 5;
 const FIX_FULL_CIRCLE: i32 = 360;
 const FIX_HALF_CIRCLE: i32 = 180;
@@ -378,6 +382,11 @@ pub const CATEGORY_SORT_LIMIT: i32 = CATEGORY_STATIC_BACK
     | CATEGORY_LIVING
     | CATEGORY_OBJECT;
 pub const DEFAULT_CATEGORY: i32 = CATEGORY_STATIC_BACK;
+
+/// `C4D_Grab_Put` / `C4D_Grab_Get` (C4Def.h:80-81): the GrabPutGet
+/// DefCore bits feeding OCF_Container (SetOCF, C4Object.cpp:658-660).
+pub const GRAB_PUT_GET_PUT: i32 = 1;
+pub const GRAB_PUT_GET_GET: i32 = 2;
 
 pub const LINE_CONNECT_POWER_INPUT: u32 = 1;
 pub const LINE_CONNECT_POWER_OUTPUT: u32 = 1 << 1;
@@ -2174,6 +2183,13 @@ pub struct ObjectState {
     /// reads it, C4Script.cpp:5444).
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub t_attach: u32,
+    /// `C4Object::NoCollectDelay` (C4Object.h:134): armed to 2 by
+    /// ObjectComDrop (C4ObjectCom.cpp:668-669), counted down by DirectCom
+    /// (C4Object.cpp:3371-3374) and SetCommand (C4Object.cpp:3939-3940);
+    /// while nonzero it vetoes OCF_Collection (SetOCF, C4Object.cpp:598).
+    /// Objects.txt "NoCollectDelay" (default 0, C4Object.cpp:2773).
+    #[serde(default)]
+    pub no_collect_delay: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -2218,6 +2234,7 @@ pub(crate) fn preview_spawn_state(
         rotation: 0,
         shape_attach: ShapeAttachRecord::default(),
         t_attach: 0,
+        no_collect_delay: 0,
         energy: 0,
         damage: 0,
         magic_energy: 0,
@@ -5592,6 +5609,32 @@ pub struct Definition {
     grab: i32,
     burn_turn_to: Option<String>,
     incomplete_activity: bool,
+    /// `Exclusive` DefCore flag (C4Def.cpp:313): OCF_Exclusive — no action
+    /// through this, no construction in front of it (SetOCF,
+    /// C4Object.cpp:581-583).
+    exclusive: bool,
+    /// `Edible` DefCore flag (C4Def.cpp:355): OCF_Edible (SetOCF,
+    /// C4Object.cpp:630-632).
+    edible: bool,
+    /// `Prey` DefCore flag (C4Def.cpp:354): OCF_Prey while alive (SetOCF,
+    /// C4Object.cpp:615-618).
+    prey: bool,
+    /// `AttractLightning` DefCore flag (C4Def.cpp:391): OCF_AttractLightning
+    /// at FullCon (SetOCF, C4Object.cpp:623-626).
+    attract_lightning: bool,
+    /// `Entrance` DefCore rect (C4Def.cpp:309): the enter/activate area
+    /// (OCF_Entrance, SetOCF C4Object.cpp:584-587; area check in
+    /// GetOCFForPos, C4Object.cpp:1149-1153).
+    entrance_rect: Option<DefinitionRect>,
+    /// `RotatedEntrance` (C4Def.cpp:377): 0 = upright only, 1 = any
+    /// rotation, N = rotations up to N degrees (SetOCF, C4Object.cpp:586).
+    rotated_entrance: i32,
+    /// `NoFight` DefCore flag (C4Def.cpp:413): suppresses OCF_FightReady
+    /// (SetOCF, C4Object.cpp:606-610).
+    no_fight: bool,
+    /// `Chop` DefCore flag (C4Def::Chopable, C4Def.cpp:378): OCF_Chop
+    /// candidate (SetOCF, C4Object.cpp:570-575).
+    chopable: bool,
     /// The [Physical] DefCore section (C4Def::Physical).
     physical: PhysicalInfo,
     /// Real C4Script content gets the C++ callback arguments — no parameters
@@ -5734,6 +5777,14 @@ impl Definition {
             no_burn_damage: false,
             burn_turn_to: None,
             incomplete_activity: false,
+            exclusive: false,
+            edible: false,
+            prey: false,
+            attract_lightning: false,
+            entrance_rect: None,
+            rotated_entrance: 0,
+            no_fight: false,
+            chopable: false,
             physical: PhysicalInfo::default(),
             c4_callback_args: false,
             solid_mask_pixels: SolidMaskPixels::default(),
@@ -5901,6 +5952,14 @@ impl Definition {
             definition.set_components(components);
         }
         definition.set_line_connect(resource.core.line_connect);
+        definition.set_exclusive(resource.core.exclusive);
+        definition.set_edible(resource.core.edible);
+        definition.set_prey(resource.core.prey);
+        definition.set_attract_lightning(resource.core.attract_lightning);
+        definition.set_entrance_rect(resource.core.entrance.map(DefinitionRect::from));
+        definition.set_rotated_entrance(resource.core.rotated_entrance);
+        definition.set_no_fight(resource.core.no_fight);
+        definition.set_chopable(resource.core.chopable);
         Ok(definition)
     }
 
@@ -5937,6 +5996,9 @@ impl Definition {
         }
         if action.no_other_action {
             spec = spec.with_no_other_action(true);
+        }
+        if action.disabled {
+            spec = spec.with_disabled(true);
         }
         if let Some(dig_free) = action.dig_free {
             spec = spec.with_dig_free(dig_free);
@@ -6088,15 +6150,88 @@ impl Definition {
         self.rotateable = rotateable.max(0);
     }
 
+    /// The def+state arm of C4Object::SetOCF (C4Object.cpp:526-666).
+    /// Context-dependent bits (HitSpeeds, Chop, InSolid, InFree, Available)
+    /// join in `Engine::compute_object_ocf`. The raw `ocf_base` seed is the
+    /// fixture shortcut for def flags this model does not carry.
     pub fn compute_ocf(&self, state: &ObjectState) -> u32 {
-        let mut ocf = crate::ocf::compute(
-            self.ocf_base(),
-            self.crew_member,
-            state.alive,
-            state.status,
-            state.container.is_some(),
-            state.construction,
-        );
+        // OCF_Normal: the OCF is never zero (SetOCF, C4Object.cpp:547-548)
+        let mut ocf = self.ocf_base | OCF_NORMAL;
+        // OCF_NotContained (SetOCF, C4Object.cpp:627-629); OCF_Available
+        // joins in Engine::compute_object_ocf with its container and
+        // landscape clauses (C4Object.cpp:645-648).
+        if state.container.is_none() {
+            ocf |= crate::ocf::NOT_CONTAINED;
+        }
+        // OCF_FullCon (SetOCF, C4Object.cpp:567-569)
+        if state.construction >= FULL_CON {
+            ocf |= crate::ocf::FULL_CON;
+        }
+        // OCF_Living/OCF_Alive (SetOCF, C4Object.cpp:600-605)
+        if state.category & CATEGORY_LIVING != 0 {
+            ocf |= crate::ocf::LIVING;
+            if state.alive {
+                ocf |= crate::ocf::ALIVE;
+            }
+        }
+        // OCF_Prey: Def->Prey && the RAW Alive flag (SetOCF,
+        // C4Object.cpp:615-618)
+        if self.prey && state.alive {
+            ocf |= crate::ocf::PREY;
+        }
+        // OCF_CrewMember: Def->CrewMember && the RAW Alive flag
+        // (SetOCF, C4Object.cpp:619-622)
+        if self.crew_member && state.alive {
+            ocf |= crate::ocf::CREW_MEMBER;
+        }
+        // OCF_AttractLightning at FullCon (SetOCF, C4Object.cpp:623-626)
+        if self.attract_lightning && ocf & crate::ocf::FULL_CON != 0 {
+            ocf |= crate::ocf::ATTRACT_LIGHTNING;
+        }
+        // OCF_Edible (SetOCF, C4Object.cpp:630-632)
+        if self.edible {
+            ocf |= crate::ocf::EDIBLE;
+        }
+        // OCF_FightReady: the OCF_Alive BIT, an action without
+        // ObjectDisabled, and !Def->NoFight (SetOCF, C4Object.cpp:606-610).
+        if ocf & crate::ocf::ALIVE != 0
+            && !self.action_library.disables_object(&state.action.name)
+            && !self.no_fight
+        {
+            ocf |= crate::ocf::FIGHT_READY;
+        }
+        // OCF_Construct: can be built outside (SetOCF, C4Object.cpp:549-552)
+        if self.constructable
+            && state.construction < FULL_CON
+            && state.rotation == 0
+            && !state.on_fire
+        {
+            ocf |= crate::ocf::CONSTRUCT;
+        }
+        // OCF_Rotate: rotateable, but not a minimum (invisible)
+        // construction site (SetOCF, C4Object.cpp:576-580)
+        if self.rotateable > 0 && state.construction > 100 {
+            ocf |= crate::ocf::ROTATE;
+        }
+        // OCF_Exclusive (SetOCF, C4Object.cpp:581-583)
+        if self.exclusive {
+            ocf |= crate::ocf::EXCLUSIVE;
+        }
+        // OCF_Entrance: positive entrance area, FullCon, and the
+        // RotatedEntrance rotation gate (SetOCF, C4Object.cpp:584-587)
+        if self
+            .entrance_rect
+            .is_some_and(|rect| rect.width > 0 && rect.height > 0)
+            && ocf & crate::ocf::FULL_CON != 0
+            && (self.rotated_entrance == 1 || state.rotation <= self.rotated_entrance)
+        {
+            ocf |= crate::ocf::ENTRANCE;
+        }
+        // OCF_Grab: Grab DefCore value, never on StaticBack objects
+        // (SetOCF, C4Object.cpp:553-555)
+        if self.grab > 0 && state.category & CATEGORY_STATIC_BACK == 0 {
+            ocf |= crate::ocf::GRAB;
+        }
         if self.collectible {
             ocf |= crate::ocf::CARRYABLE;
         }
@@ -6117,16 +6252,52 @@ impl Definition {
         {
             ocf |= crate::ocf::INFLAMMABLE;
         }
-        if let Some(rect) = self.collection_rect {
-            if rect.is_positive() {
-                let below_limit = self
-                    .collection_limit
-                    .map(|limit| state.contents.len() < limit as usize)
-                    .unwrap_or(true);
-                if below_limit {
-                    ocf |= crate::ocf::COLLECTION;
+        // OCF_Collection (SetOCF, C4Object.cpp:593-599): FullCon or
+        // IncompleteActivity, a positive Collection area, a free
+        // CollectionLimit slot, no ObjectDisabled action, and
+        // NoCollectDelay == 0.
+        if ocf & crate::ocf::FULL_CON != 0 || self.incomplete_activity {
+            if let Some(rect) = self.collection_rect {
+                if rect.is_positive() {
+                    let below_limit = self
+                        .collection_limit
+                        .map(|limit| state.contents.len() < limit as usize)
+                        .unwrap_or(true);
+                    if below_limit
+                        && !self.action_library.disables_object(&state.action.name)
+                        && state.no_collect_delay == 0
+                    {
+                        ocf |= crate::ocf::COLLECTION;
+                    }
                 }
             }
+        }
+        // OCF_LineConstruct: FullCon + any LineConnect bit besides
+        // C4D_EnergyHolder (SetOCF, C4Object.cpp:611-614)
+        if ocf & crate::ocf::FULL_CON != 0 && self.line_connect & !LINE_CONNECT_ENERGY_HOLDER != 0
+        {
+            ocf |= crate::ocf::LINE_CONSTRUCT;
+        }
+        // OCF_PowerConsumer (SetOCF, C4Object.cpp:649-652)
+        if self.line_connect & LINE_CONNECT_POWER_CONSUMER != 0
+            && ocf & crate::ocf::FULL_CON != 0
+        {
+            ocf |= crate::ocf::POWER_CONSUMER;
+        }
+        // OCF_PowerSupply: a generator, or an energized power output
+        // (SetOCF, C4Object.cpp:653-657)
+        if (self.line_connect & LINE_CONNECT_POWER_GENERATOR != 0
+            || (self.line_connect & LINE_CONNECT_POWER_OUTPUT != 0 && state.energy > 0))
+            && ocf & crate::ocf::FULL_CON != 0
+        {
+            ocf |= crate::ocf::POWER_SUPPLY;
+        }
+        // OCF_Container: Grab_Put, Grab_Get or an open entrance (SetOCF,
+        // C4Object.cpp:658-660)
+        if self.grab_put_get & (GRAB_PUT_GET_PUT | GRAB_PUT_GET_GET) != 0
+            || ocf & crate::ocf::ENTRANCE != 0
+        {
+            ocf |= crate::ocf::CONTAINER;
         }
         ocf
     }
@@ -6544,6 +6715,50 @@ impl Definition {
 
     pub fn set_incomplete_activity(&mut self, enabled: bool) {
         self.incomplete_activity = enabled;
+    }
+
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive
+    }
+
+    pub fn set_exclusive(&mut self, exclusive: bool) {
+        self.exclusive = exclusive;
+    }
+
+    pub fn set_edible(&mut self, edible: bool) {
+        self.edible = edible;
+    }
+
+    pub fn set_prey(&mut self, prey: bool) {
+        self.prey = prey;
+    }
+
+    pub fn set_attract_lightning(&mut self, attract_lightning: bool) {
+        self.attract_lightning = attract_lightning;
+    }
+
+    pub fn entrance_rect(&self) -> Option<DefinitionRect> {
+        self.entrance_rect
+    }
+
+    pub fn set_entrance_rect(&mut self, entrance_rect: Option<DefinitionRect>) {
+        self.entrance_rect = entrance_rect;
+    }
+
+    pub fn set_rotated_entrance(&mut self, rotated_entrance: i32) {
+        self.rotated_entrance = rotated_entrance;
+    }
+
+    pub fn set_no_fight(&mut self, no_fight: bool) {
+        self.no_fight = no_fight;
+    }
+
+    pub fn is_chopable(&self) -> bool {
+        self.chopable
+    }
+
+    pub fn set_chopable(&mut self, chopable: bool) {
+        self.chopable = chopable;
     }
 
     pub fn physical(&self) -> &PhysicalInfo {
@@ -12192,12 +12407,48 @@ impl Engine {
             {
                 continue;
             }
+            // GetOCFForPos (C4Object.cpp:1146-1160): the returned mask
+            // keeps Entrance/Collection only inside their def areas.
+            let candidate_ocf = self.object_ocf_for_pos(candidate_idx, point);
             if candidate_ocf & mask != 0 {
                 return Some((candidate_idx, candidate_id, candidate_ocf));
             }
             return None;
         }
         None
+    }
+
+    /// `C4Object::GetOCFForPos` (C4Object.cpp:1146-1160): the cached mask
+    /// with OCF_Entrance/OCF_Collection verified against the def's
+    /// Entrance/Collection areas at the probe point.
+    fn object_ocf_for_pos(&self, index: usize, point: Vector2) -> u32 {
+        let object = &self.objects[index];
+        let mut rocf = object.state.ocf;
+        if rocf & (crate::ocf::ENTRANCE | crate::ocf::COLLECTION) == 0 {
+            return rocf;
+        }
+        let definition = self.definitions.get(&object.definition_id);
+        let position = object.state.position;
+        let inside_area = |rect: Option<DefinitionRect>| {
+            rect.is_some_and(|rect| {
+                let dx = point.x - (position.x + rect.x);
+                let dy = point.y - (position.y + rect.y);
+                (0..rect.width).contains(&dx) && (0..rect.height).contains(&dy)
+            })
+        };
+        // Verify entrance area (C4Object.cpp:1149-1153)
+        if rocf & crate::ocf::ENTRANCE != 0
+            && !inside_area(definition.and_then(|definition| definition.entrance_rect()))
+        {
+            rocf &= !crate::ocf::ENTRANCE;
+        }
+        // Verify collection area (C4Object.cpp:1154-1158)
+        if rocf & crate::ocf::COLLECTION != 0
+            && !inside_area(definition.and_then(|definition| definition.collection_rect()))
+        {
+            rocf &= !crate::ocf::COLLECTION;
+        }
+        rocf
     }
 
     pub fn find_path(
@@ -14684,7 +14935,7 @@ impl Engine {
         let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
             HashMap::with_capacity(self.objects.len());
         for object in &self.objects {
-            let (procedure, line_connect, ocf_base, collectible) = self
+            let (procedure, line_connect, collectible) = self
                 .definitions
                 .get(&object.definition_id)
                 .map(|definition| {
@@ -14694,19 +14945,13 @@ impl Engine {
                     (
                         procedure,
                         definition.line_connect(),
-                        definition.ocf_base(),
                         definition.is_collectible(),
                     )
                 })
-                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, OCF_NORMAL, false));
-            let ocf = ocf::compute(
-                ocf_base,
-                object.state.crew_member,
-                object.state.alive,
-                object.state.status,
-                object.state.container.is_some(),
-                object.state.construction,
-            );
+                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false));
+            // ExecuteCommand reads the CACHED obj->OCF (C4Command.cpp uses
+            // Target->OCF etc. straight off the objects).
+            let ocf = object.state.ocf;
             command_snapshots.insert(
                 object.id,
                 CommandObjectSnapshot {
@@ -15679,7 +15924,7 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
-            let (procedure, line_connect, ocf_base, collectible) = self
+            let (procedure, line_connect, collectible) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
                 .map(|definition| {
@@ -15688,24 +15933,17 @@ impl Engine {
                             .action_library()
                             .procedure_for_action(&self.objects[idx].state.action.name),
                         definition.line_connect(),
-                        definition.ocf_base(),
                         definition.is_collectible(),
                     )
                 })
                 .unwrap_or((
                     action_library.procedure_for_action(&self.objects[idx].state.action.name),
                     OCF_NORMAL,
-                    OCF_NORMAL,
                     false,
                 ));
-            let ocf = ocf::compute(
-                ocf_base,
-                self.objects[idx].state.crew_member,
-                self.objects[idx].state.alive,
-                self.objects[idx].state.status,
-                self.objects[idx].state.container.is_some(),
-                self.objects[idx].state.construction,
-            );
+            // ExecuteCommand reads the CACHED obj->OCF (refreshed at this
+            // object's Execute-start, C4Object.cpp:1058).
+            let ocf = self.objects[idx].state.ocf;
             command_snapshots.insert(
                 object_id,
                 CommandObjectSnapshot {
@@ -17315,6 +17553,7 @@ impl Engine {
                     rotation: snapshot.rotation,
                     shape_attach: ShapeAttachRecord::default(),
                     t_attach: 0,
+                    no_collect_delay: 0,
                     energy: snapshot.energy,
                     construction: snapshot.construction,
                     damage: snapshot.damage,
@@ -24114,9 +24353,8 @@ impl Engine {
 
     fn compute_object_ocf(&self, index: usize) -> u32 {
         let object = &self.objects[index];
-        let ocf = self
-            .definitions
-            .get(&object.definition_id)
+        let definition = self.definitions.get(&object.definition_id);
+        let mut ocf = definition
             .map(|definition| definition.compute_ocf(&object.state))
             .unwrap_or_else(|| {
                 crate::ocf::compute(
@@ -24126,11 +24364,84 @@ impl Engine {
                     object.state.status,
                     object.state.container.is_some(),
                     object.state.construction,
+                    object.state.category,
                 )
             });
         // HitSpeeds from the fixed speed |xdir| + |ydir| (SetOCF,
         // C4Object.cpp:588-592)
-        ocf | movement_hit_speed_flags(object.fixed_velocity)
+        ocf |= movement_hit_speed_flags(object.fixed_velocity);
+        // OCF_Chop: Chopable, StaticBack (excludes felled trees), and no
+        // exclusive object blocking the center — the
+        // Game.Objects.AtObject(x, y, OCF_Exclusive) probe (SetOCF,
+        // C4Object.cpp:570-575).
+        if definition.is_some_and(|definition| definition.is_chopable())
+            && object.state.category & CATEGORY_STATIC_BACK != 0
+            && self
+                .at_object(object.state.position, crate::ocf::EXCLUSIVE, None)
+                .is_none()
+        {
+            ocf |= crate::ocf::CHOP;
+        }
+        // The landscape probes GBackSolid/GBackSemiSolid see baked
+        // C4SolidMask MCVehic pixels; rect-model fixture worlds join the
+        // mask overlay here (grid worlds bake, and the overlay is empty).
+        // Without a landscape everything is air, like C++ sky borders.
+        let landscape = self.landscape.as_ref();
+        let solid_masks = landscape
+            .map(|_| self.ocf_solid_mask_overlay())
+            .unwrap_or_default();
+        let masked = |x: i32, y: i32| solid_masks.iter().any(|mask| mask.contains(x, y));
+        let solid =
+            |x: i32, y: i32| landscape.is_some_and(|l| l.is_solid_at(x, y)) || masked(x, y);
+        let semi_solid =
+            |x: i32, y: i32| landscape.is_some_and(|l| l.is_semi_solid_at(x, y)) || masked(x, y);
+        let x = object.state.position.x;
+        let y = object.state.position.y;
+        if object.state.container.is_none() {
+            // OCF_InSolid (SetOCF, C4Object.cpp:637-640)
+            if solid(x, y) {
+                ocf |= crate::ocf::IN_SOLID;
+            }
+            // OCF_InFree (SetOCF, C4Object.cpp:641-644)
+            if !semi_solid(x, y - 1) {
+                ocf |= crate::ocf::IN_FREE;
+            }
+        }
+        // OCF_Available (SetOCF, C4Object.cpp:645-648): reachable through
+        // the container (Grab_Get or the container's cached OCF_Entrance),
+        // and not buried — free above, or a thin non-solid cover with
+        // clearance eight pixels up.
+        let container_open = match object.state.container {
+            None => true,
+            Some(container_id) => {
+                self.find_object_index(container_id)
+                    .is_some_and(|container_idx| {
+                        let container = &self.objects[container_idx];
+                        self.definitions
+                            .get(&container.definition_id)
+                            .is_some_and(|definition| {
+                                definition.grab_put_get() & GRAB_PUT_GET_GET != 0
+                            })
+                            || container.state.ocf & crate::ocf::ENTRANCE != 0
+                    })
+            }
+        };
+        if container_open && (!semi_solid(x, y - 1) || (!solid(x, y - 1) && !semi_solid(x, y - 8)))
+        {
+            ocf |= crate::ocf::AVAILABLE;
+        }
+        ocf
+    }
+
+    /// The solid-mask overlay for the SetOCF landscape probes: grid worlds
+    /// bake masks into the pixel plane (empty overlay), rect fixture
+    /// worlds carry them as rects like the movement checks.
+    fn ocf_solid_mask_overlay(&self) -> Vec<SolidMaskRect> {
+        if self.solid_mask_grid_mode() {
+            return Vec::new();
+        }
+        let indices: Vec<usize> = (0..self.objects.len()).collect();
+        self.solid_masks_for_movement(&indices)
     }
 
     fn object_has_ocf(&self, index: usize, mask: u32) -> bool {
@@ -26822,6 +27133,7 @@ impl Engine {
                 rotation,
                 shape_attach: ShapeAttachRecord::default(),
                 t_attach: 0,
+                no_collect_delay: 0,
                 // C4Object::Init: `if (Alive) Energy = GetPhysical()->Energy`
                 // (C4Object.cpp:192, raw C4MaxPhysical scale); at creation
                 // no info/temporary physical exists yet, so the def's
@@ -27687,6 +27999,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         rotation: snapshot.rotation,
         shape_attach: ShapeAttachRecord::default(),
         t_attach: 0,
+        no_collect_delay: 0,
         energy: snapshot.energy,
         construction: snapshot.construction,
         damage: snapshot.damage,
@@ -29708,6 +30021,9 @@ mod tests {
         let mut engine = Engine::with_seed(40);
         let mut victim_def = simple_definition("Clonk");
         victim_def.set_mass(100);
+        // Hit victims are livings: the Hit branch needs OCF_Alive, which
+        // needs Category & C4D_Living (SetOCF, C4Object.cpp:600-605).
+        victim_def.set_category(CATEGORY_LIVING);
         engine.register_definition(victim_def)?;
         let mut rock_def = simple_definition("Rock");
         rock_def.set_category(CATEGORY_OBJECT);
@@ -30168,6 +30484,9 @@ mod tests {
         fn fighter_def(id: &str, script: &str) -> Result<Definition, EngineError> {
             let mut definition = Definition::from_script(id, id, script)?;
             definition.set_crew_member(true);
+            // Fighters are livings: OCF_FightReady needs OCF_Alive, which
+            // needs Category & C4D_Living (SetOCF, C4Object.cpp:600-610).
+            definition.set_category(CATEGORY_LIVING);
             definition.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 16)));
             let mut specs = HashMap::new();
             specs.insert("Idle".to_string(), ActionSpec::default());
@@ -30286,6 +30605,9 @@ mod tests {
                 "#,
             )?;
             definition.set_crew_member(true);
+            // Fighters are livings: OCF_FightReady needs OCF_Alive, which
+            // needs Category & C4D_Living (SetOCF, C4Object.cpp:600-610).
+            definition.set_category(CATEGORY_LIVING);
             definition.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 16)));
             let mut specs = HashMap::new();
             specs.insert("Idle".to_string(), ActionSpec::default());
@@ -39076,6 +39398,9 @@ protected func Activity() { SetActionTargets(); return(1); }
         let crate_id = engine
             .spawn_object(
                 SpawnConfig::new("Crate")
+                    // Pushables are vehicles: StaticBack never has OCF_Grab
+                    // (SetOCF, C4Object.cpp:553-555).
+                    .with_category(CATEGORY_VEHICLE)
                     .with_position(Vector2::new(10, 0))
                     .with_vertices(vertices.clone()),
             )
@@ -41589,7 +41914,9 @@ protected func Script1() { StartTheMovie(); }
             .register_definition(talker)
             .expect("talker registers");
         let mut animal_def = simple_definition("ANML");
-        animal_def.set_category(CATEGORY_OBJECT);
+        // Alive targets are livings: OCF_Alive needs Category & C4D_Living
+        // (SetOCF, C4Object.cpp:600-605).
+        animal_def.set_category(CATEGORY_LIVING);
         engine
             .register_definition(animal_def)
             .expect("animal registers");
@@ -42063,7 +42390,9 @@ func Bless() {
             .register_definition(talker)
             .expect("talker registers");
         let mut animal_def = simple_definition("ANML");
-        animal_def.set_category(CATEGORY_OBJECT);
+        // Alive targets are livings: OCF_Alive needs Category & C4D_Living
+        // (SetOCF, C4Object.cpp:600-605).
+        animal_def.set_category(CATEGORY_LIVING);
         engine
             .register_definition(animal_def)
             .expect("animal registers");
@@ -49331,6 +49660,9 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         let mut engine = Engine::with_seed(4);
         let mut definition = simple_definition("Crew");
         definition.set_crew_member(true);
+        // Crew are livings: OCF_Alive needs Category & C4D_Living
+        // (SetOCF, C4Object.cpp:600-605).
+        definition.set_category(CATEGORY_LIVING);
         engine
             .register_definition(definition)
             .expect("definition registers");
@@ -49383,6 +49715,826 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         let idx = engine.find_object_index(id).expect("object exists");
 
         assert_ne!(engine.object_ocf_at_index(idx) & ocf::ROTATE, 0);
+    }
+
+    #[test]
+    fn ocf_rotate_requires_con_above_100() {
+        // OCF_Rotate skips minimum (invisible) construction sites: the def
+        // must be Rotateable AND Con > 100 (SetOCF, C4Object.cpp:576-580).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Wheel");
+        definition.set_rotateable(1);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Wheel").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        engine.objects[idx].state.construction = 100;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::ROTATE,
+            0,
+            "Con == 100 fails the Con > 100 gate (C4Object.cpp:579)"
+        );
+
+        engine.objects[idx].state.construction = 101;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::ROTATE,
+            0,
+            "Con 101 passes the gate"
+        );
+    }
+
+    #[test]
+    fn ocf_grab_requires_non_static_back_category() {
+        // OCF_Grab: Def->Grab AND !(Category & C4D_StaticBack)
+        // (SetOCF, C4Object.cpp:553-555).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Cart");
+        definition.set_grab(1);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let static_back = engine
+            .spawn_object(SpawnConfig::new("Cart").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(static_back).expect("object exists");
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::GRAB,
+            0,
+            "StaticBack objects are never grabbable (C4Object.cpp:554)"
+        );
+
+        let vehicle = engine
+            .spawn_object(
+                SpawnConfig::new("Cart")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(vehicle).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::GRAB, 0);
+    }
+
+    #[test]
+    fn ocf_construct_requires_incomplete_unrotated_unburning_constructable() {
+        // OCF_Construct: Def->Constructable && Con < FullCon && r == 0 &&
+        // !OnFire (SetOCF, C4Object.cpp:549-552).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Site");
+        definition.set_constructable(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Site").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::CONSTRUCT,
+            0,
+            "a completed object is not a construction site (Con < FullCon fails)"
+        );
+
+        engine.objects[idx].state.construction = FULL_CON / 2;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::CONSTRUCT, 0);
+
+        engine.objects[idx].state.rotation = 10;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::CONSTRUCT,
+            0,
+            "rotated objects cannot be built (r == 0 fails)"
+        );
+        engine.objects[idx].state.rotation = 0;
+
+        engine.objects[idx].state.on_fire = true;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::CONSTRUCT,
+            0,
+            "burning objects cannot be built (!OnFire fails)"
+        );
+    }
+
+    #[test]
+    fn ocf_living_and_alive_require_living_category() {
+        // OCF_Living: Category & C4D_Living; OCF_Alive additionally needs
+        // the Alive flag (SetOCF, C4Object.cpp:600-605). Neither derives
+        // from Def->CrewMember.
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Beast");
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        // Default StaticBack category: alive or not, no Living/Alive bits.
+        let static_back = engine
+            .spawn_object(SpawnConfig::new("Beast").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(static_back).expect("object exists");
+        engine.objects[idx].state.alive = true;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & (ocf::LIVING | ocf::ALIVE),
+            0,
+            "non-Living categories never get OCF_Living/OCF_Alive"
+        );
+
+        let living = engine
+            .spawn_object(
+                SpawnConfig::new("Beast")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(living).expect("object exists");
+        engine.objects[idx].state.alive = false;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::LIVING, 0);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::ALIVE,
+            0,
+            "dead livings keep OCF_Living but lose OCF_Alive"
+        );
+
+        engine.objects[idx].state.alive = true;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::ALIVE, 0);
+    }
+
+    #[test]
+    fn ocf_exclusive_comes_from_the_def_flag() {
+        // OCF_Exclusive: no action through this, no construction in front
+        // of this — straight from Def->Exclusive (SetOCF,
+        // C4Object.cpp:581-583; DefCore "Exclusive", C4Def.cpp:313).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Gate");
+        definition.set_exclusive(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Gate").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::EXCLUSIVE, 0);
+    }
+
+    #[test]
+    fn ocf_edible_comes_from_the_def_flag() {
+        // OCF_Edible: straight from Def->Edible (SetOCF,
+        // C4Object.cpp:630-632).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Loaf");
+        definition.set_edible(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Loaf").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::EDIBLE, 0);
+    }
+
+    #[test]
+    fn ocf_prey_requires_def_flag_and_raw_alive() {
+        // OCF_Prey: Def->Prey && the RAW Alive flag (SetOCF,
+        // C4Object.cpp:615-618) — no category gate.
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Sheep");
+        definition.set_prey(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Sheep").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        engine.objects[idx].state.alive = false;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::PREY,
+            0,
+            "dead prey is no prey (C4Object.cpp:617)"
+        );
+
+        engine.objects[idx].state.alive = true;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::PREY, 0);
+    }
+
+    #[test]
+    fn ocf_attract_lightning_requires_full_con() {
+        // OCF_AttractLightning: Def->AttractLightning at FullCon (SetOCF,
+        // C4Object.cpp:623-626).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Mast");
+        definition.set_attract_lightning(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Mast").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::ATTRACT_LIGHTNING, 0);
+
+        engine.objects[idx].state.construction = FULL_CON - 1;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::ATTRACT_LIGHTNING,
+            0,
+            "incomplete objects do not attract lightning (C4Object.cpp:625)"
+        );
+    }
+
+    #[test]
+    fn ocf_entrance_requires_area_full_con_and_rotation_gate() {
+        // OCF_Entrance: Entrance.Wdt/Hgt > 0, OCF_FullCon, and either
+        // RotatedEntrance == 1 (any rotation) or r <= RotatedEntrance
+        // (SetOCF, C4Object.cpp:584-587).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Hut");
+        definition.set_entrance_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::CONTAINER,
+            0,
+            "an entrance makes a container (C4Object.cpp:658-660)"
+        );
+
+        engine.objects[idx].state.construction = FULL_CON - 1;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & (ocf::ENTRANCE | ocf::CONTAINER),
+            0,
+            "incomplete buildings cannot be entered (OCF_FullCon gate)"
+        );
+        engine.objects[idx].state.construction = FULL_CON;
+
+        engine.objects[idx].state.rotation = 10;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::ENTRANCE,
+            0,
+            "RotatedEntrance defaults 0: rotated objects close (r <= 0 fails)"
+        );
+    }
+
+    #[test]
+    fn ocf_entrance_rotation_thresholds_match_cpp() {
+        // RotatedEntrance == 1 admits ANY rotation; N admits r <= N
+        // (SetOCF, C4Object.cpp:586).
+        let mut engine = Engine::with_seed(4);
+        let mut any_rotation = simple_definition("Windmill");
+        any_rotation.set_entrance_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        any_rotation.set_rotated_entrance(1);
+        engine
+            .register_definition(any_rotation)
+            .expect("definition registers");
+        let mut threshold = simple_definition("Tower");
+        threshold.set_entrance_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        threshold.set_rotated_entrance(45);
+        engine
+            .register_definition(threshold)
+            .expect("definition registers");
+
+        let spinner = engine
+            .spawn_object(SpawnConfig::new("Windmill").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(spinner).expect("object exists");
+        engine.objects[idx].state.rotation = 270;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+
+        let tower = engine
+            .spawn_object(SpawnConfig::new("Tower").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(tower).expect("object exists");
+        engine.objects[idx].state.rotation = 45;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+        engine.objects[idx].state.rotation = 46;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+    }
+
+    #[test]
+    fn ocf_container_comes_from_grab_put_get_without_entrance() {
+        // OCF_Container: C4D_Grab_Put or C4D_Grab_Get suffices even with
+        // no entrance (SetOCF, C4Object.cpp:658-660).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Chest");
+        definition.set_grab_put_get(1); // C4D_Grab_Put
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Chest").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::CONTAINER, 0);
+        assert_eq!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+    }
+
+    #[test]
+    fn ocf_line_construct_requires_non_energy_holder_line_connect() {
+        // OCF_LineConstruct: FullCon && LineConnect & ~C4D_EnergyHolder
+        // (SetOCF, C4Object.cpp:611-614).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Plant");
+        definition.set_line_connect(LINE_CONNECT_POWER_INPUT);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let mut holder_only = simple_definition("Lorry");
+        holder_only.set_line_connect(LINE_CONNECT_ENERGY_HOLDER);
+        engine
+            .register_definition(holder_only)
+            .expect("definition registers");
+
+        let plant = engine
+            .spawn_object(SpawnConfig::new("Plant").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(plant).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT, 0);
+
+        engine.objects[idx].state.construction = FULL_CON - 1;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT,
+            0,
+            "line construction needs OCF_FullCon (C4Object.cpp:612)"
+        );
+
+        let lorry = engine
+            .spawn_object(SpawnConfig::new("Lorry").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(lorry).expect("object exists");
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT,
+            0,
+            "a pure C4D_EnergyHolder is no line target (C4Object.cpp:613)"
+        );
+    }
+
+    #[test]
+    fn ocf_power_consumer_requires_line_connect_bit_and_full_con() {
+        // OCF_PowerConsumer: LineConnect & C4D_Power_Consumer at FullCon
+        // (SetOCF, C4Object.cpp:649-652).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Elevator");
+        definition.set_line_connect(LINE_CONNECT_POWER_CONSUMER);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Elevator").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::POWER_CONSUMER, 0);
+
+        engine.objects[idx].state.construction = FULL_CON - 1;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(engine.object_ocf_at_index(idx) & ocf::POWER_CONSUMER, 0);
+    }
+
+    #[test]
+    fn ocf_power_supply_from_generator_or_energized_output() {
+        // OCF_PowerSupply: (LineConnect & C4D_Power_Generator) OR
+        // (LineConnect & C4D_Power_Output && Energy > 0), at FullCon
+        // (SetOCF, C4Object.cpp:653-657).
+        let mut engine = Engine::with_seed(4);
+        let mut generator = simple_definition("Windbag");
+        generator.set_line_connect(LINE_CONNECT_POWER_GENERATOR);
+        engine
+            .register_definition(generator)
+            .expect("definition registers");
+        let mut output = simple_definition("Battery");
+        output.set_line_connect(LINE_CONNECT_POWER_OUTPUT);
+        engine
+            .register_definition(output)
+            .expect("definition registers");
+
+        let windbag = engine
+            .spawn_object(SpawnConfig::new("Windbag").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(windbag).expect("object exists");
+        engine.objects[idx].state.energy = 0;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY,
+            0,
+            "generators supply power regardless of stored energy"
+        );
+
+        let battery = engine
+            .spawn_object(SpawnConfig::new("Battery").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(battery).expect("object exists");
+        engine.objects[idx].state.energy = 0;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY,
+            0,
+            "an empty power output supplies nothing (Energy > 0 fails)"
+        );
+        engine.objects[idx].state.energy = 50;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY, 0);
+    }
+
+    #[test]
+    fn ocf_collection_gates_on_con_action_and_collect_delay() {
+        // OCF_Collection (SetOCF, C4Object.cpp:593-599): needs OCF_FullCon
+        // or IncompleteActivity, a positive Collection area, a free
+        // CollectionLimit slot, an action without ObjectDisabled, and
+        // NoCollectDelay == 0.
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Kiln");
+        definition.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Build".to_string(),
+            ActionSpec::default().with_disabled(true),
+        );
+        definition.configure_actions(None, specs);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Kiln").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION, 0);
+
+        // Below FullCon without IncompleteActivity: no collection.
+        engine.objects[idx].state.construction = FULL_CON - 1;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::COLLECTION,
+            0,
+            "incomplete objects without IncompleteActivity collect nothing (C4Object.cpp:594)"
+        );
+        engine.objects[idx].state.construction = FULL_CON;
+
+        // An ObjectDisabled action suspends collection.
+        engine.objects[idx].state.action.name = "Build".to_string();
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::COLLECTION,
+            0,
+            "ObjectDisabled actions veto collection (C4Object.cpp:597)"
+        );
+        engine.objects[idx].state.action.name = "Idle".to_string();
+
+        // A fresh drop delay suspends collection.
+        engine.objects[idx].state.no_collect_delay = 2;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::COLLECTION,
+            0,
+            "NoCollectDelay != 0 vetoes collection (C4Object.cpp:598)"
+        );
+        engine.objects[idx].state.no_collect_delay = 0;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION, 0);
+    }
+
+    #[test]
+    fn ocf_collection_incomplete_activity_overrides_full_con_gate() {
+        // IncompleteActivity keeps collection alive below FullCon
+        // (SetOCF, C4Object.cpp:594).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Hive");
+        definition.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        definition.set_incomplete_activity(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Hive").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].state.construction = FULL_CON / 2;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION, 0);
+    }
+
+    #[test]
+    fn ocf_fight_ready_respects_no_fight_and_disabled_actions() {
+        // OCF_FightReady (SetOCF, C4Object.cpp:606-610): the OCF_Alive bit
+        // plus an action without ObjectDisabled plus !Def->NoFight.
+        let mut engine = Engine::with_seed(4);
+        let mut pacifist = simple_definition("Monk");
+        pacifist.set_category(CATEGORY_LIVING);
+        pacifist.set_no_fight(true);
+        engine
+            .register_definition(pacifist)
+            .expect("definition registers");
+        let mut fighter = simple_definition("Knight");
+        fighter.set_category(CATEGORY_LIVING);
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Build".to_string(),
+            ActionSpec::default().with_disabled(true),
+        );
+        fighter.configure_actions(None, specs);
+        engine
+            .register_definition(fighter)
+            .expect("definition registers");
+
+        let monk = engine
+            .spawn_object(
+                SpawnConfig::new("Monk")
+                    .with_alive(true)
+                    .with_position(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(monk).expect("object exists");
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::FIGHT_READY,
+            0,
+            "NoFight defs never become fight-ready (C4Object.cpp:609)"
+        );
+
+        let knight = engine
+            .spawn_object(
+                SpawnConfig::new("Knight")
+                    .with_alive(true)
+                    .with_position(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(knight).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::FIGHT_READY, 0);
+
+        engine.objects[idx].state.action.name = "Build".to_string();
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::FIGHT_READY,
+            0,
+            "ObjectDisabled actions veto fight readiness (C4Object.cpp:608)"
+        );
+    }
+
+    #[test]
+    fn ocf_chop_requires_static_back_and_clear_center() {
+        // OCF_Chop (SetOCF, C4Object.cpp:570-575): Def->Chopable, a
+        // StaticBack category (unfelled trees), and no exclusive object
+        // covering the center (Game.Objects.AtObject(x, y, OCF_Exclusive)).
+        let mut engine = Engine::with_seed(4);
+        let mut tree = simple_definition("Tree");
+        tree.set_chopable(true);
+        tree.set_shape_rect(Some(DefinitionRect::new(-8, -20, 16, 40)));
+        engine.register_definition(tree).expect("tree registers");
+        let mut gate = simple_definition("Gate");
+        gate.set_exclusive(true);
+        gate.set_shape_rect(Some(DefinitionRect::new(-10, -20, 20, 40)));
+        engine.register_definition(gate).expect("gate registers");
+
+        // Spawn y is the con-0 bottom: 60 - (40 - 20) puts the center at 40.
+        let standing = engine
+            .spawn_object(SpawnConfig::new("Tree").with_position(Vector2::new(40, 60)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(standing).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::CHOP, 0);
+
+        // A felled tree loses StaticBack — and the Chop bit.
+        engine.objects[idx].state.category = CATEGORY_OBJECT;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::CHOP,
+            0,
+            "non-StaticBack chopables are already felled (C4Object.cpp:573)"
+        );
+        engine.objects[idx].state.category = CATEGORY_STATIC_BACK;
+        engine.refresh_object_ocf(idx);
+
+        // An exclusive object over the trunk center blocks chopping.
+        engine
+            .spawn_object(SpawnConfig::new("Gate").with_position(Vector2::new(40, 60)))
+            .expect("gate spawns");
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::CHOP,
+            0,
+            "an exclusive blocker at the center vetoes Chop (C4Object.cpp:574)"
+        );
+    }
+
+    #[test]
+    fn ocf_in_solid_and_in_free_follow_the_landscape() {
+        // OCF_InSolid: !Contained && GBackSolid(x, y)
+        // (SetOCF, C4Object.cpp:637-640); OCF_InFree: !Contained &&
+        // !GBackSemiSolid(x, y - 1) (SetOCF, C4Object.cpp:641-644).
+        let mut engine = Engine::with_seed(4);
+        // Landscape::flat(120, 60): ground surface at y = 60.
+        engine.set_landscape(Landscape::flat(120, 60));
+        engine
+            .register_definition(simple_definition("Rock"))
+            .expect("definition registers");
+
+        // Center in free air: InFree, not InSolid.
+        let airborne = engine
+            .spawn_object(SpawnConfig::new("Rock").with_position(Vector2::new(40, 20)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(airborne).expect("object exists");
+        assert_eq!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID, 0);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_FREE, 0);
+
+        // Center buried in the ground: InSolid, and the pixel above is
+        // semi-solid, so not InFree.
+        engine.objects[idx].state.position = Vector2::new(40, 80);
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID, 0);
+        assert_eq!(engine.object_ocf_at_index(idx) & ocf::IN_FREE, 0);
+
+        // Standing ON the surface (y = 60 solid, y - 1 = 59 free): the
+        // center pixel is solid AND the pixel above is free.
+        engine.objects[idx].state.position = Vector2::new(40, 60);
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID, 0);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_FREE, 0);
+    }
+
+    #[test]
+    fn ocf_available_follows_the_burial_probe() {
+        // OCF_Available landscape clause (SetOCF, C4Object.cpp:646-648):
+        // !GBackSemiSolid(x, y-1) || (!GBackSolid(x, y-1) &&
+        // !GBackSemiSolid(x, y-8)) — free above, or under a thin
+        // non-solid cover with clearance eight pixels up.
+        let mut engine = Engine::with_seed(4);
+        let mut landscape = Landscape::flat(120, 60);
+        // Shallow water 55..60 at x=80 (5 px deep), deep water 40..60 at
+        // x=100 (20 px deep).
+        landscape.set_liquid_column(
+            80,
+            vec![LiquidSegment {
+                top: 55,
+                bottom: 60,
+                material: None,
+            }],
+        );
+        landscape.set_liquid_column(
+            100,
+            vec![LiquidSegment {
+                top: 40,
+                bottom: 60,
+                material: None,
+            }],
+        );
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(simple_definition("Rock"))
+            .expect("definition registers");
+
+        let rock = engine
+            .spawn_object(SpawnConfig::new("Rock").with_position(Vector2::new(40, 20)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(rock).expect("object exists");
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "free air above: available"
+        );
+
+        // Buried: y-1 is solid ground and y-8 is still underground.
+        engine.objects[idx].state.position = Vector2::new(40, 80);
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "buried objects are not available (C4Object.cpp:647)"
+        );
+
+        // Under 2 px of shallow water (y = 57): y-1 = 56 is water
+        // (semi-solid) but not solid, and y-8 = 49 is above the surface.
+        engine.objects[idx].state.position = Vector2::new(80, 57);
+        engine.refresh_object_ocf(idx);
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "thin liquid cover keeps the object available"
+        );
+
+        // Deep under water (y = 55 at the 40..60 column): y-8 = 47 is
+        // still water.
+        engine.objects[idx].state.position = Vector2::new(100, 55);
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "deep-sunk objects are not available (C4Object.cpp:647)"
+        );
+    }
+
+    #[test]
+    fn ocf_available_inside_containers_needs_get_access_or_entrance() {
+        // OCF_Available container clause (SetOCF, C4Object.cpp:646):
+        // !Contained || (Contained->Def->GrabPutGet & C4D_Grab_Get) ||
+        // (Contained->OCF & OCF_Entrance).
+        let mut engine = Engine::with_seed(4);
+        let mut chest = simple_definition("Chest");
+        chest.set_grab_put_get(2); // C4D_Grab_Get
+        engine.register_definition(chest).expect("chest registers");
+        let mut safe = simple_definition("Safe");
+        safe.set_grab_put_get(1); // C4D_Grab_Put only
+        engine.register_definition(safe).expect("safe registers");
+        engine
+            .register_definition(simple_definition("Rock"))
+            .expect("rock registers");
+
+        let chest_id = engine
+            .spawn_object(SpawnConfig::new("Chest").with_position(Vector2::new(40, 20)))
+            .expect("chest spawns");
+        let safe_id = engine
+            .spawn_object(SpawnConfig::new("Safe").with_position(Vector2::new(80, 20)))
+            .expect("safe spawns");
+        let rock = engine
+            .spawn_object(
+                SpawnConfig::new("Rock")
+                    .with_position(Vector2::new(40, 20))
+                    .with_container(chest_id),
+            )
+            .expect("rock spawns");
+        let idx = engine.find_object_index(rock).expect("rock exists");
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "contents of a Grab_Get container stay available"
+        );
+
+        engine
+            .apply_object_update(rock, ObjectUpdate::new().with_container(safe_id))
+            .expect("move to safe");
+        let idx = engine.find_object_index(rock).expect("rock exists");
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "a put-only container without entrance hides its contents"
+        );
+    }
+
+    #[test]
+    fn at_object_verifies_entrance_and_collection_areas_like_get_ocf_for_pos() {
+        // C4Object::At runs GetOCFForPos on a hit (C4Object.cpp:1131-1160):
+        // the returned mask keeps OCF_Entrance/OCF_Collection only when the
+        // probe point lies inside the def's Entrance/Collection areas, and
+        // a stripped mask no longer matching the request BLOCKS the scan
+        // (C4GameObjects::AtObject, C4GameObjects.cpp:243-248).
+        let mut engine = Engine::with_seed(4);
+        let mut hut = simple_definition("Hut");
+        hut.set_shape_rect(Some(DefinitionRect::new(-20, -20, 40, 40)));
+        // Entrance only in the left half of the shape.
+        hut.set_entrance_rect(Some(DefinitionRect::new(-20, -20, 20, 40)));
+        engine.register_definition(hut).expect("hut registers");
+
+        // Spawn y is the con-0 bottom: 60 - (40 - 20) puts the center at 40.
+        engine
+            .spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(40, 60)))
+            .expect("hut spawns");
+
+        let inside_entrance = engine.at_object(Vector2::new(30, 40), ocf::ENTRANCE, None);
+        assert!(
+            inside_entrance.is_some(),
+            "probe inside the entrance area keeps OCF_Entrance"
+        );
+        assert_ne!(inside_entrance.expect("hit").2 & ocf::ENTRANCE, 0);
+
+        assert!(
+            engine
+                .at_object(Vector2::new(50, 40), ocf::ENTRANCE, None)
+                .is_none(),
+            "probe inside the shape but outside the entrance area strips the bit"
+        );
     }
 
     #[test]
