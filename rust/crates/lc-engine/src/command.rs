@@ -368,6 +368,129 @@ mod tests {
         );
     }
 
+    // C4Command::MoveTo DFA_SCALE arm (C4Command.cpp:335-338): vertical
+    // steering only — cy > Ty + range heads Up, cy < Ty - range heads
+    // Down (y grows downward).
+    #[test]
+    fn move_to_scale_steers_vertically() {
+        let mut scaler = snapshot_with_id(1);
+        scaler.position = Vector2::new(100, 100);
+        scaler.action_procedure = ActionProcedure::Scale;
+        scaler.crew_member = true;
+        scaler.ocf |= ocf::CREW_MEMBER;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+
+        // Target above and well to the right: DFA_SCALE ignores Tx for
+        // steering (no horizontal branch in the arm) and heads Up. The
+        // Dir_Left let-go stays quiet: |cy - Ty| = 60 > LetGoRange2 30.
+        let mut state = MoveToState::from_request(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(140))
+                .with_ty(Some(40)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Up),
+            "scaling toward a higher target heads Up (C4Command.cpp:337)"
+        );
+    }
+
+    // DFA_SCALE let-go control (C4Command.cpp:339-353): scaling with
+    // Action.Dir DIR_Left and the target off the wall to the right
+    // (Tx > cx + LetGoRange1 7, |cy - Ty| <= LetGoRange2 30) jumps off
+    // with xdir +1 (ObjectComLetGo -> ObjectActionJump(itofix(+1), 0)).
+    #[test]
+    fn move_to_scale_lets_go_toward_target() {
+        let mut scaler = snapshot_with_id(1);
+        scaler.position = Vector2::new(100, 100);
+        scaler.action_procedure = ActionProcedure::Scale;
+        scaler.direction = Direction::Left;
+        scaler.crew_member = true;
+        scaler.ocf |= ocf::CREW_MEMBER;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+
+        let mut state = MoveToState::from_request(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(140))
+                .with_ty(Some(110)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result.update.expect("let-go update");
+        let action = update.action.expect("jump action");
+        assert_eq!(action.name.as_deref(), Some("Jump"));
+        assert_eq!(
+            update.fixed_velocity,
+            Some(FixedVec2::new(
+                math::itofix(1),
+                crate::C4Fixed::from_raw(0)
+            )),
+            "let-go launches with xdir +1, ydir 0 (C4ObjectCom.cpp:310-314)"
+        );
+    }
+
+    // The contact let-go (C4Command.cpp:347-352,361-366) only fires once
+    // the scale action is 3+ frames old ("not if just started").
+    #[test]
+    fn move_to_scale_contact_let_go_respects_action_time() {
+        let mut scaler = snapshot_with_id(1);
+        scaler.position = Vector2::new(100, 100);
+        scaler.action_procedure = ActionProcedure::Scale;
+        scaler.direction = Direction::Right;
+        scaler.contact = crate::CNAT_LEFT;
+        scaler.crew_member = true;
+        scaler.ocf |= ocf::CREW_MEMBER;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        // Target high above on this side: no target-direction let-go.
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(100))
+            .with_ty(Some(20));
+
+        // Action.Time == 2: too fresh, keep scaling.
+        scaler.action_time = 2;
+        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+        let mut state = MoveToState::from_request(&request);
+        let result = state.step(&ctx);
+        assert!(
+            result
+                .update
+                .as_ref()
+                .and_then(|update| update.action.as_ref())
+                .is_none(),
+            "Action.Time <= 2 must not let go (C4Command.cpp:348)"
+        );
+
+        // Action.Time == 3 with contact: let go against the facing (-1).
+        scaler.action_time = 3;
+        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+        let mut state = MoveToState::from_request(&request);
+        let result = state.step(&ctx);
+        let update = result.update.expect("let-go update");
+        assert_eq!(
+            update.action.and_then(|action| action.name),
+            Some("Jump".into())
+        );
+        assert_eq!(
+            update.fixed_velocity,
+            Some(FixedVec2::new(
+                math::itofix(-1),
+                crate::C4Fixed::from_raw(0)
+            )),
+            "DIR_Right contact let-go jumps with xdir -1 (C4Command.cpp:365)"
+        );
+    }
+
     #[test]
     fn move_to_diagonal_free_jump_like_cpp() {
         let landscape = crate::Landscape::flat(300, 110);
@@ -7029,7 +7152,9 @@ impl CommandStack {
     }
 }
 
-// C4Command.cpp:34-35 movement-control constants.
+// C4Command.cpp:31-36 movement-control constants.
+const LET_GO_RANGE1: i32 = 7;
+const LET_GO_RANGE2: i32 = 30;
 const JUMP_ANGLE: i32 = 35;
 const JUMP_LOW_ANGLE: i32 = 80;
 const JUMP_ANGLE_RANGE: i32 = 10;
@@ -7073,6 +7198,30 @@ fn c4_distance(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
         dist -= 1;
     }
     dist as i32
+}
+
+/// `ObjectComLetGo` (C4ObjectCom.cpp:310-314) as an object update:
+/// ObjectActionJump(itofix(xdirf), Fix0) — the hardcoded Jump action plus
+/// the launch velocity (the fixed-velocity delta apply arms mobility,
+/// matching Mobile=1 in ObjectActionJump). Any pending ComDir steer from
+/// the same Execute rides along.
+fn let_go_update(steer: Option<CommandDirection>, xdirf: i32) -> ObjectUpdate {
+    let mut update = ObjectUpdate::new();
+    if let Some(direction) = steer {
+        update = update.with_command_direction(direction);
+    }
+    let mut update = update.with_action_update(
+        ActionUpdate::default()
+            .with_name("Jump")
+            .with_phase(0)
+            .with_ticks(0)
+            .with_force(true),
+    );
+    update.fixed_velocity = Some(FixedVec2::new(
+        math::itofix(xdirf),
+        crate::C4Fixed::from_raw(0),
+    ));
+    update
 }
 
 /// `SolidOnWhichSide` (C4Command.cpp:147-156).
@@ -7215,6 +7364,17 @@ impl MoveToState {
                     self.last_direction
                 }
             }
+            // DFA_SCALE (C4Command.cpp:335-338): vertical steering only —
+            // cy > Ty + range climbs Up, cy < Ty - range slides Down.
+            ActionProcedure::Scale => {
+                if dy < -self.tolerance {
+                    CommandDirection::Up
+                } else if dy > self.tolerance {
+                    CommandDirection::Down
+                } else {
+                    self.last_direction
+                }
+            }
             _ => {
                 if dx > self.tolerance {
                     CommandDirection::Right
@@ -7230,6 +7390,22 @@ impl MoveToState {
             }
         };
 
+        let steer = if direction != self.last_direction {
+            self.last_direction = direction;
+            Some(direction)
+        } else {
+            None
+        };
+
+        // DFA_SCALE let-go control (C4Command.cpp:339-368): jump off the
+        // wall toward the target or on wall contact; the C++ `return`
+        // ends this Execute with the command still pending.
+        if ctx.object.action_procedure == ActionProcedure::Scale {
+            if let Some(xdirf) = self.scale_let_go(ctx, target) {
+                return CommandStepResult::running(Some(let_go_update(steer, xdirf)));
+            }
+        }
+
         // DFA_WALK movement controls, after the ComDir steering
         // (C4Command::Execute MoveTo, C4Command.cpp:316-326):
         // FlightControl never short-circuits (it returns false even after
@@ -7241,13 +7417,6 @@ impl MoveToState {
             fly_update = self.flight_control(ctx, target);
             jump_operations = self.jump_control(ctx, target);
         }
-
-        let steer = if direction != self.last_direction {
-            self.last_direction = direction;
-            Some(direction)
-        } else {
-            None
-        };
 
         if fly_update.is_some() || jump_operations.is_some() {
             let mut update = ObjectUpdate::new();
@@ -7270,6 +7439,25 @@ impl MoveToState {
                 let update = ObjectUpdate::new().with_command_direction(direction);
                 CommandStepResult::running(Some(update))
             }
+        }
+    }
+
+    /// The DFA_SCALE let-go decision (C4Command.cpp:339-368): jump away
+    /// from the wall (xdir sign opposite the scaling side) when the
+    /// target lies off the wall beyond LetGoRange1 within LetGoRange2
+    /// vertically, or on any contact once the action is 3+ frames old.
+    fn scale_let_go(&self, ctx: &CommandRuntimeContext<'_>, target: Vector2) -> Option<i32> {
+        let (cx, cy) = (ctx.position.x, ctx.position.y);
+        let contact_let_go = ctx.object.action_time > 2 && ctx.object.contact != 0;
+        match ctx.object.direction {
+            Direction::Left => (target.x > cx + LET_GO_RANGE1
+                && inside(cy - target.y, -LET_GO_RANGE2, LET_GO_RANGE2)
+                || contact_let_go)
+                .then_some(1),
+            Direction::Right => (target.x < cx - LET_GO_RANGE1
+                && inside(cy - target.y, -LET_GO_RANGE2, LET_GO_RANGE2)
+                || contact_let_go)
+                .then_some(-1),
         }
     }
 
