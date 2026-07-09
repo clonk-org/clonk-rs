@@ -112,6 +112,10 @@ pub struct CommandDefinitionSnapshot {
     pub chop_action: Option<String>,
     #[serde(default)]
     pub constructable: bool,
+    /// DefCore `Grab` (0 none, 1 grab+push, 2 grab-only) for the
+    /// pushing let-go checks (C4Command.cpp:260, :565).
+    #[serde(default)]
+    pub grab: i32,
 }
 
 /// Identifiers that map to the classic C4 command constants.
@@ -2422,6 +2426,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: true,
+                grab: 0,
             },
         );
 
@@ -2554,6 +2559,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: true,
+                grab: 0,
             },
         );
 
@@ -5810,6 +5816,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -5933,6 +5940,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6028,6 +6036,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6119,6 +6128,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6297,6 +6307,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6382,6 +6393,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6462,6 +6474,7 @@ mod tests {
                 can_chop: true,
                 chop_action: Some("Chop".into()),
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6525,6 +6538,7 @@ mod tests {
                 can_chop: true,
                 chop_action: Some("Chop".into()),
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6587,6 +6601,7 @@ mod tests {
                 can_chop: true,
                 chop_action: Some("Chop".into()),
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6647,6 +6662,7 @@ mod tests {
                 can_chop: true,
                 chop_action: Some("Chop".into()),
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6702,6 +6718,7 @@ mod tests {
                 can_chop: false,
                 chop_action: Some("Chop".into()),
                 constructable: false,
+                grab: 0,
             },
         );
 

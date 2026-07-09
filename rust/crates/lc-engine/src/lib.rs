@@ -14209,6 +14209,7 @@ impl Engine {
                         can_chop,
                         chop_action,
                         constructable: definition.is_constructable(),
+                        grab: definition.grab(),
                     },
                 )
             })
