@@ -16982,7 +16982,7 @@ fn value_to_effect_var(value: &Value) -> EffectVarValue {
     }
 }
 
-fn effect_var_to_value(value: &EffectVarValue) -> Value {
+pub(crate) fn effect_var_to_value(value: &EffectVarValue) -> Value {
     match value {
         EffectVarValue::Int(value) => Value::Int(*value),
         EffectVarValue::Bool(value) => Value::Bool(*value),

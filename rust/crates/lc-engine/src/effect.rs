@@ -178,6 +178,12 @@ pub enum EffectEventKind {
     Check {
         pending: EffectState,
     },
+    /// Add-to-other-effect merge (C4Effect.cpp:295-313): the carried
+    /// effect is the ACCEPTOR whose `Fx<Name>Add` receives the annulled
+    /// pending effect's parameters.
+    AddTo {
+        pending: EffectState,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +211,13 @@ impl EffectEvent {
         Self {
             effect: checker,
             kind: EffectEventKind::Check { pending },
+        }
+    }
+
+    pub fn add_to(acceptor: EffectState, pending: EffectState) -> Self {
+        Self {
+            effect: acceptor,
+            kind: EffectEventKind::AddTo { pending },
         }
     }
 
