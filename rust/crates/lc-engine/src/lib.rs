@@ -2190,6 +2190,12 @@ pub struct ObjectState {
     /// Objects.txt "NoCollectDelay" (default 0, C4Object.cpp:2773).
     #[serde(default)]
     pub no_collect_delay: i32,
+    /// `C4Object::Base` (C4Object.h:135): the player number this object is
+    /// a home base for, NO_OWNER otherwise. Assigned by ExecBase's Tick10
+    /// flag check (C4Object.cpp:1000-1018), cleared by its Tick35 lost-flag
+    /// arm (:1024-1031); invalid players clear on load (C4Object.cpp:3161).
+    #[serde(default = "default_owner")]
+    pub base: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -2235,6 +2241,7 @@ pub(crate) fn preview_spawn_state(
         shape_attach: ShapeAttachRecord::default(),
         t_attach: 0,
         no_collect_delay: 0,
+        base: OWNER_NONE,
         energy: 0,
         damage: 0,
         magic_energy: 0,
@@ -15650,6 +15657,11 @@ impl Engine {
             self.exec_object_fire(idx, frame);
             // ExecLife runs after the fire effect (C4Object.cpp:1074-1080)
             self.exec_object_life(idx, frame);
+            // ExecBase runs after ExecLife (C4Object.cpp:1082-1083)
+            self.exec_object_base(idx, frame)?;
+            if self.objects[idx].destroyed || !self.objects[idx].state.status.is_active() {
+                continue;
+            }
 
             // Def TimerCall (C4Object::Execute, C4Object.cpp:1085-1091):
             // Timer++ every Execute; reaching Def->Timer resets the counter
@@ -17566,6 +17578,7 @@ impl Engine {
                     shape_attach: ShapeAttachRecord::default(),
                     t_attach: 0,
                     no_collect_delay: 0,
+                    base: OWNER_NONE,
                     energy: snapshot.energy,
                     construction: snapshot.construction,
                     damage: snapshot.damage,
@@ -22796,6 +22809,88 @@ impl Engine {
         }
     }
 
+    /// `C4Object::ExecBase` (C4Object.cpp:1000-1031): the Tick10 new-base
+    /// assignment by contained flag and the Tick35 lost-flag clear. The
+    /// BASEFUNC_AutoSellContents arm (:1028) and the Tick35 structure
+    /// snow-dig (:1034-1043) stay unported (see PORT_STATUS); the
+    /// Contents.CloseMenus calls are app-side menu presentation.
+    fn exec_object_base(&mut self, idx: usize, frame: u64) -> Result<(), EngineError> {
+        // New base assignment by flag, no old base removal (:1005-1018).
+        if frame % 10 == 0 {
+            let base = self.objects[idx].state.base;
+            let can_be_base = self
+                .definitions
+                .get(&self.objects[idx].definition_id)
+                .is_some_and(|definition| definition.can_be_base());
+            if can_be_base && !self.players.contains_key(&base) {
+                // Contents.Find(C4ID_Flag) (:1007).
+                let flag = self.objects[idx].state.contents.iter().copied().find(|id| {
+                    self.find_object_index(*id).is_some_and(|flag_index| {
+                        let flag = &self.objects[flag_index];
+                        flag.state.status.is_active()
+                            && flag.definition_id.as_str() == "FLAG"
+                    })
+                });
+                if let Some(flag_id) = flag {
+                    let flag_owner = flag
+                        .and_then(|id| self.find_object_index(id))
+                        .map(|flag_index| self.objects[flag_index].state.owner)
+                        .unwrap_or(OWNER_NONE);
+                    if self.players.contains_key(&flag_owner) && flag_owner != base {
+                        let base_id = self.objects[idx].id;
+                        // Attach new flag: Exit + FlyBase on this (:1010-1011).
+                        self.apply_object_update(flag_id, ObjectUpdate::new().clear_container())?;
+                        if let Some(flag_index) = self.find_object_index(flag_id) {
+                            let flag_definition = self.objects[flag_index].definition_id.clone();
+                            self.force_action_with_calls(flag_index, &flag_definition, "FlyBase");
+                            self.objects[flag_index].state.action.target = Some(base_id);
+                        }
+                        // Assign new base (:1013-1018); Contents.CloseMenus
+                        // is app-side.
+                        if let Some(idx) = self.find_object_index(base_id) {
+                            self.objects[idx].state.base = flag_owner;
+                            self.pending_audio.push(AudioCommand::PlaySound {
+                                name: "Trumpet".to_string(),
+                                target: Some(base_id),
+                                volume: 100,
+                                looped: false,
+                                custom_falloff: None,
+                            });
+                            self.apply_object_update(
+                                base_id,
+                                ObjectUpdate::new().with_owner(flag_owner),
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        // Base execution (:1021-1031); AutoSellContents unported.
+        if frame % 35 == 0 {
+            let idx = match self.objects.get(idx) {
+                Some(object) if object.state.status.is_active() => idx,
+                _ => return Ok(()),
+            };
+            let base = self.objects[idx].state.base;
+            if self.players.contains_key(&base) {
+                // Lost flag? Game.FindObject(C4ID_Flag, ..., "FlyBase", this)
+                // (:1027-1030).
+                let self_id = self.objects[idx].id;
+                let has_flag = self.objects.iter().any(|flag| {
+                    flag.state.status.is_active()
+                        && !flag.destroyed
+                        && flag.definition_id.as_str() == "FLAG"
+                        && flag.state.action.name == "FlyBase"
+                        && flag.state.action.target == Some(self_id)
+                });
+                if !has_flag {
+                    self.objects[idx].state.base = OWNER_NONE;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `GBackWind` (C4Wrappers.h:189-192): zero inside tunnel-background
     /// (IFT) pixels, else the weather wind.
     fn wind_at(&self, x: i32, y: i32) -> i32 {
@@ -27155,6 +27250,7 @@ impl Engine {
                 shape_attach: ShapeAttachRecord::default(),
                 t_attach: 0,
                 no_collect_delay: 0,
+                base: OWNER_NONE,
                 // C4Object::Init: `if (Alive) Energy = GetPhysical()->Energy`
                 // (C4Object.cpp:192, raw C4MaxPhysical scale); at creation
                 // no info/temporary physical exists yet, so the def's
@@ -28021,6 +28117,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         shape_attach: ShapeAttachRecord::default(),
         t_attach: 0,
         no_collect_delay: 0,
+        base: OWNER_NONE,
         energy: snapshot.energy,
         construction: snapshot.construction,
         damage: snapshot.damage,
@@ -52825,6 +52922,98 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
         // instantly recollecting what it just dropped.
         let crew_index = engine.find_object_index(crew).expect("crew exists");
         assert_eq!(engine.objects[crew_index].state.no_collect_delay, 2);
+        Ok(())
+    }
+
+    /// A CanBeBase hut and a FLAG definition with the FlyBase action
+    /// (Flag.c4d ActMap) for the ExecBase tests.
+    fn base_fixture(engine: &mut Engine) -> Result<(ObjectId, ObjectId), EngineError> {
+        let mut hut = Definition::from_script("HUT1", "Hut", BASIC_OBJECT_SCRIPT)?;
+        hut.set_can_be_base(true);
+        engine.register_definition(hut)?;
+        let mut flag = Definition::from_script("FLAG", "Flag", BASIC_OBJECT_SCRIPT)?;
+        let mut actions = HashMap::new();
+        actions.insert(
+            "FlyBase".to_string(),
+            ActionSpec::default().with_procedure("attach"),
+        );
+        flag.configure_actions(None, actions);
+        engine.register_definition(flag)?;
+        engine.register_player(PlayerConfig::new(1, "Test"))?;
+        let hut = engine.spawn_object(SpawnConfig::new("HUT1"))?;
+        let flag = engine.spawn_object(
+            SpawnConfig::new("FLAG").with_owner(1).with_container(hut),
+        )?;
+        Ok((hut, flag))
+    }
+
+    #[test]
+    fn exec_base_assigns_base_from_a_contained_flag_like_cpp() -> Result<(), EngineError> {
+        // ExecBase's Tick10 arm (C4Object.cpp:1000-1018): a CanBeBase
+        // object without a valid base that contains a flag of a valid
+        // player exits the flag onto FlyBase, becomes that player's base
+        // and takes the flag's owner.
+        let mut engine = Engine::new();
+        let (hut, flag) = base_fixture(&mut engine)?;
+
+        let mut audio = Vec::new();
+        for _ in 0..11 {
+            audio.extend(engine.tick()?.audio);
+        }
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        assert_eq!(
+            engine.objects[hut_index].state.base, 1,
+            "Base = flag->Owner (C4Object.cpp:1014)"
+        );
+        assert_eq!(
+            engine.objects[hut_index].state.owner, 1,
+            "SetOwner(flag->Owner) (C4Object.cpp:1018)"
+        );
+        let flag_index = engine.find_object_index(flag).expect("flag exists");
+        assert_eq!(
+            engine.objects[flag_index].state.container, None,
+            "flag->Exit() (C4Object.cpp:1010)"
+        );
+        assert_eq!(
+            engine.objects[flag_index].state.action.name, "FlyBase",
+            "flag->SetActionByName(\"FlyBase\", this) (C4Object.cpp:1011)"
+        );
+        assert_eq!(engine.objects[flag_index].state.action.target, Some(hut));
+        assert!(
+            audio.iter().any(|command| matches!(
+                command,
+                AudioCommand::PlaySound { name, target, .. }
+                    if name == "Trumpet" && *target == Some(hut)
+            )),
+            "the Trumpet fanfare plays at the new base (C4Object.cpp:1017)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exec_base_clears_base_when_the_flag_is_lost() -> Result<(), EngineError> {
+        // ExecBase's Tick35 arm (C4Object.cpp:1024-1031): a valid base
+        // without a FlyBase flag targeting it loses the base assignment.
+        let mut engine = Engine::new();
+        let (hut, flag) = base_fixture(&mut engine)?;
+        for _ in 0..11 {
+            engine.tick()?;
+        }
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        assert_eq!(engine.objects[hut_index].state.base, 1);
+
+        engine.apply_object_update(
+            flag,
+            ObjectUpdate::new().with_status(ObjectStatus::Deleted),
+        )?;
+        for _ in 0..36 {
+            engine.tick()?;
+        }
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        assert_eq!(
+            engine.objects[hut_index].state.base, OWNER_NONE,
+            "lost flag clears Base (C4Object.cpp:1027-1030)"
+        );
         Ok(())
     }
 
