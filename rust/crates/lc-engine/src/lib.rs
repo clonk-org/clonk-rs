@@ -12287,12 +12287,48 @@ impl Engine {
             {
                 continue;
             }
+            // GetOCFForPos (C4Object.cpp:1146-1160): the returned mask
+            // keeps Entrance/Collection only inside their def areas.
+            let candidate_ocf = self.object_ocf_for_pos(candidate_idx, point);
             if candidate_ocf & mask != 0 {
                 return Some((candidate_idx, candidate_id, candidate_ocf));
             }
             return None;
         }
         None
+    }
+
+    /// `C4Object::GetOCFForPos` (C4Object.cpp:1146-1160): the cached mask
+    /// with OCF_Entrance/OCF_Collection verified against the def's
+    /// Entrance/Collection areas at the probe point.
+    fn object_ocf_for_pos(&self, index: usize, point: Vector2) -> u32 {
+        let object = &self.objects[index];
+        let mut rocf = object.state.ocf;
+        if rocf & (crate::ocf::ENTRANCE | crate::ocf::COLLECTION) == 0 {
+            return rocf;
+        }
+        let definition = self.definitions.get(&object.definition_id);
+        let position = object.state.position;
+        let inside_area = |rect: Option<DefinitionRect>| {
+            rect.is_some_and(|rect| {
+                let dx = point.x - (position.x + rect.x);
+                let dy = point.y - (position.y + rect.y);
+                (0..rect.width).contains(&dx) && (0..rect.height).contains(&dy)
+            })
+        };
+        // Verify entrance area (C4Object.cpp:1149-1153)
+        if rocf & crate::ocf::ENTRANCE != 0
+            && !inside_area(definition.and_then(|definition| definition.entrance_rect()))
+        {
+            rocf &= !crate::ocf::ENTRANCE;
+        }
+        // Verify collection area (C4Object.cpp:1154-1158)
+        if rocf & crate::ocf::COLLECTION != 0
+            && !inside_area(definition.and_then(|definition| definition.collection_rect()))
+        {
+            rocf &= !crate::ocf::COLLECTION;
+        }
+        rocf
     }
 
     pub fn find_path(
@@ -48214,6 +48250,40 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
             0,
             "a put-only container without entrance hides its contents"
+        );
+    }
+
+    #[test]
+    fn at_object_verifies_entrance_and_collection_areas_like_get_ocf_for_pos() {
+        // C4Object::At runs GetOCFForPos on a hit (C4Object.cpp:1131-1160):
+        // the returned mask keeps OCF_Entrance/OCF_Collection only when the
+        // probe point lies inside the def's Entrance/Collection areas, and
+        // a stripped mask no longer matching the request BLOCKS the scan
+        // (C4GameObjects::AtObject, C4GameObjects.cpp:243-248).
+        let mut engine = Engine::with_seed(4);
+        let mut hut = simple_definition("Hut");
+        hut.set_shape_rect(Some(DefinitionRect::new(-20, -20, 40, 40)));
+        // Entrance only in the left half of the shape.
+        hut.set_entrance_rect(Some(DefinitionRect::new(-20, -20, 20, 40)));
+        engine.register_definition(hut).expect("hut registers");
+
+        // Spawn y is the con-0 bottom: 60 - (40 - 20) puts the center at 40.
+        engine
+            .spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(40, 60)))
+            .expect("hut spawns");
+
+        let inside_entrance = engine.at_object(Vector2::new(30, 40), ocf::ENTRANCE, None);
+        assert!(
+            inside_entrance.is_some(),
+            "probe inside the entrance area keeps OCF_Entrance"
+        );
+        assert_ne!(inside_entrance.expect("hit").2 & ocf::ENTRANCE, 0);
+
+        assert!(
+            engine
+                .at_object(Vector2::new(50, 40), ocf::ENTRANCE, None)
+                .is_none(),
+            "probe inside the shape but outside the entrance area strips the bit"
         );
     }
 
