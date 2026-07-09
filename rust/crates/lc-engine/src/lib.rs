@@ -5601,6 +5601,9 @@ pub struct Definition {
     /// `NoFight` DefCore flag (C4Def.cpp:413): suppresses OCF_FightReady
     /// (SetOCF, C4Object.cpp:606-610).
     no_fight: bool,
+    /// `Chop` DefCore flag (C4Def::Chopable, C4Def.cpp:378): OCF_Chop
+    /// candidate (SetOCF, C4Object.cpp:570-575).
+    chopable: bool,
     /// The [Physical] DefCore section (C4Def::Physical).
     physical: PhysicalInfo,
     /// Real C4Script content gets the C++ callback arguments — no parameters
@@ -5749,6 +5752,7 @@ impl Definition {
             entrance_rect: None,
             rotated_entrance: 0,
             no_fight: false,
+            chopable: false,
             physical: PhysicalInfo::default(),
             c4_callback_args: false,
             solid_mask_pixels: SolidMaskPixels::default(),
@@ -5923,6 +5927,7 @@ impl Definition {
         definition.set_entrance_rect(resource.core.entrance.map(DefinitionRect::from));
         definition.set_rotated_entrance(resource.core.rotated_entrance);
         definition.set_no_fight(resource.core.no_fight);
+        definition.set_chopable(resource.core.chopable);
         Ok(definition)
     }
 
@@ -6688,6 +6693,14 @@ impl Definition {
 
     pub fn set_no_fight(&mut self, no_fight: bool) {
         self.no_fight = no_fight;
+    }
+
+    pub fn is_chopable(&self) -> bool {
+        self.chopable
+    }
+
+    pub fn set_chopable(&mut self, chopable: bool) {
+        self.chopable = chopable;
     }
 
     pub fn physical(&self) -> &PhysicalInfo {
@@ -23857,9 +23870,8 @@ impl Engine {
 
     fn compute_object_ocf(&self, index: usize) -> u32 {
         let object = &self.objects[index];
-        let ocf = self
-            .definitions
-            .get(&object.definition_id)
+        let definition = self.definitions.get(&object.definition_id);
+        let mut ocf = definition
             .map(|definition| definition.compute_ocf(&object.state))
             .unwrap_or_else(|| {
                 crate::ocf::compute(
@@ -23873,7 +23885,20 @@ impl Engine {
             });
         // HitSpeeds from the fixed speed |xdir| + |ydir| (SetOCF,
         // C4Object.cpp:588-592)
-        ocf | movement_hit_speed_flags(object.fixed_velocity)
+        ocf |= movement_hit_speed_flags(object.fixed_velocity);
+        // OCF_Chop: Chopable, StaticBack (excludes felled trees), and no
+        // exclusive object blocking the center — the
+        // Game.Objects.AtObject(x, y, OCF_Exclusive) probe (SetOCF,
+        // C4Object.cpp:570-575).
+        if definition.is_some_and(|definition| definition.is_chopable())
+            && object.state.category & CATEGORY_STATIC_BACK != 0
+            && self
+                .at_object(object.state.position, crate::ocf::EXCLUSIVE, None)
+                .is_none()
+        {
+            ocf |= crate::ocf::CHOP;
+        }
+        ocf
     }
 
     fn object_has_ocf(&self, index: usize, mask: u32) -> bool {
@@ -47926,6 +47951,51 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             engine.object_ocf_at_index(idx) & ocf::FIGHT_READY,
             0,
             "ObjectDisabled actions veto fight readiness (C4Object.cpp:608)"
+        );
+    }
+
+    #[test]
+    fn ocf_chop_requires_static_back_and_clear_center() {
+        // OCF_Chop (SetOCF, C4Object.cpp:570-575): Def->Chopable, a
+        // StaticBack category (unfelled trees), and no exclusive object
+        // covering the center (Game.Objects.AtObject(x, y, OCF_Exclusive)).
+        let mut engine = Engine::with_seed(4);
+        let mut tree = simple_definition("Tree");
+        tree.set_chopable(true);
+        tree.set_shape_rect(Some(DefinitionRect::new(-8, -20, 16, 40)));
+        engine.register_definition(tree).expect("tree registers");
+        let mut gate = simple_definition("Gate");
+        gate.set_exclusive(true);
+        gate.set_shape_rect(Some(DefinitionRect::new(-10, -20, 20, 40)));
+        engine.register_definition(gate).expect("gate registers");
+
+        // Spawn y is the con-0 bottom: 60 - (40 - 20) puts the center at 40.
+        let standing = engine
+            .spawn_object(SpawnConfig::new("Tree").with_position(Vector2::new(40, 60)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(standing).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::CHOP, 0);
+
+        // A felled tree loses StaticBack — and the Chop bit.
+        engine.objects[idx].state.category = CATEGORY_OBJECT;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::CHOP,
+            0,
+            "non-StaticBack chopables are already felled (C4Object.cpp:573)"
+        );
+        engine.objects[idx].state.category = CATEGORY_STATIC_BACK;
+        engine.refresh_object_ocf(idx);
+
+        // An exclusive object over the trunk center blocks chopping.
+        engine
+            .spawn_object(SpawnConfig::new("Gate").with_position(Vector2::new(40, 60)))
+            .expect("gate spawns");
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::CHOP,
+            0,
+            "an exclusive blocker at the center vetoes Chop (C4Object.cpp:574)"
         );
     }
 
