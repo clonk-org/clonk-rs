@@ -308,9 +308,17 @@ impl Engine {
         }
 
         // COM_Contents contents shift (:3364-3372): data carries the target
-        // object number; the shift itself runs through the app-side menu and
-        // the FnShiftContents host path today.
+        // object NUMBER (not ID); the shift always runs on the target's
+        // container, which is not necessarily this object.
         if com == COM_CONTENTS {
+            let target_id = ObjectId::new(data as u64);
+            if let Some(container_index) = self
+                .find_object_index(target_id)
+                .and_then(|target_index| self.objects[target_index].state.container)
+                .and_then(|container_id| self.find_object_index(container_id))
+            {
+                self.object_direct_com_contents(container_index, target_id, true)?;
+            }
             return Ok(());
         }
 
@@ -342,9 +350,9 @@ impl Engine {
             return Ok(());
         }
 
-        // Direct wheel control (:3391-3396): contents scrolling still runs
-        // through the app-side menu / FnShiftContents host path.
+        // Direct wheel control (:3391-3396): scroll contents.
         if com == COM_WHEEL_UP || com == COM_WHEEL_DOWN {
+            self.object_shift_contents(index, com == COM_WHEEL_UP, true)?;
             return Ok(());
         }
 
@@ -1001,6 +1009,110 @@ impl Engine {
             return ActionProcedure::Undefined;
         }
         library.procedure_for_action(action_name)
+    }
+
+    // ---- Contents shifting (C4Object.cpp:5751-5797) -----------------------
+
+    /// `C4Object::ShiftContents` (C4Object.cpp:5751-5775): walk First->Next
+    /// (or Last->Prev with `shift_back`) for the first ACTIVE item the
+    /// current front cannot concat-picture with — approximated as a
+    /// different definition, matching the FnShiftContents host semantics —
+    /// and select it via DirectComContents.
+    fn object_shift_contents(
+        &mut self,
+        index: usize,
+        shift_back: bool,
+        do_calls: bool,
+    ) -> Result<bool, EngineError> {
+        let contents = self.objects[index].state.contents.clone();
+        let Some(front_id) = contents.first().copied() else {
+            return Ok(false);
+        };
+        let Some(front_definition) = self
+            .find_object_index(front_id)
+            .map(|front_index| self.objects[front_index].definition_id.clone())
+        else {
+            return Ok(false);
+        };
+        let mut candidates: Vec<ObjectId> = contents[1..].to_vec();
+        if shift_back {
+            candidates.reverse();
+        }
+        for candidate_id in candidates {
+            let Some(candidate_index) = self.find_object_index(candidate_id) else {
+                continue;
+            };
+            if !self.objects[candidate_index].state.status.is_active() {
+                continue;
+            }
+            if self.objects[candidate_index].definition_id != front_definition {
+                // Object different: shift to this (C4Object.cpp:5768).
+                self.object_direct_com_contents(index, candidate_id, do_calls)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// `C4Object::DirectComContents` (C4Object.cpp:5777-5797): the
+    /// ~ControlContents veto, the cyclic rotation to the front, and the
+    /// ~Selection callback whose falsy return plays the Grab sound. The
+    /// context-menu refill (:5792-5795) is app-side presentation.
+    fn object_direct_com_contents(
+        &mut self,
+        index: usize,
+        target_id: ObjectId,
+        do_calls: bool,
+    ) -> Result<(), EngineError> {
+        // Safety: active and contained in this object (:5780).
+        let Some(target_index) = self.find_object_index(target_id) else {
+            return Ok(());
+        };
+        if !self.objects[target_index].state.status.is_active()
+            || self.objects[target_index].state.container != Some(self.objects[index].id)
+        {
+            return Ok(());
+        }
+        // Desired object already at front? (:5782)
+        if self.objects[index].state.contents.first() == Some(&target_id) {
+            return Ok(());
+        }
+        // Select object via script? (:5784-5786)
+        let target_definition = self.objects[target_index].definition_id.clone();
+        if do_calls {
+            let veto = self.contained_call(
+                index,
+                "ControlContents",
+                &[Value::C4Id(target_definition.as_str().to_string())],
+            )?;
+            if compat::value_raw_truthy(&veto) {
+                return Ok(());
+            }
+        }
+        // Default action: the cyclic relink (C4ObjectList::ShiftContents,
+        // C4ObjectList.cpp:815-833) — a no-op if the id left the list.
+        let contents = &mut self.objects[index].state.contents;
+        let Some(position) = contents.iter().position(|id| *id == target_id) else {
+            return Ok(());
+        };
+        contents.rotate_left(position);
+        // Selection sound (:5790): falsy ~Selection(container) on the new
+        // front plays "Grab" at the container.
+        if do_calls {
+            let container_ref = compat::object_reference_value(self.objects[index].id);
+            let selected = self.contained_call(target_index, "Selection", &[container_ref])?;
+            if !compat::value_raw_truthy(&selected) {
+                let container_id = self.objects[index].id;
+                self.pending_audio.push(crate::AudioCommand::PlaySound {
+                    name: "Grab".to_string(),
+                    target: Some(container_id),
+                    volume: 100,
+                    looped: false,
+                    custom_falloff: None,
+                });
+            }
+        }
+        Ok(())
     }
 
     // ---- ObjectCom* helpers (C4ObjectCom.cpp) -----------------------------
@@ -1901,6 +2013,99 @@ protected func ContainedDown(pByClonk) { return(1); }
         assert!(
             snapshot.command_stack.command_names().is_empty(),
             "the container consumed the com"
+        );
+    }
+
+    /// Crew with three contents of distinct defs: front ROCK, then GOLD,
+    /// then SKUL (front = `contents[0]`, the C4ObjectList First).
+    fn wheel_fixture(engine: &mut Engine, clonk_script: &str) -> (ObjectId, [ObjectId; 3]) {
+        register_clonk(engine, "CLNK", clonk_script);
+        for id in ["ROCK", "GOLD", "SKUL"] {
+            let def = Definition::from_script(id, id, "#strict\n").expect("item compiles");
+            engine.register_definition(def).expect("register item");
+        }
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(engine, "CLNK", 1);
+        let items = ["ROCK", "GOLD", "SKUL"].map(|id| {
+            engine
+                .spawn_object(SpawnConfig::new(id).with_container(crew))
+                .expect("spawn item")
+        });
+        let index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[index].state.contents = items.to_vec();
+        (crew, items)
+    }
+
+    fn contents(engine: &Engine, id: ObjectId) -> Vec<ObjectId> {
+        let index = engine.find_object_index(id).expect("object exists");
+        engine.objects[index].state.contents.clone()
+    }
+
+    #[test]
+    fn wheel_down_shifts_contents_to_the_next_different_item() {
+        // COM_WheelDown → ShiftContents(false, true) (C4Object.cpp:
+        // 3391-3396): walk First->Next for the first item of a DIFFERENT
+        // definition and rotate it to the front (C4Object.cpp:5751-5775).
+        let mut engine = Engine::new();
+        let (crew, [rock, gold, skul]) = wheel_fixture(&mut engine, "#strict\n");
+
+        engine.player_in_com(1, COM_WHEEL_DOWN, 0).expect("wheel");
+        assert_eq!(contents(&engine, crew), vec![gold, skul, rock]);
+    }
+
+    #[test]
+    fn wheel_up_shifts_contents_back_to_the_last_different_item() {
+        // COM_WheelUp → ShiftContents(true, true): walk from Contents.Last
+        // backwards (C4Object.cpp:5757).
+        let mut engine = Engine::new();
+        let (crew, [rock, gold, skul]) = wheel_fixture(&mut engine, "#strict\n");
+
+        engine.player_in_com(1, COM_WHEEL_UP, 0).expect("wheel");
+        assert_eq!(contents(&engine, crew), vec![skul, rock, gold]);
+    }
+
+    #[test]
+    fn wheel_shift_respects_the_control_contents_veto() {
+        // DirectComContents runs ~ControlContents(id) first; a truthy
+        // return takes over the selection (C4Object.cpp:5784-5786).
+        let script = r#"
+#strict
+protected func ControlContents(idTarget) { return(1); }
+"#;
+        let mut engine = Engine::new();
+        let (crew, [rock, gold, skul]) = wheel_fixture(&mut engine, script);
+
+        engine.player_in_com(1, COM_WHEEL_DOWN, 0).expect("wheel");
+        assert_eq!(
+            contents(&engine, crew),
+            vec![rock, gold, skul],
+            "the container's ControlContents consumed the shift"
+        );
+    }
+
+    #[test]
+    fn com_contents_shifts_the_target_to_the_front_of_its_container() {
+        // COM_Contents carries the target's object NUMBER in iData and the
+        // shift runs on the target's CONTAINER (C4Object.cpp:3364-3372 ->
+        // DirectComContents, :5777-5797).
+        let mut engine = Engine::new();
+        let (crew, [rock, gold, skul]) = wheel_fixture(&mut engine, "#strict\n");
+
+        engine
+            .player_in_com(1, COM_CONTENTS, skul.as_u64() as i32)
+            .expect("contents com");
+        assert_eq!(contents(&engine, crew), vec![skul, rock, gold]);
+        // The new front had no ~Selection handler: the Grab sound plays at
+        // the container (C4Object.cpp:5790).
+        assert!(
+            engine.pending_audio.iter().any(|command| matches!(
+                command,
+                crate::AudioCommand::PlaySound { name, target, .. }
+                    if name == "Grab" && *target == Some(crew)
+            )),
+            "falsy Selection plays the Grab sound"
         );
     }
 
