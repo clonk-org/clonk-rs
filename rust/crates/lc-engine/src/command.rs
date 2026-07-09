@@ -2168,6 +2168,32 @@ mod tests {
                 assert_eq!(request.id, CommandId::MoveTo);
                 assert_eq!(request.target, Some(target_id));
                 assert_eq!(request.update_interval, 50);
+                assert_eq!(
+                    request.data,
+                    CommandData::None,
+                    "no Enter_PushTarget: the MoveTo gets no PushTarget either"
+                );
+            }
+            other => panic!("unexpected operation: {:?}", other),
+        }
+
+        // C4Command::Enter passes C4CMD_MoveTo_PushTarget through when
+        // its own Data carries C4CMD_Enter_PushTarget (C4Command.cpp:615).
+        let mut state = EnterState::from_request(
+            &CommandRequest::new(CommandId::Enter)
+                .with_target(Some(target_id))
+                .with_data(CommandData::Integer(2)),
+        )
+        .expect("state created");
+        let result = state.step(&ctx);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(
+                    request.data,
+                    CommandData::Integer(2),
+                    "Enter_PushTarget -> MoveTo_PushTarget (C4Command.cpp:615)"
+                );
             }
             other => panic!("unexpected operation: {:?}", other),
         }
@@ -8043,7 +8069,6 @@ impl MoveToState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct EnterState {
     target: ObjectId,
-    #[allow(dead_code)]
     push_target: bool,
     update_interval: u32,
     last_evaluated: Option<u64>,
@@ -8132,9 +8157,16 @@ impl EnterState {
 
         let mut result = CommandStepResult::running(self.update_to_stop(ctx));
         if self.should_issue_move(ctx.frame) {
-            let request = CommandRequest::new(CommandId::MoveTo)
+            // Move to the entrance with the push flag carried through:
+            // (Data & C4CMD_Enter_PushTarget) ? C4CMD_MoveTo_PushTarget
+            // : 0 (C4Command.cpp:615).
+            let mut request = CommandRequest::new(CommandId::MoveTo)
                 .with_target(Some(self.target))
                 .with_update_interval(50);
+            if self.push_target {
+                request =
+                    request.with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET));
+            }
             result = result.with_operations(vec![CommandOperation::PushFront(request)]);
         }
         result
