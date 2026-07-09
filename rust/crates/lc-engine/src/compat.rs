@@ -2212,9 +2212,11 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         user_menu: true,
         command_object,
         items: Vec::new(),
-        // Columns = Lines = 0 (C4Menu::Default, C4Menu.cpp:299).
+        // Columns = Lines = 0, fTextProgressing off (C4Menu::Default,
+        // C4Menu.cpp:299,303).
         columns: 0,
         lines: 0,
+        text_progress: None,
     };
     let stored = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
@@ -2730,6 +2732,40 @@ fn set_menu_size(args: &[Value]) -> Result<Value, RuntimeError> {
     if rows != 0 {
         menu.lines = rows;
     }
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu)))
+    });
+    Ok(Value::Bool(true))
+}
+
+/// FnSetMenuTextProgress (C4Script.cpp:1750-1754): NO cthr->Obj fallback —
+/// a nil menu object fails even with a scope object. With an active menu
+/// C4Menu::SetTextProgress(n, fAdd=false) (C4Menu.cpp:1079-1111) arms the
+/// progressive text display for n >= 0 (per-item distribution is
+/// presentation) or disables it for negative n, and returns true.
+fn set_menu_text_progress(args: &[Value]) -> Result<Value, RuntimeError> {
+    let progress =
+        parse_optional_i32(args.first(), "SetMenuTextProgress", "progress")?.unwrap_or(0);
+    let target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetMenuTextProgress",
+        "menu object",
+    )?;
+    let Some(target) = target else {
+        return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1752)
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false)); // !pMenuObj->Menu / !IsActive
+    };
+    // fTextProgressing = (iToProgress >= 0) (C4Menu.cpp:1084).
+    menu.text_progress = (progress >= 0).then_some(progress);
     HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
             .as_mut()
@@ -4665,6 +4701,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetMenuSelection", get_menu_selection);
     script.register_host_function("SelectMenuItem", select_menu_item);
     script.register_host_function("SetMenuSize", set_menu_size);
+    script.register_host_function("SetMenuTextProgress", set_menu_text_progress);
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("LandscapeWidth", landscape_width);
@@ -20233,6 +20270,7 @@ mod tests {
         "SetKiller",
         "SetMass",
         "SetMenuSize",
+        "SetMenuTextProgress",
         "SetObjDrawTransform",
         "SetObjDrawTransform2",
         "SetObjectStatus",

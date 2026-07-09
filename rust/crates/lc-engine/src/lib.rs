@@ -1960,6 +1960,12 @@ pub struct ObjectMenuState {
     /// C4Menu::Lines — 0 = auto layout; see `columns`.
     #[serde(default)]
     pub lines: i32,
+    /// SetMenuTextProgress state: Some(n) = progressive text display armed
+    /// starting at n characters, None = off (C4Menu::SetTextProgress,
+    /// C4Menu.cpp:1079-1111). The per-item TextDisplayProgress
+    /// distribution across captions is app-side presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_progress: Option<i32>,
 }
 
 /// C4Shape attach bookkeeping (`AttachMat`/`iAttachX`/`iAttachY`/
@@ -36682,6 +36688,71 @@ func Trigger() {
             Value::Bool(true)
         );
         assert_eq!(size(&engine), (50, 7));
+    }
+
+    #[test]
+    fn set_menu_text_progress_requires_an_explicit_menu_object_like_cpp() {
+        // FnSetMenuTextProgress (C4Script.cpp:1750-1754): unlike most menu
+        // fns there is NO cthr->Obj fallback — `if (!pMenuObj ||
+        // !pMenuObj->Menu) return false;`. With an active menu it returns
+        // C4Menu::SetTextProgress(n, false) (C4Menu.cpp:1079-1111), which
+        // is true whenever the menu is active: n >= 0 arms the progressive
+        // text display, negative n turns it off.
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func NoObj() { return SetMenuTextProgress(0); }
+        func Prog(n) { return SetMenuTextProgress(n, this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+        let progress = |engine: &Engine| {
+            engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .expect("menu is open")
+                .text_progress
+        };
+
+        assert_eq!(
+            call(&mut engine, "Prog", vec![Value::Int(0)]),
+            Value::Bool(false),
+            "no menu -> false (C4Script.cpp:1752)"
+        );
+        call(&mut engine, "OpenMenu", Vec::new());
+        assert_eq!(
+            call(&mut engine, "NoObj", Vec::new()),
+            Value::Bool(false),
+            "nil menu object -> false even with a scope object (C4Script.cpp:1752)"
+        );
+        assert_eq!(
+            call(&mut engine, "Prog", vec![Value::Int(5)]),
+            Value::Bool(true)
+        );
+        assert_eq!(progress(&engine), Some(5), "n >= 0 arms text progress");
+        assert_eq!(
+            call(&mut engine, "Prog", vec![Value::Int(-1)]),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            progress(&engine),
+            None,
+            "negative n disables text progress (fTextProgressing = false)"
+        );
     }
 
     #[test]
