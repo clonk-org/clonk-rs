@@ -16985,6 +16985,7 @@ impl Engine {
             let mut timer_kill = false;
             let mut start_denied = false;
             let mut stop_denied = false;
+            let mut add_denied = false;
             // C++ runs Fx* callbacks with fPassErrors=false: a script
             // error logs and the game continues (the erroring callback
             // yields nil). RNG/audio are restored from the pre-call
@@ -17138,7 +17139,10 @@ impl Engine {
                         game_over_triggered,
                         current_audio,
                     )
-                    .map(|(outcome, audio_state, new_rng, _add_result)| {
+                    .map(|(outcome, audio_state, new_rng, add_result)| {
+                        // C4Fx_Start_Deny from Fx*Add kills the ACCEPTOR
+                        // (C4Effect.cpp:306-309).
+                        add_denied = matches!(add_result, Some(Value::Int(-1)));
                         (outcome, audio_state, new_rng)
                     }),
             };
@@ -17180,6 +17184,14 @@ impl Engine {
                 // restores the exact list node; the sorted reinsert may
                 // reorder equal-priority peers (documented divergence).
                 object.insert_effect(event.effect.clone());
+                state_snapshot.effects = object.state.effects.clone();
+            }
+            if add_denied {
+                // pAddToEffect->Kill (C4Effect.cpp:308): a full Kill with
+                // the acceptor's own Stop callback.
+                if let Some(removed) = object.remove_effect_by_number(event.effect.number) {
+                    queue.push_back(EffectEvent::stopped(removed, EffectStopReason::Removed));
+                }
                 state_snapshot.effects = object.state.effects.clone();
             }
 
@@ -42545,6 +42557,89 @@ func FxProbeTimer(pThis, iNumber) {
         assert!(
             !calls.iter().any(|(name, _)| name == "FxFireStop"),
             "the annulled effect dies without a Stop callback"
+        );
+    }
+
+    #[test]
+    fn effect_add_returning_start_deny_kills_the_acceptor() {
+        // C4Effect::Check (C4Effect.cpp:306-309): when the acceptor's
+        // Fx*Add answers C4Fx_Start_Deny (-1), the ACCEPTOR itself is
+        // killed (full Kill — its Stop callback runs) and the check
+        // reports C4Fx_Effect_Annul. Neither effect survives.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxShieldEffect(state, effect, new_name) {
+            if (new_name == "Fire") {
+                return -2;
+            }
+            return nil;
+        }
+
+        global func FxShieldAdd(state, effect, new_name, new_interval) {
+            return -1;
+        }
+
+        global func FxShieldStop(state, effect, reason) {
+            return nil;
+        }
+
+        global func FxFireStart(state, effect) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                AddEffect("Fire", state, 100, 7);
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        let second = engine.tick().expect("tick succeeds");
+        let object = second.object(id).expect("object present");
+        assert!(
+            object.effects.is_empty(),
+            "the Fire is annulled and Shield killed itself in its Add call \
+             (C4Effect.cpp:306-309)"
+        );
+
+        let calls = call_log.lock().unwrap().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|name| *name == "FxShieldStop")
+                .count(),
+            1,
+            "the acceptor's Kill runs its Stop callback (C4Effect.cpp:390-392)"
+        );
+        assert!(
+            !calls.iter().any(|name| name == "FxFireStart"),
+            "the annulled effect still never starts"
         );
     }
 
