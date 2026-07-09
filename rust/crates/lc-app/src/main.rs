@@ -12149,6 +12149,7 @@ mod tests {
             definition: "CLNK".into(),
             function: "Control".to_string(),
             source: ScriptError::parse("boom", 1, 1),
+            recovery: None,
         };
         let status = control_script_error_to_status(script_error)
             .expect("script errors downgrade to a status message");

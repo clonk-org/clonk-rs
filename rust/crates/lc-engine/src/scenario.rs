@@ -757,6 +757,7 @@ impl Scenario {
                     definition,
                     function,
                     source,
+                    recovery: _,
                 }) => {
                     tracing::warn!(
                         script = %definition,

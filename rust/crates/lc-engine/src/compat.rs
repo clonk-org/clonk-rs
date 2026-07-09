@@ -2999,38 +2999,83 @@ fn enter(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnExit (C4Script.cpp:372-390): pObj leaves its container
-/// (C4Object::Exit; fails when not contained). The exit position falls to
-/// the container-change fold; the optional offset/rotation/speed
-/// parameters are not modeled yet (PORT_STATUS).
+/// FnExit (C4Script.cpp:372-388): pObj (or the scope object) leaves its
+/// container via C4Object::Exit. The optional tx/ty are CALLER-relative
+/// (`tx += cthr->Obj->x`, :377-381), tr == -1 draws Random(360) (:382),
+/// and Exit writes position/rotation/dirs unconditionally — bare Exit()
+/// re-places the object at the caller's position with r = 0 and zeroed
+/// dirs (C4Object.cpp:1549-1553), the y target offset by the SUBJECT's
+/// Shape.y (:385) and rdir scaled `itofix(trdir) / 10` (:388). The
+/// ObjectComCancelAttach and BoundsCheck side arms plus the
+/// Ejection/Departure engine calls stay unmodeled (PORT_STATUS).
 fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 7 {
+        return Err(RuntimeError::new(
+            "Exit expects at most 7 arguments: obj, x, y, r, xdir, ydir, rdir",
+        ));
+    }
     let subject =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "Exit", "obj")?;
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
-    });
-    if let Some(subject) = subject {
-        if Some(subject) != active {
-            return match call_world_object_function(subject, "Exit", &[]) {
-                Some(result) => result,
-                None => Ok(Value::Bool(false)),
-            };
-        }
-    }
+    let tx = parse_optional_i32(args.get(1), "Exit", "x")?.unwrap_or(0);
+    let ty = parse_optional_i32(args.get(2), "Exit", "y")?.unwrap_or(0);
+    let tr = parse_optional_i32(args.get(3), "Exit", "r")?.unwrap_or(0);
+    let txdir = parse_optional_i32(args.get(4), "Exit", "xdir")?.unwrap_or(0);
+    let tydir = parse_optional_i32(args.get(5), "Exit", "ydir")?.unwrap_or(0);
+    let trdir = parse_optional_i32(args.get(6), "Exit", "rdir")?.unwrap_or(0);
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return Ok(Value::Bool(false));
         };
-        let Some(object) = context.object_context_mut() else {
+        let active = context.object_context().map(|object| object.id());
+        let Some(target) = subject.or(active) else {
+            return Ok(Value::Bool(false)); // no pObj and no scope object
+        };
+        // Caller-relative offset: the CALLING object, also for foreign
+        // subjects (C4Script.cpp:377-381).
+        let (mut abs_x, mut abs_y) = (tx, ty);
+        if let Some(caller) = context.object_context() {
+            let position = caller.effective_position();
+            abs_x = abs_x.saturating_add(position.x);
+            abs_y = abs_y.saturating_add(position.y);
+        }
+        // The Random(360) draw happens before the contained check — it
+        // runs even when Exit then fails (C4Script.cpp:382).
+        let rotation = if tr == -1 {
+            draw_context_random(360)?
+        } else {
+            tr
+        };
+        // The SUBJECT's live Shape.y (C4Script.cpp:385): a same-call
+        // SetShape override wins over the def shape.
+        let shape_y = context
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.shape_override)
+            .map(|shape| shape.y)
+            .or_else(|| {
+                effective_definition_id(context, target)
+                    .and_then(|id| context.world.definition_metadata(&id))
+                    .and_then(|metadata| metadata.shape)
+                    .map(|shape| shape.y)
+            })
+            .unwrap_or(0);
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        let Some(scope) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
-        if object.container().is_none() {
-            return Ok(Value::Bool(false)); // not contained
+        if scope.container().is_none() {
+            return Ok(Value::Bool(false)); // not contained (C4Object.cpp:1539)
         }
-        object.set_container(None);
+        scope.set_container(None);
+        scope.set_position(Vector2::new(abs_x, abs_y.saturating_add(shape_y)));
+        // Raw r write — C4Object::Exit assigns without SetRotation's
+        // normalization (C4Object.cpp:1552).
+        scope.current_rotation = rotation;
+        scope.pending_update.rotation = Some(rotation);
+        scope.set_fixed_velocity(FixedVec2::new(itofix(txdir), itofix(tydir)));
+        scope.set_rotation_velocity(itofix(trdir) / 10);
         Ok(Value::Bool(true))
     })
 }
@@ -18838,6 +18883,25 @@ impl EffectHostContext {
             object.action_data = scope.current_action_data;
             object.damage = scope.current_damage;
             object.direction = scope.current_direction.to_script_value();
+            object.owner = scope.owner();
+            // Staged dir writes surface at whole-pixel grain (the foreign
+            // read reconstructs via itofix — sub-pixel foreign fidelity is
+            // the snapshot work, task B).
+            if scope.pending_update.fixed_velocity.is_some()
+                || scope.pending_update.fixed_velocity_x.is_some()
+                || scope.pending_update.fixed_velocity_y.is_some()
+                || scope.pending_update.velocity.is_some()
+            {
+                let fixed = scope.fixed_velocity();
+                object.velocity = Vector2::new(fixed.int_x(), fixed.int_y());
+            }
+            // Energy stays the snapshot value on purpose: the paths that
+            // depend on mid-call energy (DoEnergy, the death checks, the
+            // active-scope GetEnergy) read the scope state directly, and
+            // the foreign GetEnergy stale read is pinned by existing
+            // behavior — do not overlay without a differential test
+            // (PORT_STATUS, Script host model).
+            object.ocf = scope.staged_ocf(object.ocf);
         }
         // The snapshot contents list re-checks each child's live state:
         // C4Object::Exit removes the child from its container's Contents
@@ -18856,7 +18920,105 @@ impl EffectHostContext {
                     .unwrap_or(true)
             });
         }
+        // ...and it GROWS for same-call Enters: C4Object::Enter adds to the
+        // container's Contents immediately (`Contents.Add(this,
+        // C4ObjectList::stContents)`, C4Object.cpp:1601-1605), sorting into
+        // the matching category/id cluster (C4ObjectList::Add).
+        let entered: Vec<ObjectId> = self
+            .scopes_in_call_order()
+            .filter(|scope| {
+                scope.current_container == Some(id)
+                    && !scope.destroy
+                    && scope.status.is_active()
+                    && !object.contents.contains(&scope.id)
+            })
+            .map(|scope| scope.id)
+            .collect();
+        for child in entered {
+            let position = self.contents_insert_position(&object.contents, child);
+            object.contents.insert(position, child);
+        }
         Some(object)
+    }
+
+    /// Every scope this call holds pending writes for, in a deterministic
+    /// order: the active scope, suspended outer calls, completed nested
+    /// calls (first-call order).
+    fn scopes_in_call_order(&self) -> impl Iterator<Item = &ObjectScopeContext> {
+        self.object
+            .iter()
+            .chain(self.dormant_scopes.iter().flatten())
+            .chain(
+                self.nested_order
+                    .iter()
+                    .filter_map(|id| self.nested_objects.get(id).map(|state| &state.scope)),
+            )
+    }
+
+    /// A contents entry's sort inputs — the live scope first, then the
+    /// same-call previews and the world snapshot.
+    fn contents_sort_key(&self, id: ObjectId) -> Option<(i32, String)> {
+        let snapshot = self
+            .pending_objects
+            .get(&id)
+            .map(|object| (object.category, object.definition_id().to_string()))
+            .or_else(|| {
+                self.world
+                    .get(id)
+                    .map(|object| (object.category, object.definition_id().to_string()))
+            });
+        match self.object_scope(id) {
+            Some(scope) => {
+                let definition_id = scope
+                    .definition_id
+                    .clone()
+                    .or_else(|| snapshot.as_ref().map(|(_, def)| def.clone()))?;
+                Some((scope.current_category, definition_id))
+            }
+            None => snapshot,
+        }
+    }
+
+    /// C4ObjectList::Add stContents sort-in (C4ObjectList.cpp:104-152):
+    /// cluster with the first same-(SortLimit-category, id) entry, else
+    /// before the first entry of lower-or-equal sort category; lines (and
+    /// StaticBack children, which skip the cluster pass) fall through to
+    /// the relative-category walk, lines append at the end. The
+    /// engine-side twin is `Engine::contents_insert_position`.
+    fn contents_insert_position(&self, contents: &[ObjectId], child: ObjectId) -> usize {
+        let Some((category, definition_id)) = self.contents_sort_key(child) else {
+            return contents.len();
+        };
+        let is_line = self
+            .world
+            .definition_metadata(&definition_id)
+            .map(|metadata| metadata.line != 0)
+            .unwrap_or(false);
+        if is_line {
+            return contents.len();
+        }
+        let sort_category = category & crate::CATEGORY_SORT_LIMIT;
+        if category & crate::CATEGORY_STATIC_BACK == 0 {
+            let cluster_position = contents.iter().position(|other| {
+                self.contents_sort_key(*other)
+                    .is_some_and(|(other_category, other_definition)| {
+                        other_category & crate::CATEGORY_SORT_LIMIT == sort_category
+                            && other_definition == definition_id
+                    })
+            });
+            if let Some(position) = cluster_position {
+                return position;
+            }
+        }
+        contents
+            .iter()
+            .position(|other| {
+                self.contents_sort_key(*other)
+                    .is_some_and(|(other_category, _)| {
+                        other_category & crate::CATEGORY_SORT_LIMIT <= sort_category
+                    })
+            })
+            .unwrap_or(contents.len())
     }
 
     /// Drops a spawn queued in THIS call before it materializes. The id
@@ -19049,6 +19211,10 @@ impl EffectHostContext {
         );
         scope.definition_id = Some(object.definition_id().to_string());
         scope.current_magic_energy = state.magic_energy;
+        // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358) —
+        // nested scopes carry the snapshot mask like outer scopes do, not
+        // the preview-grade recompute.
+        scope.cached_ocf = Some(state.ocf);
         Some((scope, state.local_vars.clone()))
     }
 
@@ -20072,6 +20238,50 @@ impl ObjectScopeContext {
                 self.current_category,
             )
         })
+    }
+
+    /// The OCF mask mid-call world reads see: `base` (the snapshot mask)
+    /// with the bits re-derived whose driving state THIS call staged.
+    /// C++ SetOCF runs synchronously on Enter/Exit (C4Object.cpp:
+    /// 1531,1570), DoCon and the alive transitions (AssignDeath/
+    /// AssignAlive -> SetOCF), so the live mask never lags those changes;
+    /// bits driven by unstaged state keep their cached value (the NoFight
+    /// and landscape gates stay unevaluated here).
+    fn staged_ocf(&self, base: u32) -> u32 {
+        let mut mask = base;
+        if self.pending_update.container.is_some() {
+            // OCF_NotContained / OCF_Available (SetOCF, C4Object.cpp:
+            // 611-618; Available's open-entrance arm is unmodeled).
+            if self.container().is_some() {
+                mask &= !(ocf::NOT_CONTAINED | ocf::AVAILABLE);
+            } else {
+                mask |= ocf::NOT_CONTAINED | ocf::AVAILABLE;
+            }
+        }
+        if self.pending_update.construction.is_some() {
+            if self.construction() >= FULL_CON {
+                mask |= ocf::FULL_CON;
+            } else {
+                mask &= !ocf::FULL_CON;
+            }
+        }
+        if self.pending_update.alive.is_some() || self.pending_update.category.is_some() {
+            // OCF_Living/OCF_Alive gate on C4D_Living (C4Object.cpp:
+            // 600-605), OCF_CrewMember on Def->CrewMember && Alive
+            // (:619-622), OCF_FightReady on the Alive BIT (:606-610).
+            mask &= !(ocf::LIVING | ocf::ALIVE | ocf::CREW_MEMBER | ocf::FIGHT_READY);
+            let alive = self.alive();
+            if self.category() & crate::CATEGORY_LIVING != 0 {
+                mask |= ocf::LIVING;
+                if alive {
+                    mask |= ocf::ALIVE | ocf::FIGHT_READY;
+                }
+            }
+            if self.crew_member && alive {
+                mask |= ocf::CREW_MEMBER;
+            }
+        }
+        mask
     }
 
     fn container(&self) -> Option<ObjectId> {

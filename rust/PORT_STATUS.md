@@ -112,10 +112,26 @@ shadow, recording the new first mismatch.
   CalcDefValue overrides, remaining DefCore flags and runtime creation-number
   skew; C4Value string interning and save/network serialization; strict
   host-parameter conversion.
-- **Script host model:** non-effect outer calls still expose stale locals to
-  nested calls; outer-call errors drop pre-error mutations; same-call Enter does
-  not append contents, nested Exit drops relative args, and velocity/owner/OCF
-  are not fully overlaid.
+- **Script host model:** every outer call kind (PSF/timer/host calls,
+  Control, Initialize/Construction/Step, menu callbacks, MenuCommand
+  DirectExec) now runs on LIVE session local cells like effect callbacks —
+  nested calls onto the in-flight object share the storage in both
+  directions; outer-call errors keep their pre-error mutations (locals,
+  foreign writes, RNG/audio advance) via the `EngineError::Script`
+  recovery payload, applied by the call_object_function / DirectExec /
+  movement-Hit / control funnels; same-call Enter additions sort into the
+  container's contents (Add stContents cluster rules); FnExit threads its
+  caller-relative position/dir args incl. the tr==-1 Random(360) draw;
+  get_world_object overlays staged owner and whole-pixel dirs and
+  re-derives the STAGED OCF bits (container/con/alive/category).
+  Residuals: effect-callback ERRORS still restore the rng/audio backups
+  and drop the partial outcome (the fail-safe arm predates the recovery
+  seam); the Initialize/Construction/Step and menu-entries/-command/
+  -callback definition seams attach no recovery (their batch folds drop
+  on error); foreign dir reads stay whole-pixel (snapshot task B); energy
+  is deliberately not overlaid (active-scope/DoEnergy paths read live
+  scope state); FnExit's ObjectComCancelAttach/BoundsCheck arms and the
+  Ejection/Departure engine calls stay unmodeled.
 - **Weather / config / resources:** weather/sky closed except presentation
   residuals (stale-between-triggers gamma vs the live getter, SetSkyFade,
   disabled-BackClr retention, SkyDef tile fallback; LaunchCloud objects stay
