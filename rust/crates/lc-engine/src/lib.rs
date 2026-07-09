@@ -6073,6 +6073,14 @@ impl Definition {
             state.container.is_some(),
             state.construction,
         );
+        // OCF_Construct: can be built outside (SetOCF, C4Object.cpp:549-552)
+        if self.constructable
+            && state.construction < FULL_CON
+            && state.rotation == 0
+            && !state.on_fire
+        {
+            ocf |= crate::ocf::CONSTRUCT;
+        }
         // OCF_Rotate: rotateable, but not a minimum (invisible)
         // construction site (SetOCF, C4Object.cpp:576-580)
         if self.rotateable > 0 && state.construction > 100 {
@@ -47203,6 +47211,49 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             .expect("spawn succeeds");
         let idx = engine.find_object_index(vehicle).expect("object exists");
         assert_ne!(engine.object_ocf_at_index(idx) & ocf::GRAB, 0);
+    }
+
+    #[test]
+    fn ocf_construct_requires_incomplete_unrotated_unburning_constructable() {
+        // OCF_Construct: Def->Constructable && Con < FullCon && r == 0 &&
+        // !OnFire (SetOCF, C4Object.cpp:549-552).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Site");
+        definition.set_constructable(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Site").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::CONSTRUCT,
+            0,
+            "a completed object is not a construction site (Con < FullCon fails)"
+        );
+
+        engine.objects[idx].state.construction = FULL_CON / 2;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::CONSTRUCT, 0);
+
+        engine.objects[idx].state.rotation = 10;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::CONSTRUCT,
+            0,
+            "rotated objects cannot be built (r == 0 fails)"
+        );
+        engine.objects[idx].state.rotation = 0;
+
+        engine.objects[idx].state.on_fire = true;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::CONSTRUCT,
+            0,
+            "burning objects cannot be built (!OnFire fails)"
+        );
     }
 
     #[test]
