@@ -1024,6 +1024,13 @@ impl<'a> Vm<'a> {
             .and_then(|table| table.borrow().get(name).cloned())
     }
 
+    fn global_constant(&self, name: &str) -> Option<Value> {
+        self.globals_consts.and_then(|table| {
+            let cell = table.borrow().get(name).cloned();
+            cell.map(|cell| cell.borrow().clone())
+        })
+    }
+
     fn execute_block(
         &self,
         statements: &[Stmt],
@@ -1056,6 +1063,7 @@ impl<'a> Vm<'a> {
                 None => self
                     .global_variable(name)
                     .or_else(|| self.constants.and_then(|constants| constants.get(name).cloned()))
+                    .or_else(|| self.global_constant(name))
                     .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
             },
             Expr::Unary(op, expr) => {

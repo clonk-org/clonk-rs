@@ -1017,7 +1017,9 @@ unsafe fn make_snapshot(
             definition_id,
             position: Vector2::new(entry.position_x, entry.position_y),
             velocity: Vector2::new(entry.velocity_x, entry.velocity_y),
-            rotation: entry.rotation.rem_euclid(360),
+            // The bridge exports C4Object::r verbatim. Negative rotations are
+            // valid after DoMovement's circle bound and must survive restore.
+            rotation: entry.rotation,
             energy: entry.energy,
             construction: entry.construction,
             damage: entry.damage,
@@ -1087,7 +1089,7 @@ unsafe fn make_snapshot(
             } else {
                 Some(C4Fixed::from_raw(entry.rotation_velocity))
             },
-            fixed_rotation: optional_fixed(entry.fixed_rotation, entry.rotation.rem_euclid(360)),
+            fixed_rotation: optional_fixed(entry.fixed_rotation, entry.rotation),
         });
     }
     snapshots.sort_by_key(|object| object.id);
@@ -1496,6 +1498,36 @@ fn runtime_snapshot_mismatch(
                     problems.push(format!(
                         "object {} velocity rust {:?}, cpp {:?}",
                         id, expected_object.velocity, actual_object.velocity
+                    ));
+                }
+                if expected_object.rotation != actual_object.rotation {
+                    problems.push(format!(
+                        "object {} rotation rust {}, cpp {}",
+                        id, expected_object.rotation, actual_object.rotation
+                    ));
+                }
+                let expected_fixr = expected_object
+                    .fixed_rotation
+                    .unwrap_or_else(|| itofix(expected_object.rotation));
+                let actual_fixr = actual_object
+                    .fixed_rotation
+                    .unwrap_or_else(|| itofix(actual_object.rotation));
+                if expected_fixr != actual_fixr {
+                    problems.push(format!(
+                        "object {} subdegree rotation rust {}, cpp {}",
+                        id,
+                        expected_fixr.val(),
+                        actual_fixr.val()
+                    ));
+                }
+                let expected_rdir = expected_object.rotation_velocity.unwrap_or(C4Fixed::ZERO);
+                let actual_rdir = actual_object.rotation_velocity.unwrap_or(C4Fixed::ZERO);
+                if expected_rdir != actual_rdir {
+                    problems.push(format!(
+                        "object {} rotation velocity rust {}, cpp {}",
+                        id,
+                        expected_rdir.val(),
+                        actual_rdir.val()
                     ));
                 }
                 if expected_object.energy != actual_object.energy {
@@ -3036,6 +3068,9 @@ global func Step(state, frame, random)
             fixed_velocity_x: itofix(-1).val(),
             fixed_velocity_y: itofix(2).val(),
             fixed_rotation: itofix(0).val(),
+            mobile: false,
+            in_liquid: false,
+            object_timer: 0,
             rotation_velocity: C4Fixed::ZERO.val(),
             energy: 95,
             construction: crate::FULL_CON,
@@ -3123,12 +3158,15 @@ global func Step(state, frame, random)
             position_y: -3,
             velocity_x: 0,
             velocity_y: 1,
-            rotation: 5,
+            rotation: -5,
             fixed_position_x: itofix(2).val() + 123,
             fixed_position_y: itofix(-3).val() - 456,
             fixed_velocity_x: 300,
             fixed_velocity_y: itofix(1).val() + 789,
-            fixed_rotation: itofix(5).val() + 42,
+            fixed_rotation: itofix(-5).val() - 42,
+            mobile: false,
+            in_liquid: false,
+            object_timer: 0,
             rotation_velocity: itofix(1).val(),
             energy: 0,
             construction: crate::FULL_CON,
@@ -3190,6 +3228,7 @@ global func Step(state, frame, random)
 
         let recorded = &snapshot.objects[0];
         assert_eq!(recorded.position, Vector2::new(2, -3));
+        assert_eq!(recorded.rotation, -5, "raw signed r is preserved");
         assert_eq!(
             recorded
                 .fixed_position
@@ -3215,7 +3254,7 @@ global func Step(state, frame, random)
         );
         assert_eq!(
             recorded.fixed_rotation.expect("raw fix_r preserved").val(),
-            itofix(5).val() + 42
+            itofix(-5).val() - 42
         );
     }
 
@@ -3251,6 +3290,9 @@ global func Step(state, frame, random)
             fixed_velocity_x: itofix(0).val(),
             fixed_velocity_y: itofix(0).val(),
             fixed_rotation: itofix(0).val(),
+            mobile: false,
+            in_liquid: false,
+            object_timer: 0,
             rotation_velocity: C4Fixed::ZERO.val(),
             energy: 0,
             construction: crate::FULL_CON,
@@ -3450,6 +3492,9 @@ global func Step(state, frame, random)
             fixed_velocity_x: itofix(0).val(),
             fixed_velocity_y: itofix(0).val(),
             fixed_rotation: itofix(0).val(),
+            mobile: false,
+            in_liquid: false,
+            object_timer: 0,
             rotation_velocity: C4Fixed::ZERO.val(),
             energy: 0,
             construction: crate::FULL_CON,
@@ -3498,6 +3543,9 @@ global func Step(state, frame, random)
             fixed_velocity_x: itofix(0).val(),
             fixed_velocity_y: itofix(0).val(),
             fixed_rotation: itofix(0).val(),
+            mobile: false,
+            in_liquid: false,
+            object_timer: 0,
             rotation_velocity: C4Fixed::ZERO.val(),
             energy: 0,
             construction: crate::FULL_CON,
@@ -3828,6 +3876,67 @@ global func Step(state, frame, random)
             detail.contains("runtime extra: [1x TREE]"),
             "detail did not name the extra definitions: {detail}"
         );
+    }
+
+    #[test]
+    fn runtime_mismatch_reports_raw_rotation_state() {
+        let object = || -> ObjectSnapshot {
+            serde_json::from_value(serde_json::json!({
+                "id": 1,
+                "definition_id": "ROCK",
+                "position": {"x": 0, "y": 0},
+                "velocity": {"x": 0, "y": 0},
+                "rotation": -9,
+                "energy": 0,
+                "fixed_rotation": -589524,
+                "rotation_velocity": 32768,
+            }))
+            .expect("object snapshot deserializes")
+        };
+        let baseline = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+        let mut expected = baseline;
+        expected.objects = vec![object()];
+
+        let cases: [(&str, fn(&mut ObjectSnapshot)); 3] = [
+            ("rotation rust", |snapshot: &mut ObjectSnapshot| {
+                snapshot.rotation += 1
+            }),
+            ("subdegree rotation", |snapshot: &mut ObjectSnapshot| {
+                snapshot.fixed_rotation = Some(C4Fixed::from_raw(-589523));
+            }),
+            ("rotation velocity", |snapshot: &mut ObjectSnapshot| {
+                snapshot.rotation_velocity = Some(C4Fixed::from_raw(32767));
+            }),
+        ];
+        for (label, mutate) in cases {
+            let mut actual = expected.clone();
+            mutate(&mut actual.objects[0]);
+            let detail = runtime_snapshot_mismatch(&expected, &actual)
+                .expect("rotation difference is reported");
+            assert!(detail.contains(label), "missing {label} in {detail}");
+        }
     }
 
     #[test]

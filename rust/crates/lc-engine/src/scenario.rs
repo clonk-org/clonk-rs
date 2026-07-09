@@ -157,6 +157,19 @@ struct ScenarioScriptSource {
     c4_args: bool,
 }
 
+#[derive(Debug, Clone)]
+enum DefinitionLoadStep {
+    Definition(String),
+    Declarations { name: String, source: String },
+    SystemScripts(Vec<(String, String)>),
+}
+
+#[derive(Debug)]
+enum CollectedDefinition {
+    Definition(ScenarioDefinition),
+    SystemScripts(Vec<(String, String)>),
+}
+
 #[derive(Debug)]
 pub struct Scenario {
     name: Option<String>,
@@ -179,10 +192,13 @@ pub struct Scenario {
     base_buy_enabled: bool,
     base_sell_enabled: bool,
     landscape_insert_thrust: bool,
-    /// The scenario's own System.c4g script sources: C++ loads them into
-    /// the global script engine (C4Game::LoadScenarioScripts,
-    /// C4Game.cpp:3317-3343).
-    system_scripts: Vec<(String, String)>,
+    /// The surviving definition hosts and definition-pack System.c4g hosts in
+    /// their C4DefList::Load order. System hosts remain in place when a later
+    /// definition overload removes an earlier same-ID definition host.
+    definition_load_steps: Vec<DefinitionLoadStep>,
+    /// The scenario's own System.c4g sources. C++ loads these after defs
+    /// specifically to give them overload priority (C4Game.cpp:2606-2617).
+    scenario_system_scripts: Vec<(String, String)>,
     /// The four C4SPlrStart slots, consumed by joining players
     /// (C4Player::ScenarioInit, C4Player.cpp:670-777).
     player_starts: Vec<PlayerStart>,
@@ -345,72 +361,18 @@ impl Scenario {
     ) -> Result<Self, ScenarioError> {
         let manifest = parse_legacy_scenario_manifest(group)?;
 
-        let mut collected = Vec::new();
-        let mut seen_ids = HashSet::new();
-        // System.c4g scripts found inside definition packs join the global
-        // engine BEFORE the scenario's own (C++ registers them during def
-        // loading; LoadScenarioScripts runs later).
-        let mut pack_system_scripts: Vec<(String, String)> = Vec::new();
+        let skip_ids: HashSet<String> = manifest
+            .core
+            .definitions
+            .skip_defs
+            .iter()
+            .map(|entry| entry.id.to_ascii_uppercase())
+            .collect();
+        let mut load_items = Vec::new();
 
-        // The scenario group itself is a definition source: every .c4d
-        // child is a scenario-local definition, loaded with override
-        // priority over the packs (C4Game::InitDefs loads the scenario
-        // last with fOverload; first-wins dedup here gives the same
-        // outcome by collecting locals first).
-        for entry in group.entries()? {
-            if !entry.is_directory {
-                continue;
-            }
-            let name = entry.relative_path.to_string_lossy().to_ascii_lowercase();
-            if !(name.ends_with(".c4d") || name.ends_with(".ocd") || name.ends_with(".ocg")) {
-                continue;
-            }
-            let child = group.open_child(&entry.relative_path)?;
-            collect_definitions_from_group(
-                &child,
-                &mut seen_ids,
-                &mut collected,
-                &mut pack_system_scripts,
-            )?;
-        }
-
-        // The parent folder chain is a definition source too: every .c4d
-        // child of a .c4f ancestor serves the scenarios inside it (C++
-        // folder definitions — e.g. Hazard.c4f/ScenObjects.c4d).
-        let mut ancestor = group.root().parent();
-        while let Some(folder) = ancestor {
-            let is_folder_group = folder
-                .file_name()
-                .map(|name| {
-                    name.to_string_lossy()
-                        .to_ascii_lowercase()
-                        .ends_with(".c4f")
-                })
-                .unwrap_or(false);
-            if !is_folder_group {
-                break;
-            }
-            if let Ok(folder_group) = Group::open(folder) {
-                for entry in folder_group.entries()? {
-                    if !entry.is_directory {
-                        continue;
-                    }
-                    let name = entry.relative_path.to_string_lossy().to_ascii_lowercase();
-                    if !(name.ends_with(".c4d") || name.ends_with(".ocd")) {
-                        continue;
-                    }
-                    let child = folder_group.open_child(&entry.relative_path)?;
-                    collect_definitions_from_group(
-                        &child,
-                        &mut seen_ids,
-                        &mut collected,
-                        &mut pack_system_scripts,
-                    )?;
-                }
-            }
-            ancestor = folder.parent();
-        }
-
+        // C4Game::InitDefs loads explicit definition resources first, then
+        // folder-local resources from outermost to innermost, and finally the
+        // scenario group itself (C4Game.cpp:81-103, 210-213, 3961-3994).
         for spec in &manifest.definition_specs {
             let groups = resolver.resolve_definition_groups(group, spec)?;
             if groups.is_empty() {
@@ -419,25 +381,69 @@ impl Scenario {
             for definition_group in groups {
                 collect_definitions_from_group(
                     &definition_group,
-                    &mut seen_ids,
-                    &mut collected,
-                    &mut pack_system_scripts,
+                    true,
+                    &skip_ids,
+                    &mut load_items,
                 )?;
             }
         }
 
-        if !manifest.core.definitions.skip_defs.is_empty() {
-            let skip_ids: HashSet<String> = manifest
-                .core
-                .definitions
-                .skip_defs
-                .iter()
-                .map(|entry| entry.id.clone())
-                .collect();
-            collected.retain(|definition| {
-                let id_upper = definition.id.to_ascii_uppercase();
-                !skip_ids.contains(&id_upper)
+        let mut folder_groups = Vec::new();
+        let mut ancestor = group.root().parent();
+        while let Some(folder) = ancestor {
+            let is_folder_group = folder.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .to_ascii_lowercase()
+                    .ends_with(".c4f")
             });
+            if !is_folder_group {
+                break;
+            }
+            folder_groups.push(folder.to_path_buf());
+            ancestor = folder.parent();
+        }
+        for folder in folder_groups.iter().rev() {
+            if let Ok(folder_group) = Group::open(folder) {
+                collect_definitions_from_group(&folder_group, true, &skip_ids, &mut load_items)?;
+            }
+        }
+
+        // InitDefs' scenario pass disables System.c4g discovery because the
+        // scenario-local group is loaded later by LoadScenarioScripts.
+        collect_definitions_from_group(group, false, &skip_ids, &mut load_items)?;
+
+        // fOverload replaces and destroys an earlier same-ID C4Def script,
+        // while System hosts loaded between the two definitions remain live.
+        // Keep only the last definition event for each ID without flattening
+        // the surviving System host order.
+        let mut last_definition = HashMap::new();
+        for (index, item) in load_items.iter().enumerate() {
+            if let CollectedDefinition::Definition(definition) = item {
+                last_definition.insert(definition.id.to_ascii_uppercase(), index);
+            }
+        }
+        let mut collected = Vec::new();
+        let mut definition_load_steps = Vec::new();
+        for (index, item) in load_items.into_iter().enumerate() {
+            match item {
+                CollectedDefinition::Definition(definition)
+                    if last_definition.get(&definition.id.to_ascii_uppercase()) == Some(&index) =>
+                {
+                    definition_load_steps
+                        .push(DefinitionLoadStep::Definition(definition.id.clone()));
+                    collected.push(definition);
+                }
+                CollectedDefinition::Definition(definition) => {
+                    definition_load_steps.push(DefinitionLoadStep::Declarations {
+                        name: definition.id,
+                        source: definition.script,
+                    });
+                }
+                CollectedDefinition::SystemScripts(sources) if !sources.is_empty() => {
+                    definition_load_steps.push(DefinitionLoadStep::SystemScripts(sources));
+                }
+                CollectedDefinition::SystemScripts(_) => {}
+            }
         }
 
         if collected.is_empty() {
@@ -478,11 +484,8 @@ impl Scenario {
             base_buy_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_BUY) != 0,
             base_sell_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_SELL) != 0,
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
-            system_scripts: {
-                let mut scripts = pack_system_scripts;
-                scripts.extend(load_scenario_system_scripts(group)?);
-                scripts
-            },
+            definition_load_steps,
+            scenario_system_scripts: load_scenario_system_scripts(group)?,
             player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
             standard_names: group
                 .read_file("Names.txt")
@@ -552,14 +555,15 @@ impl Scenario {
         self.sky.as_ref()
     }
 
-    pub fn apply(&self, engine: &mut Engine) -> Result<Vec<ObjectId>, ScenarioError> {
+    /// Applies the scenario through C4Game::InitGame and the subsequent
+    /// synchronization pass, but deliberately leaves Script.Initialize for
+    /// the caller. Fresh games use this boundary to run InitGameFinal before
+    /// the queued startup-player controls execute.
+    pub fn apply_before_players(
+        &self,
+        engine: &mut Engine,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
         engine.clear_scenario_script();
-        // The scenario's own System.c4g joins the global script engine
-        // before any definition code runs (C4Game::LoadScenarioScripts,
-        // C4Game.cpp:3317-3343).
-        if !self.system_scripts.is_empty() {
-            engine.install_additional_global_scripts(&self.system_scripts);
-        }
         engine.configure_objectives(self.objectives.clone());
         // C4SPlrStart outlives scenario load: ScenarioInit reads it when a
         // player joins (C4Player.cpp:670-777).
@@ -611,7 +615,33 @@ impl Scenario {
         engine.set_base_sell_enabled(self.base_sell_enabled);
         engine.set_landscape_insert_thrust(self.landscape_insert_thrust);
 
-        for definition in &self.definitions {
+        for step in &self.definition_load_steps {
+            let definition = match step {
+                DefinitionLoadStep::Definition(id) => self
+                    .definitions
+                    .iter()
+                    .find(|definition| definition.id.eq_ignore_ascii_case(id))
+                    .ok_or_else(|| ScenarioError::UnknownDefinition(id.clone()))?,
+                DefinitionLoadStep::Declarations { name, source } => {
+                    match lc_script::Script::compile(source) {
+                        Ok(script) => lc_script::register_global_declarations(
+                            script.var_decls(),
+                            &engine.script_globals,
+                            Some(&engine.script_global_consts),
+                        ),
+                        Err(error) => tracing::warn!(
+                            definition = %name,
+                            %error,
+                            "superseded definition script failed to preparse; continuing like C++"
+                        ),
+                    }
+                    continue;
+                }
+                DefinitionLoadStep::SystemScripts(sources) => {
+                    engine.install_additional_global_scripts(sources);
+                    continue;
+                }
+            };
             let name = definition.name.as_deref().unwrap_or(&definition.id);
             // C4Def::Load ignores Script.Load failures (C4Def.cpp:632): a
             // definition with a broken script still loads, script-less; the
@@ -713,6 +743,35 @@ impl Scenario {
             engine.register_definition(compiled)?;
         }
 
+        // C++ loads Script.c first and then the scenario-local System.c4g,
+        // both after InitDefs for overload priority (C4Game.cpp:2606-2617,
+        // 3336-3355). Loading is separate from the later Initialize call.
+        if let Some(script) = &self.script {
+            match engine.load_scenario_script_with_convention(
+                &script.name,
+                &script.source,
+                script.c4_args,
+            ) {
+                Ok(()) => {}
+                Err(EngineError::Script {
+                    definition,
+                    function,
+                    source,
+                }) => {
+                    tracing::warn!(
+                        script = %definition,
+                        function,
+                        error = %source,
+                        "scenario script failed to load; continuing without it like C++"
+                    );
+                }
+                Err(other) => return Err(other.into()),
+            }
+        }
+        if !self.scenario_system_scripts.is_empty() {
+            engine.install_scenario_global_scripts(&self.scenario_system_scripts);
+        }
+
         // Script linking (C4Game::LinkScriptEngine -> C4AulScriptEngine::Link):
         // appends resolve FIRST, then includes (C4AulLink.cpp:27-28), and
         // `global func` declarations in definition scripts join the
@@ -724,7 +783,9 @@ impl Scenario {
         // CLNK, and C++ resolves it).
         engine.resolve_appends();
         engine.resolve_includes()?;
-        engine.collect_definition_global_functions();
+        // register_definition already inserted each definition's global funcs
+        // in load order. Re-collecting here would put them above the scenario
+        // System.c4g that C++ deliberately loaded last.
 
         let mut pending = self.initial_spawns.clone();
         let mut handles: HashMap<String, ObjectId> = HashMap::new();
@@ -826,6 +887,12 @@ impl Scenario {
             }
         }
 
+        // Every surviving C4Def receives ~InitializeDef after loaded-object
+        // denumeration and before the legacy environment placers run
+        // (C4Game.cpp:2505-2520).
+        let mut initialized = engine.initialize_definition_scripts()?;
+        created.append(&mut initialized);
+
         // C4Game::InitGame environment placements (C4Game.cpp:2493-2503):
         // InitVegetation/InitInEarth/InitAnimals/InitEnvironment/InitRules/
         // InitGoals run after the loaded objects, gated on
@@ -845,38 +912,22 @@ impl Scenario {
             engine.apply_weather_init(&weather_init);
         }
 
-        if let Some(script) = &self.script {
-            // A scenario script that fails to COMPILE logs and the round
-            // runs script-less (C4ScriptHost load behavior); Initialize
-            // runtime errors are already tolerated inside
-            // `install_scenario_script`.
-            match engine.install_scenario_script_with_convention(
-                &script.name,
-                &script.source,
-                script.c4_args,
-            ) {
-                Ok(mut additional) => created.append(&mut additional),
-                Err(EngineError::Script {
-                    definition,
-                    function,
-                    source,
-                }) => {
-                    tracing::warn!(
-                        script = %definition,
-                        function,
-                        error = %source,
-                        "scenario script failed to load; continuing without it like C++"
-                    );
-                }
-                Err(other) => return Err(other.into()),
-            }
-        }
         // C4Game::Init tail: SyncClearance + Synchronize AFTER InitGame,
         // BEFORE InitPlayers (C4Game.cpp:474-475) — collapse every fixed
         // position to itofix(x,y,r) and re-fix the synced RNG. A no-op
         // for synthetic scenarios (created spawns already satisfy both).
         engine.inherit_include_clonk_names();
         engine.game_start_synchronize();
+        Ok(created)
+    }
+
+    /// Applies a complete scenario with no startup players. Call
+    /// [`Scenario::apply_before_players`] when startup-player joins will be
+    /// executed later by the control queue.
+    pub fn apply(&self, engine: &mut Engine) -> Result<Vec<ObjectId>, ScenarioError> {
+        let mut created = self.apply_before_players(engine)?;
+        let mut additional = engine.initialize_scenario_script()?;
+        created.append(&mut additional);
         Ok(created)
     }
 
@@ -1147,6 +1198,10 @@ impl Scenario {
                 .as_ref()
                 .and_then(|landscape| landscape.surface().first().copied())
         });
+        let definition_load_steps = definitions
+            .iter()
+            .map(|definition| DefinitionLoadStep::Definition(definition.id.clone()))
+            .collect();
 
         Ok(Self {
             name: manifest.name,
@@ -1168,7 +1223,8 @@ impl Scenario {
             base_buy_enabled: false,
             base_sell_enabled: false,
             landscape_insert_thrust: false,
-            system_scripts: Vec::new(),
+            definition_load_steps,
+            scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
@@ -2682,9 +2738,8 @@ fn load_legacy_scenario_script(
     Ok(None)
 }
 
-/// Collects the global scripts of a System.c4g group (the `*.c` entries,
-/// sorted by name) for `Engine::install_global_scripts` — C++ loads these
-/// into `Game.ScriptEngine` at init (C4Game InitScriptEngine).
+/// Collects the scripts of a System.c4g group in the group's existing entry
+/// order, matching C4Group::FindNextEntry (C4Game.cpp:3348-3355).
 pub fn load_system_scripts(group: &Group) -> Result<Vec<(String, String)>, ScenarioError> {
     let mut sources = Vec::new();
     for entry in group.entries()? {
@@ -2698,7 +2753,6 @@ pub fn load_system_scripts(group: &Group) -> Result<Vec<(String, String)>, Scena
         let bytes = group.read_file(&entry.relative_path)?;
         sources.push((name, String::from_utf8_lossy(&bytes).into_owned()));
     }
-    sources.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(sources)
 }
 
@@ -4839,40 +4893,45 @@ fn is_missing_group_error(error: &GroupError) -> bool {
 
 fn collect_definitions_from_group(
     group: &Group,
-    seen_ids: &mut HashSet<String>,
-    output: &mut Vec<ScenarioDefinition>,
-    system_scripts: &mut Vec<(String, String)>,
+    load_system_groups: bool,
+    skip_ids: &HashSet<String>,
+    output: &mut Vec<CollectedDefinition>,
 ) -> Result<(), ScenarioError> {
+    let mut primary_definition = false;
     if group.exists("DefCore.txt") {
         let resource = ResourceDefinitionData::load(group)?;
-        let id = resource.core.id.clone();
-        if seen_ids.insert(id.clone()) {
-            output.push(scenario_definition_from_resource(
-                resource,
-                Some(group.clone()),
+        if !skip_ids.contains(&resource.core.id.to_ascii_uppercase()) {
+            primary_definition = true;
+            output.push(CollectedDefinition::Definition(
+                scenario_definition_from_resource(resource, Some(group.clone())),
             ));
         }
     }
 
-    // Definition groups carry their own System.c4g: C4DefList::Load
-    // registers its scripts with Game.ScriptEngine
-    // (C4Def.cpp:956-977) — Western.c4d/System.c4g et al.
-    if let Ok(system) = group.open_child(Path::new("System.c4g")) {
-        if let Ok(mut sources) = load_system_scripts(&system) {
-            system_scripts.append(&mut sources);
-        }
-    }
-
+    // C4DefList::Load recursively visits only *.c4d children.
     for entry in group.entries()? {
         if !entry.is_directory {
             continue;
         }
         let name = entry.relative_path.to_string_lossy().to_ascii_lowercase();
-        if name == "system.c4g" {
-            continue; // handled above; never a definition source
+        if !name.ends_with(".c4d") {
+            continue;
         }
         let child = group.open_child(&entry.relative_path)?;
-        collect_definitions_from_group(&child, seen_ids, output, system_scripts)?;
+        // The recursive call omits fLoadSysGroups in C++, so its default true
+        // applies even when only the scenario root suppressed System loading.
+        collect_definitions_from_group(&child, true, skip_ids, output)?;
+    }
+
+    // A non-primary definition root loads its System.c4g only AFTER all child
+    // definitions (C4Def.cpp:927-968). Direct primary definitions suppress
+    // their own System group, as does the scenario-file InitDefs pass.
+    if !primary_definition && load_system_groups {
+        if let Ok(system) = group.open_child(Path::new("System.c4g")) {
+            if let Ok(sources) = load_system_scripts(&system) {
+                output.push(CollectedDefinition::SystemScripts(sources));
+            }
+        }
     }
     Ok(())
 }
@@ -6868,7 +6927,8 @@ global func Step(state, frame, random)
             base_buy_enabled: true,
             base_sell_enabled: true,
             landscape_insert_thrust: false,
-            system_scripts: Vec::new(),
+            definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
+            scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
@@ -6963,7 +7023,8 @@ global func Step(state, frame, random)
             base_buy_enabled: true,
             base_sell_enabled: true,
             landscape_insert_thrust: false,
-            system_scripts: Vec::new(),
+            definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
+            scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
@@ -7388,7 +7449,12 @@ global func Step(state, frame, random)
         // reachable via inherited), and System.c4g scripts with #appendto
         // do the same (GoldRush's dialogue and AI scripts rely on both).
         let dir = tempdir().expect("tempdir");
-        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "#strict\n#appendto GOOD\n\
+             public func Probe() { return inherited() * 10 + 4; }\n",
+        );
         std::fs::write(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
             "func Probe() { return 1; }\n",
@@ -7404,16 +7470,26 @@ global func Step(state, frame, random)
         std::fs::write(
             boost.join("Script.c"),
             "#strict\n#appendto GOOD\n\
-             public func Probe() { return 10 + inherited(); }\n\
+             public func Probe() { return inherited() * 10 + 2; }\n\
              public func SetAI(szName, iInterval) { return 7; }\n",
         )
         .expect("write boost script");
+        let pack_system = dir.path().join("Defs.c4d/System.c4g");
+        std::fs::create_dir_all(&pack_system).expect("pack system dir");
+        std::fs::write(
+            pack_system.join("Append.c"),
+            "#strict\n#appendto GOOD\n\
+             public func Probe() { return inherited() * 10 + 3; }\n",
+        )
+        .expect("write pack system append");
         let system = scenario_dir.join("System.c4g");
         std::fs::create_dir_all(&system).expect("system dir");
         std::fs::write(
             system.join("Append.c"),
             "#strict\n#appendto GOOD\n\
-             public func FromSystem() { return 3; }\n",
+             static const SYSTEM_APPEND_VALUE = 3;\n\
+             public func Probe() { return inherited() * 10 + 5; }\n\
+             public func FromSystem() { return SYSTEM_APPEND_VALUE(); }\n",
         )
         .expect("write system append");
 
@@ -7426,8 +7502,8 @@ global func Step(state, frame, random)
             engine
                 .call_object_function(index, "Probe", Vec::new())
                 .expect("Probe call succeeds"),
-            lc_script::Value::Int(11),
-            "appendto overrides; inherited reaches the original"
+            lc_script::Value::Int(12345),
+            "appends follow definition, pack System, Script.c, scenario System order"
         );
         assert_eq!(
             engine
@@ -7441,7 +7517,14 @@ global func Step(state, frame, random)
                 .call_object_function(index, "FromSystem", Vec::new())
                 .expect("FromSystem call succeeds"),
             lc_script::Value::Int(3),
-            "System.c4g appends land on the target too"
+            "System.c4g appends see their global constants without nil local shadowing"
+        );
+        assert!(
+            engine
+                .global_script_functions
+                .as_ref()
+                .is_none_or(|functions| !functions.contains_key("FromSystem")),
+            "a public append function is local to its System host, not engine-global"
         );
     }
 
@@ -8381,15 +8464,21 @@ public func ActualizePhase(pClonk)
             dir.path(),
             None,
             "static probed;\n\
-             global func Initialize() { probed = PackHelper(); return nil; }\n",
+             global func Initialize() { probed = PackHelper() + PACK_ORDER; return nil; }\n",
         );
         let system = dir.path().join("Defs.c4d/System.c4g");
         std::fs::create_dir_all(&system).expect("system dir");
         std::fs::write(
             system.join("Helpers.c"),
-            "#strict\nglobal func PackHelper() { return 6; }\n",
+            "#strict\nstatic const PACK_ORDER = 20;\n\
+             global func PackHelper() { return 6; }\n",
         )
         .expect("write pack script");
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict\nstatic const PACK_ORDER = 10;\n",
+        )
+        .expect("write definition script");
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert_eq!(
@@ -8398,8 +8487,146 @@ public func ActualizePhase(pClonk)
                 .borrow()
                 .get("probed")
                 .map(|cell| cell.borrow().clone()),
-            Some(lc_script::Value::Int(6)),
-            "the pack's System.c4g global resolved from the scenario script"
+            Some(lc_script::Value::Int(26)),
+            "the pack's System.c4g loads after its child definitions"
+        );
+    }
+
+    #[test]
+    fn nested_scenario_definition_pack_reenables_system_loading() {
+        // InitDefs disables System loading only for the scenario root call.
+        // Recursive *.c4d loads use fLoadSysGroups=true again
+        // (C4Def.cpp:903-907,939-968).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "#strict\nstatic nested_result;\n\
+             global func Initialize() { nested_result = NestedHelper(); }\n",
+        );
+        let nested_system = scenario_dir.join("Helpers.c4d/System.c4g");
+        std::fs::create_dir_all(&nested_system).expect("nested system dir");
+        std::fs::write(
+            nested_system.join("Helpers.c"),
+            "#strict\nglobal func NestedHelper() { return 73; }\n",
+        )
+        .expect("write nested helper");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("nested_result")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(73))
+        );
+    }
+
+    #[test]
+    fn overloaded_definition_keeps_declarations_but_loses_functions_and_appends() {
+        // C4Def::Load preparses Script.c before C4DefList::Add replaces an
+        // existing ID. Destroying the old host unregisters its functions and
+        // appends, but GlobalNamed/GlobalConsts are not rolled back
+        // (C4Def.cpp:625-633,927-933,1059-1091; C4Aul.cpp:473-481).
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        let old = defs.join("Old.c4d");
+        let target = defs.join("Target.c4d");
+        std::fs::create_dir_all(&old).expect("old def dir");
+        std::fs::create_dir_all(&target).expect("target def dir");
+        std::fs::write(
+            old.join("DefCore.txt"),
+            "[DefCore]\nid=DUPS\nName=Old\nCategory=0\n",
+        )
+        .expect("write old core");
+        std::fs::write(
+            old.join("Script.c"),
+            "#strict\nstatic const SURVIVES_REPLACEMENT = 7;\n\
+             global func Clash() { return 1; }\n\
+             #appendto TARG\npublic func Hook() { return inherited() * 10 + 1; }\n",
+        )
+        .expect("write old script");
+        std::fs::write(
+            target.join("DefCore.txt"),
+            "[DefCore]\nid=TARG\nName=Target\nCategory=0\n",
+        )
+        .expect("write target core");
+        std::fs::write(
+            target.join("Script.c"),
+            "#strict\npublic func Hook() { return 0; }\n",
+        )
+        .expect("write target script");
+        let pack_system = defs.join("System.c4g");
+        std::fs::create_dir_all(&pack_system).expect("pack system dir");
+        std::fs::write(
+            pack_system.join("Globals.c"),
+            "#strict\nglobal func Clash() { return 15; }\n\
+             public func PackPrivate() { return 9; }\n",
+        )
+        .expect("write pack globals");
+
+        let scenario_dir = dir.path().join("Replacement.c4s");
+        let replacement = scenario_dir.join("Replacement.c4d");
+        std::fs::create_dir_all(&replacement).expect("replacement def dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Replacement\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            replacement.join("DefCore.txt"),
+            "[DefCore]\nid=DUPS\nName=New\nCategory=0\n",
+        )
+        .expect("write replacement core");
+        std::fs::write(
+            replacement.join("Script.c"),
+            "#strict\nglobal func Clash() { return 2; }\n\
+             #appendto TARG\npublic func Hook() { return inherited() * 10 + 2; }\n",
+        )
+        .expect("write replacement script");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        assert_eq!(
+            engine
+                .script_global_consts
+                .borrow()
+                .get("SURVIVES_REPLACEMENT")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(7)),
+            "the removed host's preparsed constant remains registered"
+        );
+        let globals = engine
+            .global_script_functions
+            .as_ref()
+            .expect("global table exists");
+        let clash = globals.get("Clash").expect("replacement Clash exists");
+        assert!(clash.overloaded.is_some(), "pack System is inherited");
+        assert!(
+            clash
+                .overloaded
+                .as_ref()
+                .is_some_and(|parent| parent.overloaded.is_none()),
+            "the removed definition function is absent from the overload chain"
+        );
+        assert!(!globals.contains_key("PackPrivate"));
+        let id = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let index = engine.find_object_index(id).expect("target index");
+        assert_eq!(
+            engine
+                .call_object_function(index, "Hook", Vec::new())
+                .expect("Hook runs"),
+            lc_script::Value::Int(2),
+            "only the live replacement append participates"
         );
     }
 
@@ -8762,16 +8989,25 @@ public func ActualizePhase(pClonk)
     fn scenario_local_system_c4g_installs_global_scripts() {
         // C4Game::LoadScenarioScripts (C4Game.cpp:3317-3343) loads every
         // script in the scenario's own System.c4g into the global script
-        // engine — GoldRush's 31 dialogue/helper scripts live there.
+        // engine AFTER definitions for overload priority — GoldRush's 31
+        // dialogue/helper scripts and Drachenfels' constants rely on this.
         let dir = tempdir().expect("tempdir");
         let scenario_dir = dir.path().join("Local.c4s");
         let system = scenario_dir.join("System.c4g");
         std::fs::create_dir_all(&system).expect("system dir");
         std::fs::write(
             system.join("Helpers.c"),
-            "global func ScenarioLocalHelper() { return 42; }\n",
+            "#strict\nstatic const SYSTEM_VALUE = 42;\n\
+             static const DERIVED_VALUE = SCENARIO_VALUE;\n\
+             global func ScenarioLocalHelper() { return SYSTEM_VALUE(); }\n",
         )
         .expect("write helper script");
+        std::fs::write(
+            scenario_dir.join("Script.c"),
+            "#strict\nstatic const SYSTEM_VALUE = 31;\n\
+             static const SCENARIO_VALUE = 40;\n",
+        )
+        .expect("write scenario script");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=LocalSystem\n\n[Definitions]\nDefinition1=Defs.c4d\n",
@@ -8784,7 +9020,12 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
         )
         .expect("write defcore");
-        std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+        std::fs::write(
+            good.join("Script.c"),
+            "#strict\nstatic const SYSTEM_VALUE = 17;\n\
+             func Probe() { return ScenarioLocalHelper(); }\n",
+        )
+        .expect("write script");
 
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
@@ -8799,6 +9040,66 @@ public func ActualizePhase(pClonk)
                 .as_ref()
                 .is_some_and(|table| table.contains_key("ScenarioLocalHelper")),
             "scenario System.c4g functions reach the global script engine"
+        );
+        let id = engine
+            .spawn_object(SpawnConfig::new("GOOD"))
+            .expect("target spawns");
+        let index = engine.find_object_index(id).expect("target index");
+        assert_eq!(
+            engine
+                .call_object_function(index, "Probe", Vec::new())
+                .expect("Probe call succeeds"),
+            lc_script::Value::Int(42),
+            "scenario System.c4g constants override definition constants"
+        );
+        assert_eq!(
+            engine
+                .script_global_consts
+                .borrow()
+                .get("DERIVED_VALUE")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(40)),
+            "scenario System.c4g constants can reference earlier Script.c constants"
+        );
+    }
+
+    #[test]
+    fn scenario_script_globals_exist_before_environment_initialization() {
+        // LoadScenarioScripts runs before LinkScriptEngine and InitGame's
+        // InitEnvironment object creation (C4Game.cpp:2615-2622, 2493-2503).
+        // Those object callbacks therefore see scenario Script.c globals.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "#strict\nstatic const SCENARIO_READY = 57;\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=ScenarioOrder\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapZoom=10\n\n[Environment]\nObjects=GOOD=1;\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[0u8, 0][..], &[0u8, 0][..]]),
+        )
+        .expect("write landscape");
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict\nstatic initialized_from_scenario;\n\
+             func Initialize() { initialized_from_scenario = SCENARIO_READY; }\n",
+        )
+        .expect("write definition script");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("initialized_from_scenario")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(57))
         );
     }
 
@@ -8983,6 +9284,210 @@ public func ActualizePhase(pClonk)
             join_test_player(&mut engine).len(),
             1,
             "the round continues: a player can still join"
+        );
+    }
+
+    #[test]
+    fn definition_initialize_runs_before_scenario_initialize() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            Some((
+                "INIT",
+                "static init_def_calls;\n\
+                 static init_def_section;\n\
+                 static init_def_id;\n\
+                 static init_def_value;\n\
+                 static init_def_action_length;\n\
+                 func InitializeDef(section) {\n\
+                     init_def_calls = 1;\n\
+                     init_def_section = section;\n\
+                     init_def_id = GetID();\n\
+                     init_def_value = GetDefCoreVal(\"Value\");\n\
+                     init_def_action_length = GetActMapVal(\"Length\", \"Probe\");\n\
+                     CreateObject(\"GOOD\", 10, 20, -1);\n\
+                     return 1;\n\
+                 }\n",
+            )),
+            "static scenario_saw_init_def;\n\
+             global func Initialize() {\n\
+                 scenario_saw_init_def = init_def_calls;\n\
+                 return 1;\n\
+             }\n",
+        );
+        std::fs::write(
+            dir.path().join("Defs.c4d/INIT.c4d/DefCore.txt"),
+            "[DefCore]\nid=INIT\nName=Initializer\nCategory=0\nValue=23\n",
+        )
+        .expect("write initializer defcore");
+        std::fs::write(
+            dir.path().join("Defs.c4d/INIT.c4d/ActMap.txt"),
+            "[Action]\nName=Probe\nProcedure=NONE\nLength=7\n",
+        )
+        .expect("write initializer actmap");
+
+        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(created.len(), 1, "InitializeDef's CreateObject is committed");
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_def_section")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Nil),
+            "a full scenario load passes a null section name"
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_def_id")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::C4Id("INIT".to_string())),
+            "GetID falls back to the no-object definition context"
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_def_value")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(23))
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_def_action_length")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(7))
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("scenario_saw_init_def")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(1)),
+            "scenario Initialize observes the completed definition phase"
+        );
+    }
+
+    #[test]
+    fn definition_initialize_uses_numeric_c4id_order() {
+        // C4ID is a little-endian integer: ZAAA sorts before ABBB even
+        // though lexical ordering says the opposite (C4DefList::SortByID).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            Some((
+                "ZAAA",
+                "static init_def_order;\n\
+                 func InitializeDef() {\n\
+                     if (!init_def_order) init_def_order = 0;\n\
+                     init_def_order = init_def_order * 10 + 1;\n\
+                 }\n",
+            )),
+            "// no scenario script\n",
+        );
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/DefCore.txt"),
+            "[DefCore]\nid=ABBB\nName=ABBB\nCategory=0\n",
+        )
+        .expect("write ABBB defcore");
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "static init_def_order;\n\
+             func InitializeDef() {\n\
+                 if (!init_def_order) init_def_order = 0;\n\
+                 init_def_order = init_def_order * 10 + 2;\n\
+             }\n",
+        )
+        .expect("write ABBB script");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_def_order")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(12))
+        );
+    }
+
+    #[test]
+    fn deferred_apply_synchronizes_before_initialize_and_player_join() {
+        // InitPlayers only enqueues startup joins; InitGameFinal calls
+        // Script.Initialize before the first control execution performs them
+        // (C4Game.cpp:456-483, C4PlayerInfo.cpp:1292-1320). Initialize also
+        // sees the RNG re-fixed by Synchronize, not the weather-init ledger.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static observed_players;\n\
+             static observed_random;\n\
+             global func Initialize() {\n\
+                 observed_players = GetPlayerCount();\n\
+                 observed_random = Random(100);\n\
+                 return 1;\n\
+             }\n",
+        );
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+
+        scenario
+            .apply_before_players(&mut engine)
+            .expect("pre-player apply succeeds");
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("observed_players")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Nil),
+            "Script.Initialize remains pending during the pre-player phase"
+        );
+
+        let mut synchronized_rng = engine.rng.clone();
+        let expected_random = synchronized_rng.random(100);
+        engine
+            .initialize_scenario_script()
+            .expect("scenario Initialize succeeds");
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("observed_players")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(0)),
+            "Initialize runs before queued startup-player joins"
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("observed_random")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(expected_random)),
+            "Initialize consumes the synchronized RNG stream"
+        );
+        assert_eq!(engine.rng, synchronized_rng);
+
+        assert_eq!(join_test_player(&mut engine).len(), 1);
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("observed_players")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(0)),
+            "the later player join does not retroactively rerun Initialize"
         );
     }
 
@@ -9921,7 +10426,8 @@ public func ActualizePhase(pClonk)
              Vertices=3\nVertexX=2,-14,14\nVertexY=11,-4,-4\n\
              VertexCNAT=8,1,2\nVertexFriction=50,50,50\n\n\
              [Object]\nid=GOOD\nNumber=91\nStatus=1\nX=30\nY=10\nRotation=90\n\
-             Vertices=1\nVertexX=-11\nVertexY=2\nVertexFriction=50\n",
+             Vertices=1\nVertexX=-11\nVertexY=2\nVertexFriction=50\n\n\
+             [Object]\nid=GOOD\nNumber=92\nStatus=1\nX=40\nY=10\nRotation=-9\n",
         )
         .expect("write objects");
 
@@ -9963,6 +10469,11 @@ public func ActualizePhase(pClonk)
             "saved vertices are the ALREADY-rotated shape — no re-rotation at load"
         );
         assert_eq!(engine.objects[idx].state.rotation, 90);
+        let idx = engine
+            .find_object_index(ObjectId::new(92))
+            .expect("object 92 exists");
+        assert_eq!(engine.objects[idx].state.rotation, -9);
+        assert_eq!(engine.objects[idx].fixed_rotation, crate::itofix(-9));
     }
 
     // C4Game::InitGame environment placements (C4Game.cpp:2493-2503):

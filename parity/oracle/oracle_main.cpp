@@ -14,6 +14,8 @@
 //   * `SineTable` is the real array lifted verbatim from `src/Fixed.cpp`.
 //   * `C4Random.h` is included unmodified (its only heavy include, `C4Record.h`,
 //     is `#ifdef DEBUGREC` and we do not define DEBUGREC).
+//   * `C4ScriptKiller.h` is the production GetKiller/SetKiller decision helper
+//     called by `C4Script.cpp`; the oracle exercises that exact code.
 //   * `Randomize3`/`Rnd3` are reproduced verbatim from `src/C4Random.cpp`
 //     (10 trivial lines around the real `Random()`); kept in sync via the
 //     provenance comment below.
@@ -29,6 +31,7 @@
 
 #include "oracle_fixed.h" // generated from src/Fixed.h by gen_golden.sh
 #include <C4Random.h>     // real engine header (no DEBUGREC)
+#include <C4ScriptKiller.h> // real production script-host helper
 
 extern long SineTable[9001]; // defined by the generated sine_table.cpp
 
@@ -57,6 +60,43 @@ static void consume_corrode_effect_rng()
 {
     if (!Random(5)) Random(3);
     if (!Random(20)) { /* sound effect decision only; payload has no RNG */ }
+}
+
+struct KillerOracleObject
+{
+    int32_t LastEnergyLossCausePlayer{NO_OWNER};
+};
+
+static void printScriptKillerCases()
+{
+    KillerOracleObject self, other;
+    const auto validPlayer = [](int32_t player) { return player == 1; };
+
+    const int32_t initial = C4ScriptKiller::Get(&self, static_cast<KillerOracleObject *>(nullptr));
+    const bool setSelf = C4ScriptKiller::Set(1, &self, static_cast<KillerOracleObject *>(nullptr), validPlayer);
+    const int32_t readSelf = C4ScriptKiller::Get(&self, static_cast<KillerOracleObject *>(nullptr));
+    const bool setInvalid = C4ScriptKiller::Set(9, &self, static_cast<KillerOracleObject *>(nullptr), validPlayer);
+    const int32_t afterInvalid = C4ScriptKiller::Get(&self, static_cast<KillerOracleObject *>(nullptr));
+    const bool clearSelf = C4ScriptKiller::Set(NO_OWNER, &self, static_cast<KillerOracleObject *>(nullptr), validPlayer);
+    const int32_t readCleared = C4ScriptKiller::Get(&self, static_cast<KillerOracleObject *>(nullptr));
+    const bool setForeign = C4ScriptKiller::Set(1, &self, &other, validPlayer);
+    const int32_t readForeign = C4ScriptKiller::Get(&self, &other);
+    // An arrow engine-function call runs with the target as cthr->Obj and no
+    // explicit pObj argument, so this is its exact fallback-target shape.
+    const bool arrowClear = C4ScriptKiller::Set(NO_OWNER, &other, static_cast<KillerOracleObject *>(nullptr), validPlayer);
+    const int32_t arrowRead = C4ScriptKiller::Get(&other, static_cast<KillerOracleObject *>(nullptr));
+    const int32_t getNoContext = C4ScriptKiller::Get<KillerOracleObject>(nullptr, nullptr);
+    const bool setNoContext = C4ScriptKiller::Set<KillerOracleObject>(1, nullptr, nullptr, validPlayer);
+
+    printf("\"script_killer\":{\"initial\":%d,\"set_self\":%d,\"read_self\":%d,"
+           "\"set_invalid\":%d,\"after_invalid\":%d,\"clear_self\":%d,"
+           "\"read_cleared\":%d,\"set_foreign\":%d,\"read_foreign\":%d,"
+           "\"arrow_clear\":%d,\"arrow_read\":%d,\"self_final\":%d,"
+           "\"foreign_final\":%d,\"get_no_context\":%d,\"set_no_context\":%d}",
+           initial, setSelf ? 1 : 0, readSelf, setInvalid ? 1 : 0, afterInvalid,
+           clearSelf ? 1 : 0, readCleared, setForeign ? 1 : 0, readForeign,
+           arrowClear ? 1 : 0, arrowRead, self.LastEnergyLossCausePlayer,
+           other.LastEnergyLossCausePlayer, getNoContext, setNoContext ? 1 : 0);
 }
 
 // --- C4Value hash: mirrors src/C4Value.cpp:923-1029 --------------------------
@@ -501,7 +541,12 @@ int main()
     printf("]}");
     printf(",\n");
 
-    // 10. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 10. GetKiller/SetKiller host semantics. C4Script.cpp delegates these
+    //     decisions to the production helper included above.
+    printScriptKillerCases();
+    printf(",\n");
+
+    // 11. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");

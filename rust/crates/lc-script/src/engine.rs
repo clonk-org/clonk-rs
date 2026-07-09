@@ -26,6 +26,62 @@ pub fn new_global_variables() -> GlobalVariables {
     std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()))
 }
 
+/// Registers a script's `static` and `static const` declarations in the
+/// engine-global tables used by every script host.
+pub fn register_global_declarations(
+    var_decls: &[VarDecl],
+    table: &GlobalVariables,
+    globals_consts: Option<&GlobalVariables>,
+) {
+    for var_decl in var_decls {
+        match var_decl.kind {
+            crate::ast::VarDeclKind::Static => {
+                table
+                    .borrow_mut()
+                    .entry(var_decl.name.clone())
+                    .or_insert_with(|| crate::vm::value_cell(Value::Nil));
+            }
+            crate::ast::VarDeclKind::StaticConst => {
+                // C4Aul accepts direct constants only. Its tokenizer folds a
+                // leading sign into ATT_INT when parsing a constant value;
+                // our parser represents a negative integer as Unary(Negate).
+                let value = match &var_decl.init {
+                    Some(crate::ast::Expr::Literal(literal)) => Value::from(literal.clone()),
+                    Some(crate::ast::Expr::Unary(
+                        crate::ast::UnaryOp::Negate,
+                        expression,
+                    )) => match expression.as_ref() {
+                        crate::ast::Expr::Literal(crate::value::Literal::Int(value)) => {
+                            Value::Int(value.wrapping_neg())
+                        }
+                        _ => Value::Nil,
+                    },
+                    Some(crate::ast::Expr::Variable(name)) => {
+                        let constants = globals_consts.unwrap_or(table);
+                        let cell = constants.borrow().get(name).cloned();
+                        cell.map(|cell| cell.borrow().clone())
+                            .unwrap_or(Value::Nil)
+                    }
+                    _ => Value::Nil,
+                };
+                // RegisterGlobalConstant overwrites an existing value
+                // (C4Aul.cpp:484-492). Keep the existing shared cell so
+                // every already-linked script observes the replacement.
+                // Constants live only in GlobalConsts, never GlobalNamed;
+                // that keeps them out of the VM's assignable lvalue table.
+                let constants = globals_consts.unwrap_or(table);
+                let cell = constants
+                    .borrow_mut()
+                    .entry(var_decl.name.clone())
+                    .or_insert_with(|| crate::vm::value_cell(Value::Nil))
+                    .clone();
+                *cell.borrow_mut() = value;
+            }
+            crate::ast::VarDeclKind::Local => {}
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Script {
     functions: HashMap<String, Function>,
@@ -70,6 +126,12 @@ impl Script {
         &self.functions
     }
 
+    pub fn global_access_functions(&self) -> impl Iterator<Item = (&String, &Function)> {
+        self.functions
+            .iter()
+            .filter(|(_, function)| function.access == crate::ast::AccessLevel::Global)
+    }
+
     pub fn includes(&self) -> &[String] {
         &self.includes
     }
@@ -84,6 +146,16 @@ impl Script {
 
     pub fn var_decls(&self) -> &[crate::ast::VarDecl] {
         &self.var_decls
+    }
+
+    /// Returns the script body used by C4AulScript::AppendTo after global
+    /// declarations have already been registered on the script engine.
+    /// AppendTo copies LocalNamed only (C4AulLink.cpp:145-157); `static` and
+    /// `static const` must never become locals of the target definition.
+    pub fn without_static_declarations(mut self) -> Self {
+        self.var_decls
+            .retain(|var_decl| var_decl.kind == crate::ast::VarDeclKind::Local);
+        self
     }
 }
 
@@ -250,6 +322,22 @@ impl Engine {
             .filter(|(_, function)| function.access == crate::ast::AccessLevel::Global)
     }
 
+    /// Repoints a declaring script's local global-function link at the
+    /// engine-owned function. C4Aul creates both objects for `global func`:
+    /// the function lives on the script engine while a `FnLink` remains in
+    /// the original script (C4AulParse.cpp:1603-1610). The linked function
+    /// carries the engine overload chain used by `inherited()`.
+    pub fn link_global_access_function(&mut self, name: &str, function: Function) -> bool {
+        let Some(local) = self.functions.get(name) else {
+            return false;
+        };
+        if local.access != crate::ast::AccessLevel::Global {
+            return false;
+        }
+        self.functions.insert(name.to_string(), function);
+        true
+    }
+
     pub fn function_count(&self) -> usize {
         self.functions.len()
     }
@@ -310,52 +398,9 @@ impl Engine {
             return;
         };
         let globals_consts = self.globals_consts.clone();
-        self.var_decls.retain(|var_decl| {
-            match var_decl.kind {
-                crate::ast::VarDeclKind::Static => {
-                    table
-                        .borrow_mut()
-                        .entry(var_decl.name.clone())
-                        .or_insert_with(|| crate::vm::value_cell(Value::Nil));
-                    false
-                }
-                // `static const` names are engine-global constants in C4Aul
-                // (every script sees them — Talker.c4d's _TLK_TimerInterval
-                // is read from GLOBAL funcs executing in other hosts).
-                // Initializers are constant expressions; literals and
-                // references to already-registered constants resolve here.
-                crate::ast::VarDeclKind::StaticConst => {
-                    let value = match &var_decl.init {
-                        Some(crate::ast::Expr::Literal(literal)) => {
-                            Value::from(literal.clone())
-                        }
-                        Some(crate::ast::Expr::Variable(name)) => table
-                            .borrow()
-                            .get(name)
-                            .map(|cell| cell.borrow().clone())
-                            .unwrap_or(Value::Nil),
-                        _ => Value::Nil,
-                    };
-                    let cell = table
-                        .borrow_mut()
-                        .entry(var_decl.name.clone())
-                        .or_insert_with(|| crate::vm::value_cell(value))
-                        .clone();
-                    // Also register the SAME cell as a global constant so
-                    // the old-style `NAME()` call idiom resolves it
-                    // (GetGlobalConstant, C4AulParse.cpp:2834-2864) —
-                    // plain `static` variables stay uncallable.
-                    if let Some(consts) = &globals_consts {
-                        consts
-                            .borrow_mut()
-                            .entry(var_decl.name.clone())
-                            .or_insert(cell);
-                    }
-                    false
-                }
-                _ => true,
-            }
-        });
+        register_global_declarations(&self.var_decls, &table, globals_consts.as_ref());
+        self.var_decls
+            .retain(|var_decl| var_decl.kind == crate::ast::VarDeclKind::Local);
     }
 
     /// Registers the cross-object LocalN cell supplier (FnLocalN's

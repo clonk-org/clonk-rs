@@ -260,6 +260,7 @@ src/C4Scoreboard.cpp
 src/C4Scoreboard.h
 src/C4Script.cpp
 src/C4Script.h
+src/C4ScriptKiller.h
 src/C4ScriptHost.cpp
 src/C4ScriptHost.h
 src/C4Sector.cpp

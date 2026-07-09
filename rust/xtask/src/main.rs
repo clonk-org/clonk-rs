@@ -421,8 +421,11 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
     );
     scenario
-        .apply(&mut engine)
+        .apply_before_players(&mut engine)
         .map_err(|error| anyhow!("apply failed: {error}"))?;
+    engine
+        .initialize_scenario_script()
+        .map_err(|error| anyhow!("scenario Initialize failed: {error}"))?;
 
     let log_watched = |engine: &lc_engine::Engine, stage: &str| {
         if watched_defs.is_empty() {

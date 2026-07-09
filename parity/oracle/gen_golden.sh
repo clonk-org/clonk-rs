@@ -2,10 +2,11 @@
 # Regenerate the C++ golden oracle for the differential parity harness.
 #
 # Produces parity/golden/parity_golden.json from the REAL engine determinism
-# primitives (src/Fixed.h, src/Fixed.cpp SineTable, src/C4Random.h). The Rust
-# side (rust/crates/lc-engine/tests/parity_differential.rs) diffs against the
-# committed JSON, so this script only needs to run when the C++ primitives or
-# the oracle coverage change.
+# primitives (src/Fixed.h, src/Fixed.cpp SineTable, src/C4Random.h) and the
+# production script-host helper (src/C4ScriptKiller.h). The Rust side
+# (rust/crates/lc-engine/src/parity_differential.rs) diffs against the committed
+# JSON, so this script only needs to run when the C++ primitives or oracle
+# coverage change.
 #
 # Usage: parity/oracle/gen_golden.sh   (run from anywhere)
 set -euo pipefail
@@ -36,8 +37,9 @@ awk '
   p && /};/ { exit }
 ' "$src/Fixed.cpp" > "$gen/sine_table.cpp"
 
-# 3. Compile the oracle against the real C4Random.h (no DEBUGREC) + generated
-#    header/table, and run it to produce the golden JSON.
+# 3. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
+#    C4ScriptKiller.h production helper, and the generated header/table; then
+#    run it to produce the golden JSON.
 cxx="${CXX:-clang++}"
 "$cxx" -std=c++20 -O0 \
   -I"$gen" -I"$src" \

@@ -126,6 +126,80 @@ fn script_static_consts_are_callable_across_hosts_below_strict2() {
 }
 
 #[test]
+fn later_static_const_declarations_overwrite_the_shared_value() {
+    // C4AulScriptEngine::RegisterGlobalConstant reuses the existing name
+    // index and assigns the new value (C4Aul.cpp:484-492). Existing hosts
+    // keep seeing the same shared cell, now with the replacement value.
+    let globals = lc_script::new_global_variables();
+    let consts = lc_script::new_global_variables();
+
+    let mut caller = Engine::new();
+    caller.set_global_variables(globals.clone());
+    caller.set_global_constants(consts.clone());
+    caller.add_script(
+        Script::compile("#strict\nfunc Probe() { return(SHARED_VALUE()); }\n")
+            .expect("caller compiles"),
+    );
+    caller.adopt_statics_into_globals();
+
+    for value in [17, 42] {
+        let mut declarer = Engine::new();
+        declarer.set_global_variables(globals.clone());
+        declarer.set_global_constants(consts.clone());
+        declarer.add_script(
+            Script::compile(&format!("#strict\nstatic const SHARED_VALUE = {value};\n"))
+                .expect("declarer compiles"),
+        );
+        declarer.adopt_statics_into_globals();
+        assert_eq!(
+            caller.call("Probe", &[]).expect("constant call succeeds"),
+            Value::Int(value)
+        );
+    }
+}
+
+#[test]
+fn signed_static_consts_are_registered_and_not_assignable() {
+    let globals = lc_script::new_global_variables();
+    let consts = lc_script::new_global_variables();
+
+    let mut declarer = Engine::new();
+    declarer.set_global_variables(globals.clone());
+    declarer.set_global_constants(consts.clone());
+    declarer.add_script(
+        Script::compile("#strict\nstatic const FM_Error = -1;\n")
+            .expect("declaration compiles"),
+    );
+    declarer.adopt_statics_into_globals();
+
+    let mut caller = Engine::new();
+    caller.set_global_variables(globals.clone());
+    caller.set_global_constants(consts.clone());
+    caller.add_script(
+        Script::compile(
+            "#strict\nfunc Read() { return FM_Error; }\n\
+             func Rewrite() { FM_Error = 7; }\n",
+        )
+        .expect("caller compiles"),
+    );
+    caller.adopt_statics_into_globals();
+
+    assert_eq!(
+        caller.call("Read", &[]).expect("constant resolves"),
+        Value::Int(-1)
+    );
+    assert!(
+        caller.call("Rewrite", &[]).is_err(),
+        "RegisterGlobalConstant values are not writable GlobalNamed cells"
+    );
+    assert!(globals.borrow().get("FM_Error").is_none());
+    assert_eq!(
+        caller.call("Read", &[]).expect("constant remains intact"),
+        Value::Int(-1)
+    );
+}
+
+#[test]
 fn plain_static_variables_are_not_callable() {
     // Only CONSTANTS resolve through the call idiom (the C++ parser's
     // constant fallback checks GetGlobalConstant, C4AulParse.cpp:2834;

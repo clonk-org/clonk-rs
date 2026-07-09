@@ -2447,9 +2447,9 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         // pDef = C4Id2Def(idItem), falling back to the menu object's own
         // def (C4Script.cpp:1488-1489).
         let item_def = match &item_id {
-            Value::C4Id(id) | Value::String(id) if !id.is_empty() => {
-                context.definition_metadata(id).map(|meta| meta.name.clone())
-            }
+            Value::C4Id(id) | Value::String(id) if !id.is_empty() => context
+                .definition_metadata(id)
+                .map(|meta| meta.name.clone()),
             _ => None,
         };
         let def_name = item_def
@@ -2953,12 +2953,10 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
         let definition_id = match requested {
             Some(id) => Some(id),
             // `if (!idDef && cthr->Def) idDef = cthr->Def->id` — the
-            // executing object's definition.
+            // executing function's definition, even without an object.
             None => context
-                .object_context()
-                .map(|object| object.id())
-                .and_then(|id| context.get_world_object(id))
-                .map(|object| object.definition_id().to_string()),
+                .current_definition_id()
+                .map(|definition| definition.to_string()),
         };
         let Some(definition_id) = definition_id else {
             return Ok(Value::Nil);
@@ -4734,6 +4732,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetViewOffset", set_view_offset);
     script.register_host_function("GetController", get_controller);
     script.register_host_function("SetController", set_controller);
+    script.register_host_function("GetKiller", get_killer);
+    script.register_host_function("SetKiller", set_killer);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetObjectLayer", get_object_layer);
@@ -5426,11 +5426,10 @@ fn get_type(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn create_array(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new("CreateArray expects 1 argument: size"));
-    }
-
-    let size = value_to_i32(&args[0], "CreateArray", "size")?;
+    // Unfilled C4Aul parameters are nil and C4ValueInt converts nil to zero,
+    // so bare CreateArray() constructs an empty array (FnCreateArray,
+    // C4Script.cpp:3807-3810).
+    let size = value_to_i32(args.first().unwrap_or(&Value::Nil), "CreateArray", "size")?;
     if !(0..=LEGACY_MAX_ARRAY_SIZE).contains(&size) {
         return Err(RuntimeError::new(format!(
             "CreateArray: invalid array size ({size})"
@@ -6319,6 +6318,51 @@ pub(crate) fn with_effect_context_with_state<F, T, E>(
 where
     F: FnOnce() -> Result<T, E>,
 {
+    with_effect_context_with_definition_state(
+        object,
+        None,
+        global_effects,
+        world,
+        next_object_id,
+        game_over_triggered,
+        func,
+    )
+}
+
+pub(crate) fn with_definition_effect_context_with_state<F, T, E>(
+    definition_context: DefinitionId,
+    global_effects: &[EffectState],
+    world: HostWorldContext,
+    next_object_id: u64,
+    game_over_triggered: bool,
+    func: F,
+) -> (Result<T, E>, EffectContextOutcome)
+where
+    F: FnOnce() -> Result<T, E>,
+{
+    with_effect_context_with_definition_state(
+        None,
+        Some(definition_context),
+        global_effects,
+        world,
+        next_object_id,
+        game_over_triggered,
+        func,
+    )
+}
+
+fn with_effect_context_with_definition_state<F, T, E>(
+    object: Option<HostObjectContext<'_>>,
+    definition_context: Option<DefinitionId>,
+    global_effects: &[EffectState],
+    world: HostWorldContext,
+    next_object_id: u64,
+    game_over_triggered: bool,
+    func: F,
+) -> (Result<T, E>, EffectContextOutcome)
+where
+    F: FnOnce() -> Result<T, E>,
+{
     let audio_state = AUDIO_CONTEXT
         .with(|cell| cell.borrow_mut().take())
         .unwrap_or_default();
@@ -6329,6 +6373,7 @@ where
         );
         *cell.borrow_mut() = Some(EffectHostContext::new(
             object,
+            definition_context,
             global_effects.to_vec(),
             world,
             next_object_id,
@@ -8123,9 +8168,7 @@ fn set_mass(args: &[Value]) -> Result<Value, RuntimeError> {
             .or_else(|| {
                 context
                     .get_world_object(id)
-                    .and_then(|object| {
-                        context.world.definition_metadata(object.definition_id())
-                    })
+                    .and_then(|object| context.world.definition_metadata(object.definition_id()))
                     .map(|metadata| metadata.mass)
             })
             .unwrap_or(0);
@@ -9169,9 +9212,7 @@ fn get_plr_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(Value::Int(
             player
                 .color
-                .map(|color| {
-                    ((color.r as i32) << 16) | ((color.g as i32) << 8) | color.b as i32
-                })
+                .map(|color| ((color.r as i32) << 16) | ((color.g as i32) << 8) | color.b as i32)
                 .unwrap_or(0),
         ))
     })
@@ -11266,9 +11307,7 @@ fn path_free(args: &[Value]) -> Result<Value, RuntimeError> {
         // EnemyNearby flee gate). GBackSolid sees C4SolidMask's baked
         // MCVehic pixels — the plane carries them (put_solid_mask).
         let clear = match context.world.materials() {
-            Some(materials) => {
-                crate::path_free_exact(landscape, materials, &[], x1, y1, x2, y2)
-            }
+            Some(materials) => crate::path_free_exact(landscape, materials, &[], x1, y1, x2, y2),
             None => landscape.path_is_clear(Vector2::new(x1, y1), Vector2::new(x2, y2)),
         };
         Ok(Value::Bool(clear))
@@ -12945,6 +12984,17 @@ fn set_r(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn script_rotation(rotation: i32) -> i32 {
+    let rotation = rotation % 360;
+    if rotation > 180 {
+        rotation - 360
+    } else if rotation < -180 {
+        rotation + 360
+    } else {
+        rotation
+    }
+}
+
 fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new("GetR expects at most 1 argument: target"));
@@ -12963,14 +13013,11 @@ fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if object.id() == target {
-                    return Ok(Value::Int(object.rotation()));
+                    return Ok(Value::Int(script_rotation(object.rotation())));
                 }
             }
             if let Some(other) = context.get_world_object(target) {
-                // FnGetR returns the raw r — the movement circle bounds
-                // keep it within (-180, 180], possibly negative
-                // (C4Movement.cpp:434-435).
-                return Ok(Value::Int(other.rotation));
+                return Ok(Value::Int(script_rotation(other.rotation)));
             }
             return Ok(Value::Nil);
         }
@@ -12980,7 +13027,7 @@ fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Nil),
         };
 
-        Ok(Value::Int(object.rotation()))
+        Ok(Value::Int(script_rotation(object.rotation())))
     })
 }
 
@@ -13651,76 +13698,28 @@ fn adjust_walk_rotation(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         }
 
-        let dest_angle = if seed.attach.vtx < 0 || seed.def_attach_vtx_x == 0 {
-            // Attachment at the middle (bottom) vertex: evaluate the
-            // floor around the ABSOLUTE attach position
-            // (C4Object.cpp:6023-6065).
+        let rotation_velocity = {
             let landscape = context.landscape_ref();
-            let solid =
-                |x: i32, y: i32| evaluate_landscape_query(landscape, LandscapeQuery::Solid, x, y);
-            let probe = |x_check: i32| -> i32 {
-                let mut offset = 0i32;
-                if solid(x_check, seed.attach.y) {
-                    // up: `while (--i > -iRangeY) if (solid) { ++i; break; }`
-                    loop {
-                        offset -= 1;
-                        if offset <= -range_y {
-                            break;
-                        }
-                        if solid(x_check, seed.attach.y + offset) {
-                            offset += 1;
-                            break;
-                        }
-                    }
-                } else {
-                    // down: `while (++i < iRangeY) if (solid) { --i; break; }`
-                    loop {
-                        offset += 1;
-                        if offset >= range_y {
-                            break;
-                        }
-                        if solid(x_check, seed.attach.y + offset) {
-                            offset -= 1;
-                            break;
-                        }
-                    }
-                }
-                offset
-            };
-            let solid_left = probe(seed.attach.x - range_x);
-            let solid_right = probe(seed.attach.x + range_x);
-            // "100% accurate for large values of Pi" — the INNER integer
-            // division happens first (C4Object.cpp:6064).
-            (solid_right - solid_left) * (35 / range_x.max(1))
-        } else if live_vtx_x > 0 {
-            // Attachment at a non-middle vertex: rotate the feet down
-            // (C4Object.cpp:6068-6076).
-            -50
-        } else {
-            50
+            crate::calculate_walk_rotation_velocity(
+                rotation,
+                seed.attach,
+                seed.def_attach_vtx_x,
+                live_vtx_x,
+                range_x,
+                range_y,
+                speed,
+                |x, y| evaluate_landscape_query(landscape, LandscapeQuery::Solid, x, y),
+            )
         };
 
         let Some(object) = context.object_context_mut() else {
             return Ok(Value::Bool(false));
         };
-        // Move to destination angle (C4Object.cpp:6078-6084). C++ writes
+        // Move to destination angle (C4Object.cpp:6089-6095). C++ writes
         // rdir directly (no Mobile flag); the pending-update path arms
         // mobile, but every caller runs from an attached procedure that
         // has already set it.
-        if (dest_angle - rotation).abs() > 2 {
-            let bounded = itofix((dest_angle - rotation).clamp(-15, 15));
-            let divisor = if speed != 0 { 10000 / speed } else { 0 };
-            // `rdir /= (10000 / iSpeed)` — a zero divisor is division by
-            // zero in C++ (unreachable for sane speeds); fail safe here.
-            let rdir = if divisor != 0 {
-                bounded / divisor
-            } else {
-                C4Fixed::ZERO
-            };
-            object.set_rotation_velocity(rdir);
-        } else {
-            object.set_rotation_velocity(C4Fixed::ZERO);
-        }
+        object.set_rotation_velocity(rotation_velocity);
         Ok(Value::Bool(true))
     })
 }
@@ -13879,17 +13878,10 @@ fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         }
 
-        // No argument provided - return current object's definition_id
-        if let Some(object) = context.object_context() {
-            let object_id = object.id();
-            if let Some(world_object) = context.get_world_object(object_id) {
-                return Ok(Value::C4Id(world_object.definition_id().to_string()));
-            }
-            // The world snapshot predates the object during its own
-            // materialize-time Initialize — the scope knows its def.
-            if let Some(definition_id) = object.definition_id.clone() {
-                return Ok(Value::C4Id(definition_id));
-            }
+        // No argument: cthr->Obj->Def when there is an object, otherwise
+        // cthr->Def from the executing function owner.
+        if let Some(definition_id) = context.current_definition_id() {
+            return Ok(Value::C4Id(definition_id.to_string()));
         }
 
         Ok(Value::Nil)
@@ -15999,7 +15991,15 @@ fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
             },
             None => match context.object_context() {
                 Some(object) => object.action_library.clone(),
-                None => return Ok(Value::Nil),
+                None => {
+                    let Some(definition) = context.current_definition_id() else {
+                        return Ok(Value::Nil);
+                    };
+                    let Some(metadata) = context.definition_metadata(definition.as_str()) else {
+                        return Ok(Value::Nil);
+                    };
+                    metadata.action_library.clone()
+                }
             },
         };
         let Some(spec) = library.specs().get(&action) else {
@@ -16653,6 +16653,86 @@ fn get_controller(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(|object| object.controller())
             .unwrap_or(OWNER_NONE);
         Ok(Value::Int(controller))
+    })
+}
+
+/// FnGetKiller (C4Script.cpp:1333-1337): read the object's
+/// LastEnergyLossCausePlayer, defaulting a nil target to the calling object
+/// and returning NO_OWNER without an object.
+fn get_killer(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetKiller expects at most 1 argument: target",
+        ));
+    }
+
+    let target_id = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "GetKiller", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Int(OWNER_NONE));
+        };
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Int(OWNER_NONE));
+        };
+        // C++ writes the live field directly, so a SetKiller earlier in the
+        // same call must win over the frame-start world snapshot.
+        let killer = context
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.energy_loss_cause)
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .map(|object| object.last_energy_loss_cause)
+            })
+            .unwrap_or(OWNER_NONE);
+        Ok(Value::Int(killer))
+    })
+}
+
+/// FnSetKiller (C4Script.cpp:1339-1347): accept NO_OWNER or a valid player,
+/// default a nil target to the calling object, and directly replace
+/// LastEnergyLossCausePlayer (without the DoEnergy self-damage guard).
+fn set_killer(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "SetKiller expects at most 2 arguments: killer and optional target",
+        ));
+    }
+
+    let new_killer = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetKiller", "killer")?;
+    let target_id = args
+        .get(1)
+        .map(|arg| parse_object_reference_argument(arg, "SetKiller", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if new_killer != OWNER_NONE && context.player_state(new_killer).is_none() {
+            return Ok(Value::Bool(false));
+        }
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        let Some(scope) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
+        scope.pending_update.energy_loss_cause = Some(new_killer);
+        Ok(Value::Bool(true))
     })
 }
 
@@ -17738,6 +17818,10 @@ pub(crate) fn value_raw_truthy(value: &Value) -> bool {
 
 struct EffectHostContext {
     object: Option<ObjectScopeContext>,
+    /// Definition context for no-object script execution (`cthr->Def`).
+    /// InitializeDef and similar definition-owned callbacks retain this
+    /// even though `cthr->Obj` is null (C4AulExec.cpp:343-352).
+    definition_context: Option<DefinitionId>,
     global: Option<EffectScopeContext>,
     /// LIVE local cells per object with an in-flight VM session: deeper
     /// nested calls onto the same object share them, so mid-call local
@@ -17782,6 +17866,7 @@ struct EffectHostContext {
 impl EffectHostContext {
     fn new(
         object: Option<HostObjectContext<'_>>,
+        definition_context: Option<DefinitionId>,
         global_effects: Vec<EffectState>,
         world: HostWorldContext,
         next_object_id: u64,
@@ -17887,6 +17972,7 @@ impl EffectHostContext {
         let global = Some(EffectScopeContext::new(global_effects));
         Self {
             object,
+            definition_context,
             global,
             world,
             player_overrides: HashMap::new(),
@@ -18419,6 +18505,18 @@ impl EffectHostContext {
 
     fn object_context(&self) -> Option<&ObjectScopeContext> {
         self.object.as_ref()
+    }
+
+    fn current_definition_id(&self) -> Option<DefinitionId> {
+        self.object
+            .as_ref()
+            .and_then(|object| {
+                object.definition_id.clone().or_else(|| {
+                    self.get_world_object(object.id())
+                        .map(|world_object| DefinitionId::from(world_object.definition_id()))
+                })
+            })
+            .or_else(|| self.definition_context.clone())
     }
 
     #[allow(dead_code)]
@@ -19766,6 +19864,7 @@ mod tests {
         "GetID",
         "GetIndexOf",
         "GetKeys",
+        "GetKiller",
         "GetLeague",
         "GetLength",
         "GetMagicEnergy",
@@ -19871,6 +19970,7 @@ mod tests {
         "SetEntrance",
         "SetGraphics",
         "SetGravity",
+        "SetKiller",
         "SetMass",
         "SetObjDrawTransform",
         "SetObjDrawTransform2",
@@ -20296,6 +20396,10 @@ mod tests {
 
     #[test]
     fn create_array_allocates_nil_initialised_values() {
+        assert_eq!(
+            create_array(&[]).expect("bare CreateArray succeeds"),
+            Value::Array(Vec::new())
+        );
         let result = create_array(&[Value::Int(3)]).expect("CreateArray succeeds");
         assert_eq!(
             result,
@@ -24144,12 +24248,10 @@ func ProbeBadIndex(id) {
     }
 
     #[test]
-    fn get_r_returns_the_raw_engine_rotation() {
-        // C++ keeps r within (-180, 180] via the movement circle bounds
-        // (C4Movement.cpp:434-435) and FnGetR returns it RAW — a walker
-        // leaning left reads a NEGATIVE angle. Only SetR normalizes to
-        // 0..360 (C4Object::SetRotation, C4Object.cpp:5632-5634). The
-        // dragon's Flying()/AdjustWalkRotation deltas depend on signed r.
+    fn get_r_projects_raw_rotation_to_the_cpp_signed_range() {
+        // FnGetR projects stored r into [-180,180] (C4Script.cpp:1181-1188).
+        // SetR stores 350, but scripts observe -10; movement-produced negative
+        // rotations remain negative for AdjustWalkRotation/Flying deltas.
         let (result, _) = with_effect_context(
             Some(HostObjectContext::with_category(
                 ObjectId::new(1),
@@ -24161,7 +24263,7 @@ func ProbeBadIndex(id) {
                 OWNER_NONE,
                 Vector2::ZERO,
                 Vector2::ZERO,
-                -10,
+                350,
                 &[],
                 "Walk",
                 0,
@@ -24186,6 +24288,9 @@ func ProbeBadIndex(id) {
             || get_r(&[]),
         );
         assert_eq!(result.expect("GetR succeeds"), Value::Int(-10));
+        assert_eq!(script_rotation(-190), 170);
+        assert_eq!(script_rotation(540), 180);
+        assert_eq!(script_rotation(-540), -180);
     }
 
     fn adjust_walk_rotation_case(
