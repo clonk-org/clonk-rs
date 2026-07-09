@@ -14688,7 +14688,7 @@ impl Engine {
         let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
             HashMap::with_capacity(self.objects.len());
         for object in &self.objects {
-            let (procedure, line_connect, ocf_base, collectible) = self
+            let (procedure, line_connect, collectible) = self
                 .definitions
                 .get(&object.definition_id)
                 .map(|definition| {
@@ -14698,19 +14698,13 @@ impl Engine {
                     (
                         procedure,
                         definition.line_connect(),
-                        definition.ocf_base(),
                         definition.is_collectible(),
                     )
                 })
-                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, OCF_NORMAL, false));
-            let ocf = ocf::compute(
-                ocf_base,
-                object.state.crew_member,
-                object.state.alive,
-                object.state.status,
-                object.state.container.is_some(),
-                object.state.construction,
-            );
+                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false));
+            // ExecuteCommand reads the CACHED obj->OCF (C4Command.cpp uses
+            // Target->OCF etc. straight off the objects).
+            let ocf = object.state.ocf;
             command_snapshots.insert(
                 object.id,
                 CommandObjectSnapshot {
@@ -15674,7 +15668,7 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
-            let (procedure, line_connect, ocf_base, collectible) = self
+            let (procedure, line_connect, collectible) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
                 .map(|definition| {
@@ -15683,24 +15677,17 @@ impl Engine {
                             .action_library()
                             .procedure_for_action(&self.objects[idx].state.action.name),
                         definition.line_connect(),
-                        definition.ocf_base(),
                         definition.is_collectible(),
                     )
                 })
                 .unwrap_or((
                     action_library.procedure_for_action(&self.objects[idx].state.action.name),
                     OCF_NORMAL,
-                    OCF_NORMAL,
                     false,
                 ));
-            let ocf = ocf::compute(
-                ocf_base,
-                self.objects[idx].state.crew_member,
-                self.objects[idx].state.alive,
-                self.objects[idx].state.status,
-                self.objects[idx].state.container.is_some(),
-                self.objects[idx].state.construction,
-            );
+            // ExecuteCommand reads the CACHED obj->OCF (refreshed at this
+            // object's Execute-start, C4Object.cpp:1058).
+            let ocf = self.objects[idx].state.ocf;
             command_snapshots.insert(
                 object_id,
                 CommandObjectSnapshot {
