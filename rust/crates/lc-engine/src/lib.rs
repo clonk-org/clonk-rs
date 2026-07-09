@@ -39443,6 +39443,61 @@ func Trigger(object pOther) {
         );
     }
 
+    // C4FindObjectLayer::Check is `pObj->pLayer == pLayer`
+    // (C4FindObject.cpp:671-674): Find_Layer(nil) matches every UNLAYERED
+    // object and Find_Layer(pLayer) exactly the layer's members —
+    // System.c4g BlastObjects (Explode.c:93-97) relies on the nil form to
+    // find explosion victims.
+    #[test]
+    fn find_layer_criterion_compares_the_object_layer_like_cpp() {
+        let caller_script = r#"#strict
+local iBare, iLayered;
+func Probe(pLayer) {
+    iBare = GetLength(FindObjects([C4FO_Layer]));
+    iLayered = GetLength(FindObjects([C4FO_Layer, pLayer]));
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(simple_definition("OTHR"))
+            .expect("other registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let layer = engine
+            .spawn_object(SpawnConfig::new("OTHR").with_category(CATEGORY_OBJECT))
+            .expect("layer spawns");
+        engine
+            .spawn_object(
+                SpawnConfig::new("OTHR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_layer(layer),
+            )
+            .expect("layered spawns");
+
+        let caller_idx = engine.find_object_index(caller).expect("caller exists");
+        engine
+            .call_object_function(caller_idx, "Probe", vec![Value::Object(layer.as_u64())])
+            .expect("probe runs");
+        let locals = &engine.objects[caller_idx].state.local_vars;
+        assert_eq!(
+            locals.get("iBare"),
+            Some(&Value::Int(2)),
+            "nil layer matches the two unlayered objects"
+        );
+        assert_eq!(
+            locals.get("iLayered"),
+            Some(&Value::Int(1)),
+            "the layer's one member matches"
+        );
+    }
+
     // FnGetObjectLayer (C4Script.cpp:5160-5166): the object's pLayer —
     // nil for the (default) unlayered world, the layer object when set.
     // System.c4g Explode.c reads it before removing the exploding object.

@@ -11730,7 +11730,9 @@ enum FindCondition {
         name: String,
         pars: Vec<Value>,
     },
-    Layer,
+    /// C4FindObjectLayer (C4FindObject.cpp:671-674): `pObj->pLayer ==
+    /// pLayer` — None matches every unlayered object.
+    Layer(Option<ObjectId>),
 }
 
 /// C4SO_* constants (C4FindObject.h:53-62) as a parsed sort tree.
@@ -11885,8 +11887,9 @@ impl FindCondition {
                 },
                 _ => return ParsedCriterion::None,
             },
-            // C4FO_Layer
-            70 => FindCondition::Layer,
+            // C4FO_Layer: Data[1].getObj(), nil = the unlayered world
+            // (C4FindObject.cpp:157-159).
+            70 => FindCondition::Layer(data.get(1).and_then(value_as_object_id)),
             _ => return ParsedCriterion::None,
         };
         ParsedCriterion::Condition(condition)
@@ -11984,7 +11987,10 @@ impl FindCondition {
                     Some(result) => value_raw_truthy(&result?),
                 }
             }
-            FindCondition::Layer => false,
+            // C4FindObjectLayer::Check (C4FindObject.cpp:671-674).
+            FindCondition::Layer(layer) => {
+                object.full_state().and_then(|state| state.layer) == *layer
+            }
         })
     }
 
