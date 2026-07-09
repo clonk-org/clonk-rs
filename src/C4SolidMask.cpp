@@ -19,6 +19,7 @@
 
 #include <C4Include.h>
 #include <C4SolidMask.h>
+#include <C4SolidMaskBitmap.h>
 
 #include <C4Object.h>
 #include <C4Wrappers.h>
@@ -400,7 +401,7 @@ C4SolidMask::C4SolidMask(C4Object *pForObject) : pForObject(pForObject)
 	// copy solid mask from bitmap
 	int iNeededBufSize = pForObject->SolidMask.Wdt * pForObject->SolidMask.Hgt;
 	pSolidMask = new uint8_t[iNeededBufSize];
-	C4Surface *sfcBitmap = pForObject->GetGraphics()->GetBitmap();
+	C4Surface *sfcBitmap = C4SolidMaskBitmap::GetActiveBitmap(pForObject);
 	if (!sfcBitmap->Lock()) return;
 
 	int xcnt, ycnt;
@@ -408,7 +409,7 @@ C4SolidMask::C4SolidMask(C4Object *pForObject) : pForObject(pForObject)
 		for (xcnt = 0; xcnt < pForObject->SolidMask.Wdt; xcnt++)
 		{
 			// Solid mask target x/y is relative to def bitmap top-left, not object center.
-			pSolidMask[xcnt + ycnt * pForObject->SolidMask.Wdt] = sfcBitmap->IsPixTransparent(pForObject->SolidMask.x + xcnt, pForObject->SolidMask.y + ycnt) ? 0x00 : 0xff;
+			pSolidMask[xcnt + ycnt * pForObject->SolidMask.Wdt] = C4SolidMaskBitmap::MaskPixel(sfcBitmap, pForObject->SolidMask.x + xcnt, pForObject->SolidMask.y + ycnt);
 		}
 	// create mat buff to store the material replaced by the solid mask
 	// the upper left corner is here the [objpos]+rot([shapexy]+[targetxy]+[realWH]/2)-maxWH/2

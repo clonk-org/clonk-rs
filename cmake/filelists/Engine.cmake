@@ -273,6 +273,7 @@ src/C4Sky.cpp
 src/C4Sky.h
 src/C4SolidMask.cpp
 src/C4SolidMask.h
+src/C4SolidMaskBitmap.h
 src/C4SoundSystem.cpp
 src/C4SoundSystem.h
 src/C4Startup.cpp
