@@ -17,6 +17,7 @@ const LINEKIT_DEFINITION: &str = "LNKT";
 const CONKIT_DEFINITION: &str = "CNKT";
 const ACQUIRE_REQUEST_INTERVAL: u32 = 50;
 const COMMAND_FLAG_ENTER_PUSH_TARGET: i32 = 0b10;
+const COMMAND_FLAG_MOVE_TO_NO_POS_ADJUST: i32 = 0b1;
 const COMMAND_FLAG_MOVE_TO_PUSH_TARGET: i32 = 0b10;
 const DIG_MOVE_TO_RANGE_DEFAULT: i32 = 5;
 const DIG_DIRECTION_RANGE: i32 = 1;
@@ -50,6 +51,9 @@ pub struct CommandObjectSnapshot {
     pub collectible: bool,
     /// Live vertex-contact bits (C4Object::t_contact equivalent; CNAT_*).
     pub contact: u32,
+    /// Frames in the current action (C4Object Action.Time) for the
+    /// "not if just started" let-go contact check (C4Command.cpp:348,362).
+    pub action_time: u32,
     /// Current shape top (C4Object Shape.y) for the top-free scans
     /// (C4Command.cpp:1867).
     pub shape_top: i32,
@@ -108,6 +112,10 @@ pub struct CommandDefinitionSnapshot {
     pub chop_action: Option<String>,
     #[serde(default)]
     pub constructable: bool,
+    /// DefCore `Grab` (0 none, 1 grab+push, 2 grab-only) for the
+    /// pushing let-go checks (C4Command.cpp:260, :565).
+    #[serde(default)]
+    pub grab: i32,
 }
 
 /// Identifiers that map to the classic C4 command constants.
@@ -235,6 +243,7 @@ mod tests {
     fn snapshot_with_id(id: u64) -> CommandObjectSnapshot {
         CommandObjectSnapshot {
             contact: 0,
+            action_time: 0,
             shape_top: 0,
             shape: DefinitionRect::new(-8, -10, 16, 20),
             id: ObjectId::new(id),
@@ -294,6 +303,503 @@ mod tests {
         }
     }
 
+    /// A MoveTo state past its InitEvaluation Execute with the raw Tx/Ty
+    /// (the C++ equivalent of an Evaluated command): the movement-control
+    /// geometry pins below run against these coordinates directly.
+    fn evaluated_move_to(request: &CommandRequest) -> MoveToState {
+        let mut state = MoveToState::from_request(request);
+        state.evaluated = true;
+        state
+    }
+
+    fn move_to_ctx_at_frame<'a>(
+        object: &'a CommandObjectSnapshot,
+        objects: &'a HashMap<ObjectId, CommandObjectSnapshot>,
+        players: &'a HashMap<i32, CommandPlayerSnapshot>,
+        definitions: &'a HashMap<DefinitionId, CommandDefinitionSnapshot>,
+        frame: u64,
+    ) -> CommandRuntimeContext<'a> {
+        CommandRuntimeContext {
+            landscape: None,
+            frame,
+            position: object.position,
+            object,
+            objects,
+            players,
+            definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        }
+    }
+
+    // C4Command::MoveTo DFA_SWIM arm (C4Command.cpp:370-382): on Tick2
+    // frames (Game.iTick2 != 0, i.e. odd FrameCounter) the swimmer steers
+    // horizontally toward Tx (with target range); on !Tick2 frames it
+    // steers vertically toward Ty with NO range (cy < Ty -> Down).
+    #[test]
+    fn move_to_swim_steers_horizontal_on_tick2_and_vertical_otherwise() {
+        let mut swimmer = snapshot_with_id(1);
+        swimmer.position = Vector2::new(100, 100);
+        swimmer.action_procedure = ActionProcedure::Swim;
+        swimmer.crew_member = true;
+        swimmer.ocf |= ocf::CREW_MEMBER;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        // Target right and below: dx = 60, dy = 40.
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(160))
+            .with_ty(Some(140))
+            .with_update_interval(1);
+
+        // Odd frame (iTick2 == 1): horizontal arm -> COMD_Right.
+        let ctx = move_to_ctx_at_frame(&swimmer, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(&request);
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Right),
+            "Tick2 swim steering is horizontal (C4Command.cpp:372-376)"
+        );
+
+        // Even frame (iTick2 == 0): vertical arm -> COMD_Down (cy < Ty).
+        let ctx = move_to_ctx_at_frame(&swimmer, &objects, &players, &definitions, 2);
+        let mut state = evaluated_move_to(&request);
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Down),
+            "!Tick2 swim steering is vertical (C4Command.cpp:377-381)"
+        );
+    }
+
+    // C4Command::MoveTo DFA_SCALE arm (C4Command.cpp:335-338): vertical
+    // steering only — cy > Ty + range heads Up, cy < Ty - range heads
+    // Down (y grows downward).
+    #[test]
+    fn move_to_scale_steers_vertically() {
+        let mut scaler = snapshot_with_id(1);
+        scaler.position = Vector2::new(100, 100);
+        scaler.action_procedure = ActionProcedure::Scale;
+        scaler.crew_member = true;
+        scaler.ocf |= ocf::CREW_MEMBER;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+
+        // Target above and well to the right: DFA_SCALE ignores Tx for
+        // steering (no horizontal branch in the arm) and heads Up. The
+        // Dir_Left let-go stays quiet: |cy - Ty| = 60 > LetGoRange2 30.
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(140))
+                .with_ty(Some(40)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Up),
+            "scaling toward a higher target heads Up (C4Command.cpp:337)"
+        );
+    }
+
+    // DFA_SCALE let-go control (C4Command.cpp:339-353): scaling with
+    // Action.Dir DIR_Left and the target off the wall to the right
+    // (Tx > cx + LetGoRange1 7, |cy - Ty| <= LetGoRange2 30) jumps off
+    // with xdir +1 (ObjectComLetGo -> ObjectActionJump(itofix(+1), 0)).
+    #[test]
+    fn move_to_scale_lets_go_toward_target() {
+        let mut scaler = snapshot_with_id(1);
+        scaler.position = Vector2::new(100, 100);
+        scaler.action_procedure = ActionProcedure::Scale;
+        scaler.direction = Direction::Left;
+        scaler.crew_member = true;
+        scaler.ocf |= ocf::CREW_MEMBER;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(140))
+                .with_ty(Some(110)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result.update.expect("let-go update");
+        let action = update.action.expect("jump action");
+        assert_eq!(action.name.as_deref(), Some("Jump"));
+        assert_eq!(
+            update.fixed_velocity,
+            Some(FixedVec2::new(
+                math::itofix(1),
+                crate::C4Fixed::from_raw(0)
+            )),
+            "let-go launches with xdir +1, ydir 0 (C4ObjectCom.cpp:310-314)"
+        );
+    }
+
+    // The contact let-go (C4Command.cpp:347-352,361-366) only fires once
+    // the scale action is 3+ frames old ("not if just started").
+    #[test]
+    fn move_to_scale_contact_let_go_respects_action_time() {
+        let mut scaler = snapshot_with_id(1);
+        scaler.position = Vector2::new(100, 100);
+        scaler.action_procedure = ActionProcedure::Scale;
+        scaler.direction = Direction::Right;
+        scaler.contact = crate::CNAT_LEFT;
+        scaler.crew_member = true;
+        scaler.ocf |= ocf::CREW_MEMBER;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        // Target high above on this side: no target-direction let-go.
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(100))
+            .with_ty(Some(20));
+
+        // Action.Time == 2: too fresh, keep scaling.
+        scaler.action_time = 2;
+        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(&request);
+        let result = state.step(&ctx);
+        assert!(
+            result
+                .update
+                .as_ref()
+                .and_then(|update| update.action.as_ref())
+                .is_none(),
+            "Action.Time <= 2 must not let go (C4Command.cpp:348)"
+        );
+
+        // Action.Time == 3 with contact: let go against the facing (-1).
+        scaler.action_time = 3;
+        let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(&request);
+        let result = state.step(&ctx);
+        let update = result.update.expect("let-go update");
+        assert_eq!(
+            update.action.and_then(|action| action.name),
+            Some("Jump".into())
+        );
+        assert_eq!(
+            update.fixed_velocity,
+            Some(FixedVec2::new(
+                math::itofix(-1),
+                crate::C4Fixed::from_raw(0)
+            )),
+            "DIR_Right contact let-go jumps with xdir -1 (C4Command.cpp:365)"
+        );
+    }
+
+    // C4Command::MoveTo DFA_HANGLE arm (C4Command.cpp:384-391):
+    // horizontal steering; |Angle(cx,cy,Tx,Ty)| > LetGoHangleAngle 110
+    // drops off the ceiling (ObjectComLetGo(0) — Jump with zero xdir).
+    #[test]
+    fn move_to_hangle_steers_horizontal_and_drops_past_angle() {
+        let mut hangler = snapshot_with_id(1);
+        hangler.position = Vector2::new(100, 100);
+        hangler.action_procedure = ActionProcedure::Hang;
+        hangler.crew_member = true;
+        hangler.ocf |= ocf::CREW_MEMBER;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        // Target right, slightly below: Angle = 99 <= 110 keeps hangling;
+        // steer Right. No vertical branch in the arm.
+        let ctx = move_to_ctx_at_frame(&hangler, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(160))
+                .with_ty(Some(110)),
+        );
+        let result = state.step(&ctx);
+        let update = result.update.expect("steer update");
+        assert_eq!(update.command_direction, Some(CommandDirection::Right));
+        assert!(update.action.is_none(), "within LetGoHangleAngle: no drop");
+
+        // Target straight below: Angle = 180 > 110 -> ObjectComLetGo(0).
+        let ctx = move_to_ctx_at_frame(&hangler, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(100))
+                .with_ty(Some(160)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result.update.expect("drop update");
+        assert_eq!(
+            update.action.and_then(|action| action.name),
+            Some("Jump".into())
+        );
+        assert_eq!(
+            update.fixed_velocity,
+            Some(FixedVec2::new(
+                math::itofix(0),
+                crate::C4Fixed::from_raw(0)
+            )),
+            "hangle drop has zero launch velocity (C4Command.cpp:390)"
+        );
+    }
+
+    // C4Command::MoveTo DFA_FLIGHT arm (C4Command.cpp:414-417): no ComDir
+    // steering at all — only FlightControl, which re-arms the Fly action
+    // for a CanFly crew member with the target in the ±60° top sector.
+    #[test]
+    fn move_to_flight_runs_flight_control_without_steering() {
+        let landscape = crate::Landscape::flat(300, 110);
+        let mut flyer = snapshot_with_id(1);
+        flyer.position = Vector2::new(100, 100);
+        flyer.action_procedure = ActionProcedure::Flight;
+        flyer.crew_member = true;
+        flyer.ocf |= ocf::CREW_MEMBER;
+        flyer.physical.can_fly = 1;
+        flyer.shape_top = -10;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut ctx = move_to_ctx_at_frame(&flyer, &objects, &players, &definitions, 1);
+        ctx.landscape = Some(&landscape);
+
+        // Target up and slightly right (angle 9, distance 70, sky above):
+        // FlightControl takes off; the flight arm never assigns ComDir.
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(110))
+                .with_ty(Some(30)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result.update.expect("fly update");
+        assert_eq!(
+            update.command_direction, None,
+            "DFA_FLIGHT never steers ComDir (C4Command.cpp:414-417)"
+        );
+        assert_eq!(
+            update.action.and_then(|action| action.name),
+            Some("Fly".into()),
+            "FlightControl takes off (C4Command.cpp:1843)"
+        );
+    }
+
+    // C4CMD_MoveTo InitEvaluation (C4Command.cpp:1634-1643): the first
+    // Execute only evaluates (returns true — no movement that frame);
+    // AdjustMoveToTarget grounds a mid-air target unless Data carries
+    // C4CMD_MoveTo_NoPosAdjust (C4Command.h:68).
+    #[test]
+    fn move_to_init_evaluation_adjusts_target_unless_no_pos_adjust() {
+        let landscape = crate::Landscape::flat(300, 110);
+        // Standing walker: center y 100, feet on the 110 surface.
+        let walker = walking_jumper(Vector2::new(100, 100));
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        ctx.landscape = Some(&landscape);
+
+        // Mid-air target straight up: AdjustMoveToTarget drops it to the
+        // bottom of free space (109) then lifts it Shape.Hgt/2 -> y 99,
+        // one pixel off the walker's center — no vertical steer.
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(100))
+            .with_ty(Some(50))
+            .with_update_interval(1);
+        let mut state = MoveToState::from_request(&request); // unevaluated
+        let first = state.step(&ctx);
+        assert_eq!(first.status, CommandStatus::Running);
+        assert!(
+            first.update.is_none() && first.operations.is_empty(),
+            "the evaluation Execute does nothing else (C4Command.cpp:1555)"
+        );
+        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
+        ctx.landscape = Some(&landscape);
+        let second = state.step(&ctx);
+        assert_eq!(
+            second.update.and_then(|update| update.command_direction),
+            None,
+            "adjusted target sits at the walker's level (C4Command.cpp:1640)"
+        );
+
+        // NoPosAdjust keeps the raw (100,50): the walker steers Up.
+        let request = request.with_data(CommandData::Integer(1));
+        let mut state = MoveToState::from_request(&request); // unevaluated
+        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        ctx.landscape = Some(&landscape);
+        let _ = state.step(&ctx);
+        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
+        ctx.landscape = Some(&landscape);
+        let second = state.step(&ctx);
+        assert_eq!(
+            second.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Up),
+            "NoPosAdjust leaves the mid-air target (C4Command.h:68)"
+        );
+    }
+
+    // C4CMD_MoveTo InitEvaluation target absorption (C4Command.cpp:1637):
+    // Tx/Ty become Target->x/y ONCE and Target clears — the destination
+    // does not follow the target afterwards.
+    #[test]
+    fn move_to_absorbs_target_position_once() {
+        let walker = walking_jumper(Vector2::new(100, 100));
+        let target_id = ObjectId::new(9);
+        let mut target = snapshot_with_id(9);
+        target.position = Vector2::new(200, 100);
+        let mut objects = HashMap::new();
+        objects.insert(target_id, target);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_target(Some(target_id))
+            .with_update_interval(1);
+        let mut state = MoveToState::from_request(&request); // unevaluated
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let _ = state.step(&ctx); // evaluation frame
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
+        let result = state.step(&ctx);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Right),
+            "steers toward the absorbed (200,100)"
+        );
+
+        // Target teleports left; the command keeps heading for 200.
+        objects.get_mut(&target_id).expect("target").position = Vector2::new(0, 100);
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 3);
+        let result = state.step(&ctx);
+        assert_ne!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Left),
+            "Tx/Ty were absorbed once — no live following (C4Command.cpp:1637)"
+        );
+    }
+
+    // C4Command::MoveTo pushing (C4Command.cpp:257-265): without the
+    // C4CMD_MoveTo_PushTarget Data flag (C4Command.h:69) — or against a
+    // Grab=2 grab-only target — a pushing mover lets go (UnGrab sub-
+    // command) and marks itself for re-evaluation.
+    #[test]
+    fn move_to_push_without_push_target_flag_ungrabs() {
+        let vehicle_id = ObjectId::new(7);
+        let mut vehicle = snapshot_with_id(7);
+        vehicle.position = Vector2::new(95, 100);
+        let mut pusher = walking_jumper(Vector2::new(100, 100));
+        pusher.action_procedure = ActionProcedure::Push;
+        pusher.action_target = Some(vehicle_id);
+        let mut objects = HashMap::new();
+        objects.insert(vehicle_id, vehicle);
+        let players = HashMap::new();
+        let mut definitions = HashMap::new();
+        definitions.insert(
+            "DEF7".to_string(),
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: false,
+                chop_action: None,
+                constructable: false,
+                grab: 1,
+            },
+        );
+
+        // Data 0: pushing not desired -> UnGrab, still running.
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(200))
+                .with_ty(Some(100))
+                .with_update_interval(1),
+        );
+        let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        match result.operations.first() {
+            Some(CommandOperation::PushFront(request)) => {
+                assert_eq!(request.id, CommandId::UnGrab);
+                assert_eq!(request.update_interval, 50);
+            }
+            other => panic!("expected UnGrab, got {other:?}"),
+        }
+        assert!(
+            !state.evaluated,
+            "vehicle control may have blocked evaluation — re-evaluate (C4Command.cpp:263)"
+        );
+    }
+
+    // With the PushTarget flag the mover keeps pushing: cx/cy come from
+    // the pushed vehicle (C4Command.cpp:271-277) and the DFA_PUSH arm
+    // steers horizontally only (:329-333).
+    #[test]
+    fn move_to_push_with_flag_steers_from_vehicle_position() {
+        let vehicle_id = ObjectId::new(7);
+        let mut vehicle = snapshot_with_id(7);
+        vehicle.position = Vector2::new(95, 100);
+        let mut pusher = walking_jumper(Vector2::new(100, 100));
+        pusher.action_procedure = ActionProcedure::Push;
+        pusher.action_target = Some(vehicle_id);
+        let mut objects = HashMap::new();
+        objects.insert(vehicle_id, vehicle);
+        let players = HashMap::new();
+        let mut definitions = HashMap::new();
+        definitions.insert(
+            "DEF7".to_string(),
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: false,
+                chop_action: None,
+                constructable: false,
+                grab: 1,
+            },
+        );
+
+        // Target far below the vehicle's column: the vehicle position
+        // override yields dx 0 and the push arm ignores dy entirely.
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(95))
+                .with_ty(Some(160))
+                .with_data(CommandData::Integer(2))
+                .with_update_interval(1),
+        );
+        let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.is_empty(), "no UnGrab with PushTarget");
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            None,
+            "DFA_PUSH steers horizontally from the vehicle position only"
+        );
+
+        // Grab-only target (Grab=2) lets go even with the flag.
+        definitions.get_mut("DEF7").expect("def").grab = 2;
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(200))
+                .with_ty(Some(100))
+                .with_data(CommandData::Integer(2))
+                .with_update_interval(1),
+        );
+        let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
+        let result = state.step(&ctx);
+        match result.operations.first() {
+            Some(CommandOperation::PushFront(request)) => {
+                assert_eq!(request.id, CommandId::UnGrab, "Grab=2 (C4Command.cpp:260)");
+            }
+            other => panic!("expected UnGrab, got {other:?}"),
+        }
+    }
+
     // C4Command::JumpControl trigger 1 (C4Command.cpp:1861-1872): target
     // in the ±(35±10)° diagonal, path free, farther than 30, 15px head
     // room -> a C4CMD_Jump goes on TOP of the MoveTo.
@@ -308,7 +814,7 @@ mod tests {
 
         // Angle(100,100 -> 140,43) = 90 - trunc(atan2(57,40)) = 36 — inside
         // 35±10; distance 70 > 30; sky above.
-        let mut state = MoveToState::from_request(
+        let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(140))
                 .with_ty(Some(43)),
@@ -339,7 +845,7 @@ mod tests {
 
         // Angle(100,100 -> 140,93) = 90 - trunc(atan2(7,40)) = 81; 81-80=1
         // inside ±50.
-        let mut state = MoveToState::from_request(
+        let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(140))
                 .with_ty(Some(93)),
@@ -381,7 +887,7 @@ mod tests {
         // solid at x>=150 -> +1 -> side point x = 140 - 23 = 117 (clear
         // ground), adjust drops it to the 110 surface (|dy|<=20 from 100
         // fails?) — pick ty=75 edge instead for a shallower drop.
-        let mut state = MoveToState::from_request(
+        let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(148))
                 .with_ty(Some(72)),
@@ -503,6 +1009,106 @@ mod tests {
             }
             other => panic!("expected move request, got {:?}", other),
         }
+    }
+
+    // FnGetCommand serves the LIVE C4Command fields (C4Script.cpp:
+    // 926-945) — the snapshot stack (which backs the world-context views
+    // every frame) must carry the same elements, not nil.
+    #[test]
+    fn snapshot_command_views_expose_live_elements() {
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(140))
+                    .with_ty(Some(90))
+                    .with_data(CommandData::Integer(1)),
+            )
+            .expect("push");
+
+        let snapshot = stack.snapshot();
+        let views = snapshot.command_views();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].name, "MoveTo");
+        assert_eq!(
+            (views[0].tx, views[0].ty),
+            (Some(140), Some(90)),
+            "restored views keep Tx/Ty (C4Script.cpp:934-937)"
+        );
+        assert_eq!(views[0].data, CommandData::Integer(1));
+
+        let mut restored = CommandStack::new();
+        restored.restore_from_snapshot(&snapshot);
+        let views = restored.command_views();
+        assert_eq!(
+            (views[0].tx, views[0].ty),
+            (Some(140), Some(90)),
+            "a restored stack keeps its elements"
+        );
+    }
+
+    // The element view follows the InitEvaluation rewrites: MoveTo's
+    // Target folds into Tx/Ty and clears (C4Command.cpp:1637), so
+    // GetCommand element 1 goes nil and element 2 reads the absorbed X.
+    #[test]
+    fn command_views_follow_move_to_target_absorption() {
+        let walker = walking_jumper(Vector2::new(100, 100));
+        let target_id = ObjectId::new(9);
+        let mut target = snapshot_with_id(9);
+        target.position = Vector2::new(200, 100);
+        let mut objects = HashMap::new();
+        objects.insert(target_id, target);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_target(Some(target_id))
+                    .with_update_interval(1),
+            )
+            .expect("push");
+
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let _ = stack.step(&ctx); // InitEvaluation execute
+
+        let views = stack.command_views();
+        assert_eq!(views[0].target, None, "Target cleared (C4Command.cpp:1637)");
+        assert_eq!(
+            (views[0].tx, views[0].ty),
+            (Some(200), Some(100)),
+            "Tx/Ty absorbed the target position"
+        );
+
+        // The same live values survive the snapshot round-trip.
+        let views = stack.snapshot().command_views();
+        assert_eq!(views[0].target, None);
+        assert_eq!((views[0].tx, views[0].ty), (Some(200), Some(100)));
+    }
+
+    // Acquire's element view reads the defaulted 500/250 search range
+    // (InitEvaluation, C4Command.cpp:1666-1670).
+    #[test]
+    fn command_views_show_acquire_range_defaults() {
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Acquire)
+                    .with_data(CommandData::Text("WOOD".into())),
+            )
+            .expect("push");
+
+        let views = stack.command_views();
+        assert_eq!(
+            (views[0].tx, views[0].ty),
+            (Some(500), Some(250)),
+            "defaulted search range is live-visible (C4Command.cpp:1668-1669)"
+        );
+        assert_eq!(views[0].data, CommandData::Text("WOOD".into()));
+
+        let views = stack.snapshot().command_views();
+        assert_eq!((views[0].tx, views[0].ty), (Some(500), Some(250)));
     }
 
     #[test]
@@ -1662,6 +2268,32 @@ mod tests {
                 assert_eq!(request.id, CommandId::MoveTo);
                 assert_eq!(request.target, Some(target_id));
                 assert_eq!(request.update_interval, 50);
+                assert_eq!(
+                    request.data,
+                    CommandData::None,
+                    "no Enter_PushTarget: the MoveTo gets no PushTarget either"
+                );
+            }
+            other => panic!("unexpected operation: {:?}", other),
+        }
+
+        // C4Command::Enter passes C4CMD_MoveTo_PushTarget through when
+        // its own Data carries C4CMD_Enter_PushTarget (C4Command.cpp:615).
+        let mut state = EnterState::from_request(
+            &CommandRequest::new(CommandId::Enter)
+                .with_target(Some(target_id))
+                .with_data(CommandData::Integer(2)),
+        )
+        .expect("state created");
+        let result = state.step(&ctx);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(
+                    request.data,
+                    CommandData::Integer(2),
+                    "Enter_PushTarget -> MoveTo_PushTarget (C4Command.cpp:615)"
+                );
             }
             other => panic!("unexpected operation: {:?}", other),
         }
@@ -2034,6 +2666,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: true,
+                grab: 0,
             },
         );
 
@@ -2166,6 +2799,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: true,
+                grab: 0,
             },
         );
 
@@ -4292,6 +4926,42 @@ mod tests {
             }
             other => panic!("expected get request, got {:?}", other),
         }
+
+        // C4CMD_Acquire InitEvaluation (C4Command.cpp:1666-1670) only
+        // replaces a ZERO Tx/Ty with 500/250 — a negative range stays
+        // negative and the Inside(cx-px, -Tx, +Tx) test (:2115-2116)
+        // then matches nothing: the nearby item is NOT found and the
+        // command falls through to Buy (:2136).
+        assert_eq!(
+            (state.range_x, state.range_y),
+            (500, 250),
+            "zero ranges default (C4Command.cpp:1668-1669)"
+        );
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire)
+                .with_data(CommandData::Text("WOOD".into()))
+                .with_tx(Some(-50))
+                .with_ty(Some(-50)),
+        )
+        .expect("state created");
+        assert_eq!(
+            (state.range_x, state.range_y),
+            (-50, -50),
+            "negative ranges keep their sign (C4Command.cpp:1668 replaces only 0)"
+        );
+        let _ = state.step(&ctx);
+        state.script_result = Some(AcquireScriptResult::Continue);
+        let result = state.step(&ctx);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(
+                    request.id,
+                    CommandId::Buy,
+                    "empty signed range finds no material -> Buy (C4Command.cpp:2136)"
+                );
+            }
+            other => panic!("expected buy request, got {:?}", other),
+        }
     }
 
     #[test]
@@ -5422,6 +6092,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -5545,6 +6216,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -5640,6 +6312,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -5731,6 +6404,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -5909,6 +6583,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -5994,6 +6669,7 @@ mod tests {
                 can_chop: false,
                 chop_action: None,
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6074,6 +6750,7 @@ mod tests {
                 can_chop: true,
                 chop_action: Some("Chop".into()),
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6137,6 +6814,7 @@ mod tests {
                 can_chop: true,
                 chop_action: Some("Chop".into()),
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6199,6 +6877,7 @@ mod tests {
                 can_chop: true,
                 chop_action: Some("Chop".into()),
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6259,6 +6938,7 @@ mod tests {
                 can_chop: true,
                 chop_action: Some("Chop".into()),
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6314,6 +6994,7 @@ mod tests {
                 can_chop: false,
                 chop_action: Some("Chop".into()),
                 constructable: false,
+                grab: 0,
             },
         );
 
@@ -6675,6 +7356,11 @@ pub struct CommandSnapshot {
     mode: CommandMode,
     retries: i32,
     failures: i32,
+    /// The creating request — the base of the FnGetCommand element view
+    /// (persisted so restored stacks keep their elements; pre-existing
+    /// saves without it degrade to name-only views).
+    #[serde(default)]
+    request: Option<CommandRequest>,
 }
 
 impl CommandSnapshot {
@@ -6684,16 +7370,17 @@ impl CommandSnapshot {
             mode: entry.mode,
             retries: entry.retries,
             failures: entry.failures,
+            request: entry.request.clone(),
         }
     }
 }
 
 /// The FnGetCommand element view of one stack entry (C4Script.cpp:926-945):
-/// name, Target, Tx, Ty, Target2, Data. Sourced from the creating
-/// CommandRequest — C++ reads the LIVE C4Command fields, which only the
-/// Acquire/Wait InitEvaluation defaults ever rewrite (C4Command.cpp:
-/// 1659-1670); restored snapshots (no retained request) expose nil
-/// elements.
+/// name, Target, Tx, Ty, Target2, Data — the LIVE C4Command fields. The
+/// creating CommandRequest is the base; states whose C++ counterpart
+/// rewrites the fields (MoveTo's target absorption C4Command.cpp:1637,
+/// Acquire's 500/250 range defaults :1666-1670, Construct's found site
+/// :1757-1766) override it with their live values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandView {
     pub name: String,
@@ -6705,8 +7392,8 @@ pub struct CommandView {
 }
 
 impl CommandView {
-    fn from_entry(name: String, request: Option<&CommandRequest>) -> Self {
-        Self {
+    fn from_entry(name: String, request: Option<&CommandRequest>, state: &CommandState) -> Self {
+        let mut view = Self {
             name,
             target: request.and_then(|request| request.target),
             tx: request.and_then(|request| request.tx),
@@ -6715,7 +7402,9 @@ impl CommandView {
             data: request
                 .map(|request| request.data.clone())
                 .unwrap_or(CommandData::None),
-        }
+        };
+        state.apply_live_overrides(&mut view);
+        view
     }
 }
 
@@ -6745,12 +7434,23 @@ impl CommandStackSnapshot {
             .collect()
     }
 
-    /// FnGetCommand element views; snapshots keep no request, so only
-    /// the names survive a restore.
+    /// FnGetCommand element views from the persisted request + live
+    /// state overrides — restored stacks keep their elements.
     pub fn command_views(&self) -> Vec<CommandView> {
-        self.command_names()
-            .into_iter()
-            .map(|name| CommandView::from_entry(name, None))
+        self.commands
+            .iter()
+            .map(|command| {
+                CommandView::from_entry(
+                    command
+                        .state
+                        .id()
+                        .map(CommandId::to_name)
+                        .unwrap_or("None")
+                        .to_string(),
+                    command.request.as_ref(),
+                    &command.state,
+                )
+            })
             .collect()
     }
 }
@@ -6800,6 +7500,7 @@ impl CommandStack {
                         .unwrap_or("None")
                         .to_string(),
                     entry.request.as_ref(),
+                    &entry.state,
                 )
             })
             .collect()
@@ -6958,7 +7659,10 @@ impl CommandStack {
     }
 }
 
-// C4Command.cpp:34-35 movement-control constants.
+// C4Command.cpp:31-36 movement-control constants.
+const LET_GO_RANGE1: i32 = 7;
+const LET_GO_RANGE2: i32 = 30;
+const LET_GO_HANGLE_ANGLE: i32 = 110;
 const JUMP_ANGLE: i32 = 35;
 const JUMP_LOW_ANGLE: i32 = 80;
 const JUMP_ANGLE_RANGE: i32 = 10;
@@ -7002,6 +7706,30 @@ fn c4_distance(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
         dist -= 1;
     }
     dist as i32
+}
+
+/// `ObjectComLetGo` (C4ObjectCom.cpp:310-314) as an object update:
+/// ObjectActionJump(itofix(xdirf), Fix0) — the hardcoded Jump action plus
+/// the launch velocity (the fixed-velocity delta apply arms mobility,
+/// matching Mobile=1 in ObjectActionJump). Any pending ComDir steer from
+/// the same Execute rides along.
+fn let_go_update(steer: Option<CommandDirection>, xdirf: i32) -> ObjectUpdate {
+    let mut update = ObjectUpdate::new();
+    if let Some(direction) = steer {
+        update = update.with_command_direction(direction);
+    }
+    let mut update = update.with_action_update(
+        ActionUpdate::default()
+            .with_name("Jump")
+            .with_phase(0)
+            .with_ticks(0)
+            .with_force(true),
+    );
+    update.fixed_velocity = Some(FixedVec2::new(
+        math::itofix(xdirf),
+        crate::C4Fixed::from_raw(0),
+    ));
+    update
 }
 
 /// `SolidOnWhichSide` (C4Command.cpp:147-156).
@@ -7060,6 +7788,14 @@ struct MoveToState {
     target: Option<ObjectId>,
     tx: Option<i32>,
     ty: Option<i32>,
+    /// C4CMD_MoveTo Data flags (C4CMD_MoveTo_NoPosAdjust/PushTarget,
+    /// C4Command.h:68-69).
+    #[serde(default)]
+    data: i32,
+    /// C4Command::Evaluated — false until the InitEvaluation Execute
+    /// (C4Command.cpp:1625-1643) has absorbed Target and adjusted Tx/Ty.
+    #[serde(default)]
+    evaluated: bool,
     update_interval: u32,
     last_evaluated: Option<u64>,
     tolerance: i32,
@@ -7073,6 +7809,11 @@ impl MoveToState {
             target: request.target,
             tx: request.tx,
             ty: request.ty,
+            data: match request.data {
+                CommandData::Integer(value) => value,
+                _ => 0,
+            },
+            evaluated: false,
             update_interval: request.update_interval.max(1),
             last_evaluated: None,
             tolerance: 5,
@@ -7091,12 +7832,44 @@ impl MoveToState {
         }
     }
 
+    /// C4CMD_MoveTo InitEvaluation (C4Command.cpp:1634-1643): absorb the
+    /// Target position into Tx/Ty once (Target clears, :1637) and ground
+    /// the destination via AdjustMoveToTarget unless Data carries
+    /// C4CMD_MoveTo_NoPosAdjust (:1640, C4Command.h:68). FreeMoveTo
+    /// accepts any spot for floaters and CanFly physicals (:116-124).
+    fn init_evaluation(&mut self, ctx: &CommandRuntimeContext<'_>) {
+        if let Some(target) = self.target.take() {
+            if let Some(position) = ctx.resolve_position(target) {
+                self.tx = Some(self.tx.unwrap_or(0) + position.x);
+                self.ty = Some(self.ty.unwrap_or(0) + position.y);
+            }
+        }
+        if self.data & COMMAND_FLAG_MOVE_TO_NO_POS_ADJUST == 0 {
+            if let (Some(landscape), Some(tx), Some(ty)) = (ctx.landscape, self.tx, self.ty) {
+                let free_move = ctx.object.action_procedure == ActionProcedure::Float
+                    || ctx.object.physical.can_fly != 0;
+                let (mut x, mut y) = (tx, ty);
+                adjust_move_to_target(landscape, &mut x, &mut y, free_move, ctx.object.shape.height);
+                self.tx = Some(x);
+                self.ty = Some(y);
+            }
+        }
+    }
+
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         let interval = self.update_interval as u64;
         if let Some(last) = self.last_evaluated {
             if ctx.frame.saturating_sub(last) < interval {
                 return CommandStepResult::running(None);
             }
+        }
+
+        // The initial-evaluation Execute consumes the frame without
+        // moving (`if (InitEvaluation()) return;`, C4Command.cpp:1555).
+        if !self.evaluated {
+            self.evaluated = true;
+            self.init_evaluation(ctx);
+            return CommandStepResult::running(None);
         }
         self.last_evaluated = Some(ctx.frame);
 
@@ -7108,8 +7881,46 @@ impl MoveToState {
             }
         };
 
-        let dx = target.x - ctx.position.x;
-        let dy = target.y - ctx.position.y;
+        // Pushing grab-only or pushing not desired: let go
+        // (C4Command.cpp:257-265) — UnGrab sub-command, and the command
+        // re-evaluates because vehicle control might have blocked the
+        // evaluation (:263).
+        if ctx.object.action_procedure == ActionProcedure::Push {
+            if let Some(action_target) = ctx.object.action_target {
+                let grab_only = ctx
+                    .resolve(action_target)
+                    .and_then(|snapshot| ctx.definition(snapshot.definition_id.as_str()))
+                    .is_some_and(|definition| definition.grab == 2);
+                if grab_only || self.data & COMMAND_FLAG_MOVE_TO_PUSH_TARGET == 0 {
+                    self.evaluated = false;
+                    let request = CommandRequest::new(CommandId::UnGrab)
+                        .with_update_interval(50)
+                        .with_mode(CommandMode::SilentSub);
+                    return CommandStepResult::running(None)
+                        .with_operations(vec![CommandOperation::PushFront(request)]);
+                }
+            }
+        }
+
+        // Push/pull movers measure from the pushed vehicle's position
+        // (C4Command.cpp:271-277; the fWaypoint skip needs the pathfinder
+        // waypoint stack, which is not ported yet).
+        let mut position = ctx.position;
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Push | ActionProcedure::Pull
+        ) {
+            if let Some(vehicle) = ctx
+                .object
+                .action_target
+                .and_then(|id| ctx.resolve_position(id))
+            {
+                position = vehicle;
+            }
+        }
+
+        let dx = target.x - position.x;
+        let dy = target.y - position.y;
         if dx.abs() <= self.tolerance && dy.abs() <= self.tolerance {
             self.arrived_frames += 1;
         } else {
@@ -7122,29 +7933,78 @@ impl MoveToState {
             return CommandStepResult::completed(Some(update));
         }
 
-        let direction = if dx > self.tolerance {
-            CommandDirection::Right
-        } else if dx < -self.tolerance {
-            CommandDirection::Left
-        } else if dy > self.tolerance {
-            CommandDirection::Down
-        } else if dy < -self.tolerance {
-            CommandDirection::Up
-        } else {
-            CommandDirection::Stop
+        let direction = match ctx.object.action_procedure {
+            // DFA_SWIM (C4Command.cpp:370-382): Tick2 frames (Game.iTick2
+            // != 0 — odd FrameCounter) steer horizontally with the target
+            // range; !Tick2 frames steer vertically toward Ty with no
+            // range. ComDir is left alone when no condition hits.
+            ActionProcedure::Swim => {
+                if ctx.frame % 2 != 0 {
+                    if dx > self.tolerance {
+                        CommandDirection::Right
+                    } else if dx < -self.tolerance {
+                        CommandDirection::Left
+                    } else {
+                        self.last_direction
+                    }
+                } else if dy > 0 {
+                    CommandDirection::Down
+                } else if dy < 0 {
+                    CommandDirection::Up
+                } else {
+                    self.last_direction
+                }
+            }
+            // DFA_SCALE (C4Command.cpp:335-338): vertical steering only —
+            // cy > Ty + range climbs Up, cy < Ty - range slides Down.
+            ActionProcedure::Scale => {
+                if dy < -self.tolerance {
+                    CommandDirection::Up
+                } else if dy > self.tolerance {
+                    CommandDirection::Down
+                } else {
+                    self.last_direction
+                }
+            }
+            // DFA_FLIGHT (C4Command.cpp:414-417): no ComDir steering —
+            // only FlightControl runs (below).
+            ActionProcedure::Flight => self.last_direction,
+            // DFA_PUSH/DFA_PULL (C4Command.cpp:329-333): horizontal
+            // steering only, measured from the vehicle position above.
+            ActionProcedure::Push | ActionProcedure::Pull => {
+                if dx > self.tolerance {
+                    CommandDirection::Right
+                } else if dx < -self.tolerance {
+                    CommandDirection::Left
+                } else {
+                    self.last_direction
+                }
+            }
+            // DFA_HANGLE (C4Command.cpp:384-387): horizontal steering
+            // only; the angle-based drop follows below.
+            ActionProcedure::Hang => {
+                if dx > self.tolerance {
+                    CommandDirection::Right
+                } else if dx < -self.tolerance {
+                    CommandDirection::Left
+                } else {
+                    self.last_direction
+                }
+            }
+            _ => {
+                if dx > self.tolerance {
+                    CommandDirection::Right
+                } else if dx < -self.tolerance {
+                    CommandDirection::Left
+                } else if dy > self.tolerance {
+                    CommandDirection::Down
+                } else if dy < -self.tolerance {
+                    CommandDirection::Up
+                } else {
+                    CommandDirection::Stop
+                }
+            }
         };
-
-        // DFA_WALK movement controls, after the ComDir steering
-        // (C4Command::Execute MoveTo, C4Command.cpp:316-326):
-        // FlightControl never short-circuits (it returns false even after
-        // taking off, :1816-1849); JumpControl returning true ends the
-        // Execute for this tick.
-        let mut fly_update: Option<ActionUpdate> = None;
-        let mut jump_operations: Option<Vec<CommandOperation>> = None;
-        if ctx.object.action_procedure == ActionProcedure::Walk {
-            fly_update = self.flight_control(ctx, target);
-            jump_operations = self.jump_control(ctx, target);
-        }
 
         let steer = if direction != self.last_direction {
             self.last_direction = direction;
@@ -7152,6 +8012,39 @@ impl MoveToState {
         } else {
             None
         };
+
+        // DFA_SCALE let-go control (C4Command.cpp:339-368): jump off the
+        // wall toward the target or on wall contact; the C++ `return`
+        // ends this Execute with the command still pending.
+        if ctx.object.action_procedure == ActionProcedure::Scale {
+            if let Some(xdirf) = self.scale_let_go(ctx, target) {
+                return CommandStepResult::running(Some(let_go_update(steer, xdirf)));
+            }
+        }
+
+        // DFA_HANGLE let-go control (C4Command.cpp:388-390): drop off the
+        // ceiling once the target angle leaves the hangling sector.
+        if ctx.object.action_procedure == ActionProcedure::Hang
+            && c4_angle(ctx.position.x, ctx.position.y, target.x, target.y).abs()
+                > LET_GO_HANGLE_ANGLE
+        {
+            return CommandStepResult::running(Some(let_go_update(steer, 0)));
+        }
+
+        // DFA_WALK movement controls, after the ComDir steering
+        // (C4Command::Execute MoveTo, C4Command.cpp:316-326):
+        // FlightControl never short-circuits (it returns false even after
+        // taking off, :1816-1849); JumpControl returning true ends the
+        // Execute for this tick. DFA_FLIGHT runs FlightControl alone
+        // (:414-417).
+        let mut fly_update: Option<ActionUpdate> = None;
+        let mut jump_operations: Option<Vec<CommandOperation>> = None;
+        if ctx.object.action_procedure == ActionProcedure::Walk {
+            fly_update = self.flight_control(ctx, target);
+            jump_operations = self.jump_control(ctx, target);
+        } else if ctx.object.action_procedure == ActionProcedure::Flight {
+            fly_update = self.flight_control(ctx, target);
+        }
 
         if fly_update.is_some() || jump_operations.is_some() {
             let mut update = ObjectUpdate::new();
@@ -7174,6 +8067,25 @@ impl MoveToState {
                 let update = ObjectUpdate::new().with_command_direction(direction);
                 CommandStepResult::running(Some(update))
             }
+        }
+    }
+
+    /// The DFA_SCALE let-go decision (C4Command.cpp:339-368): jump away
+    /// from the wall (xdir sign opposite the scaling side) when the
+    /// target lies off the wall beyond LetGoRange1 within LetGoRange2
+    /// vertically, or on any contact once the action is 3+ frames old.
+    fn scale_let_go(&self, ctx: &CommandRuntimeContext<'_>, target: Vector2) -> Option<i32> {
+        let (cx, cy) = (ctx.position.x, ctx.position.y);
+        let contact_let_go = ctx.object.action_time > 2 && ctx.object.contact != 0;
+        match ctx.object.direction {
+            Direction::Left => (target.x > cx + LET_GO_RANGE1
+                && inside(cy - target.y, -LET_GO_RANGE2, LET_GO_RANGE2)
+                || contact_let_go)
+                .then_some(1),
+            Direction::Right => (target.x < cx - LET_GO_RANGE1
+                && inside(cy - target.y, -LET_GO_RANGE2, LET_GO_RANGE2)
+                || contact_let_go)
+                .then_some(-1),
         }
     }
 
@@ -7313,7 +8225,6 @@ impl MoveToState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct EnterState {
     target: ObjectId,
-    #[allow(dead_code)]
     push_target: bool,
     update_interval: u32,
     last_evaluated: Option<u64>,
@@ -7402,9 +8313,16 @@ impl EnterState {
 
         let mut result = CommandStepResult::running(self.update_to_stop(ctx));
         if self.should_issue_move(ctx.frame) {
-            let request = CommandRequest::new(CommandId::MoveTo)
+            // Move to the entrance with the push flag carried through:
+            // (Data & C4CMD_Enter_PushTarget) ? C4CMD_MoveTo_PushTarget
+            // : 0 (C4Command.cpp:615).
+            let mut request = CommandRequest::new(CommandId::MoveTo)
                 .with_target(Some(self.target))
                 .with_update_interval(50);
+            if self.push_target {
+                request =
+                    request.with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET));
+            }
             result = result.with_operations(vec![CommandOperation::PushFront(request)]);
         }
         result
@@ -10610,18 +11528,14 @@ impl AcquireState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
         let definition_id =
             command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
+        // C4CMD_Acquire InitEvaluation Tx/Ty defaults (C4Command.cpp:
+        // 1666-1670): only a ZERO range becomes 500/250 — the sign of a
+        // nonzero range survives into the Inside(cx-px, -Tx, +Tx) match
+        // (:2115-2116), where a negative range matches nothing.
         let raw_range_x = request.tx.unwrap_or(0);
         let raw_range_y = request.ty.unwrap_or(0);
-        let range_x = if raw_range_x == 0 {
-            500
-        } else {
-            raw_range_x.abs()
-        };
-        let range_y = if raw_range_y == 0 {
-            250
-        } else {
-            raw_range_y.abs()
-        };
+        let range_x = if raw_range_x == 0 { 500 } else { raw_range_x };
+        let range_y = if raw_range_y == 0 { 250 } else { raw_range_y };
         Ok(Self {
             target: request.target,
             definition_id,
@@ -11589,6 +12503,36 @@ impl CommandState {
             CommandState::Unsupported => None,
         }
     }
+
+    /// Live C4Command-field overrides for the FnGetCommand view
+    /// (C4Script.cpp:926-945 reads the LIVE fields): only the states
+    /// whose C++ counterpart rewrites Target/Tx/Ty after Set do so —
+    /// MoveTo's InitEvaluation absorption/adjust (C4Command.cpp:
+    /// 1634-1643), Acquire's 500/250 range defaults (:1666-1670) and
+    /// Construct's found-site write (:1757-1766). Put's Ty reminder
+    /// flag (:1384) is unmodeled.
+    fn apply_live_overrides(&self, view: &mut CommandView) {
+        match self {
+            CommandState::MoveTo(state) => {
+                view.target = state.target;
+                view.tx = state.tx;
+                view.ty = state.ty;
+            }
+            CommandState::Acquire(state) => {
+                view.target = state.target;
+                view.tx = Some(state.range_x);
+                view.ty = Some(state.range_y);
+                view.target2 = state.ignore_container;
+            }
+            CommandState::Construct(state) => {
+                if let Some(site) = state.site {
+                    view.tx = Some(site.x);
+                    view.ty = Some(site.y);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn stop_update(ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
@@ -11605,9 +12549,9 @@ struct ActiveCommand {
     mode: CommandMode,
     retries: i32,
     failures: i32,
-    /// The creating request, retained for the FnGetCommand element view
-    /// (C4Script.cpp:926-945). Not persisted — restored stacks expose
-    /// nil elements.
+    /// The creating request, the FnGetCommand element-view base
+    /// (C4Script.cpp:926-945); persisted through CommandSnapshot so
+    /// restored stacks keep their elements.
     request: Option<CommandRequest>,
 }
 
@@ -11668,7 +12612,7 @@ impl ActiveCommand {
             mode: snapshot.mode,
             retries: snapshot.retries,
             failures: snapshot.failures,
-            request: None,
+            request: snapshot.request,
         }
     }
 
