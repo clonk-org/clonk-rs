@@ -37053,6 +37053,87 @@ protected func Activity() { SetActionTargets(); return(1); }
         assert_eq!(settings.temperature, 39);
     }
 
+    // C4Weather::SetSeasonGamma (C4Weather.cpp:259-285): season num/offset
+    // from `(Season / 25) % 4` and `BoundBy(Season % 25, 5, 19) - 5`, the
+    // 3-point ramp interpolated between the SeasonColors rows (:251-257),
+    // negative Temperature shifting red/green down and blue up by
+    // `Temperature / 2` (truncating division).
+    #[test]
+    fn season_gamma_winter_start_is_the_exact_winter_ramp() {
+        // Season=0: iSeason1=0 (winter), iSeasonOff1=BoundBy(0,5,19)-5=0 —
+        // the blend collapses to SeasonColors[0] verbatim.
+        let settings = EnvironmentSettings::new(0)
+            .with_season(0)
+            .with_gamma_enabled();
+        assert_eq!(
+            settings.season_gamma(),
+            Some((
+                RgbColor::new(0x00, 0x00, 0x00),
+                RgbColor::new(0x7f, 0x7f, 0x90),
+                RgbColor::new(0xef, 0xef, 0xff),
+            ))
+        );
+    }
+
+    #[test]
+    fn season_gamma_blends_winter_into_spring_with_truncating_division() {
+        // Season=12: off1=7, off2=8; channel = (c1*8 + c2*7) / 15 with C++
+        // integer truncation (C4Weather.cpp:272), e.g. mid red
+        // (0x7f*8 + 0x90*7)/15 = 2024/15 = 134 (not 135).
+        let settings = EnvironmentSettings::new(0)
+            .with_season(12)
+            .with_gamma_enabled();
+        assert_eq!(
+            settings.season_gamma(),
+            Some((
+                RgbColor::new(3, 7, 0),
+                RgbColor::new(134, 142, 136),
+                RgbColor::new(246, 246, 240),
+            ))
+        );
+    }
+
+    #[test]
+    fn season_gamma_negative_temperature_shifts_blue_up_red_green_down() {
+        // Temperature=-25: Temperature/2 = -12 (truncation toward zero,
+        // C4Weather.cpp:274-279); red+green += -12, blue -= -12, channels
+        // clamped to 0..255.
+        let settings = EnvironmentSettings::new(0)
+            .with_season(0)
+            .with_temperature(-25)
+            .with_gamma_enabled();
+        assert_eq!(
+            settings.season_gamma(),
+            Some((
+                RgbColor::new(0, 0, 12),
+                RgbColor::new(115, 115, 156),
+                RgbColor::new(227, 227, 255),
+            ))
+        );
+    }
+
+    #[test]
+    fn season_gamma_season_hundred_wraps_to_winter() {
+        // Season=100: (100/25)%4 = 0 and 100%25 = 0 — identical to
+        // Season=0 (C4Weather.cpp:263-264).
+        let at_hundred = EnvironmentSettings::new(0)
+            .with_season(100)
+            .with_gamma_enabled();
+        let at_zero = EnvironmentSettings::new(0)
+            .with_season(0)
+            .with_gamma_enabled();
+        assert_eq!(at_hundred.season_gamma(), at_zero.season_gamma());
+    }
+
+    #[test]
+    fn season_gamma_suppressed_by_no_gamma() {
+        // `if (NoGamma) return;` (C4Weather.cpp:261); C4Weather::Default
+        // starts with NoGamma=true (:193).
+        let settings = EnvironmentSettings::new(0).with_season(0);
+        assert!(settings.no_gamma);
+        assert_eq!(settings.season_gamma(), None);
+    }
+
     #[test]
     fn snapshot_reports_environment_metrics() {
         let mut engine = Engine::with_seed(15);
