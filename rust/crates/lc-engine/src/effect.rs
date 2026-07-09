@@ -164,6 +164,10 @@ pub enum EffectStopReason {
     Cleared,
     Destroyed,
     Replaced,
+    /// Temporary deactivation (C4FxCall_Temp, C4Effects.h:47): the effect
+    /// is NOT removed — Fx*Stop runs with fTemp = true
+    /// (TempRemoveUpperEffects, C4Effect.cpp:489).
+    Temp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +188,14 @@ pub enum EffectEventKind {
     AddTo {
         pending: EffectState,
     },
+    /// Temporary deactivation of an upper effect (TempRemoveUpperEffects,
+    /// C4Effect.cpp:473-492): Fx*Stop(C4FxCall_Temp, fTemp = true); the
+    /// effect stays in the list.
+    TempRemoved,
+    /// Reactivation of a temp-removed upper effect
+    /// (TempReaddUpperEffects, C4Effect.cpp:494-510):
+    /// Fx*Start(C4FxCall_Temp).
+    TempReadded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +230,20 @@ impl EffectEvent {
         Self {
             effect: acceptor,
             kind: EffectEventKind::AddTo { pending },
+        }
+    }
+
+    pub fn temp_removed(effect: EffectState) -> Self {
+        Self {
+            effect,
+            kind: EffectEventKind::TempRemoved,
+        }
+    }
+
+    pub fn temp_readded(effect: EffectState) -> Self {
+        Self {
+            effect,
+            kind: EffectEventKind::TempReadded,
         }
     }
 

@@ -8141,13 +8141,54 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        let mut extras = vec![effect_stop_reason_value(reason)];
+        if matches!(reason, EffectStopReason::Temp) {
+            // fTemp = true (TempRemoveUpperEffects, C4Effect.cpp:489).
+            extras.push(Value::Bool(true));
+        }
         self.dispatch_effect_callback(
             state,
             object_id,
             effect,
             "Stop",
             "FxStop",
-            vec![effect_stop_reason_value(reason)],
+            extras,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+        )
+    }
+
+    /// Reactivate a temp-removed effect (TempReaddUpperEffects,
+    /// C4Effect.cpp:505): Fx*Start with iTemp = C4FxCall_Temp
+    /// (C4Effects.h:47); the result is ignored like C++.
+    #[allow(clippy::too_many_arguments)]
+    fn call_effect_temp_readd(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        effect: &EffectState,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        self.dispatch_effect_callback(
+            state,
+            object_id,
+            effect,
+            "Start",
+            "FxStart",
+            vec![Value::Int(1)],
             rng,
             global_effects,
             physics,
@@ -16932,6 +16973,9 @@ impl Engine {
         // number -> (acceptor number, AnnulCalls temp-call request). The
         // LAST checker answering -2/-3 wins the merge.
         let mut annulled_started: HashMap<i32, (i32, bool)> = HashMap::new();
+        // Anchors whose temp remove/readd bracket was already queued (a
+        // re-popped anchor event must not expand again).
+        let mut temp_wrapped_started: HashSet<i32> = HashSet::new();
 
         while let Some(event) = queue.pop_front() {
             // C4Effect::Check (C4Effect.cpp:97-116): before a new effect
@@ -16990,6 +17034,43 @@ impl Engine {
                         queue.push_front(EffectEvent::add_to(acceptor, event.effect.clone()));
                     }
                     continue;
+                }
+                // C4Effect ctor (C4Effect.cpp:118-133): a validating
+                // Fx*Start is bracketed by temp-deactivating all upper
+                // effects (high to low) and reactivating them afterwards
+                // (low to high) — only when the new effect HAS an Fx*Start
+                // and is not priority 1 (`fRemoveUpper && pNext &&
+                // pFnStart`, C4Effect.cpp:123). The bracket runs even when
+                // the Start then denies (C4Effect.cpp:128-133).
+                if event.effect.priority != 1
+                    && !temp_wrapped_started.contains(&event.effect.number)
+                {
+                    let has_start = resolve_effect_dispatch_definition(
+                        &event.effect,
+                        &world,
+                        definitions,
+                        definition,
+                    )
+                    .has_effect_callback(&event.effect.name, "Start");
+                    if has_start {
+                        let uppers = upper_effects_of(&object.state.effects, &event.effect);
+                        if !uppers.is_empty() {
+                            temp_wrapped_started.insert(event.effect.number);
+                            let mut sequence: Vec<EffectEvent> = uppers
+                                .iter()
+                                .rev()
+                                .cloned()
+                                .map(EffectEvent::temp_removed)
+                                .collect();
+                            sequence.push(event);
+                            sequence
+                                .extend(uppers.into_iter().map(EffectEvent::temp_readded));
+                            for queued in sequence.into_iter().rev() {
+                                queue.push_front(queued);
+                            }
+                            continue;
+                        }
+                    }
                 }
             }
             let snapshot_for_call = state_snapshot.clone();
@@ -17156,6 +17237,45 @@ impl Engine {
                         // C4Fx_Start_Deny from Fx*Add kills the ACCEPTOR
                         // (C4Effect.cpp:306-309).
                         add_denied = matches!(add_result, Some(Value::Int(-1)));
+                        (outcome, audio_state, new_rng)
+                    }),
+                EffectEventKind::TempRemoved => dispatch_definition
+                    .call_effect_stop(
+                        &snapshot_for_call,
+                        object_id,
+                        &event.effect,
+                        EffectStopReason::Temp,
+                        rng,
+                        &global_view,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, _temp_result)| {
+                        // The temp stop's result is ignored
+                        // (C4Effect.cpp:489 does not check it).
+                        (outcome, audio_state, new_rng)
+                    }),
+                EffectEventKind::TempReadded => dispatch_definition
+                    .call_effect_temp_readd(
+                        &snapshot_for_call,
+                        object_id,
+                        &event.effect,
+                        rng,
+                        &global_view,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, _temp_result)| {
+                        // The temp readd's result is ignored
+                        // (C4Effect.cpp:505 does not check it).
                         (outcome, audio_state, new_rng)
                     }),
             };
@@ -26657,8 +26777,27 @@ fn effect_stop_reason_value(reason: EffectStopReason) -> Value {
         EffectStopReason::Cleared => "cleared",
         EffectStopReason::Destroyed => "destroyed",
         EffectStopReason::Replaced => "replaced",
+        // C4FxCall_Temp (C4Effects.h:47) in the deferred string convention.
+        EffectStopReason::Temp => "temp",
     };
     Value::String(label.to_string())
+}
+
+/// Active effects AFTER `anchor` in the C++ effect list — the list orders
+/// ascending by |iPriority| with new-before-equal insertion
+/// (C4Effect.cpp:80-94), so an upper effect has a higher priority magnitude
+/// or is an equal-magnitude peer inserted earlier (lower number).
+/// Priority-1 effects never take temp callbacks (C4Effect.cpp:489,505).
+fn upper_effects_of(effects: &[EffectState], anchor: &EffectState) -> Vec<EffectState> {
+    effects
+        .iter()
+        .filter(|existing| existing.number != anchor.number && existing.priority != 1)
+        .filter(|existing| {
+            let (upper, base) = (existing.priority.abs(), anchor.priority.abs());
+            upper > base || (upper == base && existing.number < anchor.number)
+        })
+        .cloned()
+        .collect()
 }
 
 fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[EffectCommand]) {
@@ -42459,6 +42598,125 @@ func FxProbeTimer(pThis, iNumber) {
         assert!(
             !calls.iter().any(|name| name == "FxDeniedStop"),
             "dead effects are deleted without the Stop callback"
+        );
+    }
+
+    #[test]
+    fn new_effect_start_temp_removes_and_readds_upper_effects() {
+        // C4Effect ctor (C4Effect.cpp:118-133): when a new effect WITH an
+        // Fx*Start validates, active higher-priority effects are
+        // temp-deactivated first — Fx*Stop(reason temp, fTemp = true),
+        // high to low (TempRemoveUpperEffects, C4Effect.cpp:473-492) — and
+        // reactivated after the new Start via Fx*Start(C4FxCall_Temp),
+        // low to high (TempReaddUpperEffects, C4Effect.cpp:494-510). A new
+        // effect WITHOUT an Fx*Start skips the whole bracket
+        // (`fRemoveUpper && pNext && pFnStart`, C4Effect.cpp:123).
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Upper", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxUpperStart(state, effect, temp) {
+            return nil;
+        }
+
+        global func FxUpperStop(state, effect, reason, temp) {
+            return nil;
+        }
+
+        global func FxLowerStart(state, effect) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "add", name = "Lower", priority = 100, interval = 0 } ] };
+            }
+            if (frame == 3) {
+                return { effects = [ { op = "add", name = "Plain", priority = 100, interval = 0 } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                call_log
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.to_vec()));
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        call_log.lock().unwrap().clear();
+
+        let second = engine.tick().expect("tick succeeds");
+        let object = second.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Lower", "Upper"], "both effects survive");
+
+        let calls: Vec<(String, Vec<Value>)> = call_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name.starts_with("Fx"))
+            .cloned()
+            .collect();
+        let call_names: Vec<&str> = calls.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            call_names,
+            vec!["FxUpperStop", "FxLowerStart", "FxUpperStart"],
+            "the validating Start is bracketed by the upper effect's temp \
+             stop and temp readd (C4Effect.cpp:122-133)"
+        );
+        let (_, stop_args) = &calls[0];
+        assert_eq!(
+            stop_args.get(2),
+            Some(&Value::String("temp".to_string())),
+            "the temp stop's reason is C4FxCall_Temp (C4Effect.cpp:489)"
+        );
+        assert_eq!(
+            stop_args.get(3),
+            Some(&Value::Bool(true)),
+            "fTemp = true (C4Effect.cpp:489)"
+        );
+        let (_, readd_args) = &calls[2];
+        assert_eq!(
+            readd_args.get(2),
+            Some(&Value::Int(1)),
+            "the temp readd's Start gets iTemp = C4FxCall_Temp \
+             (C4Effect.cpp:505, C4Effects.h:47)"
+        );
+
+        call_log.lock().unwrap().clear();
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        assert_eq!(object.effects.len(), 3, "Plain registers too");
+        let calls = call_log.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|(name, _)| name == "FxUpperStop"),
+            "an effect without Fx*Start skips the temp bracket \
+             (C4Effect.cpp:123)"
         );
     }
 
