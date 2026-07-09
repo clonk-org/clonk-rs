@@ -15556,8 +15556,50 @@ impl Engine {
                 object.tick_effects()
             };
 
-            if !timer_events.is_empty() {
-                self.dispatch_object_effect_events(idx, &definition_id, timer_events)?;
+            // The engine-internal fire timer (FnFxFireTimer,
+            // C4Effect.cpp:643-658 → C4Object::ExecFire) executes at its
+            // list position within the elapsed batch — unless a script
+            // overloads FxFireTimer (C++ resolves the callback through the
+            // script engine first; the engine function is registered
+            // beneath it, AddFunc C4Script.cpp:6995).
+            let mut segment: Vec<EffectEvent> = Vec::new();
+            for event in timer_events {
+                let engine_fire = event.effect.name == C4FX_FIRE
+                    && matches!(event.kind, EffectEventKind::Timer)
+                    && !self.effect_has_script_callback(&event.effect, &definition_id, "Timer");
+                if !engine_fire {
+                    segment.push(event);
+                    continue;
+                }
+                if !segment.is_empty() {
+                    self.dispatch_object_effect_events(
+                        idx,
+                        &definition_id,
+                        std::mem::take(&mut segment),
+                    )?;
+                }
+                if self.objects[idx].destroyed
+                    || !self.objects[idx].state.status.is_active()
+                {
+                    break;
+                }
+                // An earlier callback may have killed this fire mid-batch —
+                // C4Effect::Execute skips dead entries (C4Effect.cpp:326-336).
+                let still_burning = self.objects[idx]
+                    .state
+                    .effects
+                    .iter()
+                    .any(|effect| effect.number == event.effect.number);
+                if still_burning {
+                    let stop_events = self.exec_object_fire(idx, frame, event.effect.number);
+                    segment.extend(stop_events);
+                }
+            }
+            if !segment.is_empty()
+                && !self.objects[idx].destroyed
+                && self.objects[idx].state.status.is_active()
+            {
+                self.dispatch_object_effect_events(idx, &definition_id, segment)?;
             }
             if self.objects[idx].destroyed
                 || !self.objects[idx].state.status.is_active()
@@ -15566,8 +15608,6 @@ impl Engine {
                 // before ExecLife/ExecBase/Timer (C4Object.cpp:1087-1090).
                 continue;
             }
-            // effects (fire) run after movement (C4Object.cpp:1073-1077)
-            self.exec_object_fire(idx, frame);
             // ExecLife runs after the fire effect (C4Object.cpp:1074-1080)
             self.exec_object_life(idx, frame);
 
@@ -17982,6 +18022,28 @@ impl Engine {
             let snapshot_for_call = state_snapshot.clone();
             let dispatch_definition =
                 resolve_effect_dispatch_definition(&event.effect, &world, definitions, definition);
+            // Engine-internal fire callbacks: when no script overload
+            // shadows the engine function (AddFunc C4Script.cpp:6994-6996),
+            // Fx*Stop clears the OnFire flag — real and temp removals alike
+            // (FnFxFireStop, C4Effect.cpp:775-791) — and the temp-readd
+            // Fx*Start re-arms it (FnFxFireStart iTemp arm,
+            // C4Effect.cpp:563-565).
+            if event.effect.name == C4FX_FIRE {
+                let engine_native = |callback: &str| -> bool {
+                    !dispatch_definition.has_effect_callback(C4FX_FIRE, callback)
+                };
+                match event.kind {
+                    EffectEventKind::Stopped(_) | EffectEventKind::TempRemoved
+                        if engine_native("Stop") =>
+                    {
+                        object.state.on_fire = false;
+                    }
+                    EffectEventKind::TempReadded if engine_native("Start") => {
+                        object.state.on_fire = true;
+                    }
+                    _ => {}
+                }
+            }
             let mut timer_kill = false;
             let mut start_denied = false;
             let mut stop_denied = false;
@@ -22651,18 +22713,21 @@ impl Engine {
         Ok(true)
     }
 
-    /// `C4Object::ExecFire` (C4Object.cpp:766-810), run for burning objects
-    /// after movement like the C++ fire effect timer. Still open: the Tick5
-    /// base extinguish (needs the base model), SmokeRate smoke (visual), and
-    /// death/removal callbacks from the energy and damage changes.
-    fn exec_object_fire(&mut self, idx: usize, frame: u64) {
+    /// `C4Object::ExecFire` (C4Object.cpp:766-810), run by the fire
+    /// effect's timer (FnFxFireTimer, C4Effect.cpp:643-658). Returns the
+    /// deferred Fx*Stop events of effects an extinguish killed. Still open:
+    /// the Tick5 base extinguish (needs the base model), SmokeRate smoke
+    /// (visual), and death/removal callbacks from the energy and damage
+    /// changes.
+    fn exec_object_fire(&mut self, idx: usize, frame: u64, fire_number: i32) -> Vec<EffectEvent> {
         if !self.objects[idx].state.on_fire {
-            return;
+            return Vec::new();
         }
+        let mut stop_events = Vec::new();
         // Fire Phase (C4Object.cpp:769)
         {
             let object = &mut self.objects[idx];
-            object.state.fire_phase = (object.state.fire_phase + 1) % 15;
+            object.state.fire_phase = (object.state.fire_phase + 1) % MAX_FIRE_PHASE;
         }
         let (no_burn_decay, no_burn_damage) = self
             .definitions
@@ -22676,7 +22741,7 @@ impl Engine {
             object.state.construction = (object.state.construction - 100).clamp(0, FULL_CON);
             if object.state.construction == 0 {
                 let _ = object.mark_destroyed();
-                return;
+                return stop_events;
             }
         }
         // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:780)
@@ -22709,9 +22774,11 @@ impl Engine {
                     .map(|material| material.extinguisher() > 0)
                     .unwrap_or(false);
                 if extinguisher {
-                    // Extinguish (C4Object.cpp:799-801); the Pshshsh sound is
+                    // Extinguish(iFireNumber) kills THIS fire effect
+                    // (C4Object.cpp:799-801); the Pshshsh sound is
                     // presentation-only.
-                    self.objects[idx].state.on_fire = false;
+                    let (_, events) = self.extinguish_object(idx, fire_number);
+                    stop_events.extend(events);
                 }
                 // Inflame (C4Object.cpp:803-804)
                 if self.rng.random(3) == 0 {
@@ -22719,6 +22786,73 @@ impl Engine {
                 }
             }
         }
+        // FnFxFireTimer returns C4Fx_Execute_Kill once the flag is gone
+        // (C4Effect.cpp:663-666) — belt and braces when something cleared
+        // OnFire without killing the effect.
+        if !self.objects[idx].state.on_fire {
+            if let Some(removed) = self.objects[idx].remove_effect_by_number(fire_number) {
+                stop_events.push(EffectEvent::stopped(removed, EffectStopReason::Removed));
+            }
+        }
+        stop_events
+    }
+
+    /// `C4Object::Extinguish` (C4Object.cpp:1269-1301): a known fire number
+    /// kills exactly that effect; zero kills every "*Fire*" effect while
+    /// skipping engine-internal "Int*" names (C4Fx_AnyFire/C4Fx_Internal,
+    /// C4Effects.h:154-155). The engine-internal FnFxFireStop clears the
+    /// OnFire flag (C4Effect.cpp:787); the returned Stopped events carry
+    /// the deferred Fx*Stop dispatch for script-visible effects.
+    fn extinguish_object(&mut self, idx: usize, fire_number: i32) -> (bool, Vec<EffectEvent>) {
+        let mut events = Vec::new();
+        let mut killed = 0usize;
+        loop {
+            let target = self.objects[idx].state.effects.iter().find_map(|effect| {
+                if fire_number != 0 {
+                    (effect.number == fire_number).then_some(effect.number)
+                } else {
+                    (effect.name.contains("Fire") && !effect.name.starts_with("Int"))
+                        .then_some(effect.number)
+                }
+            });
+            let Some(number) = target else { break };
+            if let Some(removed) = self.objects[idx].remove_effect_by_number(number) {
+                killed += 1;
+                if removed.name == C4FX_FIRE {
+                    // engine FnFxFireStop (C4Effect.cpp:787)
+                    self.objects[idx].state.on_fire = false;
+                }
+                events.push(EffectEvent::stopped(removed, EffectStopReason::Removed));
+            }
+            if fire_number != 0 {
+                break;
+            }
+        }
+        (killed > 0, events)
+    }
+
+    /// Whether `Fx<Name><Event>` resolves to a SCRIPT function for this
+    /// effect (C4Effect::AssignCallbackFunctions, C4Effect.cpp:30-56:
+    /// command-target script, command-id def script, else the global
+    /// table; GetFuncRecursive finds script globals before the
+    /// engine-registered C++ functions).
+    fn effect_has_script_callback(
+        &self,
+        effect: &EffectState,
+        fallback_definition_id: &DefinitionId,
+        event: &str,
+    ) -> bool {
+        let definition_id = effect
+            .command_target
+            .and_then(|target| self.find_object_index(ObjectId::new(target as u64)))
+            .map(|target_idx| self.objects[target_idx].definition_id.clone())
+            .or_else(|| effect.command_id.clone())
+            .unwrap_or_else(|| fallback_definition_id.clone());
+        self.definitions
+            .get(&definition_id)
+            .or_else(|| self.definitions.get(fallback_definition_id))
+            .map(|definition| definition.has_effect_callback(&effect.name, event))
+            .unwrap_or(false)
     }
 
     /// `C4Object::ExecLife` breathing block (C4Object.cpp:878-919), run
@@ -30504,6 +30638,102 @@ mod tests {
     }
 
     #[test]
+    fn fire_burns_through_the_effect_timer_exactly_once_per_frame() -> Result<(), EngineError> {
+        // The burn is driven by the fire effect's own timer — priority 100,
+        // interval 1 (C4Object::Incinerate, C4Object.cpp:1263-1265) —
+        // whose FnFxFireTimer calls C4Object::ExecFire once per elapsed
+        // frame (C4Effect.cpp:643-658; iTime advance C4Effect.cpp:339-342).
+        // The entry must survive the tick: the engine timer exists, so the
+        // "no timer function: mark dead" arm (C4Effect.cpp:358-360) must
+        // NOT fire.
+        let mut engine = Engine::with_seed(29);
+        engine.register_definition(simple_definition("Hut"))?;
+        let hut =
+            engine.spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(10, 10)))?;
+        let idx = engine.find_object_index(hut).expect("hut exists");
+        assert!(engine.incinerate_object(idx, 1, false, None)?);
+        let con_before = engine.objects[idx].state.construction;
+        let phase_before = engine.objects[idx].state.fire_phase;
+        engine.tick()?;
+        let idx = engine.find_object_index(hut).expect("hut survives");
+        assert_eq!(
+            engine.objects[idx].state.construction,
+            con_before - 100,
+            "DoCon(-100) exactly once per frame (C4Object.cpp:779-781)"
+        );
+        assert_eq!(
+            engine.objects[idx].state.fire_phase,
+            (phase_before + 1) % 15,
+            "FirePhase advances once (C4Object.cpp:770)"
+        );
+        let fire = engine.objects[idx]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Fire")
+            .cloned()
+            .expect("fire effect survives its timer");
+        assert_eq!(fire.timer, 1, "iTime elapsed once");
+        engine.tick()?;
+        let idx = engine.find_object_index(hut).expect("hut survives");
+        assert_eq!(
+            engine.objects[idx].state.construction,
+            con_before - 200,
+            "second frame burns exactly once more"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fire_timer_extinguishes_in_extinguisher_material_and_kills_the_effect(
+    ) -> Result<(), EngineError> {
+        // ExecFire's Tick5 background arm (C4Object.cpp:797-806) calls
+        // C4Object::Extinguish in extinguishing material, which kills the
+        // fire effect (C4Object.cpp:1269-1301) — FnFxFireStop clears the
+        // OnFire flag (C4Effect.cpp:787). The Random(3) inflame draw still
+        // runs after the extinguish (C4Object.cpp:803-804).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+            Extinguisher=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let mut engine = Engine::with_seed(31);
+        engine.set_materials(materials);
+        engine.register_definition(simple_definition("Hut"))?;
+        let hut =
+            engine.spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(10, 10)))?;
+        let idx = engine.find_object_index(hut).expect("hut exists");
+        assert!(engine.incinerate_object(idx, 1, false, None)?);
+        // flood the spot AFTER ignition
+        let mut landscape = Landscape::flat_with_material(40, 30, None);
+        landscape.set_liquid_column(10, vec![LiquidSegment::with_material(5, 12, Some(water))]);
+        engine.set_landscape(landscape);
+        // run to the next Tick5 frame
+        while engine.frame % 5 != 4 {
+            engine.tick()?;
+        }
+        engine.tick()?;
+        let idx = engine.find_object_index(hut).expect("hut survives");
+        assert!(!engine.objects[idx].state.on_fire, "extinguished");
+        assert!(
+            !engine.objects[idx]
+                .state
+                .effects
+                .iter()
+                .any(|effect| effect.name == "Fire"),
+            "the fire effect was killed by the extinguish"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn incinerate_in_extinguisher_leaves_no_fire_effect_entry() -> Result<(), EngineError> {
         // fxFireStart deny (C4Effect.cpp:574-607 + ctor :128-131): in
         // extinguishing material the Start returns -1 and the freshly
@@ -30574,8 +30804,9 @@ mod tests {
         let con_before = engine.objects[idx].state.construction;
         let mirror = engine.rng.clone();
 
+        let fire_number = engine.objects[idx].state.effects[0].number;
         // frame 1: neither Tick5 nor Tick10 — only phase + decay
-        engine.exec_object_fire(idx, 1);
+        engine.exec_object_fire(idx, 1, fire_number);
         assert_eq!(
             engine.objects[idx].state.fire_phase,
             (phase_after_start + 1) % 15
@@ -30586,10 +30817,10 @@ mod tests {
         assert_eq!(engine.rng, mirror, "no draws in open air off-tick");
 
         // frame 5: Tick5 → energy -1 (air: no background draw)
-        engine.exec_object_fire(idx, 5);
+        engine.exec_object_fire(idx, 5, fire_number);
         assert_eq!(engine.objects[idx].state.energy, 49_000);
         // frame 10: Tick10 + Tick5 → damage +2, energy -1
-        engine.exec_object_fire(idx, 10);
+        engine.exec_object_fire(idx, 10, fire_number);
         assert_eq!(engine.objects[idx].state.damage, 2);
         assert_eq!(engine.objects[idx].state.energy, 48_000);
         assert_eq!(engine.rng, mirror, "still no draws in open air");
@@ -30603,8 +30834,9 @@ mod tests {
         )?;
         let buried_idx = engine.find_object_index(buried).expect("buried exists");
         assert!(engine.incinerate_object(buried_idx, 1, false, None)?);
+        let buried_fire = engine.objects[buried_idx].state.effects[0].number;
         let mut mirror = engine.rng.clone();
-        engine.exec_object_fire(buried_idx, 15);
+        engine.exec_object_fire(buried_idx, 15, buried_fire);
         mirror.random(3);
         assert_eq!(engine.rng, mirror, "Tick5 inflame draw over material");
         assert!(
@@ -39865,7 +40097,12 @@ protected func Activity() { SetActionTargets(); return(1); }
             .spawn_object(SpawnConfig::new("Torch"))
             .expect("spawns");
         let idx = engine.find_object_index(id).expect("exists");
-        engine.objects[idx].state.on_fire = true;
+        // C++ has no OnFire without the fire effect: ignition goes through
+        // C4Object::Incinerate, which creates the timer-driven entry
+        // (C4Object.cpp:1257-1266).
+        assert!(engine
+            .incinerate_object(idx, -1, false, None)
+            .expect("incinerates"));
         engine.objects[idx].state.fire_phase = 0;
         engine.tick().expect("tick succeeds");
         assert_eq!(
