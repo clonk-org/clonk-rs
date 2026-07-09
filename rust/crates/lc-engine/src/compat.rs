@@ -3356,27 +3356,20 @@ fn get_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "SetPlrKnowledge expects 3 arguments: player, definition, remove flag",
-        ));
-    }
-
-    let player_id = value_to_i32(&args[0], "SetPlrKnowledge", "player")?;
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetPlrKnowledge",
+        "player",
+    )?;
     let definition = match parse_definition_argument(args.get(1), "SetPlrKnowledge")? {
         Some(id) => id,
         None => return Ok(Value::Bool(false)),
     };
-    let remove = match args.get(2) {
-        Some(Value::Bool(value)) => *value,
-        Some(Value::Nil) | None => false,
-        Some(other) => {
-            return Err(RuntimeError::new(format!(
-                "SetPlrKnowledge: expected bool for remove flag, got {}",
-                other.type_name()
-            )))
-        }
-    };
+    let remove = value_to_bool(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetPlrKnowledge",
+        "remove flag",
+    )?;
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -21229,7 +21222,7 @@ func ProbeBadIndex(id) {
     }
 
     #[test]
-    fn set_plr_knowledge_grants_definition_and_records_command() {
+    fn set_plr_knowledge_defaults_omitted_remove_to_false() {
         let mut player = PlayerState::default();
         player.id = 7;
         let definitions = HashMap::from([(
@@ -21265,11 +21258,10 @@ func ProbeBadIndex(id) {
             1,
             false,
         );
-        let args = [
-            Value::Int(7),
-            Value::String("BRIK".into()),
-            Value::Bool(false),
-        ];
+        // Parse_Params pads omitted parameters with nil, whose bool
+        // conversion is false (C4AulParse.cpp:2342-2344; C4Value.h:325-330).
+        // Dragon Rock's InitializePlayer relies on this two-argument grant.
+        let args = [Value::Int(7), Value::C4Id("BRIK".into())];
         let (result, outcome) =
             with_effect_context(None, &[], world, 1, || set_plr_knowledge(&args));
 
@@ -21288,7 +21280,7 @@ func ProbeBadIndex(id) {
     }
 
     #[test]
-    fn set_plr_knowledge_revokes_definition_and_records_command() {
+    fn set_plr_knowledge_accepts_integer_true_to_revoke() {
         let mut player = PlayerState::default();
         player.id = 8;
         player.knowledge = vec!["BRIK".to_string()];
@@ -21328,7 +21320,7 @@ func ProbeBadIndex(id) {
         let args = [
             Value::Int(8),
             Value::String("BRIK".into()),
-            Value::Bool(true),
+            Value::Int(1),
         ];
         let (result, outcome) =
             with_effect_context(None, &[], world, 1, || set_plr_knowledge(&args));
