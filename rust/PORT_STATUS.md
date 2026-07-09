@@ -7,19 +7,23 @@
 
 ## Current status
 
-- **Pinned live shadow matched through frame 156 before the current fix
-  (2026-07-09, seed 424242).** The visible frame-157 animal mismatch was a
-  downstream RNG symptom: dual C++/Rust ledgers are exact through frame 143
-  draw 31818, then C++ performs Water's `Random(10)` splash check while Rust
-  incorrectly fast-paths the same PXS as path-free. Raw PXS state, target
-  `(900,372)`, and execution order are identical. C++ `_PathFree` sees the
-  authoritative Water pixel at the edge of coarse cell `(52,24)`; Rust's
-  `pix_cnt_cell_occupied` consulted only its lossy column approximation. The
-  grid-first occupancy fix is frozen by the real C++ `C4LandscapePath.h`
-  oracle with a single density-25 pixel at `(16,9)` in a 17×15 cell. The fix
-  removes the old frame-157 failure; the current live wall is **frame 170** on
-  WIPF #566 (Rust Walk/Right versus C++ Turn/Left, with sub-pixel x already
-  split), not yet localized.
+- **Pinned live shadow matches through frame 183 (2026-07-09, seed 424242).**
+  The frame-170 WIPF #566 wall was `DFA_WALK`/`SetDir` ordering, not contact:
+  Right steering changes raw xdir `-52430 -> -19662`, which still has a
+  negative C4Fixed sign even though `fixtoi` rounds it to zero. C++ therefore
+  calls `SetDir(Left)`, fires Walk's `TurnAction=Turn`, snaps fix_x to pixel
+  541, then retains the old Walk `pAction` for phase advance; Rust tested its
+  rounded velocity and assigned direction directly. Rust now uses the raw
+  sign, full SetDir/TurnAction + fixed-resync semantics, and the pre-transition
+  phase source. The production `C4ActionDirection.h` oracle freezes the exact
+  result (Turn/Left, phase 1, time 0, fix_x 35435314). The current live wall is
+  **frame 184**, object 571: Rust Walk/Left and moving versus C++ Turn/Right and
+  resting, not yet localized.
+  The preceding frame-157 animal mismatch was a downstream RNG symptom from
+  frame 143: C++ saw the authoritative Water pixel at coarse cell `(52,24)`
+  and consumed Water's `Random(10)`, while Rust consulted only its lossy column
+  model. Grid-first occupancy is frozen by `C4LandscapePath.h` with one
+  density-25 edge pixel in a 17x15 cell.
   Menu subsystem, persistent mass movers, PXS blast/border fidelity, rotated
   masks, the C++-order tick phases, live in-flight locals, crew join with
   fair-crew physicals and the C4-style HUD are all merged.

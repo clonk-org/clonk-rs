@@ -344,8 +344,30 @@ impl ActionLibrary {
         state: &mut ActionState,
         phase_advance: i32,
     ) -> ActionAdvanceOutcome {
-        if let Some(spec) = self.specs.get(&state.name) {
-            Self::advance_with_spec(state, spec, self, phase_advance)
+        let source_action = state.name.clone();
+        self.advance_state_from_action_by(state, &source_action, phase_advance, true)
+    }
+
+    /// Advance the live action state through the ActMap entry captured at the
+    /// start of `C4Object::ExecAction`. `SetDir` may switch the live action via
+    /// `TurnAction`, but C++ keeps its old `pAction` pointer for phase handling
+    /// through the end of that execution (C4Object.cpp:4794, 5440-5465).
+    pub fn advance_state_from_action_by(
+        &self,
+        state: &mut ActionState,
+        source_action: &str,
+        phase_advance: i32,
+        increment_live_time: bool,
+    ) -> ActionAdvanceOutcome {
+        if let Some(spec) = self.specs.get(source_action) {
+            Self::advance_with_spec(
+                state,
+                source_action,
+                spec,
+                self,
+                phase_advance,
+                increment_live_time,
+            )
         } else {
             state.advance();
             ActionAdvanceOutcome::default()
@@ -408,15 +430,20 @@ impl ActionLibrary {
 
     fn advance_with_spec(
         state: &mut ActionState,
+        source_action: &str,
         spec: &ActionSpec,
         library: &ActionLibrary,
         phase_advance: i32,
+        increment_live_time: bool,
     ) -> ActionAdvanceOutcome {
         let mut outcome = ActionAdvanceOutcome::default();
 
         // Action.Time++ (C4Object.cpp:4745): counts every ExecAction of a
-        // real action, independent of the phase machinery below.
-        state.time = state.time.saturating_add(1);
+        // real action, independent of the phase machinery below. A different
+        // TurnAction already reset the NEW action's time after that increment.
+        if increment_live_time {
+            state.time = state.time.saturating_add(1);
+        }
 
         // Phase advance is gated on a nonzero Delay — "zero delay means no
         // phase advance" (C4Object.cpp:5441; the ActMap default is 0,
@@ -435,13 +462,14 @@ impl ActionLibrary {
         state.ticks = 0;
 
         let step = normalize_step(spec.step);
-        let current_action = state.name.clone();
+        let live_action = state.name.clone();
         // Phase += Step, then the PhaseCall, then the length check
         // (C4Object.cpp:5448-5464).
         state.phase = state.phase.saturating_add(step);
         if spec.phase_call.is_some() {
             outcome.phase_event = Some(ActionPhaseEvent {
-                action: current_action,
+                action: source_action.to_string(),
+                live_action,
                 phase: state.phase,
             });
         }
@@ -519,7 +547,10 @@ pub struct ActionAdvanceOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionPhaseEvent {
+    /// ActMap entry whose PhaseCall C++ invokes through the stale `pAction`.
     pub action: String,
+    /// Live action name visible to that callback after an earlier TurnAction.
+    pub live_action: String,
     pub phase: i32,
 }
 

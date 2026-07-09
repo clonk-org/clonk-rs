@@ -14679,6 +14679,10 @@ impl Engine {
                 continue;
             }
             dbg_stage(&self.objects[idx], "POSTCMD");
+            // ExecAction captures pAction before procedure steering. SetDir
+            // may replace the live action through TurnAction, but C++ keeps
+            // this entry for phase advance through the end of ExecAction.
+            let exec_action_source = self.objects[idx].state.action.name.clone();
             let exec_action_returned_early = self.apply_physics_at_index(idx);
             dbg_stage(&self.objects[idx], "POSTACT");
 
@@ -14691,6 +14695,7 @@ impl Engine {
             // exit) skips it entirely; movement below still runs.
             if !exec_action_returned_early {
                 let physical_for_advance = self.object_physical(idx);
+                let pre_phase_action_state = self.objects[idx].state.action.clone();
                 let advance_outcome = {
                     let object = &mut self.objects[idx];
                     // iPhaseAdvance (C4Object.cpp:4696): WALK fixtoi(|xdir|*10)
@@ -14699,9 +14704,8 @@ impl Engine {
                     // fixtoi(swimlimit*10) with the PHYSICAL limit, not the
                     // velocity (:5010-ish "iPhaseAdvance = fixtoi(lLimit*10)"),
                     // DIG fixtoi(diglimit*40) (:4894-4895); everything else 1.
-                    let phase_advance = match action_library
-                        .procedure_for_action(&object.state.action.name)
-                    {
+                    let phase_advance =
+                        match action_library.procedure_for_action(&exec_action_source) {
                         ActionProcedure::Walk | ActionProcedure::Hang => {
                             math::fixtoi(object.fixed_velocity.x.abs() * 10)
                         }
@@ -14714,10 +14718,13 @@ impl Engine {
                         }
                         _ => 1,
                     };
-                    object
-                        .state
-                        .action
-                        .advance_with_library_by(&action_library, phase_advance)
+                    let increment_live_time = object.state.action.name == exec_action_source;
+                    action_library.advance_state_from_action_by(
+                        &mut object.state.action,
+                        &exec_action_source,
+                        phase_advance,
+                        increment_live_time,
+                    )
                 };
 
                 // The phase-end transition runs through SetAction
@@ -14737,16 +14744,18 @@ impl Engine {
                 // C4Object.cpp:5462); name-changing wraps are recorded by the
                 // block below.
                 if advance_outcome.wrapped
-                    && self.objects[idx].state.action.name == previous_action_state.name
+                    && self.objects[idx].state.action.name == pre_phase_action_state.name
                 {
                     self.objects[idx].record_action_event(
-                        previous_action_state.clone(),
+                        pre_phase_action_state.clone(),
                         ActionTransitionKind::Natural,
                     );
                 }
-                if self.objects[idx].state.action.name != previous_action_state.name {
-                    self.objects[idx]
-                        .record_action_event(previous_action_state, ActionTransitionKind::Natural);
+                if self.objects[idx].state.action.name != pre_phase_action_state.name {
+                    self.objects[idx].record_action_event(
+                        pre_phase_action_state,
+                        ActionTransitionKind::Natural,
+                    );
                 }
 
                 if let Some(event) = advance_outcome.phase_event {
@@ -14759,7 +14768,7 @@ impl Engine {
                         // event snapshot carries exactly that pair; the
                         // rest of the state is live.
                         let mut state_snapshot = self.objects[idx].script_state_snapshot();
-                        state_snapshot.action.name = event.action.clone();
+                        state_snapshot.action.name = event.live_action;
                         state_snapshot.action.phase = event.phase;
                         self.invoke_action_callback(
                             idx,
@@ -18270,6 +18279,7 @@ impl Engine {
             pull_handled = true;
         }
 
+        let mut walk_set_direction = None;
         {
             let physical = self.object_physical(idx);
             // At-limit physical training before the ComDir movement: Scale
@@ -18623,11 +18633,13 @@ impl Engine {
             object.refresh_velocity_from_fixed();
             match procedure {
                 ActionProcedure::Walk => {
-                    if object.state.velocity.x < 0 {
-                        object.state.direction = Direction::Left;
-                    } else if object.state.velocity.x > 0 {
-                        object.state.direction = Direction::Right;
-                    }
+                    walk_set_direction = if object.fixed_velocity.x < C4Fixed::ZERO {
+                        Some(Direction::Left)
+                    } else if object.fixed_velocity.x > C4Fixed::ZERO {
+                        Some(Direction::Right)
+                    } else {
+                        None
+                    };
                 }
                 ActionProcedure::Hang | ActionProcedure::Dig | ActionProcedure::Swim => {
                     if let Some(direction) = pending_direction {
@@ -18661,6 +18673,10 @@ impl Engine {
                 }
                 _ => {}
             }
+        }
+
+        if let Some(direction) = walk_set_direction {
+            self.set_exec_action_direction(idx, &definition_id, direction);
         }
 
         if matches!(procedure, ActionProcedure::Lift)
@@ -19321,6 +19337,40 @@ impl Engine {
             }
         }
         Ok(true)
+    }
+
+    /// C4Object::SetDir as reached from an internal ExecAction procedure
+    /// (C4Object.cpp:4248-4265): run the current action's TurnAction through
+    /// SetActionByName on a facing change, then assign the requested direction
+    /// even if that transition failed or changed actions. Direction-count
+    /// validation remains at the script SetDir seam; synthetic action fixtures
+    /// historically omit Directions and are outside this differential.
+    fn set_exec_action_direction(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        direction: Direction,
+    ) {
+        let Some((current_direction, turn_action)) = self
+            .definitions
+            .get(definition_id)
+            .map(|definition| {
+                let library = definition.action_library();
+                let action_name = &self.objects[idx].state.action.name;
+                (
+                    self.objects[idx].state.direction,
+                    library.turn_action_for(action_name).map(str::to_string),
+                )
+            })
+        else {
+            return;
+        };
+        if direction != current_direction {
+            if let Some(turn_action) = turn_action {
+                self.force_action_with_calls(idx, definition_id, &turn_action);
+            }
+        }
+        self.objects[idx].state.direction = direction;
     }
 
     /// SetActionByName-style forced transition from an engine path
