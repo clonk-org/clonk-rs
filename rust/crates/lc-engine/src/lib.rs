@@ -5513,9 +5513,10 @@ pub struct Definition {
     /// the movement loop reads them per masked object per moving object per
     /// tick, and re-scanning the sprite there dominated the loop.
     solid_mask_pixels: SolidMaskPixels,
-    /// Per-override-rect pixel cache (Objects.txt SolidMask= picks its
-    /// own sprite region).
-    solid_mask_rect_cache: std::cell::RefCell<HashMap<(i32, i32, i32, i32), SolidMaskPixels>>,
+    /// Per-active-graphics/override-rect pixel cache (Objects.txt SolidMask=
+    /// picks its own sprite region, while SetGraphics picks another bitmap).
+    solid_mask_rect_cache:
+        std::cell::RefCell<HashMap<(Option<String>, i32, i32, i32, i32), SolidMaskPixels>>,
 }
 
 /// Precomputed solid-mask pixel data for `solid_masks_for_movement`.
@@ -6118,6 +6119,7 @@ impl Definition {
 
     pub fn set_sprite_variants(&mut self, variants: HashMap<String, DefinitionSpriteImage>) {
         self.sprite_variants = variants;
+        self.solid_mask_rect_cache.borrow_mut().clear();
     }
 
     pub fn sprite_variant_keys(&self) -> Vec<String> {
@@ -6166,24 +6168,47 @@ impl Definition {
     /// SolidMask= overrides pick a different sprite region per object
     /// (C4Object::SolidMask; the CTWR platform has NO DefCore mask at
     /// all). Cached per rect.
-    fn solid_mask_pixels_for_rect(&self, mask: DefinitionTargetRect) -> SolidMaskPixels {
-        if Some(mask) == self.solid_mask {
+    fn solid_mask_pixels_for_rect(
+        &self,
+        mask: DefinitionTargetRect,
+        graphics_name: Option<&str>,
+    ) -> SolidMaskPixels {
+        let graphics_key = graphics_name
+            .filter(|name| !name.is_empty())
+            .map(str::to_ascii_lowercase);
+        if graphics_key.is_none() && Some(mask) == self.solid_mask {
             return self.solid_mask_pixels.clone();
         }
-        let key = (mask.x, mask.y, mask.width, mask.height);
+        let key = (
+            graphics_key.clone(),
+            mask.x,
+            mask.y,
+            mask.width,
+            mask.height,
+        );
         if let Some(cached) = self.solid_mask_rect_cache.borrow().get(&key) {
             return cached.clone();
         }
-        let computed = self.compute_solid_mask_pixels(mask);
+        let computed = self.compute_solid_mask_pixels(mask, graphics_key.as_deref());
         self.solid_mask_rect_cache
             .borrow_mut()
             .insert(key, computed.clone());
         computed
     }
 
-    fn compute_solid_mask_pixels(&self, mask: DefinitionTargetRect) -> SolidMaskPixels {
-        let Some(image) = self.sprite_image.as_ref() else {
-            return SolidMaskPixels::Rectangle;
+    fn compute_solid_mask_pixels(
+        &self,
+        mask: DefinitionTargetRect,
+        graphics_name: Option<&str>,
+    ) -> SolidMaskPixels {
+        let Some(image) = self.sprite_image_variant(graphics_name) else {
+            return if graphics_name.is_none() {
+                SolidMaskPixels::Rectangle
+            } else {
+                // C++ SetGraphics rejects an unknown named graphic. Never
+                // silently substitute the owning definition's default bitmap.
+                SolidMaskPixels::OutOfBounds
+            };
         };
         let image_width = image.width as i32;
         let image_height = image.height as i32;
@@ -15448,6 +15473,7 @@ impl Engine {
             container,
             vertices,
             graphics_overlays,
+            base_graphics: update_base_graphics,
             physicals,
             entrance_status: update_entrance_status,
             color: update_color,
@@ -15637,6 +15663,12 @@ impl Engine {
             if let Some(overlays) = graphics_overlays {
                 object.state.graphics_overlays = overlays;
             }
+            if let Some(base_graphics) = update_base_graphics {
+                if object.state.base_graphics != base_graphics {
+                    object.state.base_graphics = base_graphics;
+                    solid_mask_refresh = true;
+                }
+            }
 
             object.clamp_velocity(&self.physics);
 
@@ -15663,8 +15695,8 @@ impl Engine {
         };
 
         if solid_mask_refresh {
-            // SetSolidMask reflows the bake immediately
-            // (C4Object.cpp:3792 CheckSolidMaskRect + UpdateSolidMask).
+            // SetSolidMask and SetGraphics reflow the bake immediately
+            // (C4Object.cpp:3792 and UpdateGraphics at :381-402).
             self.update_solid_mask(index);
         }
         self.update_sector_for_index(index);
@@ -15942,9 +15974,13 @@ impl Engine {
 
         let mut command_operations = command_operations;
 
-        let (previous_owner, previous_crew_member) = {
+        let (previous_owner, previous_crew_member, previous_base_graphics) = {
             let object = &self.objects[index];
-            (object.state.owner, object.state.crew_member)
+            (
+                object.state.owner,
+                object.state.crew_member,
+                object.state.base_graphics.clone(),
+            )
         };
 
         // FnChangeDef swaps the definition INLINE at the call site
@@ -16125,6 +16161,12 @@ impl Engine {
             self.apply_container_change(object_id, previous, new, false)?;
         }
 
+        if self.objects[index].state.base_graphics != previous_base_graphics {
+            // C4Object::SetGraphics calls UpdateGraphics(true), which removes,
+            // recreates and re-puts the active solid mask (C4Object.cpp:381-402).
+            self.update_solid_mask(index);
+        }
+
         self.apply_nested_object_outcomes(other_objects)?;
 
         // The C++ host functions behind these outcomes run SetOCF
@@ -16157,9 +16199,13 @@ impl Engine {
 
             let mut effect_events = Vec::new();
             let mut container_changes = Vec::new();
-            let (previous_owner, previous_crew_member) = {
+            let (previous_owner, previous_crew_member, previous_base_graphics) = {
                 let object = &self.objects[index];
-                (object.state.owner, object.state.crew_member)
+                (
+                    object.state.owner,
+                    object.state.crew_member,
+                    object.state.base_graphics.clone(),
+                )
             };
             let mut energy_died = false;
             // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply the
@@ -16310,6 +16356,9 @@ impl Engine {
 
             for (previous, new) in container_changes {
                 self.apply_container_change(object_id, previous, new, false)?;
+            }
+            if self.objects[index].state.base_graphics != previous_base_graphics {
+                self.update_solid_mask(index);
             }
         }
         Ok(())
@@ -22862,6 +22911,31 @@ impl Engine {
             .is_some()
     }
 
+    /// C4SolidMask copies alpha from `pForObject->GetGraphics()->GetBitmap()`
+    /// (C4SolidMask.cpp:400-412), not necessarily the owning definition's
+    /// default sprite. Mask geometry still belongs to the owning definition.
+    fn solid_mask_pixels_for_object(
+        &self,
+        object: &Object,
+        mask: DefinitionTargetRect,
+    ) -> SolidMaskPixels {
+        let (graphics_definition, graphics_name) = object
+            .state
+            .base_graphics
+            .as_ref()
+            .map(|graphics| {
+                (
+                    graphics.definition.as_str(),
+                    graphics.graphics_name.as_deref(),
+                )
+            })
+            .unwrap_or((object.definition_id.as_str(), None));
+        self.definitions
+            .get(graphics_definition)
+            .map(|definition| definition.solid_mask_pixels_for_rect(mask, graphics_name))
+            .unwrap_or(SolidMaskPixels::OutOfBounds)
+    }
+
     /// The object's effective solid mask spec when eligible
     /// (C4Object::UpdateSolidMask gates: mask enabled, FullCon, not
     /// contained, no rotation, C4Object.cpp:5652-5656).
@@ -22885,7 +22959,7 @@ impl Engine {
             Some(rect) => rect,
             None => definition.solid_mask()?,
         };
-        let pixels = match definition.solid_mask_pixels_for_rect(mask) {
+        let pixels = match self.solid_mask_pixels_for_object(object, mask) {
             SolidMaskPixels::OutOfBounds => return None,
             SolidMaskPixels::Rectangle => None,
             SolidMaskPixels::Alpha(pixels) => Some(Rc::clone(&pixels)),
@@ -23236,7 +23310,7 @@ impl Engine {
             // The pixel decode follows the EFFECTIVE rect: an Objects.txt
             // override reads its own sprite region (C4SolidMask::Put uses
             // the object's SolidMask, not the def's).
-            let mask_pixels = match definition.solid_mask_pixels_for_rect(mask) {
+            let mask_pixels = match self.solid_mask_pixels_for_object(object, mask) {
                 SolidMaskPixels::OutOfBounds => continue,
                 SolidMaskPixels::Rectangle => None,
                 SolidMaskPixels::Alpha(pixels) => Some(Rc::clone(&pixels)),
@@ -44099,6 +44173,69 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             .flat_map(|y| (0..width).map(move |x| (x, y)))
             .filter(|&(x, y)| landscape.grid_byte_at(x, y) == Some(vehicle))
             .collect()
+    }
+
+    fn one_pixel_sprite(alpha: u8) -> DefinitionSpriteImage {
+        DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([0, 0, 0, alpha]),
+            color_mask: None,
+        }
+    }
+
+    #[test]
+    fn set_graphics_rebuilds_solid_mask_from_the_active_bitmap_like_cpp() {
+        // C4Object::SetGraphics selects a C4DefGraphics from the requested
+        // source definition and immediately calls UpdateGraphics(true), which
+        // deletes/recreates the solid mask (src/C4Object.cpp:5908-5923,
+        // :381-402). C4SolidMask then samples that ACTIVE bitmap
+        // (src/C4SolidMask.cpp:400-412).
+        let mut gate = Definition::from_script(
+            "GATE",
+            "Gate",
+            r#"
+            #strict 2
+            public func Switch() { return SetGraphics("2", nil, SKIN); }
+            public func Reset() { return SetGraphics(nil); }
+            "#,
+        )
+        .expect("gate script compiles");
+        gate.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        gate.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        gate.set_sprite_image(Some(one_pixel_sprite(0)));
+
+        let mut skin = simple_definition("SKIN");
+        skin.set_sprite_image(Some(one_pixel_sprite(0)));
+        skin.set_sprite_variants(HashMap::from([(
+            "2".to_string(),
+            one_pixel_sprite(255),
+        )]));
+
+        let mut engine = Engine::with_seed(7);
+        engine.set_landscape(vehicle_grid_landscape(20, 20));
+        engine.register_definition(gate).expect("gate registers");
+        engine.register_definition(skin).expect("skin registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("GATE")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("gate spawns");
+        assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
+
+        let idx = engine.find_object_index(id).expect("gate exists");
+        engine
+            .call_object_function(idx, "Switch", Vec::new())
+            .expect("SetGraphics callback succeeds");
+        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+
+        let idx = engine.find_object_index(id).expect("gate exists");
+        engine
+            .call_object_function(idx, "Reset", Vec::new())
+            .expect("default graphics restore succeeds");
+        assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
     }
 
     #[test]

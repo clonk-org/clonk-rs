@@ -20,6 +20,8 @@
 //     `C4Landscape::_PathFree`; the oracle feeds it real PixCnt-style inputs.
 //   * `C4ActionDirection.h` is the production raw-xdir direction decision used
 //     by `C4Object::ExecAction` and `C4Object::SetDir`.
+//   * `C4SolidMaskBitmap.h` is the production active-graphics bitmap selection
+//     and transparency conversion used by `C4SolidMask`.
 //   * `Randomize3`/`Rnd3` are reproduced verbatim from `src/C4Random.cpp`
 //     (10 trivial lines around the real `Random()`); kept in sync via the
 //     provenance comment below.
@@ -38,6 +40,7 @@
 #include <C4ActionDirection.h> // real production ExecAction/SetDir decisions
 #include <C4LandscapePath.h> // real production coarse-path traversal
 #include <C4ScriptKiller.h> // real production script-host helper
+#include <C4SolidMaskBitmap.h> // real production active-bitmap mask sampling
 
 extern long SineTable[9001]; // defined by the generated sine_table.cpp
 
@@ -187,6 +190,56 @@ static void printActionDirectionCase()
            xdir.val, requestedDirection, update.PhaseAdvance, runsTurnAction ? 1 : 0,
            actionIsTurn ? 1 : 0, requestedDirection, actionTime, actionPhase,
            actionPhaseDelay, fixXAfterSetDir, fixX.val);
+}
+
+struct SolidMaskOracleBitmap
+{
+    bool Transparent;
+
+    bool IsPixTransparent(int32_t, int32_t) { return Transparent; }
+};
+
+struct SolidMaskOracleGraphics
+{
+    SolidMaskOracleBitmap *Bitmap;
+
+    SolidMaskOracleBitmap *GetBitmap() { return Bitmap; }
+};
+
+struct SolidMaskOracleObject
+{
+    SolidMaskOracleGraphics *Graphics;
+
+    SolidMaskOracleGraphics *GetGraphics() { return Graphics; }
+};
+
+static void printSolidMaskGraphicsCases()
+{
+    // Minimized from Goldrush frame 184, CTWR #1351. The decisive mask source
+    // pixel (219,86) is transparent in Graphics.png and opaque in Graphics2.png.
+    // C4SolidMask samples the object's ACTIVE graphics, including variants.
+    SolidMaskOracleBitmap baseBitmap{true};
+    SolidMaskOracleBitmap variantBitmap{false};
+    SolidMaskOracleGraphics baseGraphics{&baseBitmap};
+    SolidMaskOracleGraphics variantGraphics{&variantBitmap};
+    SolidMaskOracleObject object{&baseGraphics};
+    constexpr int32_t sourceX = 219;
+    constexpr int32_t sourceY = 86;
+
+    printf("\"solid_mask_graphics\":[");
+    const auto printCase = [&](const char *name, int32_t selectedVariant)
+    {
+        auto *active = C4SolidMaskBitmap::GetActiveBitmap(&object);
+        printf("%s{\"name\":\"%s\",\"selected_variant\":%d,\"active_variant\":%d,"
+               "\"source_x\":%d,\"source_y\":%d,\"mask_pixel\":%u}",
+               selectedVariant ? "," : "", name, selectedVariant,
+               active == &variantBitmap ? 1 : 0, sourceX, sourceY,
+               static_cast<unsigned int>(C4SolidMaskBitmap::MaskPixel(active, sourceX, sourceY)));
+    };
+    printCase("base", 0);
+    object.Graphics = &variantGraphics;
+    printCase("variant_2", 1);
+    printf("]");
 }
 
 // --- C4Value hash: mirrors src/C4Value.cpp:923-1029 --------------------------
@@ -646,7 +699,12 @@ int main()
     printActionDirectionCase();
     printf(",\n");
 
-    // 13. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 13. C4SolidMask active graphics sampling. The variant_2 case is the
+    //     minimized Goldrush frame-184 CTWR/SNKE contact divergence.
+    printSolidMaskGraphicsCases();
+    printf(",\n");
+
+    // 14. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");
