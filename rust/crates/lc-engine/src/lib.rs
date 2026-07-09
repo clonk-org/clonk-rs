@@ -2362,6 +2362,15 @@ impl ObjectState {
             if self.container != container {
                 self.container = container;
                 container_change = Some((previous_container, self.container));
+                // C4Object::Enter/Exit force-close the moving object's menu
+                // (CloseMenu(true), C4Object.cpp:1555/:1594). A delta that
+                // carries its OWN menu write already folded the correct
+                // post-Enter/Exit state above (script scopes stage the close
+                // at Enter/Exit call time) — only menu-less deltas (the
+                // engine-internal collect/grab/enter movers) close here.
+                if delta.menu.is_none() {
+                    self.menu = None;
+                }
             }
             if let Some(components) = &delta.components {
                 self.components = components.clone();
@@ -15785,6 +15794,7 @@ impl Engine {
             if let Some(entrance_status) = update_entrance_status {
                 object.state.entrance_status = entrance_status;
             }
+            let menu_written = update_menu.is_some();
             if let Some(menu) = update_menu {
                 object.state.menu = menu;
             }
@@ -15801,6 +15811,13 @@ impl Engine {
                 if object.state.container != container_update {
                     object.state.container = container_update;
                     container_change = Some((previous_container, object.state.container));
+                    // C4Object::Enter/Exit force-close the moving object's
+                    // menu (CloseMenu(true), C4Object.cpp:1555/:1594) —
+                    // unless this update carries its own (already correctly
+                    // ordered) menu write.
+                    if !menu_written {
+                        object.state.menu = None;
+                    }
                 }
             }
             if let Some(vertices) = vertices {
@@ -36157,6 +36174,192 @@ func Trigger() {
             .expect("clonk exists")
             .expect("menu is open");
         assert_eq!(menu.selection, 1);
+    }
+
+    #[test]
+    fn exit_closes_the_object_menu_like_cpp() {
+        // C4Object::Exit (C4Object.cpp:1530-1562) force-closes the exiting
+        // object's menu among its "Misc updates" (CloseMenu(true),
+        // C4Object.cpp:1555) — synchronously, so a GetMenu later in the
+        // same script call already sees it gone.
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func LeaveAndRead() { Exit(); return GetMenu(this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", "").expect("script compiles"),
+            )
+            .expect("hut registers");
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("hut spawns");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK").with_container(hut))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "OpenMenu", Vec::new())
+                .expect("OpenMenu succeeds"),
+            Value::Bool(true)
+        );
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "LeaveAndRead", Vec::new())
+                .expect("LeaveAndRead succeeds"),
+            Value::Int(0),
+            "Exit closes the menu before the same-call GetMenu (C4Object.cpp:1555)"
+        );
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(engine.objects[idx].state.container, None, "exit folded");
+        assert_eq!(
+            engine.debug_object_menu(clonk.as_u64()),
+            Some(None),
+            "the menu stays closed after the fold"
+        );
+    }
+
+    #[test]
+    fn enter_closes_the_object_menu_and_a_later_create_menu_survives_like_cpp() {
+        // C4Object::Enter (C4Object.cpp:1565-1614) force-closes the entering
+        // object's menu among its "Failsafe updates" (CloseMenu(true),
+        // C4Object.cpp:1594). The close happens AT the Enter — a CreateMenu
+        // later in the same call opens a fresh menu that stays.
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func BoardAndRead(hut) { Enter(hut); return GetMenu(this()); }
+        func BoardThenReopen(hut) { Enter(hut); Exit(); Enter(hut); CreateMenu(MENU, this(), this(), 0, "After"); return GetMenu(this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", "").expect("script compiles"),
+            )
+            .expect("hut registers");
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("hut spawns");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "OpenMenu", Vec::new())
+                .expect("OpenMenu succeeds"),
+            Value::Bool(true)
+        );
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "BoardAndRead", vec![object_reference_value(hut)])
+                .expect("BoardAndRead succeeds"),
+            Value::Int(0),
+            "Enter closes the menu before the same-call GetMenu (C4Object.cpp:1594)"
+        );
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(engine.objects[idx].state.container, Some(hut));
+        assert_eq!(engine.debug_object_menu(clonk.as_u64()), Some(None));
+
+        // Exit+Enter then CreateMenu in ONE call: the new menu must survive
+        // the container-change fold (C++ closed at Enter time, then the
+        // script reopened — the reopened menu stays).
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "BoardThenReopen", vec![object_reference_value(hut)])
+                .expect("BoardThenReopen succeeds"),
+            Value::C4Id("MENU".into())
+        );
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu reopened after Enter survives the fold");
+        assert_eq!(menu.identification, Value::C4Id("MENU".into()));
+    }
+
+    #[test]
+    fn engine_internal_container_moves_close_the_object_menu_like_cpp() {
+        // Engine-internal container moves (collection cross-check
+        // lib.rs `with_container` update, grab/enter DirectCom arms) are
+        // C4Object::Enter/Exit too — both force-close the MOVING object's
+        // menu (CloseMenu(true), C4Object.cpp:1555/:1594).
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", "").expect("script compiles"),
+            )
+            .expect("hut registers");
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("hut spawns");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        engine
+            .call_object_function(idx, "OpenMenu", Vec::new())
+            .expect("OpenMenu succeeds");
+        assert!(engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .is_some());
+
+        // Host-driven Enter, like the collection cross-check
+        // (C4Object::Collect -> Enter, C4Object.cpp:5698 -> :1552).
+        engine
+            .apply_object_update(clonk, ObjectUpdate::new().with_container(hut))
+            .expect("enter applies");
+        assert_eq!(
+            engine.debug_object_menu(clonk.as_u64()),
+            Some(None),
+            "the entering object's menu closes (C4Object.cpp:1594)"
+        );
+
+        // Reopen, then a host-driven Exit (e.g. drop) closes it again.
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        engine
+            .call_object_function(idx, "OpenMenu", Vec::new())
+            .expect("OpenMenu succeeds");
+        assert!(engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .is_some());
+        engine
+            .apply_object_update(clonk, ObjectUpdate::new().clear_container())
+            .expect("exit applies");
+        assert_eq!(
+            engine.debug_object_menu(clonk.as_u64()),
+            Some(None),
+            "the exiting object's menu closes (C4Object.cpp:1555)"
+        );
     }
 
     #[test]

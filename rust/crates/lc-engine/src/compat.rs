@@ -19453,6 +19453,10 @@ impl ObjectScopeContext {
         }
         self.current_container = container;
         self.pending_update.container = Some(container);
+        // C4Object::Enter/Exit force-close the moving object's menu
+        // synchronously (CloseMenu(true), C4Object.cpp:1555 and :1594) —
+        // staged here so a later same-call CreateMenu can still reopen one.
+        self.pending_update.menu = Some(None);
     }
 
     fn mark_destroy(&mut self) {
