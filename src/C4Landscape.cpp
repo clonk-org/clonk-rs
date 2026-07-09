@@ -18,6 +18,7 @@
 
 #include <C4Include.h>
 #include <C4Landscape.h>
+#include <C4LandscapePath.h>
 #include <C4SolidMask.h>
 
 #include <C4Map.h>
@@ -889,29 +890,10 @@ bool C4Landscape::ClearPix(int32_t tx, int32_t ty)
 
 bool C4Landscape::_PathFree(int32_t x, int32_t y, int32_t x2, int32_t y2)
 {
-	x /= 17; y /= 15; x2 /= 17; y2 /= 15;
-	while (x != x2 && y != y2)
+	return C4LandscapePath::IsFree(x, y, x2, y2, [this](int32_t cellX, int32_t cellY)
 	{
-		if (PixCnt[x * PixCntPitch + y])
-			return false;
-		if (x > x2) x--; else x++;
-		if (y > y2) y--; else y++;
-	}
-	if (x != x2)
-		do
-		{
-			if (PixCnt[x * PixCntPitch + y])
-				return false;
-			if (x > x2) x--; else x++;
-		} while (x != x2);
-	else
-		while (y != y2)
-		{
-			if (PixCnt[x * PixCntPitch + y])
-				return false;
-			if (y > y2) y--; else y++;
-		}
-	return !PixCnt[x * PixCntPitch + y];
+		return PixCnt[cellX * PixCntPitch + cellY] != 0;
+	});
 }
 
 int32_t C4Landscape::GetMatHeight(int32_t x, int32_t y, int32_t iYDir, int32_t iMat, int32_t iMax)
