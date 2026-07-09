@@ -15549,7 +15549,12 @@ impl Engine {
         self.transfer_zones.retain_existing(&alive);
         self.prune_selection();
         self.process_spawn_queue(spawn_requests)?;
-        self.refresh_elimination_state();
+        let alive_owners = self.refresh_elimination_state();
+        // C4Player::Execute's Tick35 CheckElimination (C4Player.cpp:225-235)
+        // — crewless owners eliminate ONE-WAY at the boundary only.
+        if frame % 35 == 0 {
+            self.check_crew_elimination(&alive_owners);
+        }
         self.check_game_over()?;
         // Control.DoSyncCheck() closes the frame (C4Game.cpp:829)
         self.do_sync_check();
@@ -18066,12 +18071,16 @@ impl Engine {
         }
     }
 
-    fn refresh_elimination_state(&mut self) {
+    /// Refreshes the per-owner crew bookkeeping (C4Player::Crew) and
+    /// returns the owners that still hold living crew. Elimination itself
+    /// is NOT decided here — C4Player::CheckElimination runs on the Tick35
+    /// boundary only (C4Player.cpp:225-235) via `check_crew_elimination`.
+    fn refresh_elimination_state(&mut self) -> HashSet<i32> {
+        let mut active_alive = HashSet::new();
         if self.objects.is_empty() && self.known_crew_owners.is_empty() && self.players.is_empty() {
-            return;
+            return active_alive;
         }
 
-        let mut active_alive = HashSet::new();
         let mut crew_map: HashMap<i32, Vec<ObjectId>> = HashMap::new();
         for object in &self.objects {
             if !object.state.crew_member {
@@ -18104,22 +18113,25 @@ impl Engine {
                 player.set_crew(crew);
             }
         }
+        active_alive
+    }
 
+    /// C4Player::CheckElimination (C4Player.cpp:1680-1690), run from the
+    /// player execute's Tick35 arm (C4Player.cpp:225-235): a crewless
+    /// owner is eliminated ONE-WAY — C4Player::Eliminate never reverts
+    /// ("Already eliminated safety", :1684, :2015-2017). The script-player
+    /// NoEliminationCheck flag (CSPF_NoEliminationCheck,
+    /// C4Script.cpp:2879) is unmodeled — script players are unported.
+    fn check_crew_elimination(&mut self, alive_owners: &HashSet<i32>) {
         let mut known: Vec<i32> = self.known_crew_owners.iter().copied().collect();
         known.sort_unstable();
-        known.dedup();
-
         for owner in known {
-            if active_alive.contains(&owner) {
-                self.eliminated_crew_owners.remove(&owner);
-                if let Some(player) = self.players.get_mut(&owner) {
-                    if player.status() == PlayerStatus::Eliminated {
-                        player.set_status(PlayerStatus::Active);
-                    }
-                }
-            } else {
-                self.eliminated_crew_owners.insert(owner);
-                if let Some(player) = self.players.get_mut(&owner) {
+            if alive_owners.contains(&owner) {
+                continue;
+            }
+            self.eliminated_crew_owners.insert(owner);
+            if let Some(player) = self.players.get_mut(&owner) {
+                if player.status() == PlayerStatus::Active {
                     player.set_status(PlayerStatus::Eliminated);
                 }
             }
@@ -31938,6 +31950,12 @@ global func MenuCommand(state, kind, selection)
             .expect("restored object available");
         assert_eq!(snapshot.status, ObjectStatus::Inactive);
         assert!(restored.crew_members(1).is_empty());
+        // Elimination is Tick35-gated (C4Player.cpp:225-235): the restored
+        // crewless owner eliminates once the game runs to the boundary.
+        assert!(!restored.is_owner_eliminated(1));
+        for _ in 0..35 {
+            restored.tick().expect("tick succeeds");
+        }
         assert!(restored.is_owner_eliminated(1));
     }
 
@@ -39143,15 +39161,27 @@ protected func Activity() { SetActionTargets(); return(1); }
             )
             .expect("queue succeeds");
 
+        // C4Player::CheckElimination runs on the Tick35 boundary only
+        // (C4Player.cpp:225-235): the crewless owner survives frames 1-34
+        // (the C++ recruit-in-the-window grace) and eliminates at 35.
         engine.tick().expect("tick succeeds");
-
+        assert!(
+            !engine.is_owner_eliminated(1),
+            "no elimination before the Tick35 boundary"
+        );
+        for _ in 1..35 {
+            engine.tick().expect("tick succeeds");
+        }
         assert!(engine.is_owner_eliminated(1));
         assert_eq!(engine.eliminated_owners(), vec![1]);
         assert!(!engine.is_owner_eliminated(2));
     }
 
     #[test]
-    fn crew_elimination_clears_when_new_crew_spawned() {
+    fn crew_elimination_is_one_way_like_cpp() {
+        // C4Player::Eliminate never reverts (C4Player.cpp:1684 "Already
+        // eliminated safety", 2015-2017) — new crew after elimination does
+        // NOT restore the player.
         let mut engine = Engine::with_seed(0);
         let mut definition = build_definition();
         definition.set_crew_member(true);
@@ -39169,16 +39199,20 @@ protected func Activity() { SetActionTargets(); return(1); }
                 QueuedCommand::immediate(ObjectUpdate::new()).with_destroy(true),
             )
             .expect("queue succeeds");
-        engine.tick().expect("tick succeeds");
-
+        for _ in 0..35 {
+            engine.tick().expect("tick succeeds");
+        }
         assert!(engine.is_owner_eliminated(1));
 
         engine
             .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
+        for _ in 0..35 {
+            engine.tick().expect("tick succeeds");
+        }
 
-        assert!(!engine.is_owner_eliminated(1));
-        assert!(engine.eliminated_owners().is_empty());
+        assert!(engine.is_owner_eliminated(1), "elimination is one-way");
+        assert_eq!(engine.eliminated_owners(), vec![1]);
     }
 
     #[test]
@@ -39242,7 +39276,10 @@ protected func Activity() { SetActionTargets(); return(1); }
                 QueuedCommand::immediate(ObjectUpdate::new()).with_destroy(true),
             )
             .expect("queue succeeds");
-        engine.tick().expect("tick succeeds");
+        // Elimination lands at the Tick35 boundary (C4Player.cpp:225-235).
+        for _ in 0..35 {
+            engine.tick().expect("tick succeeds");
+        }
 
         assert!(engine.is_owner_eliminated(1));
         assert!(!engine.is_owner_eliminated(2));
@@ -39264,8 +39301,8 @@ protected func Activity() { SetActionTargets(); return(1); }
             .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
-        assert!(!restored.is_owner_eliminated(1));
-        assert!(restored.eliminated_owners().is_empty());
+        // One-way like C4Player::Eliminate (C4Player.cpp:2015-2017).
+        assert!(restored.is_owner_eliminated(1));
     }
 
     #[test]
