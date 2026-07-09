@@ -4550,6 +4550,9 @@ fn tolerate_script_error<T>(result: Result<T, EngineError>) -> Result<Option<T>,
             definition,
             function,
             source,
+            // Funnels consume the recovery payload before tolerating;
+            // errors reaching here without a funnel carry none.
+            recovery: _,
         }) => {
             tracing::warn!(
                 %definition,
@@ -4561,6 +4564,17 @@ fn tolerate_script_error<T>(result: Result<T, EngineError>) -> Result<Option<T>,
         }
         Err(other) => Err(other),
     }
+}
+
+/// Everything a failed outer script call mutated BEFORE the error: the
+/// partial host outcome plus the advanced RNG and audio state. C++ keeps
+/// all of it (mutations land on the live objects as they happen); the
+/// engine funnels apply it before handling the error.
+#[derive(Debug)]
+pub struct ScriptCallRecovery {
+    pub(crate) outcome: compat::EffectContextOutcome,
+    pub(crate) audio: AudioRegistry,
+    pub(crate) rng: LcgRng,
 }
 
 #[derive(Debug, Error)]
@@ -4587,6 +4601,11 @@ pub enum EngineError {
         function: String,
         #[source]
         source: ScriptError,
+        /// The failed call's PRE-ERROR outcome. C4AulExec errors abort the
+        /// call but roll nothing back (C4AulExec.cpp:1318-1342) — C++
+        /// already mutated the live objects — so the engine funnel applies
+        /// this before surfacing the error.
+        recovery: Option<Box<ScriptCallRecovery>>,
     },
     #[error("invalid script output in {function} of `{definition}`: {detail}")]
     InvalidScriptOutput {
@@ -5698,6 +5717,7 @@ impl Definition {
                 definition: id.clone(),
                 function: "load".to_string(),
                 source: parse_error.into(),
+                recovery: None,
             })?;
 
         let includes = compiled_script.includes().to_vec();
@@ -6963,6 +6983,7 @@ impl Definition {
             definition: self.id.clone(),
             function: "Initialize".to_string(),
             source,
+            recovery: None,
         })?;
         let mut batch = parse_command(&self.id, "Initialize", result)?;
         // Store updated local variables in the delta so they persist
@@ -7136,6 +7157,7 @@ impl Definition {
             definition: self.id.clone(),
             function: "Construction".to_string(),
             source,
+            recovery: None,
         })?;
         // Construction() return value is not used (it just returns 0 or nil)
         // We only care about side effects (initializing local variables, etc.)
@@ -7301,6 +7323,7 @@ impl Definition {
             definition: self.id.clone(),
             function: "Step".to_string(),
             source,
+            recovery: None,
         })?;
         let mut batch = parse_command(&self.id, "Step", result)?;
         batch.delta.local_vars = Some(updated_local_vars);
@@ -7490,6 +7513,7 @@ impl Definition {
             definition: self.id.clone(),
             function: kind.context().to_string(),
             source,
+            recovery: None,
         })?;
 
         // Action callbacks can return any value in C4Script.
@@ -7606,6 +7630,7 @@ impl Definition {
             definition: self.id.clone(),
             function: "MenuEntries".to_string(),
             source,
+            recovery: None,
         })?;
         // MenuEntries shouldn't modify local vars, so we discard them
         let entries = self.parse_context_menu_entries(value)?;
@@ -7737,6 +7762,7 @@ impl Definition {
             definition: self.id.clone(),
             function: "MenuCommand".to_string(),
             source,
+            recovery: None,
         })?;
         // Store updated local variables
         if let Some(object_update) = &mut host_effects.object_update {
@@ -7786,96 +7812,30 @@ impl Definition {
         }
 
         let args: [Value; 0] = [];
-        let physics_guard = enter_physics_context(physics);
-        let env_guard = enter_environment_context(environment, frame);
-        let guard = enter_random_context(rng);
-        let next_object_id = world.next_object_id();
-        let audio_guard = enter_audio_context(audio);
-        let object_context = compat::HostObjectContext::with_category(
+        let (value, host_effects, audio_state, rng) = self.exec_in_object_context(
+            state,
             object_id,
-            state.container,
-            state.status,
-            state.energy,
-            state.damage,
-            state.construction,
-            state.owner,
-            state.position,
-            state.velocity,
-            state.rotation,
-            &state.effects,
-            state.action.name.clone(),
-            state.action.time,
-            state.action.data,
-            state.action.phase,
-            self.action_library.clone(),
-            state.direction,
-            state.command_direction,
-            0,
-            state.action.target,
-            state.action.target2,
-            &state.vertices,
-            state.category,
-            self.ocf_base,
-            self.crew_member,
-            state.draw_transform,
-            state.base_graphics.clone(),
-        )
-        .with_definition_id(self.id.as_str())
-        .with_graphics_overlays(state.graphics_overlays.clone())
-        .with_base_graphics(state.base_graphics.clone())
-        .with_alive(state.alive)
-        .with_controller(state.controller)
-        .with_in_liquid(state.in_liquid)
-        .with_own_mass(state.own_mass)
-        .with_physicals(
-            state.info_physical,
-            state.temporary_physical,
-            state.physical_changes.clone(),
-            *self.physical(),
-        )
-        .with_walk_rotation(self.walk_rotation_seed(state))
-                .with_script_fixed_velocity(state.script_fixed_velocity)
-        .with_magic_energy(state.magic_energy)
-        .with_ocf(state.ocf);
-        let (result, mut host_effects) = compat::with_effect_context_with_state(
-            Some(object_context),
+            rng,
             global_effects,
+            physics,
+            environment,
+            frame,
             world,
-            next_object_id,
             game_over_triggered,
-            || self.run_live_object_session(function, &args, &state.local_vars, object_id),
-        );
-        let rng = guard.finish();
-        let physics_delta = physics_guard.finish();
-        let environment_delta = env_guard.finish();
-        let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
-            definition: self.id.clone(),
-            function: "Control".to_string(),
-            source,
-        })?;
-        // Store updated local variables
-        if let Some(object_update) = &mut host_effects.object_update {
-            object_update.local_vars = Some(updated_local_vars);
-        } else {
-            let mut update = ObjectUpdate::default();
-            update.local_vars = Some(updated_local_vars);
-            host_effects.object_update = Some(update);
-        }
+            audio,
+            "Control",
+            |script, cells, this| script.call_with_cells_and_this(function, &args, cells, this),
+        )?;
         // C4Object::CallControl (C4Object.cpp:3300) evaluates the script
         // result with `static_cast<bool>(...)` — C4Value raw-data truthiness
         // (C4Value.h:76,183-185): only nil, 0 and false are unhandled. Real
         // control scripts return ints (`return(1)`), never bools.
-        let handled = compat::value_raw_truthy(&value);
-
-        if !environment_delta.is_empty() {
-            host_effects.environment = Some(environment_delta);
-        }
-        if !physics_delta.is_empty() {
-            host_effects.physics = Some(physics_delta);
-        }
-
-        let audio_state = audio_guard.finish();
-        Ok((handled, host_effects, audio_state, rng))
+        Ok((
+            compat::value_raw_truthy(&value),
+            host_effects,
+            audio_state,
+            rng,
+        ))
     }
 
     /// Run one OUTER object VM call on LIVE local cells registered as the
@@ -8047,11 +8007,11 @@ impl Definition {
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let value = result.map_err(|source| EngineError::Script {
-            definition: self.id.clone(),
-            function: label.to_string(),
-            source,
-        })?;
+        // The outcome folds for BOTH exits: on a script error the partial
+        // outcome — everything mutated before the unwind, including the
+        // cells' local writes — travels as the error's recovery payload
+        // (C4AulExec aborts the call but rolls nothing back,
+        // C4AulExec.cpp:1318-1342).
         // Store updated local variables — the final cell snapshot carries
         // nested-call writes too (shared live storage).
         let updated_local_vars = cells.snapshot();
@@ -8071,6 +8031,21 @@ impl Definition {
         }
 
         let audio_state = audio_guard.finish();
+        let value = match result {
+            Ok(value) => value,
+            Err(source) => {
+                return Err(EngineError::Script {
+                    definition: self.id.clone(),
+                    function: label.to_string(),
+                    source,
+                    recovery: Some(Box::new(ScriptCallRecovery {
+                        outcome: host_effects,
+                        audio: audio_state,
+                        rng,
+                    })),
+                });
+            }
+        };
         Ok((value, host_effects, audio_state, rng))
     }
 
@@ -8210,6 +8185,7 @@ impl Definition {
             definition: format!("{}::{}", self.id, function),
             function: "MenuCallback".to_string(),
             source,
+            recovery: None,
         })?;
         // Store updated local variables
         if let Some(object_update) = &mut host_effects.object_update {
@@ -8758,6 +8734,7 @@ impl Definition {
                 definition: format!("{}::{}::{}", self.id, effect.name, function_label),
                 function: "EffectCallback".to_string(),
                 source,
+                recovery: None,
             })
     }
 }
@@ -8785,6 +8762,7 @@ impl ScenarioScript {
                 definition: name.clone(),
                 function: "load".to_string(),
                 source: ScriptError::from(source),
+                recovery: None,
             })?;
         let append_script = (!compiled.appends().is_empty())
             .then(|| compiled.clone().without_static_declarations());
@@ -8980,6 +8958,7 @@ impl ScenarioScript {
                     definition: self.name.clone(),
                     function: function.to_string(),
                     source,
+                    recovery: None,
                 }),
             ),
         };
@@ -13558,7 +13537,7 @@ impl Engine {
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
-        let (value, outcome, audio_state, new_rng) = definition.call_object_function(
+        let call = definition.call_object_function(
             &state_snapshot,
             object_id,
             function,
@@ -13571,7 +13550,21 @@ impl Engine {
             world,
             self.game_over_triggered,
             self.audio_registry.clone(),
-        )?;
+        );
+        let (value, outcome, audio_state, new_rng) = match call {
+            Ok(ok) => ok,
+            // Pre-error mutations persist (C++ mutated the live objects).
+            Err(error) => {
+                return Err(self.apply_script_error_recovery(
+                    error,
+                    index,
+                    &action_library,
+                    object_id,
+                    &definition_id,
+                    true,
+                ));
+            }
+        };
         self.rng = new_rng;
         self.audio_registry = audio_state;
         self.apply_action_callback_outcome(
@@ -13613,7 +13606,7 @@ impl Engine {
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
-        let (value, outcome, audio_state, new_rng) = definition.direct_exec_object_expression(
+        let call = definition.direct_exec_object_expression(
             &state_snapshot,
             object_id,
             source,
@@ -13626,7 +13619,21 @@ impl Engine {
             world,
             self.game_over_triggered,
             self.audio_registry.clone(),
-        )?;
+        );
+        let (value, outcome, audio_state, new_rng) = match call {
+            Ok(ok) => ok,
+            // Pre-error mutations persist (C++ mutated the live objects).
+            Err(error) => {
+                return Err(self.apply_script_error_recovery(
+                    error,
+                    index,
+                    &action_library,
+                    object_id,
+                    &definition_id,
+                    true,
+                ));
+            }
+        };
         self.rng = new_rng;
         self.audio_registry = audio_state;
         self.apply_action_callback_outcome(
@@ -13734,7 +13741,7 @@ impl Engine {
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
-        let (value, outcome, audio_state, new_rng) = definition.call_object_function(
+        let call = definition.call_object_function(
             &state_snapshot,
             object_id,
             function,
@@ -13747,7 +13754,21 @@ impl Engine {
             world,
             self.game_over_triggered,
             self.audio_registry.clone(),
-        )?;
+        );
+        let (value, outcome, audio_state, new_rng) = match call {
+            Ok(ok) => ok,
+            // Pre-error mutations persist (C++ mutated the live objects).
+            Err(error) => {
+                return Err(self.apply_script_error_recovery(
+                    error,
+                    index,
+                    action_library,
+                    object_id,
+                    definition_id,
+                    false,
+                ));
+            }
+        };
         self.rng = new_rng;
         self.audio_registry = audio_state;
         self.apply_callback_outcome(
@@ -13845,7 +13866,7 @@ impl Engine {
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
-        let (handled, outcome, audio_state, new_rng) = definition.call_control(
+        let call = definition.call_control(
             &state_snapshot,
             cursor,
             &function_name,
@@ -13857,7 +13878,21 @@ impl Engine {
             world,
             self.game_over_triggered,
             self.audio_registry.clone(),
-        )?;
+        );
+        let (handled, outcome, audio_state, new_rng) = match call {
+            Ok(ok) => ok,
+            // Pre-error mutations persist (C++ mutated the live objects).
+            Err(error) => {
+                return Err(self.apply_script_error_recovery(
+                    error,
+                    index,
+                    &action_library,
+                    cursor,
+                    &definition_id,
+                    true,
+                ));
+            }
+        };
         self.rng = new_rng;
         self.audio_registry = audio_state;
         self.apply_action_callback_outcome(
@@ -16510,6 +16545,53 @@ impl Engine {
         )
     }
 
+    /// Apply the pre-error mutations a failed outer call carried before
+    /// handing the error on (C4AulExec.cpp:1318-1342: the error aborts the
+    /// call, but C++ already mutated the live objects — nothing rolls
+    /// back). Errors without a payload pass through untouched.
+    fn apply_script_error_recovery(
+        &mut self,
+        error: EngineError,
+        index: usize,
+        action_library: &ActionLibrary,
+        object_id: ObjectId,
+        definition_id: &str,
+        clamp_velocity: bool,
+    ) -> EngineError {
+        let EngineError::Script {
+            definition,
+            function,
+            source,
+            recovery: Some(recovery),
+        } = error
+        else {
+            return error;
+        };
+        let ScriptCallRecovery {
+            outcome,
+            audio,
+            rng,
+        } = *recovery;
+        self.rng = rng;
+        self.audio_registry = audio;
+        if let Err(apply_error) = self.apply_callback_outcome(
+            index,
+            outcome,
+            action_library,
+            object_id,
+            definition_id,
+            clamp_velocity,
+        ) {
+            return apply_error;
+        }
+        EngineError::Script {
+            definition,
+            function,
+            source,
+            recovery: None,
+        }
+    }
+
     fn apply_action_callback_outcome(
         &mut self,
         index: usize,
@@ -18138,6 +18220,7 @@ impl Engine {
                     definition,
                     function,
                     source,
+                    recovery: _,
                 }) => {
                     tracing::warn!(
                         %definition,
@@ -26829,6 +26912,7 @@ impl Engine {
                     definition,
                     function,
                     source,
+                    recovery: _,
                 }) => {
                     tracing::warn!(
                         %definition,
@@ -44299,6 +44383,61 @@ public func Query(pA) {
             engine.objects[idx].state.local_vars.get("state"),
             Some(&Value::Int(42)),
             "the deepest write is the one that persists"
+        );
+    }
+
+    // C4AulExec errors unwind the call but leave every mutation made
+    // BEFORE the error in place — C++ mutates live state chronologically
+    // (C4AulExec.cpp:1318-1342 logs and continues; nothing is rolled
+    // back). An OUTER call that errors must still fold its partial
+    // outcome: local writes, foreign-object mutations and the RNG draws
+    // it made.
+    #[test]
+    fn outer_call_error_keeps_pre_error_mutations_like_cpp() {
+        let script = r#"#strict
+local state;
+public func Break(pOther) {
+  state = 5;
+  DoDamage(3, pOther);
+  var pNone;
+  pNone->Boom();
+  state = 9;
+  return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("Targ"))
+            .expect("target registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("Targ").with_category(CATEGORY_OBJECT))
+            .expect("target spawns");
+
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        let result = engine.call_object_function(idx, "Break", vec![Value::Object(target.as_u64())]);
+        assert!(
+            matches!(result, Err(EngineError::Script { .. })),
+            "the nil deref aborts the call with a script error"
+        );
+
+        let idx = engine.find_object_index(actor).expect("actor exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("state"),
+            Some(&Value::Int(5)),
+            "the pre-error local write persists; the post-error one never ran"
+        );
+        let target_idx = engine.find_object_index(target).expect("target exists");
+        assert_eq!(
+            engine.objects[target_idx].state.damage, 3,
+            "the pre-error foreign DoDamage persists (C++ mutated the live object)"
         );
     }
 
