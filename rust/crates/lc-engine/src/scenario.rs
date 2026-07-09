@@ -4677,9 +4677,9 @@ fn split_outside_brackets(text: &str) -> Vec<&str> {
 /// One serialized C4Value (C4Value::CompileFunc, C4Value.cpp:717-800 +
 /// GetC4VID :368-394): `A`=any (zero data reads back nil, nonzero guesses
 /// int), `i`=int, `b`=bool, `O`=enumerated object number (0 = no object),
-/// `a[size;elems]`=array with trailing nils omitted on write. `I` (C4ID),
-/// `S` (string-table id) and `m` (map) are not modeled yet — they read as
-/// nil with a warning.
+/// `I`=C4ID stored as its signed 32-bit payload, `a[size;elems]`=array with
+/// trailing nils omitted on write. `S` (string-table id) and `m` (map) are
+/// not modeled yet — they read as nil with a warning.
 fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Value, ScenarioError> {
     use lc_script::Value;
     let parse_error = |detail: String| {
@@ -4704,6 +4704,18 @@ fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Val
         'O' => Ok(match int_payload()? {
             number if number > 0 => Value::Object(number as u64),
             _ => Value::Nil,
+        }),
+        'I' => Ok(match int_payload()? {
+            0 => Value::Nil,
+            raw @ 1..=9999 => Value::C4Id(format!("{raw:04}")),
+            raw => Value::C4Id(
+                (raw as u32)
+                    .to_le_bytes()
+                    .into_iter()
+                    .take_while(|byte| *byte != 0)
+                    .map(char::from)
+                    .collect(),
+            ),
         }),
         'a' => {
             let inner = payload
@@ -4733,7 +4745,7 @@ fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Val
             }
             Ok(Value::Array(elements))
         }
-        'I' | 'S' | 'm' => {
+        'S' | 'm' => {
             tracing::warn!(
                 value = encoded,
                 "LocalNamed C4Value type not modeled yet; reading as nil"
@@ -10144,9 +10156,9 @@ public func ActualizePhase(pClonk)
     // CompileFunc, C4ValueMap.cpp:236-295): per-object script locals load
     // verbatim with the C4Value type-char encoding (GetC4VID,
     // C4Value.cpp:368-394) — A=any (zero data reads back nil), i=int,
-    // b=bool, O=enumerated object number, a[size;elems]=array with
-    // trailing nils omitted. GoldRush trees carry MotionThreshold this
-    // way; bandit AI state (iOwner) too.
+    // b=bool, I=C4ID, O=enumerated object number, a[size;elems]=array with
+    // trailing nils omitted. The I payloads below are verbatim C++-written
+    // Dragon Rock values (C4Value.cpp:717-800; C4Id.cpp:26-45).
     #[test]
     fn objects_txt_restores_named_locals_like_cpp() {
         let dir = tempdir().expect("tempdir");
@@ -10170,7 +10182,9 @@ public func ActualizePhase(pClonk)
         std::fs::write(
             scenario_dir.join("Objects.txt"),
             "[Object]\nid=GOOD\nNumber=95\nStatus=1\nX=5\nY=5\n\
-             LocalNamed=5;iNum=i17,fFlag=b1,pRef=O80,junk=A0,aList=a[4;i1,i2]\n",
+             LocalNamed=10;iNum=i17,fFlag=b1,pRef=O80,junk=A0,aList=a[4;i1,i2],\
+             idSpell=I1112688205,aiFirst=I1145979202,numeric=I1337,none=I0,\
+             aSpells=a[3;I959858757,I1145979202]\n",
         )
         .expect("write objects");
 
@@ -10207,6 +10221,35 @@ public func ActualizePhase(pClonk)
                 lc_script::Value::Nil,
             ])),
             "arrays restore the declared size; trailing nils are omitted on write"
+        );
+        assert_eq!(
+            locals.get("idSpell"),
+            Some(&lc_script::Value::C4Id("MFRB".to_string())),
+            "C++'s signed int32 C4ID payload decodes in little-endian byte order"
+        );
+        assert_eq!(
+            locals.get("aiFirst"),
+            Some(&lc_script::Value::C4Id("BAND".to_string())),
+            "callback-suffix IDs survive even when they are not definitions"
+        );
+        assert_eq!(
+            locals.get("numeric"),
+            Some(&lc_script::Value::C4Id("1337".to_string())),
+            "numeric C4IDs use the four-digit C4IdText form"
+        );
+        assert_eq!(
+            locals.get("none"),
+            Some(&lc_script::Value::Nil),
+            "C4ID_None remains falsey instead of becoming the truthy text NONE"
+        );
+        assert_eq!(
+            locals.get("aSpells"),
+            Some(&lc_script::Value::Array(vec![
+                lc_script::Value::C4Id("EH69".to_string()),
+                lc_script::Value::C4Id("BAND".to_string()),
+                lc_script::Value::Nil,
+            ])),
+            "nested C4IDs restore through the recursive array decoder"
         );
     }
 
