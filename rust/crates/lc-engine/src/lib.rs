@@ -6065,14 +6065,25 @@ impl Definition {
     /// join in `Engine::compute_object_ocf`. The raw `ocf_base` seed is the
     /// fixture shortcut for def flags this model does not carry.
     pub fn compute_ocf(&self, state: &ObjectState) -> u32 {
-        let mut ocf = crate::ocf::compute(
-            self.ocf_base | OCF_NORMAL,
-            self.crew_member,
-            state.alive,
-            state.status,
-            state.container.is_some(),
-            state.construction,
-        );
+        // OCF_Normal: the OCF is never zero (SetOCF, C4Object.cpp:547-548)
+        let mut ocf = self.ocf_base | OCF_NORMAL;
+        // OCF_NotContained (SetOCF, C4Object.cpp:627-629)
+        if state.container.is_none() {
+            ocf |= crate::ocf::NOT_CONTAINED | crate::ocf::AVAILABLE;
+        }
+        // OCF_FullCon (SetOCF, C4Object.cpp:567-569)
+        if state.construction >= FULL_CON {
+            ocf |= crate::ocf::FULL_CON;
+        }
+        if self.crew_member {
+            ocf |= crate::ocf::LIVING;
+        }
+        if state.alive {
+            ocf |= crate::ocf::ALIVE;
+            if self.crew_member {
+                ocf |= crate::ocf::CREW_MEMBER | crate::ocf::FIGHT_READY;
+            }
+        }
         // OCF_Construct: can be built outside (SetOCF, C4Object.cpp:549-552)
         if self.constructable
             && state.construction < FULL_CON
