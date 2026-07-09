@@ -6060,15 +6060,27 @@ impl Definition {
         self.rotateable = rotateable.max(0);
     }
 
+    /// The def+state arm of C4Object::SetOCF (C4Object.cpp:526-666).
+    /// Context-dependent bits (HitSpeeds, Chop, InSolid, InFree, Available)
+    /// join in `Engine::compute_object_ocf`. The raw `ocf_base` seed is the
+    /// fixture shortcut for def flags this model does not carry.
     pub fn compute_ocf(&self, state: &ObjectState) -> u32 {
         let mut ocf = crate::ocf::compute(
-            self.ocf_base(),
+            self.ocf_base | OCF_NORMAL,
             self.crew_member,
             state.alive,
             state.status,
             state.container.is_some(),
             state.construction,
         );
+        // OCF_Rotate (SetOCF, C4Object.cpp:576-580)
+        if self.rotateable > 0 {
+            ocf |= crate::ocf::ROTATE;
+        }
+        // OCF_Grab from the Grab DefCore value (SetOCF, C4Object.cpp:553-555)
+        if self.grab > 0 {
+            ocf |= crate::ocf::GRAB;
+        }
         if self.collectible {
             ocf |= crate::ocf::CARRYABLE;
         }
