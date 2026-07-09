@@ -379,6 +379,11 @@ pub const CATEGORY_SORT_LIMIT: i32 = CATEGORY_STATIC_BACK
     | CATEGORY_OBJECT;
 pub const DEFAULT_CATEGORY: i32 = CATEGORY_STATIC_BACK;
 
+/// `C4D_Grab_Put` / `C4D_Grab_Get` (C4Def.h:80-81): the GrabPutGet
+/// DefCore bits feeding OCF_Container (SetOCF, C4Object.cpp:658-660).
+pub const GRAB_PUT_GET_PUT: i32 = 1;
+pub const GRAB_PUT_GET_GET: i32 = 2;
+
 pub const LINE_CONNECT_POWER_INPUT: u32 = 1;
 pub const LINE_CONNECT_POWER_OUTPUT: u32 = 1 << 1;
 pub const LINE_CONNECT_LIQUID_INPUT: u32 = 1 << 2;
@@ -5578,6 +5583,13 @@ pub struct Definition {
     /// `AttractLightning` DefCore flag (C4Def.cpp:391): OCF_AttractLightning
     /// at FullCon (SetOCF, C4Object.cpp:623-626).
     attract_lightning: bool,
+    /// `Entrance` DefCore rect (C4Def.cpp:309): the enter/activate area
+    /// (OCF_Entrance, SetOCF C4Object.cpp:584-587; area check in
+    /// GetOCFForPos, C4Object.cpp:1149-1153).
+    entrance_rect: Option<DefinitionRect>,
+    /// `RotatedEntrance` (C4Def.cpp:377): 0 = upright only, 1 = any
+    /// rotation, N = rotations up to N degrees (SetOCF, C4Object.cpp:586).
+    rotated_entrance: i32,
     /// The [Physical] DefCore section (C4Def::Physical).
     physical: PhysicalInfo,
     /// Real C4Script content gets the C++ callback arguments — no parameters
@@ -5723,6 +5735,8 @@ impl Definition {
             edible: false,
             prey: false,
             attract_lightning: false,
+            entrance_rect: None,
+            rotated_entrance: 0,
             physical: PhysicalInfo::default(),
             c4_callback_args: false,
             solid_mask_pixels: SolidMaskPixels::default(),
@@ -5894,6 +5908,8 @@ impl Definition {
         definition.set_edible(resource.core.edible);
         definition.set_prey(resource.core.prey);
         definition.set_attract_lightning(resource.core.attract_lightning);
+        definition.set_entrance_rect(resource.core.entrance.map(DefinitionRect::from));
+        definition.set_rotated_entrance(resource.core.rotated_entrance);
         Ok(definition)
     }
 
@@ -6144,6 +6160,16 @@ impl Definition {
         if self.exclusive {
             ocf |= crate::ocf::EXCLUSIVE;
         }
+        // OCF_Entrance: positive entrance area, FullCon, and the
+        // RotatedEntrance rotation gate (SetOCF, C4Object.cpp:584-587)
+        if self
+            .entrance_rect
+            .is_some_and(|rect| rect.width > 0 && rect.height > 0)
+            && ocf & crate::ocf::FULL_CON != 0
+            && (self.rotated_entrance == 1 || state.rotation <= self.rotated_entrance)
+        {
+            ocf |= crate::ocf::ENTRANCE;
+        }
         // OCF_Grab: Grab DefCore value, never on StaticBack objects
         // (SetOCF, C4Object.cpp:553-555)
         if self.grab > 0 && state.category & CATEGORY_STATIC_BACK == 0 {
@@ -6179,6 +6205,13 @@ impl Definition {
                     ocf |= crate::ocf::COLLECTION;
                 }
             }
+        }
+        // OCF_Container: Grab_Put, Grab_Get or an open entrance (SetOCF,
+        // C4Object.cpp:658-660)
+        if self.grab_put_get & (GRAB_PUT_GET_PUT | GRAB_PUT_GET_GET) != 0
+            || ocf & crate::ocf::ENTRANCE != 0
+        {
+            ocf |= crate::ocf::CONTAINER;
         }
         ocf
     }
@@ -6592,6 +6625,18 @@ impl Definition {
 
     pub fn set_attract_lightning(&mut self, attract_lightning: bool) {
         self.attract_lightning = attract_lightning;
+    }
+
+    pub fn entrance_rect(&self) -> Option<DefinitionRect> {
+        self.entrance_rect
+    }
+
+    pub fn set_entrance_rect(&mut self, entrance_rect: Option<DefinitionRect>) {
+        self.entrance_rect = entrance_rect;
+    }
+
+    pub fn set_rotated_entrance(&mut self, rotated_entrance: i32) {
+        self.rotated_entrance = rotated_entrance;
     }
 
     pub fn physical(&self) -> &PhysicalInfo {
@@ -47487,6 +47532,104 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             0,
             "incomplete objects do not attract lightning (C4Object.cpp:625)"
         );
+    }
+
+    #[test]
+    fn ocf_entrance_requires_area_full_con_and_rotation_gate() {
+        // OCF_Entrance: Entrance.Wdt/Hgt > 0, OCF_FullCon, and either
+        // RotatedEntrance == 1 (any rotation) or r <= RotatedEntrance
+        // (SetOCF, C4Object.cpp:584-587).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Hut");
+        definition.set_entrance_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::CONTAINER,
+            0,
+            "an entrance makes a container (C4Object.cpp:658-660)"
+        );
+
+        engine.objects[idx].state.construction = FULL_CON - 1;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & (ocf::ENTRANCE | ocf::CONTAINER),
+            0,
+            "incomplete buildings cannot be entered (OCF_FullCon gate)"
+        );
+        engine.objects[idx].state.construction = FULL_CON;
+
+        engine.objects[idx].state.rotation = 10;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::ENTRANCE,
+            0,
+            "RotatedEntrance defaults 0: rotated objects close (r <= 0 fails)"
+        );
+    }
+
+    #[test]
+    fn ocf_entrance_rotation_thresholds_match_cpp() {
+        // RotatedEntrance == 1 admits ANY rotation; N admits r <= N
+        // (SetOCF, C4Object.cpp:586).
+        let mut engine = Engine::with_seed(4);
+        let mut any_rotation = simple_definition("Windmill");
+        any_rotation.set_entrance_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        any_rotation.set_rotated_entrance(1);
+        engine
+            .register_definition(any_rotation)
+            .expect("definition registers");
+        let mut threshold = simple_definition("Tower");
+        threshold.set_entrance_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        threshold.set_rotated_entrance(45);
+        engine
+            .register_definition(threshold)
+            .expect("definition registers");
+
+        let spinner = engine
+            .spawn_object(SpawnConfig::new("Windmill").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(spinner).expect("object exists");
+        engine.objects[idx].state.rotation = 270;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+
+        let tower = engine
+            .spawn_object(SpawnConfig::new("Tower").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(tower).expect("object exists");
+        engine.objects[idx].state.rotation = 45;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+        engine.objects[idx].state.rotation = 46;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+    }
+
+    #[test]
+    fn ocf_container_comes_from_grab_put_get_without_entrance() {
+        // OCF_Container: C4D_Grab_Put or C4D_Grab_Get suffices even with
+        // no entrance (SetOCF, C4Object.cpp:658-660).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Chest");
+        definition.set_grab_put_get(1); // C4D_Grab_Put
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Chest").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::CONTAINER, 0);
+        assert_eq!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
     }
 
     #[test]
