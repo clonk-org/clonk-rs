@@ -23062,6 +23062,67 @@ impl Engine {
             })
     }
 
+    /// C4Object::CloseMenu (C4Object.cpp:2033-2041) for the engine-side
+    /// control paths that run outside a script scope (the host-fn twin is
+    /// compat::close_object_menu). Force skips the MenuQueryCancel query
+    /// (C4Menu::TryClose, C4Menu.cpp:317-320); a soft close of a USER menu
+    /// asks MenuQueryCancel(Selection, ParentObject) on the command object
+    /// first (C4ObjectMenu::IsCloseDenied, C4ObjectMenu.cpp:57-76) — a
+    /// truthy answer keeps the menu and fails the close. CB_Scenario menus
+    /// (no command object) skip the query here — see the PORT_STATUS
+    /// `object menus` row.
+    pub(crate) fn close_object_menu(
+        &mut self,
+        object_id: ObjectId,
+        force: bool,
+    ) -> Result<bool, EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(true);
+        };
+        let Some(menu) = self.objects[index].state.menu.clone() else {
+            return Ok(true); // no menu -> close OK (C4Object.cpp:2035)
+        };
+        if !force && menu.user_menu && compat::begin_menu_close_query(object_id) {
+            // Missing handler = silent miss (the "~" in PSF_MenuQueryCancel,
+            // C4GameScript.h); callee errors fall back to close-OK like the
+            // C++ fail-safe Call.
+            let command_index = menu
+                .command_object
+                .and_then(|command_object| self.find_object_index(command_object))
+                .filter(|&command_index| {
+                    self.definitions
+                        .get(&self.objects[command_index].definition_id)
+                        .is_some_and(|definition| definition.has_function("MenuQueryCancel"))
+                });
+            let denied = match command_index {
+                Some(command_index) => {
+                    let pars = vec![
+                        Value::Int(menu.selection),
+                        object_reference_value(object_id),
+                    ];
+                    tolerate_script_error(self.call_object_function(
+                        command_index,
+                        "MenuQueryCancel",
+                        pars,
+                    ))?
+                    .map(|value| value.as_bool())
+                    .unwrap_or(false)
+                }
+                None => false,
+            };
+            compat::end_menu_close_query(object_id);
+            if denied {
+                return Ok(false);
+            }
+        }
+        // delete Menu (C4Object.cpp:2038) — dropping the state is the
+        // close in this model.
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects[index].state.menu = None;
+        }
+        Ok(true)
+    }
+
     /// Debug/test helper: the object's script menu state (outer None =
     /// object missing; inner None = no menu open).
     pub fn debug_object_menu(&self, id: u64) -> Option<Option<ObjectMenuState>> {
@@ -36398,6 +36459,105 @@ func Trigger() {
             engine.debug_object_menu(clonk.as_u64()),
             Some(None),
             "SyncClearance closes menus (C4Object.cpp:3842)"
+        );
+    }
+
+    #[test]
+    fn control_set_command_soft_closes_the_menu_and_a_denial_aborts_like_cpp() {
+        // C4Object::SetCommand with fControl (C4Object.cpp:3938-3981):
+        // ClearCommands runs first (:3941), then the menu must agree to a
+        // SOFT close — `if (!CloseMenu(false)) return;` (:3944-3946). A
+        // MenuQueryCancel denial (C4ObjectMenu::IsCloseDenied,
+        // C4ObjectMenu.cpp:57-76) keeps the menu open and aborts the whole
+        // SetCommand: no ControlCommand overload, no command push — but the
+        // stack stays cleared.
+        let script = r#"
+        local deny;
+        local queried;
+        func SetDeny(flag) { deny = flag; }
+        func MenuQueryCancel(sel, menuObj) { queried = queried + 1; return deny; }
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        "#;
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player registers");
+        let clonk = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_action(ActionState::new("Idle")),
+            )
+            .expect("clonk spawns");
+        engine.set_crew_cursor(1, Some(clonk)).expect("cursor set");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+        let queried = |engine: &Engine| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine.objects[idx]
+                .state
+                .local_vars
+                .get("queried")
+                .cloned()
+                .unwrap_or(Value::Nil)
+        };
+
+        // Undenied menu: the control command closes it and pushes.
+        call(&mut engine, "OpenMenu", Vec::new());
+        engine
+            .player_object_command(1, CommandId::Dig, None, 10, 20)
+            .expect("command routes");
+        assert_eq!(
+            engine.debug_object_menu(clonk.as_u64()),
+            Some(None),
+            "SetCommand(fControl) closed the undenied menu (C4Object.cpp:3945)"
+        );
+        assert_eq!(queried(&engine), Value::Int(1), "the soft close queried");
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine.objects[idx].commands.snapshot().command_names(),
+            vec!["Dig".to_string()],
+            "the command was set after the close"
+        );
+
+        // Denied menu: it survives, and the SetCommand aborts AFTER the
+        // ClearCommands — the old Dig is gone, nothing new is pushed.
+        // (Throw/Drop route as C4P_Command_Add and never touch the menu,
+        // C4ObjectCom.cpp:1020-1036 — use another Set-mode command.)
+        call(&mut engine, "OpenMenu", Vec::new());
+        call(&mut engine, "SetDeny", vec![Value::Int(1)]);
+        engine
+            .player_object_command(1, CommandId::Dig, None, 30, 40)
+            .expect("command routes");
+        assert!(
+            engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .is_some(),
+            "the denied menu stays open (C4Object.cpp:3946)"
+        );
+        assert_eq!(queried(&engine), Value::Int(2));
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert!(
+            engine.objects[idx].commands.snapshot().is_empty(),
+            "the abort still cleared the stack (ClearCommands ran first, :3941)"
         );
     }
 
