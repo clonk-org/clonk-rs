@@ -6,13 +6,13 @@
 
 ## Status
 
-- Pinned Goldrush (`LC_PIN_SEED=424242`) matches through frame **218**.
-- First mismatch: frame **219**, object 1343 — Rust `Swim`, phase 4,
-  `fix_y=28730976`; C++ `Turn`, phase 1, `fix_y=28698212`.
-- Latest closed wall: frame 192 duplicated WIPF #565's synchronous `Sit`
-  StartCall, shifting global RNG. Runtime folds now preserve
-  `callbacks_dispatched`; callback order matches C++ Start→End/Abort. The
-  production `C4ActionCallbacks.h` differential covers count and order.
+- Pinned Goldrush (`LC_PIN_SEED=424242`) matches through frame **308**.
+- First mismatch: frame **309**, FISH #1343 command direction — Rust `Right`,
+  C++ `Down`.
+- Latest closed wall: frame 219 directly assigned DFA_SWIM facing, bypassing
+  `SetDir`, its `TurnAction`, and fixed-position resync. WALK/HANGLE/DIG/SWIM
+  now share the C++ path; the production `C4ActionDirection.h` differential
+  freezes FISH #1343's exact velocity, action, phase, and fixed coordinates.
 - Foundational fixed-point and RNG gaps are closed: object motion is signed
   16.16 `C4Fixed`; `Random()` uses the C++ LCG and global draw ledger.
 - Scenario coverage: 93/93 load and apply; content audit 92/93. The remaining

@@ -161,6 +161,71 @@ fn action_direction_engine() -> (Engine, crate::ObjectId) {
     (engine, id)
 }
 
+fn swim_action_direction_engine() -> (Engine, crate::ObjectId) {
+    let mut definition =
+        Definition::from_script("FISH", "Fish", "#strict\n").expect("oracle fixture compiles");
+    definition.configure_actions(
+        Some("Swim".to_string()),
+        HashMap::from([
+            (
+                "Swim".to_string(),
+                ActionSpec::default()
+                    .with_procedure("SWIM")
+                    .with_directions(2)
+                    .with_length(20)
+                    .with_delay(1)
+                    .with_next("Swim")
+                    .with_turn_action("Turn"),
+            ),
+            (
+                "Turn".to_string(),
+                ActionSpec::default()
+                    .with_procedure("SWIM")
+                    .with_directions(2)
+                    .with_length(15)
+                    .with_delay(3)
+                    .with_next("Swim"),
+            ),
+        ]),
+    );
+    definition.set_physical(PhysicalInfo {
+        swim: 100_000,
+        ..PhysicalInfo::default()
+    });
+
+    let mut engine = Engine::with_seed(0);
+    engine.set_physics(PhysicsSettings::new(0, 20, -20));
+    engine
+        .register_definition(definition)
+        .expect("oracle fixture registers");
+    let mut action = ActionState::new("Swim");
+    action.phase = 3;
+    action.time = 103;
+    let id = engine
+        .spawn_object(
+            SpawnConfig::new("FISH")
+                .with_position(crate::Vector2::new(873, 438))
+                .with_fixed_position(FixedVec2::new(
+                    C4Fixed::from_raw(57_212_928),
+                    C4Fixed::from_raw(28_737_532),
+                ))
+                .with_fixed_velocity(FixedVec2::new(
+                    C4Fixed::ZERO,
+                    C4Fixed::from_raw(-6_556),
+                ))
+                .with_action(action)
+                .with_direction(Direction::Right)
+                .with_command_direction(CommandDirection::Left)
+                .with_category(CATEGORY_OBJECT)
+                .with_mobile(true)
+                .with_loaded(true),
+        )
+        .expect("oracle fixture spawns");
+    let idx = engine.find_object_index(id).expect("swimmer exists");
+    engine.objects[idx].state.in_liquid = true;
+    (engine, id)
+}
+
 fn action_callbacks_engine(case: &str) -> (Engine, crate::ObjectId) {
     let script = r#"#strict
 local callbackOrder, startCount, oldCount;
@@ -949,7 +1014,112 @@ func Trigger(object pOther) {
         );
     }
 
-    // 13. C4Object::SetAction callback dispatch (C4Object.cpp:4172-4208).
+    // 13. C4Object::ExecAction DFA_SWIM + SetDir ordering
+    //     (C4Object.cpp:4946-4984, 4235-4254, 4168-4169). This is the
+    //     minimized Goldrush frame-219 FISH case: Left ComDir creates a raw
+    //     negative xdir, which must fire Swim.TurnAction and snap both fixed
+    //     coordinates before movement while stale Swim advances Turn's phase.
+    {
+        let section = &golden["action_swim_direction"];
+
+        let (mut exec_action, id) = swim_action_direction_engine();
+        let idx = exec_action
+            .find_object_index(id)
+            .expect("oracle swimmer exists");
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "returned_early",
+            0,
+            i64::from(exec_action.apply_physics_at_index(idx)),
+        );
+        let object = &exec_action.objects[idx];
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "steered_xdir",
+            i(section, "steered_xdir"),
+            i64::from(object.fixed_velocity.x.val()),
+        );
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "steered_ydir",
+            i(section, "steered_ydir"),
+            i64::from(object.fixed_velocity.y.val()),
+        );
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "action_is_turn",
+            i(section, "action_is_turn"),
+            i64::from(object.state.action.name == "Turn"),
+        );
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "direction",
+            i(section, "direction"),
+            i64::from(object.state.direction.to_script_value()),
+        );
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "command_direction",
+            i(section, "command_direction"),
+            i64::from(object.state.command_direction.to_script_value()),
+        );
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "fix_x_after_set_dir",
+            i(section, "fix_x_after_set_dir"),
+            i64::from(object.fixed_position.x.val()),
+        );
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "fix_y_after_set_dir",
+            i(section, "fix_y_after_set_dir"),
+            i64::from(object.fixed_position.y.val()),
+        );
+
+        let (mut full_frame, id) = swim_action_direction_engine();
+        full_frame.tick().expect("oracle frame executes");
+        let object = &full_frame.objects[full_frame
+            .find_object_index(id)
+            .expect("oracle swimmer survives")];
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "action_phase",
+            i(section, "action_phase"),
+            i64::from(object.state.action.phase),
+        );
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "action_time",
+            i(section, "action_time"),
+            i64::from(object.state.action.time),
+        );
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "fix_x_after_move",
+            i(section, "fix_x_after_move"),
+            i64::from(object.fixed_position.x.val()),
+        );
+        expect_eq(
+            "action_swim_direction",
+            0,
+            "fix_y_after_move",
+            i(section, "fix_y_after_move"),
+            i64::from(object.fixed_position.y.val()),
+        );
+    }
+
+    // 14. C4Object::SetAction callback dispatch (C4Object.cpp:4172-4208).
     //     Minimized from Goldrush frame 192, WIPF #565: script SetAction
     //     synchronously fires the new StartCall exactly once and before the
     //     old AbortCall; natural phase wraps likewise fire Start before End.
@@ -994,7 +1164,7 @@ func Trigger(object pOther) {
         );
     }
 
-    // 14. C4SolidMask constructor bitmap selection (C4SolidMask.cpp:400-412,
+    // 15. C4SolidMask constructor bitmap selection (C4SolidMask.cpp:400-412,
     //     C4Object.cpp:5908-5923). Minimized from Goldrush frame 184, CTWR
     //     #1351: source pixel (219,86) is transparent in Graphics.png but
     //     opaque in Graphics2.png. SetGraphics selects Graphics2 and rebuilds
@@ -1065,7 +1235,7 @@ func Trigger(object pOther) {
         }
     }
 
-    // 15. Movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 16. Movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    fix_x += xdir; fix_y += (ydir += gravity); matching C4Movement.cpp.
     for scn in golden["movement"].as_array().unwrap() {
         let name = scn["name"].as_str().unwrap_or("?");

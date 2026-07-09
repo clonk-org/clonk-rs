@@ -19010,7 +19010,7 @@ impl Engine {
             pull_handled = true;
         }
 
-        let mut walk_set_direction = None;
+        let mut exec_set_direction = None;
         {
             let physical = self.object_physical(idx);
             // At-limit physical training before the ComDir movement: Scale
@@ -19363,23 +19363,23 @@ impl Engine {
                 .clamp_fixed_velocity(&mut object.fixed_velocity);
             object.refresh_velocity_from_fixed();
             match procedure {
-                ActionProcedure::Walk => {
-                    walk_set_direction = if object.fixed_velocity.x < C4Fixed::ZERO {
-                        Some(Direction::Left)
-                    } else if object.fixed_velocity.x > C4Fixed::ZERO {
-                        Some(Direction::Right)
-                    } else {
-                        None
-                    };
-                }
-                ActionProcedure::Hang | ActionProcedure::Dig | ActionProcedure::Swim => {
-                    if let Some(direction) = pending_direction {
-                        object.state.direction = direction;
-                    } else if object.state.velocity.x < 0 {
-                        object.state.direction = Direction::Left;
-                    } else if object.state.velocity.x > 0 {
-                        object.state.direction = Direction::Right;
-                    }
+                // WALK/HANGLE/DIG/SWIM all call C4Object::SetDir from the
+                // raw C4Fixed xdir sign (C4Object.cpp:4802-4805,
+                // 4886-4887, 4933, 4980-4981). Defer until after this borrow
+                // so TurnAction runs through the full SetAction path.
+                ActionProcedure::Walk
+                | ActionProcedure::Hang
+                | ActionProcedure::Dig
+                | ActionProcedure::Swim => {
+                    exec_set_direction = pending_direction.or_else(|| {
+                        if object.fixed_velocity.x < C4Fixed::ZERO {
+                            Some(Direction::Left)
+                        } else if object.fixed_velocity.x > C4Fixed::ZERO {
+                            Some(Direction::Right)
+                        } else {
+                            None
+                        }
+                    });
                 }
                 ActionProcedure::Push => {
                     if object.state.velocity.x < 0 {
@@ -19406,7 +19406,7 @@ impl Engine {
             }
         }
 
-        if let Some(direction) = walk_set_direction {
+        if let Some(direction) = exec_set_direction {
             self.set_exec_action_direction(idx, &definition_id, direction);
         }
 

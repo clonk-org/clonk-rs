@@ -195,6 +195,68 @@ static void printActionDirectionCase()
            actionPhaseDelay, fixXAfterSetDir, fixX.val);
 }
 
+static void printSwimActionDirectionCase()
+{
+    // Minimized from Goldrush frame 219, FISH #1343. COMD_Left applies one
+    // SwimAccel to a zero xdir. DFA_SWIM then calls SetDir(Left), which fires
+    // Swim.TurnAction and SetAction snaps BOTH fixed accumulators to the
+    // integer position before movement. ExecAction retains the old Swim action
+    // as its phase source, so the newly installed Turn advances to phase 1.
+    C4Fixed xdir, ydir;
+    xdir.val = 0;
+    ydir.val = -6556;
+    xdir -= itofix(20, 100); // SwimAccel = FIXED100(20)
+    const auto update = C4ActionDirection::FromHorizontalVelocity(xdir, 0);
+    const int32_t requestedDirection = update.Direction == C4ActionDirection::Horizontal::Left
+        ? 0
+        : update.Direction == C4ActionDirection::Horizontal::Right ? 1 : -1;
+    const int32_t currentDirection = 1;
+    const bool runsTurnAction = requestedDirection >= 0
+        && C4ActionDirection::RunsTurnAction(currentDirection, requestedDirection, true);
+
+    C4Fixed fixX, fixY;
+    fixX.val = 57212928;
+    fixY.val = 28737532;
+    int32_t actionTime = 103;
+    int32_t actionPhase = 3;
+    int32_t actionPhaseDelay = 0;
+    bool actionIsTurn = false;
+
+    actionTime++;
+    if (runsTurnAction)
+    {
+        actionIsTurn = true;
+        actionTime = actionPhase = actionPhaseDelay = 0;
+        fixX = itofix(873);
+        fixY = itofix(438);
+    }
+
+    const int32_t fixXAfterSetDir = fixX.val;
+    const int32_t fixYAfterSetDir = fixY.val;
+    // Full Swim physical: lLimit=FIXED100(160), phase advance=16, Delay=1.
+    const int32_t phaseAdvance = fixtoi(itofix(160, 100) * 10);
+    actionPhaseDelay += phaseAdvance;
+    if (actionPhaseDelay >= 1)
+    {
+        actionPhaseDelay = 0;
+        actionPhase += 1;
+    }
+    fixX += xdir;
+    fixY += ydir;
+
+    printf("\"action_swim_direction\":{\"initial_xdir\":0,\"initial_ydir\":-6556,"
+           "\"steered_xdir\":%d,\"steered_ydir\":%d,\"requested_dir\":%d,"
+           "\"phase_advance\":%d,\"runs_turn_action\":%d,\"action_is_turn\":%d,"
+           "\"direction\":%d,\"command_direction\":7,\"action_time\":%d,"
+           "\"action_phase\":%d,\"action_phase_delay\":%d,"
+           "\"fix_x_after_set_dir\":%d,\"fix_y_after_set_dir\":%d,"
+           "\"fix_x_after_move\":%d,\"fix_y_after_move\":%d}",
+           xdir.val, ydir.val, requestedDirection, phaseAdvance,
+           runsTurnAction ? 1 : 0, actionIsTurn ? 1 : 0, requestedDirection,
+           actionTime, actionPhase, actionPhaseDelay, fixXAfterSetDir,
+           fixYAfterSetDir, fixX.val, fixY.val);
+}
+
 static void printActionCallbackCases()
 {
     // Minimized from Goldrush frame 192, WIPF #565. Script SetAction requests
@@ -763,17 +825,22 @@ int main()
     printActionDirectionCase();
     printf(",\n");
 
-    // 13. C4Object::SetAction callback order/count. The first case is the
+    // 13. DFA_SWIM raw-xdir SetDir/TurnAction ordering. The input is the
+    //     minimized Goldrush frame-219 FISH divergence.
+    printSwimActionDirectionCase();
+    printf(",\n");
+
+    // 14. C4Object::SetAction callback order/count. The first case is the
     //     minimized Goldrush frame-192 WIPF duplicate StartCall divergence.
     printActionCallbackCases();
     printf(",\n");
 
-    // 14. C4SolidMask active graphics sampling. The variant_2 case is the
+    // 15. C4SolidMask active graphics sampling. The variant_2 case is the
     //     minimized Goldrush frame-184 CTWR/SNKE contact divergence.
     printSolidMaskGraphicsCases();
     printf(",\n");
 
-    // 15. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 16. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");
