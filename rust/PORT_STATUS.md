@@ -146,8 +146,9 @@ shadow, recording the new first mismatch.
 
 ## Open presentation gaps
 
-- **Renderer/audio:** transforms, GL/shaders, landscape, audio panning and
-  high-level sound/music remain partial.
+- **Renderer/audio:** transforms, GL/shaders, landscape and audio panning remain
+  partial. Scenario music now excludes WAV/definition effects and finds direct
+  `Music.c4g`; MIDI decoding and playlist advancement are missing.
 - **GUI/particles:** generic DrawElement/layout/text/portraits and Particle.txt
   graphics/draw procedures are missing.
 - **Launcher:** player selection, update/first-start flows, search input,
