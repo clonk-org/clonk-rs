@@ -6073,8 +6073,9 @@ impl Definition {
             state.container.is_some(),
             state.construction,
         );
-        // OCF_Rotate (SetOCF, C4Object.cpp:576-580)
-        if self.rotateable > 0 {
+        // OCF_Rotate: rotateable, but not a minimum (invisible)
+        // construction site (SetOCF, C4Object.cpp:576-580)
+        if self.rotateable > 0 && state.construction > 100 {
             ocf |= crate::ocf::ROTATE;
         }
         // OCF_Grab from the Grab DefCore value (SetOCF, C4Object.cpp:553-555)
@@ -47133,6 +47134,39 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         let idx = engine.find_object_index(id).expect("object exists");
 
         assert_ne!(engine.object_ocf_at_index(idx) & ocf::ROTATE, 0);
+    }
+
+    #[test]
+    fn ocf_rotate_requires_con_above_100() {
+        // OCF_Rotate skips minimum (invisible) construction sites: the def
+        // must be Rotateable AND Con > 100 (SetOCF, C4Object.cpp:576-580).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Wheel");
+        definition.set_rotateable(1);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Wheel").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        engine.objects[idx].state.construction = 100;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::ROTATE,
+            0,
+            "Con == 100 fails the Con > 100 gate (C4Object.cpp:579)"
+        );
+
+        engine.objects[idx].state.construction = 101;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::ROTATE,
+            0,
+            "Con 101 passes the gate"
+        );
     }
 
     #[test]
