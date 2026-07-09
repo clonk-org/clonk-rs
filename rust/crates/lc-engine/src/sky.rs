@@ -212,6 +212,16 @@ impl SkyState {
         }
     }
 
+    /// FnSetSkyAdjust -> C4Sky::SetModulation (C4Sky.cpp:238-244):
+    /// `Modulation = dwWithClr; BackClr = dwBackClr; BackClrEnabled =
+    /// (Modulation >> 24) != 0` — the `Option` on back_color models the
+    /// enable flag (C++ keeps a disabled BackClr around, but scripts
+    /// always set both in one call).
+    pub fn apply_modulation(&mut self, modulation: u32, back_color: u32) {
+        self.settings.modulation = Some(modulation);
+        self.settings.back_color = (modulation >> 24 != 0).then_some(back_color);
+    }
+
     pub fn snapshot(&self) -> SkyFrame {
         SkyFrame {
             settings: self.settings.clone(),
@@ -361,6 +371,26 @@ mod tests {
                 itofix(-2).val(),
             ]),
             "SkyPar_KEEP preserves every scroll slot"
+        );
+    }
+
+    #[test]
+    fn set_sky_adjust_models_c4sky_set_modulation() {
+        // C4Sky::SetModulation (C4Sky.cpp:238-244): Modulation and BackClr
+        // assign; BackClrEnabled = (Modulation >> 24) != 0 — a modulation
+        // without an alpha byte disables the background fill.
+        let mut sky = SkyState::new(surface_settings(SkyParallaxMode::Fixed));
+        sky.apply_modulation(0x80ffffff, 0x40c4ff);
+        let frame = sky.snapshot();
+        assert_eq!(frame.settings.modulation, Some(0x80ffffff));
+        assert_eq!(frame.settings.back_color, Some(0x40c4ff));
+
+        sky.apply_modulation(0x00ffffff, 0x123456);
+        let frame = sky.snapshot();
+        assert_eq!(frame.settings.modulation, Some(0x00ffffff));
+        assert_eq!(
+            frame.settings.back_color, None,
+            "alpha-less modulation disables the back fill"
         );
     }
 

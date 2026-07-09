@@ -4608,6 +4608,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("BlastFree", blast_free);
     script.register_host_function("ShakeFree", shake_free);
     script.register_host_function("SetSkyParallax", set_sky_parallax);
+    script.register_host_function("SetSkyAdjust", set_sky_adjust);
     script.register_host_function("SetGamma", set_gamma);
     script.register_host_function("ResetGamma", reset_gamma);
     script.register_host_function("GBackSolid", g_back_solid);
@@ -6384,6 +6385,9 @@ pub(crate) enum LandscapeOperation {
         position: Vector2,
         amount: i32,
     },
+    /// FnSetSkyAdjust (C4Script.cpp:4626-4630) -> C4Sky::SetModulation
+    /// (C4Sky.cpp:238-244).
+    SkyAdjust { modulation: u32, back_color: u32 },
     /// FnSetSkyParallax (C4Script.cpp:4955-4970) — Sky is a C4Landscape
     /// member; the raw int args carry the SkyPar_KEEP magic through to
     /// `SkyState::apply_parallax`.
@@ -11410,6 +11414,30 @@ fn set_gamma(_args: &[Value]) -> Result<Value, RuntimeError> {
 /// 0x000000/0x808080/0xffffff ramp — the same presentation no-op.
 fn reset_gamma(_args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Nil)
+}
+
+/// FnSetSkyAdjust (C4Script.cpp:4626-4630) -> C4Sky::SetModulation: sky
+/// blit modulation plus the alpha-gated background fill color.
+fn set_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
+    let modulation =
+        value_to_i32(args.first().unwrap_or(&Value::Nil), "SetSkyAdjust", "adjust")? as u32;
+    let back_color = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetSkyAdjust",
+        "back color",
+    )? as u32;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetSkyAdjust requires an active engine context"))?;
+        context.register_landscape_operation(LandscapeOperation::SkyAdjust {
+            modulation,
+            back_color,
+        });
+        Ok(Value::Nil)
+    })
 }
 
 /// FnSetSkyParallax (C4Script.cpp:4955-4970): seven plain ints; nil and
@@ -19723,6 +19751,7 @@ mod tests {
         "SetRDir",
         "SetSeason",
         "SetShape",
+        "SetSkyAdjust",
         "SetSkyParallax",
         "SetSolidMask",
         "SetTemperature",

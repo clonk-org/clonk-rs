@@ -23603,6 +23603,16 @@ impl Engine {
                 LandscapeOperation::ShakeCircle { center, radius } => {
                     self.execute_shake_circle_operation(center, radius)
                 }
+                LandscapeOperation::SkyAdjust {
+                    modulation,
+                    back_color,
+                } => {
+                    // FnSetSkyAdjust -> C4Sky::SetModulation
+                    // (C4Sky.cpp:238-244).
+                    if let Some(sky) = &mut self.sky {
+                        sky.apply_modulation(modulation, back_color);
+                    }
+                }
                 LandscapeOperation::SkyParallax {
                     mode,
                     par_x,
