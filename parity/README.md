@@ -29,6 +29,7 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `script_killer` | `src/C4ScriptKiller.h`, called by `src/C4Script.cpp:1333-1347` | GetKiller/SetKiller fallback target, player validation, direct assignment, foreign/arrow targeting |
 | `landscape_path` | `src/C4LandscapePath.h`, called by `src/C4Landscape.cpp:890-915` | 17×15 PixCnt traversal and authoritative pixel-plane occupancy at cell edges |
 | `action_direction` | `src/C4ActionDirection.h`, called by `C4Object::ExecAction`/`SetDir` | raw-C4Fixed facing, TurnAction fixed-position resync, and stale pre-transition phase ordering |
+| `action_swim_direction` | `src/C4ActionDirection.h`, called by DFA_SWIM/`SetDir` | SwimAccel facing changes, TurnAction two-axis fixed-position resync, and stale Swim phase ordering |
 | `action_callbacks` | `src/C4ActionCallbacks.h`, called by `C4Object::SetAction` | synchronous callback count and Start-before-End/Abort ordering |
 | `solid_mask_graphics` | `src/C4SolidMaskBitmap.h`, called by `C4SolidMask` | active/default graphics selection and transparent/solid mask sampling after `SetGraphics` |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
@@ -78,6 +79,11 @@ scenario via the `RustEngineBridge` live shadow-diff — see "Phase 2" below.
   frame-170 WIPF state; Rust runs the same Walk/Turn ActMap through a real
   engine frame and compares raw velocity/position plus action, facing, phase,
   and time.
+- `action_swim_direction` drives the same production direction/TurnAction
+  decisions with the minimized Goldrush frame-219 FISH state. Rust runs a real
+  Swim/Turn ActMap frame and compares raw velocity/position plus action, facing,
+  phase, and time; the decisive fixed-y snap is observable only when internal
+  DFA_SWIM facing goes through `SetDir`.
 - `action_callbacks` calls the production `C4ActionCallbacks.h` dispatcher
   used by `C4Object::SetAction`. Its Start-only case is the minimized Goldrush
   frame-192 WIPF double-`Sitting` divergence; real Rust script fixtures also
