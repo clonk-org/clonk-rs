@@ -4607,6 +4607,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ScriptGo", script_go);
     script.register_host_function("BlastFree", blast_free);
     script.register_host_function("ShakeFree", shake_free);
+    script.register_host_function("SetSkyParallax", set_sky_parallax);
     script.register_host_function("GBackSolid", g_back_solid);
     script.register_host_function("GBackSemiSolid", g_back_semi_solid);
     script.register_host_function("GBackLiquid", g_back_liquid);
@@ -6380,6 +6381,18 @@ pub(crate) enum LandscapeOperation {
         material: i32,
         position: Vector2,
         amount: i32,
+    },
+    /// FnSetSkyParallax (C4Script.cpp:4955-4970) — Sky is a C4Landscape
+    /// member; the raw int args carry the SkyPar_KEEP magic through to
+    /// `SkyState::apply_parallax`.
+    SkyParallax {
+        mode: i32,
+        par_x: i32,
+        par_y: i32,
+        xdir: i32,
+        ydir: i32,
+        x: i32,
+        y: i32,
     },
 }
 
@@ -11378,6 +11391,38 @@ fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
             radius,
         });
         Ok(Value::Bool(true))
+    })
+}
+
+/// FnSetSkyParallax (C4Script.cpp:4955-4970): seven plain ints; nil and
+/// missing args are 0 at the C4Aul boundary (zeroing the scroll slots) —
+/// only the explicit SkyPar_KEEP magic preserves a slot.
+fn set_sky_parallax(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut slots = [0i32; 7];
+    for (index, slot) in slots.iter_mut().enumerate() {
+        *slot = value_to_i32(
+            args.get(index).unwrap_or(&Value::Nil),
+            "SetSkyParallax",
+            "parameter",
+        )?;
+    }
+    let [mode, par_x, par_y, xdir, ydir, x, y] = slots;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("SetSkyParallax requires an active engine context")
+        })?;
+        context.register_landscape_operation(LandscapeOperation::SkyParallax {
+            mode,
+            par_x,
+            par_y,
+            xdir,
+            ydir,
+            x,
+            y,
+        });
+        Ok(Value::Nil)
     })
 }
 
@@ -19658,6 +19703,7 @@ mod tests {
         "SetRDir",
         "SetSeason",
         "SetShape",
+        "SetSkyParallax",
         "SetSolidMask",
         "SetTemperature",
         "SetTransferZone",
@@ -20645,6 +20691,33 @@ mod tests {
             LandscapeOperation::ShakeCircle { center, radius } => {
                 assert_eq!(*center, Vector2::new(30, 40));
                 assert_eq!(*radius, 5);
+            }
+            other => panic!("unexpected landscape operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn set_sky_parallax_registers_operation_with_keep_defaults() {
+        // FnSetSkyParallax (C4Script.cpp:4955-4970): all seven ints pass
+        // through; missing/nil args are 0 at the C4Aul boundary (which
+        // ZEROES the scroll slots — only the explicit SkyPar_KEEP magic
+        // preserves them).
+        let args = [Value::Int(1), Value::Int(20), Value::Int(20)];
+        let (result, outcome) = with_object_host_context(|| set_sky_parallax(&args));
+        assert_eq!(result.expect("SetSkyParallax succeeds"), Value::Nil);
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::SkyParallax {
+                mode,
+                par_x,
+                par_y,
+                xdir,
+                ydir,
+                x,
+                y,
+            } => {
+                assert_eq!((*mode, *par_x, *par_y), (1, 20, 20));
+                assert_eq!((*xdir, *ydir, *x, *y), (0, 0, 0, 0));
             }
             other => panic!("unexpected landscape operation: {:?}", other),
         }

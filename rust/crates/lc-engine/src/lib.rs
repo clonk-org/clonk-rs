@@ -23600,6 +23600,22 @@ impl Engine {
                 LandscapeOperation::ShakeCircle { center, radius } => {
                     self.execute_shake_circle_operation(center, radius)
                 }
+                LandscapeOperation::SkyParallax {
+                    mode,
+                    par_x,
+                    par_y,
+                    xdir,
+                    ydir,
+                    x,
+                    y,
+                } => {
+                    // FnSetSkyParallax (C4Script.cpp:4955-4970) mutates
+                    // Game.Landscape.Sky; a world without a configured
+                    // sky has nothing to scroll.
+                    if let Some(sky) = &mut self.sky {
+                        sky.apply_parallax(mode, par_x, par_y, xdir, ydir, x, y);
+                    }
+                }
                 LandscapeOperation::ExtractMaterialAmount {
                     material,
                     position,

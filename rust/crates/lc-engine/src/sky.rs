@@ -91,6 +91,10 @@ pub struct SkyFrame {
     pub fixed: Option<[i32; 4]>,
 }
 
+/// `SkyPar_KEEP` (C4Script.cpp:4955): the magic int scripts pass to
+/// SetSkyParallax to preserve a parameter slot.
+pub const SKY_PAR_KEEP: i32 = -163764;
+
 /// The C4Sky scroll state (C4Sky.h): position and per-frame speed as
 /// C4Fixed, advanced by `C4Sky::Execute` (C4Sky.cpp:193-204).
 #[derive(Debug, Clone)]
@@ -162,6 +166,49 @@ impl SkyState {
         }
         if matches!(self.settings.parallax_mode, SkyParallaxMode::Wind) {
             self.xdir = math::fixed100(environment.wind);
+        }
+    }
+
+    /// FnSetSkyParallax (C4Script.cpp:4955-4970): each slot applies unless
+    /// it holds `SkyPar_KEEP`; the mode assigns only inside 0..1 (script
+    /// can never reach the settings-level "both axes" preset); a ZERO
+    /// ParX/ParY is ignored (they divide in Draw); xdir/ydir/x/y assign
+    /// `itofix(int)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_parallax(
+        &mut self,
+        mode: i32,
+        par_x: i32,
+        par_y: i32,
+        xdir: i32,
+        ydir: i32,
+        x: i32,
+        y: i32,
+    ) {
+        if mode != SKY_PAR_KEEP {
+            match mode {
+                0 => self.settings.parallax_mode = SkyParallaxMode::Fixed,
+                1 => self.settings.parallax_mode = SkyParallaxMode::Wind,
+                _ => {}
+            }
+        }
+        if par_x != SKY_PAR_KEEP && par_x != 0 {
+            self.settings.parallax_x = par_x;
+        }
+        if par_y != SKY_PAR_KEEP && par_y != 0 {
+            self.settings.parallax_y = par_y;
+        }
+        if xdir != SKY_PAR_KEEP {
+            self.xdir = math::itofix(xdir);
+        }
+        if ydir != SKY_PAR_KEEP {
+            self.ydir = math::itofix(ydir);
+        }
+        if x != SKY_PAR_KEEP {
+            self.x = math::itofix(x);
+        }
+        if y != SKY_PAR_KEEP {
+            self.y = math::itofix(y);
         }
     }
 
@@ -263,6 +310,58 @@ mod tests {
         sky.advance(&environment);
         sky.advance(&environment);
         assert_eq!(sky.snapshot().fixed.map(|fixed| fixed[0]), Some(itofix(-2).val()));
+    }
+
+    #[test]
+    fn set_parallax_follows_fnsetskyparallax_keep_and_zero_rules() {
+        // FnSetSkyParallax (C4Script.cpp:4955-4970): SkyPar_KEEP (-163764)
+        // preserves a slot; the mode assigns only inside 0..1; a ZERO
+        // ParX/ParY is ignored (divisor protection); xdir/ydir/x/y assign
+        // itofix(int) — C++ nil args arrive as 0 and thus ZERO them.
+        let mut sky = SkyState::new(surface_settings(SkyParallaxMode::Wind));
+        sky.apply_parallax(0, 0, 15, 3, -2, 7, 9);
+        let frame = sky.snapshot();
+        assert_eq!(frame.settings.parallax_mode, SkyParallaxMode::Fixed);
+        assert_eq!(
+            frame.settings.parallax_x, 10,
+            "zero ParX keeps the previous divisor"
+        );
+        assert_eq!(frame.settings.parallax_y, 15);
+        assert_eq!(
+            frame.fixed,
+            Some([
+                itofix(7).val(),
+                itofix(9).val(),
+                itofix(3).val(),
+                itofix(-2).val(),
+            ])
+        );
+
+        sky.apply_parallax(
+            2,
+            SKY_PAR_KEEP,
+            SKY_PAR_KEEP,
+            SKY_PAR_KEEP,
+            SKY_PAR_KEEP,
+            SKY_PAR_KEEP,
+            SKY_PAR_KEEP,
+        );
+        let frame = sky.snapshot();
+        assert_eq!(
+            frame.settings.parallax_mode,
+            SkyParallaxMode::Fixed,
+            "mode outside 0..1 is ignored (Inside gate)"
+        );
+        assert_eq!(
+            frame.fixed,
+            Some([
+                itofix(7).val(),
+                itofix(9).val(),
+                itofix(3).val(),
+                itofix(-2).val(),
+            ]),
+            "SkyPar_KEEP preserves every scroll slot"
+        );
     }
 
     #[test]
