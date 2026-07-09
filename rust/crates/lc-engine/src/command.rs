@@ -7140,6 +7140,11 @@ pub enum CommandOperation {
         index: i32,
         success: bool,
     },
+    /// C4Object::SetCommand's entry decrement (C4Object.cpp:3941-3942):
+    /// every SetCommand counts an armed NoCollectDelay down by one. It
+    /// travels with the command ops so its order against Clear/Push is
+    /// preserved through the staged script outcomes.
+    DecrementNoCollectDelay,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7627,6 +7632,10 @@ impl CommandStack {
                 CommandOperation::Finish { index, success } => {
                     self.finish_entry(index, success);
                 }
+                // Command internals use AddCommand, never SetCommand — the
+                // decrement only arrives via the engine/script staging
+                // paths, which apply against the object state.
+                CommandOperation::DecrementNoCollectDelay => {}
             }
         }
         Some(result)

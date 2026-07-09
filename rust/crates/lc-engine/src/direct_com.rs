@@ -1184,9 +1184,11 @@ impl Engine {
             self.at_object(position, ocf::ENTRANCE, Some(target_id))
         {
             if entrance_ocf & ocf::ENTRANCE != 0 {
-                // SetCommand: clear stack then push (C4Object.h:214-219,
-                // C4Object.cpp:3923-3930 without the fControl overloads).
+                // SetCommand: NoCollectDelay decrement, clear stack, push
+                // (C4Object.h:214-219, C4Object.cpp:3939-3943 without the
+                // fControl overloads).
                 self.objects[target_index].apply_command_operations([
+                    CommandOperation::DecrementNoCollectDelay,
                     CommandOperation::Clear,
                     CommandOperation::PushFront(
                         CommandRequest::new(CommandId::Enter).with_target(Some(entrance_id)),
@@ -1350,8 +1352,12 @@ impl Engine {
             self.objects[index].apply_command_operations([CommandOperation::PushFront(request)]);
             return Ok(());
         }
-        // SetCommand: clear stack (:3928-3930).
-        self.objects[index].apply_command_operations([CommandOperation::Clear]);
+        // SetCommand: decrement NoCollectDelay (:3941-3942), then clear the
+        // stack (:3943).
+        self.objects[index].apply_command_operations([
+            CommandOperation::DecrementNoCollectDelay,
+            CommandOperation::Clear,
+        ]);
         // Close menu — soft: `if (!CloseMenu(false)) return;`
         // (C4Object.cpp:3944-3946). A MenuQueryCancel denial aborts the
         // SetCommand with the stack already cleared. The query may run
@@ -1498,6 +1504,89 @@ mod tests {
             engine.objects[crew_index].state.ocf & ocf::COLLECTION,
             0,
             "the post-drop SetOCF clears OCF_Collection (C4ObjectCom.cpp:671)"
+        );
+    }
+
+    #[test]
+    fn set_command_control_path_decrements_no_collect_delay() {
+        // C4Object::SetCommand decrements NoCollectDelay at entry
+        // (C4Object.cpp:3941-3942). A single COM_Up press in WALK counts
+        // down twice: once in DirectCom (:3359-3362) and once in the Jump
+        // command's SetCommand (ObjectComUp -> PlayerObjectCommand ->
+        // ObjectCommand2Obj Set mode, C4Player.cpp:1450).
+        let mut engine = Engine::new();
+        let (crew, _) = drop_window_fixture(&mut engine);
+        let index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[index].state.no_collect_delay = 2;
+
+        engine.player_in_com(1, COM_UP, 0).expect("in_com");
+        assert_eq!(
+            no_collect_delay(&engine, crew),
+            0,
+            "DirectCom + SetCommand each count the delay down once"
+        );
+    }
+
+    #[test]
+    fn script_set_command_decrements_no_collect_delay() {
+        // FnSetCommand routes through C4Object::SetCommand
+        // (C4Script.cpp:866), whose entry decrement (C4Object.cpp:3941-3942)
+        // must also fire for script-issued commands.
+        let script = r#"
+#strict
+public func DoWait() { SetCommand(this(), "Wait"); return(1); }
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", script);
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[index].state.no_collect_delay = 2;
+
+        engine
+            .call_object_function(index, "DoWait", Vec::new())
+            .expect("DoWait runs");
+        assert_eq!(
+            no_collect_delay(&engine, crew),
+            1,
+            "script SetCommand counts the delay down once (C4Object.cpp:3941)"
+        );
+    }
+
+    #[test]
+    fn drop_window_closes_after_a_control_and_the_item_is_recollected() {
+        // The full C++ window: drop arms NoCollectDelay = 2
+        // (C4ObjectCom.cpp:669); the next plain control counts it down in
+        // DirectCom (C4Object.cpp:3359-3362) AND in the resulting Set-mode
+        // command's SetCommand (:3941-3942) — after ONE control the
+        // collector's OCF_Collection returns and the Tick3 cross check
+        // recollects the item (C4GameObjects.cpp:185-194).
+        let mut engine = Engine::new();
+        let (crew, item) = drop_window_fixture(&mut engine);
+
+        engine
+            .player_object_command(1, CommandId::Drop, None, 0, 0)
+            .expect("drop command");
+        for _ in 0..6 {
+            engine.tick().expect("tick");
+        }
+        let item_index = engine.find_object_index(item).expect("item exists");
+        assert_eq!(
+            engine.objects[item_index].state.container, None,
+            "armed delay keeps the item on the ground"
+        );
+
+        engine.player_in_com(1, COM_UP, 0).expect("in_com");
+        for _ in 0..3 {
+            engine.tick().expect("tick");
+        }
+        let item_index = engine.find_object_index(item).expect("item exists");
+        assert_eq!(
+            engine.objects[item_index].state.container,
+            Some(crew),
+            "one control closes the window and the cross check recollects"
         );
     }
 

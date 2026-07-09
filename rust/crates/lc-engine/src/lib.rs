@@ -4128,6 +4128,12 @@ impl Object {
                 CommandOperation::Finish { index, success } => {
                     self.commands.finish_entry_public(index, success);
                 }
+                CommandOperation::DecrementNoCollectDelay => {
+                    // C4Object::SetCommand entry (C4Object.cpp:3941-3942).
+                    if self.state.no_collect_delay > 0 {
+                        self.state.no_collect_delay -= 1;
+                    }
+                }
             }
         }
     }
