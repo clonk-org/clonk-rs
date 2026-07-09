@@ -1819,12 +1819,14 @@ impl EnvironmentSettings {
         }
     }
 
+    /// C4Weather::Execute's temperature step (C4Weather.cpp:88-93): every
+    /// Tick35 the temperature moves one degree toward
+    /// `Climate - int32(TemperatureRange * cos(6.28 * Season / 100.0))` —
+    /// a double-precision cosine of the LITERAL 6.28 (not tau) with the
+    /// C++ truncating int cast, and no TemperatureRange gate.
     fn update_temperature_from_season(&mut self) {
-        if self.temperature_range <= 0 {
-            return;
-        }
-        let season_angle = (self.season.rem_euclid(100) as f32 / 100.0) * core::f32::consts::TAU;
-        let delta = (self.temperature_range as f32 * season_angle.cos()).round() as i32;
+        let delta = (f64::from(self.temperature_range)
+            * (6.28 * f64::from(self.season) / 100.0).cos()) as i32;
         let target = self.climate.saturating_sub(delta);
         if self.temperature < target {
             self.temperature = self.temperature.saturating_add(1);
@@ -37258,6 +37260,53 @@ protected func Activity() { SetActionTargets(); return(1); }
         settings.advance_frame(&mut rng, 35);
         settings.advance_frame(&mut rng, 70);
         assert_eq!((settings.season, settings.season_delay), (40, -600));
+    }
+
+    // C4Weather::Execute's temperature step (C4Weather.cpp:88-93):
+    //   iTemperature = Climate - int32(TemperatureRange
+    //                    * cos(6.28 * float(Season) / 100.0));
+    // then Temperature moves one degree toward it every Tick35.
+    #[test]
+    fn temperature_drifts_toward_climate_when_range_is_zero() {
+        // No TemperatureRange gate in C++: with range 0 the target is
+        // plain Climate and the drift still runs.
+        let mut settings = EnvironmentSettings::new(0)
+            .with_climate(10)
+            .with_temperature_range(0)
+            .with_temperature(0);
+        let mut rng = LcgRng::seed_from_u64(0);
+        settings.advance_frame(&mut rng, 35);
+        assert_eq!(settings.temperature, 1);
+    }
+
+    #[test]
+    fn temperature_target_truncates_the_cpp_cos_product() {
+        // Season=12: cos(6.28 * 12 / 100.0) = 0.72923..., * 30 = 21.877 —
+        // the C++ int cast TRUNCATES to 21 (not rounds to 22), so a
+        // temperature of -21 already sits at the target and must not move.
+        let mut settings = EnvironmentSettings::new(0)
+            .with_climate(0)
+            .with_temperature_range(30)
+            .with_season(12)
+            .with_temperature(-21);
+        let mut rng = LcgRng::seed_from_u64(0);
+        settings.advance_frame(&mut rng, 35);
+        assert_eq!(settings.temperature, -21);
+    }
+
+    #[test]
+    fn temperature_target_truncates_toward_zero_past_half_year() {
+        // Season=50: cos(3.14) = -0.9999987, * 20 = -19.99997 — the C++
+        // cast truncates toward ZERO to -19, so the target is
+        // Climate + 19 = 9 and a temperature of 9 must not move.
+        let mut settings = EnvironmentSettings::new(0)
+            .with_climate(-10)
+            .with_temperature_range(20)
+            .with_season(50)
+            .with_temperature(9);
+        let mut rng = LcgRng::seed_from_u64(0);
+        settings.advance_frame(&mut rng, 35);
+        assert_eq!(settings.temperature, 9);
     }
 
     #[test]
