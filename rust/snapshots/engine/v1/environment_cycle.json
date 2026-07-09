@@ -57,7 +57,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": false,
-        "ocf": 136314945,
+        "ocf": 203423809,
         "timer": 1,
         "own_mass": 0,
         "on_fire": false,
@@ -94,6 +94,8 @@
         "season": 0,
         "year_speed": 0,
         "season_delay": 0,
+        "season_min": 0,
+        "season_max": 100,
         "temperature_range": 30,
         "lightning": 0,
         "meteorite": 0,
@@ -609,7 +611,12 @@
         null
       ],
       "default_solid_material": null,
-      "default_liquid_material": null
+      "default_liquid_material": null,
+      "left_open": 0,
+      "right_open": 0,
+      "top_open": true,
+      "bottom_open": false,
+      "vehicle_material": null
     },
     "rng": {
       "hold": 1383819543,
@@ -1190,7 +1197,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": false,
-        "ocf": 136314945,
+        "ocf": 203423809,
         "timer": 2,
         "own_mass": 0,
         "on_fire": false,
@@ -1227,6 +1234,8 @@
         "season": 0,
         "year_speed": 0,
         "season_delay": 0,
+        "season_min": 0,
+        "season_max": 100,
         "temperature_range": 30,
         "lightning": 0,
         "meteorite": 0,
@@ -1742,7 +1751,12 @@
         null
       ],
       "default_solid_material": null,
-      "default_liquid_material": null
+      "default_liquid_material": null,
+      "left_open": 0,
+      "right_open": 0,
+      "top_open": true,
+      "bottom_open": false,
+      "vehicle_material": null
     },
     "rng": {
       "hold": 199458686,
@@ -2323,7 +2337,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": false,
-        "ocf": 136314945,
+        "ocf": 203423809,
         "timer": 3,
         "own_mass": 0,
         "on_fire": false,
@@ -2360,6 +2374,8 @@
         "season": 0,
         "year_speed": 0,
         "season_delay": 0,
+        "season_min": 0,
+        "season_max": 100,
         "temperature_range": 30,
         "lightning": 0,
         "meteorite": 0,
@@ -2875,7 +2891,12 @@
         null
       ],
       "default_solid_material": null,
-      "default_liquid_material": null
+      "default_liquid_material": null,
+      "left_open": 0,
+      "right_open": 0,
+      "top_open": true,
+      "bottom_open": false,
+      "vehicle_material": null
     },
     "rng": {
       "hold": 3369310281,
@@ -3456,7 +3477,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": false,
-        "ocf": 136314945,
+        "ocf": 203423809,
         "timer": 4,
         "own_mass": 0,
         "on_fire": false,
@@ -3493,6 +3514,8 @@
         "season": 0,
         "year_speed": 0,
         "season_delay": 0,
+        "season_min": 0,
+        "season_max": 100,
         "temperature_range": 30,
         "lightning": 0,
         "meteorite": 0,
@@ -4008,7 +4031,12 @@
         null
       ],
       "default_solid_material": null,
-      "default_liquid_material": null
+      "default_liquid_material": null,
+      "left_open": 0,
+      "right_open": 0,
+      "top_open": true,
+      "bottom_open": false,
+      "vehicle_material": null
     },
     "rng": {
       "hold": 2734307816,
@@ -4589,7 +4617,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": false,
-        "ocf": 136314945,
+        "ocf": 203423809,
         "timer": 5,
         "own_mass": 0,
         "on_fire": false,
@@ -4626,6 +4654,8 @@
         "season": 0,
         "year_speed": 0,
         "season_delay": 0,
+        "season_min": 0,
+        "season_max": 100,
         "temperature_range": 30,
         "lightning": 0,
         "meteorite": 0,
@@ -5141,7 +5171,12 @@
         null
       ],
       "default_solid_material": null,
-      "default_liquid_material": null
+      "default_liquid_material": null,
+      "left_open": 0,
+      "right_open": 0,
+      "top_open": true,
+      "bottom_open": false,
+      "vehicle_material": null
     },
     "rng": {
       "hold": 1011978507,
@@ -5722,7 +5757,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": false,
-        "ocf": 136314945,
+        "ocf": 203423809,
         "timer": 6,
         "own_mass": 0,
         "on_fire": false,
@@ -5759,6 +5794,8 @@
         "season": 0,
         "year_speed": 0,
         "season_delay": 0,
+        "season_min": 0,
+        "season_max": 100,
         "temperature_range": 30,
         "lightning": 0,
         "meteorite": 0,
@@ -6274,7 +6311,12 @@
         null
       ],
       "default_solid_material": null,
-      "default_liquid_material": null
+      "default_liquid_material": null,
+      "left_open": 0,
+      "right_open": 0,
+      "top_open": true,
+      "bottom_open": false,
+      "vehicle_material": null
     },
     "rng": {
       "hold": 2832848802,
@@ -6855,7 +6897,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": false,
-        "ocf": 136314945,
+        "ocf": 203423809,
         "timer": 7,
         "own_mass": 0,
         "on_fire": false,
@@ -6892,6 +6934,8 @@
         "season": 0,
         "year_speed": 0,
         "season_delay": 0,
+        "season_min": 0,
+        "season_max": 100,
         "temperature_range": 30,
         "lightning": 0,
         "meteorite": 0,
@@ -7407,7 +7451,12 @@
         null
       ],
       "default_solid_material": null,
-      "default_liquid_material": null
+      "default_liquid_material": null,
+      "left_open": 0,
+      "right_open": 0,
+      "top_open": true,
+      "bottom_open": false,
+      "vehicle_material": null
     },
     "rng": {
       "hold": 1774591965,
@@ -7988,7 +8037,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": false,
-        "ocf": 136314945,
+        "ocf": 203423809,
         "timer": 8,
         "own_mass": 0,
         "on_fire": false,
@@ -8025,6 +8074,8 @@
         "season": 0,
         "year_speed": 0,
         "season_delay": 0,
+        "season_min": 0,
+        "season_max": 100,
         "temperature_range": 30,
         "lightning": 0,
         "meteorite": 0,
@@ -8540,7 +8591,12 @@
         null
       ],
       "default_solid_material": null,
-      "default_liquid_material": null
+      "default_liquid_material": null,
+      "left_open": 0,
+      "right_open": 0,
+      "top_open": true,
+      "bottom_open": false,
+      "vehicle_material": null
     },
     "rng": {
       "hold": 3269587756,

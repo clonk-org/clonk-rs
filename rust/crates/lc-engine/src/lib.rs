@@ -363,6 +363,10 @@ const C4D_BORDER_BOTTOM: i32 = 4;
 const C4D_BORDER_LAYER: i32 = 8;
 const CONTACT_DENSITY_SOLID: i32 = 50;
 const C4M_VEHICLE: i32 = 100;
+/// `C4M_Solid` / `C4M_SemiSolid` (C4Material.h:201-202): the GBackSolid
+/// and GBackSemiSolid density thresholds.
+const C4M_SOLID: i32 = 50;
+const C4M_SEMI_SOLID: i32 = 25;
 const ATTACH_RANGE: i32 = 5;
 const FIX_FULL_CIRCLE: i32 = 360;
 const FIX_HALF_CIRCLE: i32 = 180;
@@ -23898,7 +23902,40 @@ impl Engine {
         {
             ocf |= crate::ocf::CHOP;
         }
+        // The landscape probes GBackSolid/GBackSemiSolid see baked
+        // C4SolidMask MCVehic pixels; rect-model fixture worlds join the
+        // mask overlay here (grid worlds bake, and the overlay is empty).
+        if object.state.container.is_none() {
+            if let Some(landscape) = self.landscape.as_ref() {
+                let solid_masks = self.ocf_solid_mask_overlay();
+                let masked = |x: i32, y: i32| solid_masks.iter().any(|mask| mask.contains(x, y));
+                let x = object.state.position.x;
+                let y = object.state.position.y;
+                // OCF_InSolid (SetOCF, C4Object.cpp:637-640)
+                if landscape.is_solid_at(x, y) || masked(x, y) {
+                    ocf |= crate::ocf::IN_SOLID;
+                }
+                // OCF_InFree (SetOCF, C4Object.cpp:641-644)
+                if !landscape.is_semi_solid_at(x, y - 1) && !masked(x, y - 1) {
+                    ocf |= crate::ocf::IN_FREE;
+                }
+            } else {
+                // No landscape: all air, like C++ over sky-open borders.
+                ocf |= crate::ocf::IN_FREE;
+            }
+        }
         ocf
+    }
+
+    /// The solid-mask overlay for the SetOCF landscape probes: grid worlds
+    /// bake masks into the pixel plane (empty overlay), rect fixture
+    /// worlds carry them as rects like the movement checks.
+    fn ocf_solid_mask_overlay(&self) -> Vec<SolidMaskRect> {
+        if self.solid_mask_grid_mode() {
+            return Vec::new();
+        }
+        let indices: Vec<usize> = (0..self.objects.len()).collect();
+        self.solid_masks_for_movement(&indices)
     }
 
     fn object_has_ocf(&self, index: usize, mask: u32) -> bool {
@@ -47997,6 +48034,41 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             0,
             "an exclusive blocker at the center vetoes Chop (C4Object.cpp:574)"
         );
+    }
+
+    #[test]
+    fn ocf_in_solid_and_in_free_follow_the_landscape() {
+        // OCF_InSolid: !Contained && GBackSolid(x, y)
+        // (SetOCF, C4Object.cpp:637-640); OCF_InFree: !Contained &&
+        // !GBackSemiSolid(x, y - 1) (SetOCF, C4Object.cpp:641-644).
+        let mut engine = Engine::with_seed(4);
+        // Landscape::flat(120, 60): ground surface at y = 60.
+        engine.set_landscape(Landscape::flat(120, 60));
+        engine
+            .register_definition(simple_definition("Rock"))
+            .expect("definition registers");
+
+        // Center in free air: InFree, not InSolid.
+        let airborne = engine
+            .spawn_object(SpawnConfig::new("Rock").with_position(Vector2::new(40, 20)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(airborne).expect("object exists");
+        assert_eq!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID, 0);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_FREE, 0);
+
+        // Center buried in the ground: InSolid, and the pixel above is
+        // semi-solid, so not InFree.
+        engine.objects[idx].state.position = Vector2::new(40, 80);
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID, 0);
+        assert_eq!(engine.object_ocf_at_index(idx) & ocf::IN_FREE, 0);
+
+        // Standing ON the surface (y = 60 solid, y - 1 = 59 free): the
+        // center pixel is solid AND the pixel above is free.
+        engine.objects[idx].state.position = Vector2::new(40, 60);
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID, 0);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_FREE, 0);
     }
 
     #[test]
