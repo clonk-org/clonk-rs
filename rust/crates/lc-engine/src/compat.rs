@@ -6757,9 +6757,12 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         return result;
     }
 
-    let scope = determine_scope_from_state(&args[1])?;
+    // An unfilled pTarget slot is nil — a GLOBAL effect (FnAddEffect's
+    // C4Object *pTarget = nullptr).
+    let target_state = args.get(1).unwrap_or(&Value::Nil);
+    let scope = determine_scope_from_state(target_state)?;
     if matches!(scope, EffectScope::Object) {
-        match &args[1] {
+        match target_state {
             Value::Object(_) | Value::Proplist(_) => {}
             other => {
                 return Err(RuntimeError::new(format!(
@@ -6770,9 +6773,11 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
+    // `if (... || !iPrio) return 0` (C4Script.cpp:5449) — an unfilled
+    // priority nil-fills to 0 like C4AulExec, creating NOTHING.
     let priority = match args.get(2) {
         Some(Value::Int(value)) => *value,
-        Some(Value::Nil) | None => 100,
+        Some(Value::Nil) | None => 0,
         Some(other) => {
             return Err(RuntimeError::new(format!(
                 "AddEffect: expected int for priority, got {}",
@@ -23257,7 +23262,7 @@ func ProbeBadIndex(id) {
     fn add_and_remove_effect_flow() {
         let state = empty_state();
         let (result, outcome) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("Glow".into()), state.clone()])?;
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(100)])?;
             remove_effect(&[Value::String("Glow".into()), state.clone()])
         });
 
@@ -23278,7 +23283,7 @@ func ProbeBadIndex(id) {
     fn remove_effect_can_skip_callbacks() {
         let state = empty_state();
         let (result, outcome) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("Glow".into()), state.clone()])?;
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(100)])?;
             remove_effect(&[
                 Value::String("Glow".into()),
                 state.clone(),
@@ -25598,7 +25603,7 @@ func ProbeBadIndex(id) {
     fn get_effect_uses_context_view() {
         let state = empty_state();
         let (result, _) = with_object_host_context(|| {
-            add_effect(&[Value::String("Glow".into()), state.clone()])?;
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(100)])?;
             get_effect(&[
                 Value::String("Glow".into()),
                 state.clone(),
@@ -25692,8 +25697,8 @@ func ProbeBadIndex(id) {
         // EffectCall (Clonk.c4d/Script.c:860-875).
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("First".into()), state.clone()])?;
-            add_effect(&[Value::String("XControl".into()), state.clone()])?;
+            add_effect(&[Value::String("First".into()), state.clone(), Value::Int(100)])?;
+            add_effect(&[Value::String("XControl".into()), state.clone(), Value::Int(100)])?;
             remove_effect(&[Value::String("First".into()), state.clone()])?;
             get_effect(&[Value::String("*Control*".into()), state.clone()])
         });
@@ -25713,8 +25718,8 @@ func ProbeBadIndex(id) {
         // `GetEffect(0, this(), iEffect, 1)` relies on it.
         let state = empty_state();
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("First".into()), state.clone()])?;
-            add_effect(&[Value::String("XControl".into()), state.clone()])?;
+            add_effect(&[Value::String("First".into()), state.clone(), Value::Int(100)])?;
+            add_effect(&[Value::String("XControl".into()), state.clone(), Value::Int(100)])?;
             remove_effect(&[Value::String("First".into()), state.clone()])?;
             get_effect(&[
                 Value::Int(0),

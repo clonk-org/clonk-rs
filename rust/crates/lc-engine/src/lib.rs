@@ -30743,7 +30743,7 @@ global func Step(state, frame, random)
     global func Initialize(state, random)
     {
         AddEffect("Glow", state, 120, 3);
-        AddEffect("Spark", state);
+        AddEffect("Spark", state, 100);
         return nil;
     }
 
@@ -42439,6 +42439,39 @@ func Zap() { return BlastObject(12, FindObject(VCTM)); }
             "alive targets lose level/3 percent points (C4Object.cpp:1418)"
         );
         assert!(engine.objects[victim_idx].state.alive);
+    }
+
+    // FnAddEffect refuses a missing/zero priority: `if (!iPrio) return 0`
+    // (C4Script.cpp:5457) — an unfilled parameter nil-fills to 0 like
+    // C4AulExec, so `AddEffect("Foo", 0)` creates NOTHING and returns 0.
+    #[test]
+    fn add_effect_without_priority_creates_nothing_like_cpp() {
+        let script = r#"#strict
+local iResult;
+func Trigger() { iResult = AddEffect("Foo"); return(1); }
+"#;
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+        assert_eq!(
+            engine.objects[actor_idx].state.local_vars.get("iResult"),
+            Some(&Value::Int(0)),
+            "missing priority returns 0 (C4Script.cpp:5457)"
+        );
+        assert!(
+            engine.objects[actor_idx].state.effects.is_empty(),
+            "no effect is created"
+        );
     }
 
     // C4Object::Blast's incinerate arm (C4Object.cpp:1420-1423): once the
