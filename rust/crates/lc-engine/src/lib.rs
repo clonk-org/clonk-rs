@@ -8026,15 +8026,17 @@ impl Definition {
         )
     }
 
-    /// `Fx<Name>Effect` check call (C4Effect.cpp:178): the checker effect is
-    /// asked about a pending new effect by name.
+    /// `Fx<Name>Effect` check call (C4Effect.cpp:280-282): the checker
+    /// effect is asked about a pending new effect — the callback receives
+    /// the new name plus the AddEffect rVal1-4 (C++ passes them at
+    /// positions 5-8; the deferred convention appends them after the name).
     #[allow(clippy::too_many_arguments)]
     fn call_effect_effect(
         &self,
         state: &ObjectState,
         object_id: ObjectId,
         checker: &EffectState,
-        pending: &str,
+        pending: &EffectState,
         rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
@@ -8044,13 +8046,24 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        let mut extras = vec![Value::String(pending.name.clone())];
+        // rVal1-4 (C4Effect.cpp:282): always four slots, missing = nil.
+        for index in 0..4 {
+            extras.push(
+                pending
+                    .vars()
+                    .get(index)
+                    .map(compat::effect_var_to_value)
+                    .unwrap_or(Value::Nil),
+            );
+        }
         self.dispatch_effect_callback(
             state,
             object_id,
             checker,
             "Effect",
             "FxEffect",
-            vec![Value::String(pending.to_string())],
+            extras,
             rng,
             global_effects,
             physics,
@@ -17078,7 +17091,7 @@ impl Engine {
                         &snapshot_for_call,
                         object_id,
                         &event.effect,
-                        &pending.name,
+                        pending,
                         rng,
                         &global_view,
                         current_physics,
@@ -42557,6 +42570,61 @@ func FxProbeTimer(pThis, iNumber) {
         assert!(
             !calls.iter().any(|(name, _)| name == "FxFireStop"),
             "the annulled effect dies without a Stop callback"
+        );
+    }
+
+    #[test]
+    fn effect_check_callback_receives_new_effect_parameters() {
+        // Fx*Effect check calls carry the pending AddEffect's rVal1-4
+        // (C4Effect.cpp:282) — a checker can decide on the parameters, not
+        // just the name. Here Shield denies only strength-42 additions.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxShieldEffect(state, effect, new_name, strength) {
+            if (strength == 42) {
+                return -1;
+            }
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                AddEffect("Fire", state, 100, 0, nil, nil, nil, 42);
+            }
+            if (frame == 3) {
+                AddEffect("Frost", state, 100, 0, nil, nil, nil, 5);
+            }
+            return nil;
+        }
+        "#;
+
+        let definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Frost", "Shield"],
+            "the checker saw strength 42 on Fire (denied) and 5 on Frost \
+             (passed) — C4Effect.cpp:282 forwards rVal1-4"
         );
     }
 
