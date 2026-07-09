@@ -26771,6 +26771,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.container,
                 object.draw_transform,
             ).with_direction(object.direction.to_script_value())
+            .with_contents(object.contents.clone())
             .with_commands(object.command_stack.command_views())
             .with_ocf(object.ocf)
             // Nested calls (obj->Method, foreign RemoveObject) need a full
@@ -40263,6 +40264,349 @@ func Trigger(object pLayered) {
             locals.get("aLayered"),
             Some(&Value::Object(caller_id.as_u64())),
             "layer object returned"
+        );
+    }
+
+    #[test]
+    fn set_object_layer_self_foreign_and_clear_are_live_and_persisted() {
+        // FnSetObjectLayer writes pLayer immediately, defaults its target to
+        // the caller and accepts nil/0 to clear (C4Script.cpp:5168-5180).
+        // Dragon Rock self-layers the endboss and princess via arrow calls.
+        let caller_script = r#"#strict
+local bSelf, pSelfNow, bForeign, pForeignNow, bClear, pCleared;
+func Trigger(object pOther) {
+    bSelf = SetObjectLayer(this());
+    pSelfNow = GetObjectLayer();
+    bForeign = SetObjectLayer(this(), pOther);
+    pForeignNow = GetObjectLayer(pOther);
+    bClear = SetObjectLayer(0, pOther);
+    pCleared = GetObjectLayer(pOther);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("OTHR", "Other", "#strict\n").expect("other compiles"),
+            )
+            .expect("other registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let other_id = engine
+            .spawn_object(SpawnConfig::new("OTHR").with_category(CATEGORY_OBJECT))
+            .expect("other spawns");
+        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+
+        engine
+            .call_object_function(
+                caller_index,
+                "Trigger",
+                vec![Value::Object(other_id.as_u64())],
+            )
+            .expect("layer trigger runs");
+
+        let caller = engine.object_snapshot(caller_id).expect("caller remains");
+        assert_eq!(caller.local_vars.get("bSelf"), Some(&Value::Bool(true)));
+        assert_eq!(
+            caller.local_vars.get("pSelfNow"),
+            Some(&Value::Object(caller_id.as_u64()))
+        );
+        assert_eq!(caller.local_vars.get("bForeign"), Some(&Value::Bool(true)));
+        assert_eq!(
+            caller.local_vars.get("pForeignNow"),
+            Some(&Value::Object(caller_id.as_u64()))
+        );
+        assert_eq!(caller.local_vars.get("bClear"), Some(&Value::Bool(true)));
+        assert_eq!(caller.local_vars.get("pCleared"), Some(&Value::Nil));
+        assert_eq!(caller.layer, Some(caller_id));
+        assert_eq!(
+            engine
+                .object_snapshot(other_id)
+                .expect("other remains")
+                .layer,
+            None
+        );
+    }
+
+    #[test]
+    fn set_object_layer_propagates_to_direct_present_contents_only() {
+        // FnSetObjectLayer walks exactly the target's direct Contents and
+        // accepts both Status 1 and 2; it does not recurse into grandchildren
+        // (C4Script.cpp:5174-5178).
+        let caller_script = r#"#strict
+local bSet, pDirect, pInactive, pGrandchild;
+func Trigger(object direct, object inactive, object grandchild) {
+    bSet = SetObjectLayer(this());
+    pDirect = GetObjectLayer(direct);
+    pInactive = GetObjectLayer(inactive);
+    pGrandchild = GetObjectLayer(grandchild);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles"),
+            )
+            .expect("item registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let direct_id = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(caller_id),
+            )
+            .expect("direct content spawns");
+        let inactive_id = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_status(ObjectStatus::Inactive)
+                    .with_container(caller_id),
+            )
+            .expect("inactive content spawns");
+        let grandchild_id = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(direct_id),
+            )
+            .expect("grandchild spawns");
+        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+
+        engine
+            .call_object_function(
+                caller_index,
+                "Trigger",
+                vec![
+                    Value::Object(direct_id.as_u64()),
+                    Value::Object(inactive_id.as_u64()),
+                    Value::Object(grandchild_id.as_u64()),
+                ],
+            )
+            .expect("layer trigger runs");
+
+        let caller = engine.object_snapshot(caller_id).expect("caller remains");
+        assert_eq!(caller.local_vars.get("bSet"), Some(&Value::Bool(true)));
+        assert_eq!(
+            caller.local_vars.get("pDirect"),
+            Some(&Value::Object(caller_id.as_u64()))
+        );
+        assert_eq!(
+            caller.local_vars.get("pInactive"),
+            Some(&Value::Object(caller_id.as_u64()))
+        );
+        assert_eq!(caller.local_vars.get("pGrandchild"), Some(&Value::Nil));
+        assert_eq!(
+            engine
+                .object_snapshot(direct_id)
+                .expect("direct content remains")
+                .layer,
+            Some(caller_id)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(inactive_id)
+                .expect("inactive content remains")
+                .layer,
+            Some(caller_id)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(grandchild_id)
+                .expect("grandchild remains")
+                .layer,
+            None
+        );
+    }
+
+    #[test]
+    fn create_paths_inherit_the_creator_layer_immediately() {
+        // C4Object::Init copies pCreator->pLayer (C4Object.cpp:153-170).
+        // CreateObject uses the caller as creator; CreateContents uses its
+        // container (C4Script.cpp:1886-1902, C4Object.cpp:1866-1871).
+        let caller_script = r#"#strict
+local pObject, pConstruction, pContents;
+local pObjectLayer, pConstructionLayer, pContentsLayer;
+func Trigger(object pContainer) {
+    SetObjectLayer(this());
+    SetObjectLayer(pContainer, pContainer);
+    pObject = CreateObject(ITEM, 0, 0, -1);
+    pObjectLayer = GetObjectLayer(pObject);
+    pConstruction = CreateConstruction(ITEM, 0, 0, -1, 100);
+    pConstructionLayer = GetObjectLayer(pConstruction);
+    pContents = CreateContents(ITEM, pContainer);
+    pContentsLayer = GetObjectLayer(pContents);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles"),
+            )
+            .expect("item registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let container_id = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_category(CATEGORY_OBJECT))
+            .expect("foreign container spawns");
+        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+
+        engine
+            .call_object_function(
+                caller_index,
+                "Trigger",
+                vec![Value::Object(container_id.as_u64())],
+            )
+            .expect("creation trigger runs");
+
+        let caller = engine.object_snapshot(caller_id).expect("caller remains");
+        let object_id = match caller.local_vars.get("pObject") {
+            Some(Value::Object(id)) => ObjectId::new(*id),
+            other => panic!("CreateObject result should be an object, got {other:?}"),
+        };
+        let contents_id = match caller.local_vars.get("pContents") {
+            Some(Value::Object(id)) => ObjectId::new(*id),
+            other => panic!("CreateContents result should be an object, got {other:?}"),
+        };
+        let construction_id = match caller.local_vars.get("pConstruction") {
+            Some(Value::Object(id)) => ObjectId::new(*id),
+            other => panic!("CreateConstruction result should be an object, got {other:?}"),
+        };
+        assert_eq!(
+            caller.local_vars.get("pObjectLayer"),
+            Some(&Value::Object(caller_id.as_u64())),
+            "CreateObject exposes the inherited layer in the same call"
+        );
+        assert_eq!(
+            caller.local_vars.get("pConstructionLayer"),
+            Some(&Value::Object(caller_id.as_u64())),
+            "CreateConstruction exposes the inherited layer in the same call"
+        );
+        assert_eq!(
+            caller.local_vars.get("pContentsLayer"),
+            Some(&Value::Object(container_id.as_u64())),
+            "CreateContents uses the selected container as creator"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(object_id)
+                .expect("created object remains")
+                .layer,
+            Some(caller_id)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(construction_id)
+                .expect("construction remains")
+                .layer,
+            Some(caller_id)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(contents_id)
+                .expect("created content remains")
+                .layer,
+            Some(container_id)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(contents_id)
+                .expect("created content remains")
+                .container,
+            Some(container_id)
+        );
+    }
+
+    #[test]
+    fn scenario_set_object_layer_sees_and_updates_snapshot_contents() {
+        // Scenario callbacks run against host_world_context_from_snapshot.
+        // Its object list must carry Contents so FnSetObjectLayer can perform
+        // the same direct-only propagation as an object-script callback.
+        let scenario_script = r#"#strict
+global func ApplyLayer(object pLayer, object pTarget) {
+    return(SetObjectLayer(pLayer, pTarget));
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles"),
+            )
+            .expect("item registers");
+        engine
+            .install_scenario_script_with_convention("Scenario", scenario_script, true)
+            .expect("scenario installs");
+        let layer_id = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_category(CATEGORY_OBJECT))
+            .expect("layer spawns");
+        let target_id = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_category(CATEGORY_OBJECT))
+            .expect("target spawns");
+        let direct_id = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(target_id),
+            )
+            .expect("direct content spawns");
+        let grandchild_id = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(direct_id),
+            )
+            .expect("grandchild spawns");
+
+        engine
+            .call_scenario_script_function(
+                "ApplyLayer",
+                vec![
+                    Value::Object(layer_id.as_u64()),
+                    Value::Object(target_id.as_u64()),
+                ],
+            )
+            .expect("scenario layer call runs");
+
+        assert_eq!(
+            engine.object_snapshot(target_id).expect("target remains").layer,
+            Some(layer_id)
+        );
+        assert_eq!(
+            engine.object_snapshot(direct_id).expect("content remains").layer,
+            Some(layer_id),
+            "scenario host snapshot exposes the target's direct contents"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(grandchild_id)
+                .expect("grandchild remains")
+                .layer,
+            None,
+            "layer propagation remains direct-only"
         );
     }
 

@@ -3890,6 +3890,8 @@ struct LegacyObjectRecord {
     action_data: Option<i32>,
     action_target: Option<u64>,
     action_target2: Option<u64>,
+    /// C4Object::pLayer (`Layer=`, C4Object.cpp:2819).
+    layer: Option<u64>,
     contained: Option<u64>,
     contents: Vec<u64>,
 }
@@ -4236,6 +4238,17 @@ impl LegacyObjectRecord {
                     ))
                 })?);
             }
+            "layer" => {
+                let value = parse_i64(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Layer `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                if value > 0 {
+                    self.layer = Some(value as u64);
+                }
+            }
             "contained" => {
                 let value = parse_i64(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
@@ -4316,6 +4329,7 @@ impl LegacyObjectRecord {
             action_data,
             action_target,
             action_target2,
+            layer,
             contained,
             contents: _,
         } = self;
@@ -4357,6 +4371,9 @@ impl LegacyObjectRecord {
         config = config.with_position(Vector2::new(x.unwrap_or(0), y.unwrap_or(0)));
         if let Some(custom_name) = custom_name {
             config = config.with_custom_name(custom_name);
+        }
+        if let Some(layer) = layer {
+            config = config.with_layer(ObjectId::new(layer));
         }
 
         if xdir.is_some() || ydir.is_some() {
@@ -9847,7 +9864,7 @@ public func ActualizePhase(pClonk)
             scenario_dir.join("Objects.txt"),
             // XDir/YDir are float-bit C4Fixed like real saves write them
             // (Fixed.h:247-266): f-1063256064 = -5.0, f1077936128 = 3.0.
-            "[Object]\nid=BOX1\nNumber=100\nName=Scroll: Alchemist's bag\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nName=\"ScriptWipf\"\nStatus=1\nCategory=0\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
+            "[Object]\nid=BOX1\nNumber=100\nName=Scroll: Alchemist's bag\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nName=\"ScriptWipf\"\nStatus=1\nCategory=0\nLayer=100\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
         )
         .expect("write objects");
 
@@ -9878,6 +9895,7 @@ public func ActualizePhase(pClonk)
         assert_eq!(second.container_handle.as_deref(), Some("100"));
         assert_eq!(second.config.definition_id, "GEM1");
         assert_eq!(second.config.custom_name.as_deref(), Some("ScriptWipf"));
+        assert_eq!(second.config.layer, Some(ObjectId::new(100)));
         assert_eq!(second.config.position, Vector2::new(30, 40));
         assert_eq!(second.config.velocity, Vector2::new(-5, 3));
         assert_eq!(second.config.energy, Some(77));
@@ -9920,6 +9938,7 @@ public func ActualizePhase(pClonk)
             .expect("gem object");
         assert_eq!(gem_snapshot.definition_id, "GEM1");
         assert_eq!(gem_snapshot.custom_name.as_deref(), Some("ScriptWipf"));
+        assert_eq!(gem_snapshot.layer, Some(ObjectId::new(100)));
         assert_eq!(gem_snapshot.position, Vector2::new(30, 40));
         // Loads denumerate Contained without the Enter transfer
         // (C4Object.cpp:1582 never runs): compile default NO_OWNER.

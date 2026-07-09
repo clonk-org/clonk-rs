@@ -4695,6 +4695,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetObjectLayer", get_object_layer);
+    script.register_host_function("SetObjectLayer", set_object_layer);
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("InsertMaterial", insert_material);
     script.register_host_function("ExtractMaterialAmount", extract_material_amount);
@@ -13919,6 +13920,10 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 vertices: Vec::new(),
             });
         let definition_category = metadata.category;
+        let creator_layer = context
+            .object_context()
+            .map(ObjectScopeContext::id)
+            .and_then(|creator| context.object_layer(creator));
 
         let base_position = context
             .object_context()
@@ -13958,6 +13963,9 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_owner(owner)
             .with_category(definition_category)
             .with_id(id);
+        if let Some(layer) = creator_layer {
+            spawn = spawn.with_layer(layer);
+        }
         // "Set initial controller to creating controller, so more
         // complicated cause-effect-chains can be traced back to the
         // causing player" (FnCreateObject, C4Script.cpp:1905-1906).
@@ -14015,14 +14023,18 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         // arrow-call them immediately (GoldRush: pObj->SetAI right after
         // CreateObject). The spawn stays authoritative; nested outcomes
         // fold only touched fields.
-        .with_full_state(Rc::new(crate::preview_spawn_state(
-            position,
-            owner,
-            creator_controller.unwrap_or(owner),
-            definition_category,
-            FULL_CON,
-            metadata.vertices.clone(),
-        )));
+        .with_full_state(Rc::new({
+            let mut state = crate::preview_spawn_state(
+                position,
+                owner,
+                creator_controller.unwrap_or(owner),
+                definition_category,
+                FULL_CON,
+                metadata.vertices.clone(),
+            );
+            state.layer = creator_layer;
+            state
+        }));
 
         context.register_spawn(spawn, preview);
         Ok(object_reference_value(id))
@@ -14171,6 +14183,10 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 vertices: Vec::new(),
             });
         let definition_category = metadata.category;
+        let creator_layer = context
+            .object_context()
+            .map(ObjectScopeContext::id)
+            .and_then(|creator| context.object_layer(creator));
 
         let base_position = context
             .object_context()
@@ -14203,6 +14219,9 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_category(definition_category)
             .with_construction(construction_value)
             .with_id(id);
+        if let Some(layer) = creator_layer {
+            spawn = spawn.with_layer(layer);
+        }
         // The creating controller rides onto the site (FnCreateConstruction,
         // C4Script.cpp:1932-1933).
         let creator_controller = context
@@ -14245,14 +14264,18 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             None,
         )
         .with_ocf(preview_ocf)
-        .with_full_state(Rc::new(crate::preview_spawn_state(
-            position,
-            owner,
-            creator_controller.unwrap_or(owner),
-            definition_category,
-            construction_value,
-            metadata.vertices.clone(),
-        )));
+        .with_full_state(Rc::new({
+            let mut state = crate::preview_spawn_state(
+                position,
+                owner,
+                creator_controller.unwrap_or(owner),
+                definition_category,
+                construction_value,
+                metadata.vertices.clone(),
+            );
+            state.layer = creator_layer;
+            state
+        }));
 
         context.register_spawn(spawn, preview);
         Ok(object_reference_value(id))
@@ -15634,6 +15657,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 None => return Ok(Value::Nil),
             }
         };
+        let creator_layer = context.object_layer(container);
 
         let metadata = context
             .definition_metadata(&definition)
@@ -15682,12 +15706,15 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         let mut last = Value::Nil;
         for _ in 0..count {
             let id = context.allocate_object_id();
-            let spawn = SpawnConfig::new(definition.clone())
+            let mut spawn = SpawnConfig::new(definition.clone())
                 .with_position(position)
                 .with_owner(owner)
                 .with_category(metadata.category)
                 .with_container(container)
                 .with_id(id);
+            if let Some(layer) = creator_layer {
+                spawn = spawn.with_layer(layer);
+            }
             let preview_ocf = ocf::compute(
                 metadata.ocf_base,
                 metadata.crew_member,
@@ -15730,6 +15757,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                     metadata.vertices.clone(),
                 );
                 state.container = Some(container);
+                state.layer = creator_layer;
                 state
             }));
             context.register_spawn(spawn, preview);
@@ -16698,10 +16726,7 @@ fn set_view_offset(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnGetObjectLayer (C4Script.cpp:5160-5166): the object's pLayer — nil
-/// unless a layer was assigned (Objects.txt `Layer=`; SetObjectLayer is
-/// unported). Layers cannot change mid-call, so the world snapshot is
-/// authoritative for the context object too.
+/// FnGetObjectLayer (C4Script.cpp:5160-5166): the object's effective pLayer.
 fn get_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -16723,10 +16748,56 @@ fn get_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
-        let layer = target
-            .and_then(|target| context.get_world_object(target))
-            .and_then(|object| object.full_state().and_then(|state| state.layer));
+        let layer = target.and_then(|target| context.object_layer(target));
         Ok(layer.map(object_reference_value).unwrap_or(Value::Nil))
+    })
+}
+
+/// FnSetObjectLayer (C4Script.cpp:5168-5180): set or clear pLayer on the
+/// explicit target, defaulting a nil target to the calling object.
+fn set_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "SetObjectLayer expects at most 2 arguments: layer and target",
+        ));
+    }
+    let layer = args
+        .first()
+        .map(|value| parse_object_reference_argument(value, "SetObjectLayer", "layer"))
+        .transpose()?
+        .flatten();
+    let target_id = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "SetObjectLayer", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Bool(false));
+        };
+        let contents = context
+            .get_world_object(target)
+            .map(|object| object.contents().to_vec())
+            .unwrap_or_default();
+        if !context.set_object_layer(target, layer) {
+            return Ok(Value::Bool(false));
+        }
+        for content in contents {
+            if context
+                .get_world_object(content)
+                .map(|object| object.is_present())
+                .unwrap_or(false)
+            {
+                context.set_object_layer(content, layer);
+            }
+        }
+        Ok(Value::Bool(true))
     })
 }
 
@@ -18233,6 +18304,29 @@ impl EffectHostContext {
         }
         self.object_scope_mut(target)
             .map(|scope| scope.pending_update.custom_name = Some(custom_name))
+            .is_some()
+    }
+
+    /// The effective C4Object::pLayer mid-call. A pending clear shadows the
+    /// frame-start state just like a pending layer assignment.
+    fn object_layer(&self, target: ObjectId) -> Option<ObjectId> {
+        if let Some(layer) = self
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.layer.as_ref())
+        {
+            return *layer;
+        }
+        self.get_world_object(target)
+            .and_then(|object| object.full_state().and_then(|state| state.layer))
+    }
+
+    /// Stage one object's pLayer through the normal nested-scope fold.
+    fn set_object_layer(&mut self, target: ObjectId, layer: Option<ObjectId>) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        self.object_scope_mut(target)
+            .map(|scope| scope.pending_update.layer = Some(layer))
             .is_some()
     }
 
@@ -19793,6 +19887,7 @@ mod tests {
         "SetName",
         "SetObjDrawTransform",
         "SetObjDrawTransform2",
+        "SetObjectLayer",
         "SetObjectStatus",
         "SetOwner",
         "SetPhase",
