@@ -2243,6 +2243,26 @@ fn get_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         .unwrap_or(Value::Int(0)))
 }
 
+/// FnGetMenuSelection (C4Script.cpp:4310-4316): -1 without an object or an
+/// active menu, else C4Menu::GetSelection() — the raw Selection index
+/// (C4Menu.cpp:612-615; -1 while nothing is selected).
+fn get_menu_selection(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GetMenuSelection",
+        "obj",
+    )?;
+    let Some(target) = target.or(active_object_id()) else {
+        return Ok(Value::Int(-1));
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    Ok(Value::Int(menu.map(|menu| menu.selection).unwrap_or(-1)))
+}
+
 /// FnPunch (C4Script.cpp:328-332) → ObjectComPunch (C4ObjectCom.cpp:
 /// 735-767): a zero punch derives from the Fight physicals
 /// (BoundBy(5*attacker/target, 0, 10)); QueryCatchBlow on the target
@@ -4599,6 +4619,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CloseMenu", close_menu);
     script.register_host_function("CreateMenu", create_menu);
     script.register_host_function("GetMenu", get_menu);
+    script.register_host_function("GetMenuSelection", get_menu_selection);
     script.register_host_function("SelectMenuItem", select_menu_item);
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("FrameCounter", frame_counter);
@@ -20063,6 +20084,7 @@ mod tests {
         "GetMaterial",
         "GetMaterialVal",
         "GetMenu",
+        "GetMenuSelection",
         "GetName",
         "GetOCF",
         "GetObjectLayer",

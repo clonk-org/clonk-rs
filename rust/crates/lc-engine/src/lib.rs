@@ -36562,6 +36562,60 @@ func Trigger() {
     }
 
     #[test]
+    fn get_menu_selection_reads_the_selection_or_minus_one_like_cpp() {
+        // FnGetMenuSelection (C4Script.cpp:4310-4316): no object, no menu or
+        // inactive menu -> -1; otherwise C4Menu::GetSelection() — the raw
+        // Selection index (C4Menu.cpp:612-615), which itself is -1 while
+        // nothing is selected (C4Menu::Default, C4Menu.cpp:284).
+        let script = r#"
+        func Read() { return GetMenuSelection(this()); }
+        func ReadSelf() { return GetMenuSelection(); }
+        func OpenEmpty() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func Fill() {
+            AddMenuItem("Info", "", WIPF, this());
+            AddMenuItem("A", "CmdA", WIPF, this());
+            AddMenuItem("B", "CmdB", WIPF, this());
+            return SelectMenuItem(2, this());
+        }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, Vec::new())
+                .expect("call succeeds")
+        };
+
+        assert_eq!(
+            call(&mut engine, "Read"),
+            Value::Int(-1),
+            "no menu -> -1 (C4Script.cpp:4314)"
+        );
+        assert_eq!(call(&mut engine, "OpenEmpty"), Value::Bool(true));
+        assert_eq!(
+            call(&mut engine, "ReadSelf"),
+            Value::Int(-1),
+            "open menu without a selection reports its raw -1"
+        );
+        assert_eq!(call(&mut engine, "Fill"), Value::Bool(true));
+        assert_eq!(
+            call(&mut engine, "Read"),
+            Value::Int(2),
+            "the selected index is reported (C4Script.cpp:4315)"
+        );
+    }
+
+    #[test]
     fn landscape_width_and_height_report_gback_dimensions_like_cpp() {
         // FnLandscapeWidth/FnLandscapeHeight (C4Script.cpp:3077-3085):
         // GBackWdt/GBackHgt — the wild-horse ContactRight turn check reads
