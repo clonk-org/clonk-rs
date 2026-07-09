@@ -1824,6 +1824,9 @@ impl EnvironmentSettings {
     /// `Climate - int32(TemperatureRange * cos(6.28 * Season / 100.0))` —
     /// a double-precision cosine of the LITERAL 6.28 (not tau) with the
     /// C++ truncating int cast, and no TemperatureRange gate.
+    // The 6.28 is the C++ oracle's own approximation (C4Weather.cpp:90) —
+    // substituting the real TAU would desync the temperature by a degree.
+    #[allow(clippy::approx_constant)]
     fn update_temperature_from_season(&mut self) {
         let delta = (f64::from(self.temperature_range)
             * (6.28 * f64::from(self.season) / 100.0).cos()) as i32;
