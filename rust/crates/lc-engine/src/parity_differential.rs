@@ -6,7 +6,8 @@
 //! `parity/golden/parity_golden.json`. That golden is produced from the REAL
 //! engine code (`src/Fixed.h`, `src/Fixed.cpp`'s `SineTable`, `src/C4Random.h`,
 //! `src/C4ScriptKiller.h`, `src/C4LandscapePath.h`, and
-//! `src/C4ActionDirection.h`, and `src/C4SolidMaskBitmap.h`) by
+//! `src/C4ActionDirection.h`, `src/C4ActionCallbacks.h`, and
+//! `src/C4SolidMaskBitmap.h`) by
 //! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
 //! the C++ oracle, not a Rust-vs-Rust regression.
 //!
@@ -158,6 +159,102 @@ fn action_direction_engine() -> (Engine, crate::ObjectId) {
         )
         .expect("oracle fixture spawns");
     (engine, id)
+}
+
+fn action_callbacks_engine(case: &str) -> (Engine, crate::ObjectId) {
+    let script = r#"#strict
+local callbackOrder, startCount, oldCount;
+
+protected func Activity()
+{
+    SetAction("New");
+    return 1;
+}
+
+protected func OnStart()
+{
+    callbackOrder = callbackOrder * 10 + 1;
+    startCount = startCount + 1;
+    return 1;
+}
+
+protected func OnEnd()
+{
+    callbackOrder = callbackOrder * 10 + 2;
+    oldCount = oldCount + 1;
+    return 1;
+}
+
+protected func OnAbort()
+{
+    callbackOrder = callbackOrder * 10 + 3;
+    oldCount = oldCount + 1;
+    return 1;
+}
+"#;
+    let mut definition =
+        Definition::from_script("ACBK", "Action callbacks", script).expect("fixture compiles");
+    definition.set_c4_callback_convention(true);
+    let mut old = ActionSpec::default();
+    match case {
+        "script_start_only" => {
+            definition.set_timer(1);
+            definition.set_timer_call(Some("Activity".to_string()));
+        }
+        "script_start_abort" => {
+            definition.set_timer(1);
+            definition.set_timer_call(Some("Activity".to_string()));
+            old = old.with_abort_call("OnAbort");
+        }
+        "natural_start_end" => {
+            old = old
+                .with_length(1)
+                .with_delay(1)
+                .with_next("New")
+                .with_end_call("OnEnd");
+        }
+        other => panic!("unknown action_callbacks case `{other}`"),
+    }
+    definition.configure_actions(
+        Some("Old".to_string()),
+        HashMap::from([
+            ("Old".to_string(), old),
+            (
+                "New".to_string(),
+                ActionSpec::default().with_start_call("OnStart"),
+            ),
+        ]),
+    );
+
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(definition)
+        .expect("fixture registers");
+    let id = engine
+        .spawn_object(
+            SpawnConfig::new("ACBK")
+                .with_action(ActionState::new("Old"))
+                .with_category(CATEGORY_OBJECT)
+                .with_local_vars(HashMap::from([
+                    ("callbackOrder".to_string(), ScriptValue::Int(0)),
+                    ("startCount".to_string(), ScriptValue::Int(0)),
+                    ("oldCount".to_string(), ScriptValue::Int(0)),
+                ]))
+                .with_loaded(true),
+        )
+        .expect("fixture spawns");
+    (engine, id)
+}
+
+fn action_callback_local(engine: &Engine, id: crate::ObjectId, name: &str) -> i64 {
+    engine
+        .find_object_index(id)
+        .and_then(|idx| engine.objects[idx].state.local_vars.get(name))
+        .and_then(|value| match value {
+            ScriptValue::Int(value) => Some(i64::from(*value)),
+            _ => None,
+        })
+        .unwrap_or(0)
 }
 
 fn solid_mask_sprite(alpha: u8) -> DefinitionSpriteImage {
@@ -852,7 +949,52 @@ func Trigger(object pOther) {
         );
     }
 
-    // 13. C4SolidMask constructor bitmap selection (C4SolidMask.cpp:400-412,
+    // 13. C4Object::SetAction callback dispatch (C4Object.cpp:4172-4208).
+    //     Minimized from Goldrush frame 192, WIPF #565: script SetAction
+    //     synchronously fires the new StartCall exactly once and before the
+    //     old AbortCall; natural phase wraps likewise fire Start before End.
+    for (idx, case) in golden["action_callbacks"]
+        .as_array()
+        .expect("action_callbacks is an array")
+        .iter()
+        .enumerate()
+    {
+        let name = case["name"]
+            .as_str()
+            .expect("action_callbacks case has a name");
+        let (mut engine, id) = action_callbacks_engine(name);
+        engine.tick().expect("callback fixture frame executes");
+        expect_eq(
+            "action_callbacks",
+            idx,
+            "completed",
+            i(case, "completed"),
+            i64::from(engine.find_object_index(id).is_some()),
+        );
+        expect_eq(
+            "action_callbacks",
+            idx,
+            "callback_order",
+            i(case, "callback_order"),
+            action_callback_local(&engine, id, "callbackOrder"),
+        );
+        expect_eq(
+            "action_callbacks",
+            idx,
+            "start_count",
+            i(case, "start_count"),
+            action_callback_local(&engine, id, "startCount"),
+        );
+        expect_eq(
+            "action_callbacks",
+            idx,
+            "old_count",
+            i(case, "old_count"),
+            action_callback_local(&engine, id, "oldCount"),
+        );
+    }
+
+    // 14. C4SolidMask constructor bitmap selection (C4SolidMask.cpp:400-412,
     //     C4Object.cpp:5908-5923). Minimized from Goldrush frame 184, CTWR
     //     #1351: source pixel (219,86) is transparent in Graphics.png but
     //     opaque in Graphics2.png. SetGraphics selects Graphics2 and rebuilds
@@ -923,7 +1065,7 @@ func Trigger(object pOther) {
         }
     }
 
-    // 14. Movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 15. Movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    fix_x += xdir; fix_y += (ydir += gravity); matching C4Movement.cpp.
     for scn in golden["movement"].as_array().unwrap() {
         let name = scn["name"].as_str().unwrap_or("?");
