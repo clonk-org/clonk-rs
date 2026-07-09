@@ -2076,21 +2076,35 @@ fn c4id_text_of(value: &Value) -> String {
     }
 }
 
+thread_local! {
+    /// C4ObjectMenu::CloseQuerying (C4ObjectMenu.h:64): the per-menu
+    /// recursion check for the MenuQueryCancel callback — shared between
+    /// the host-fn close path and the engine-side close hooks.
+    static CLOSE_QUERYING: RefCell<std::collections::HashSet<ObjectId>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Marks `menu_object`'s menu as close-querying; false when a query is
+/// already running (the C4ObjectMenu::CloseQuerying recursion check).
+pub(crate) fn begin_menu_close_query(menu_object: ObjectId) -> bool {
+    CLOSE_QUERYING.with(|cell| cell.borrow_mut().insert(menu_object))
+}
+
+pub(crate) fn end_menu_close_query(menu_object: ObjectId) {
+    CLOSE_QUERYING.with(|cell| {
+        cell.borrow_mut().remove(&menu_object);
+    });
+}
+
 /// C4ObjectMenu::IsCloseDenied (C4ObjectMenu.cpp:56-75): a USER menu asks
 /// MenuQueryCancel(Selection, ParentObject) on the command object
 /// (CB_Object) or the scenario script (CB_Scenario); a truthy answer keeps
 /// the menu open. The CloseQuerying flag stops recursive queries.
 fn menu_close_denied(menu_object: ObjectId, menu: &crate::ObjectMenuState) -> bool {
-    thread_local! {
-        static CLOSE_QUERYING: RefCell<std::collections::HashSet<ObjectId>> =
-            RefCell::new(std::collections::HashSet::new());
-    }
     if !menu.user_menu {
         return false;
     }
-    let already_querying =
-        CLOSE_QUERYING.with(|cell| !cell.borrow_mut().insert(menu_object));
-    if already_querying {
+    if !begin_menu_close_query(menu_object) {
         return false;
     }
     let pars = [
@@ -2114,9 +2128,7 @@ fn menu_close_denied(menu_object: ObjectId, menu: &crate::ObjectMenuState) -> bo
     }
     .map(|result| result.map(|value| value.as_bool()).unwrap_or(false))
     .unwrap_or(false);
-    CLOSE_QUERYING.with(|cell| {
-        cell.borrow_mut().remove(&menu_object);
-    });
+    end_menu_close_query(menu_object);
     denied
 }
 
