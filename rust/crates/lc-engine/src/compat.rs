@@ -7307,18 +7307,37 @@ fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
     call_args.extend(args.iter().skip(3).take(7).cloned());
     call_args.resize(9, Value::Nil);
 
-    if let Some(command_target) = effect.command_target {
+    dispatch_effect_fx_callback(
+        effect.command_target,
+        effect.command_id.as_deref(),
+        &function,
+        &call_args,
+    )
+    .unwrap_or(Ok(Value::Nil))
+}
+
+/// Resolves and executes an Fx callback like C4Effect::DoCall
+/// (C4Effect.cpp:439-456): the effect's command target's own script, else
+/// the command id's def script (Obj=nullptr, GetFuncRecursive reaches
+/// globals), else the engine-global function table. `None` when the
+/// function exists nowhere (pFn nullptr) — the caller decides whether
+/// that means C4Value() or "leave a chained value untouched".
+fn dispatch_effect_fx_callback(
+    command_target: Option<i32>,
+    command_id: Option<&str>,
+    function: &str,
+    call_args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    if let Some(command_target) = command_target {
         // pFn->Exec(pCommandTarget, ...) — the command target is `this`
-        // (C4Effect.cpp:443-445,456); a missing function is C4Value()
-        // (:454-455).
+        // (C4Effect.cpp:443-445,456).
         return call_world_object_script_function(
             ObjectId::new(command_target as u64),
-            &function,
-            &call_args,
-        )
-        .unwrap_or(Ok(Value::Nil));
+            function,
+            call_args,
+        );
     }
-    let definition_script = effect.command_id.as_ref().and_then(|id| {
+    let definition_script = command_id.and_then(|id| {
         HOST_CONTEXT.with(|cell| {
             cell.borrow()
                 .as_ref()
@@ -7328,8 +7347,7 @@ fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(script) = definition_script {
         // idCommandTarget resolves the def script with Obj=nullptr
         // (C4Effect.cpp:446-447); GetFuncRecursive reaches globals.
-        return call_scoped_script_function_or_global(script, &function, &call_args)
-            .unwrap_or(Ok(Value::Nil));
+        return call_scoped_script_function_or_global(script, function, call_args);
     }
     // No command target at all: Game.ScriptEngine — GLOBAL script
     // functions (C4Effect.cpp:448-449). Any loaded script host shares the
@@ -7339,19 +7357,18 @@ fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
             context
                 .world
                 .scenario_script()
-                .filter(|script| script.has_global_function(&function))
+                .filter(|script| script.has_global_function(function))
                 .or_else(|| {
                     context
                         .world
                         .definition_scripts()
-                        .find(|script| script.has_global_function(&function))
+                        .find(|script| script.has_global_function(function))
                 })
                 .cloned()
         })
     });
     global_carrier
-        .and_then(|script| call_scoped_script_function_or_global(script, &function, &call_args))
-        .unwrap_or(Ok(Value::Nil))
+        .and_then(|script| call_scoped_script_function_or_global(script, function, call_args))
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
