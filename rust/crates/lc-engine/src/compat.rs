@@ -2213,10 +2213,11 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         command_object,
         items: Vec::new(),
         // Columns = Lines = 0, fTextProgressing off (C4Menu::Default,
-        // C4Menu.cpp:299,303).
+        // C4Menu.cpp:299,303), no frame deco.
         columns: 0,
         lines: 0,
         text_progress: None,
+        decoration: None,
     };
     let stored = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
@@ -2732,6 +2733,49 @@ fn set_menu_size(args: &[Value]) -> Result<Value, RuntimeError> {
     if rows != 0 {
         menu.lines = rows;
     }
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu)))
+    });
+    Ok(Value::Bool(true))
+}
+
+/// FnSetMenuDecoration (C4Script.cpp:1737-1748): NO cthr->Obj fallback —
+/// a nil menu object fails even with a scope object. The deco def must be
+/// known (FrameDecoration::SetByDef fails on C4Id2Def null,
+/// C4GuiDialogs.cpp:113-114); its FrameDeco* border/facet queries are
+/// app-side presentation — only the source def id is sim state.
+fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError> {
+    let deco_id = args.first().cloned().unwrap_or(Value::Nil);
+    let target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetMenuDecoration",
+        "menu object",
+    )?;
+    let Some(target) = target else {
+        return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1739)
+    };
+    let (menu, known_def) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return (None, None);
+        };
+        let known_def = match &deco_id {
+            Value::C4Id(id) | Value::String(id) if !id.is_empty() => context
+                .definition_metadata(id)
+                .map(|_| id.clone()),
+            _ => None,
+        };
+        (context.object_menu(target), known_def)
+    });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1739)
+    };
+    let Some(known_def) = known_def else {
+        return Ok(Value::Bool(false)); // SetByDef failed (C4Script.cpp:1741-1745)
+    };
+    menu.decoration = Some(known_def);
     HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
             .as_mut()
@@ -4700,6 +4744,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetMenu", get_menu);
     script.register_host_function("GetMenuSelection", get_menu_selection);
     script.register_host_function("SelectMenuItem", select_menu_item);
+    script.register_host_function("SetMenuDecoration", set_menu_decoration);
     script.register_host_function("SetMenuSize", set_menu_size);
     script.register_host_function("SetMenuTextProgress", set_menu_text_progress);
     script.register_host_function("SetPlrView", set_plr_view);
@@ -20269,6 +20314,7 @@ mod tests {
         "SetGravity",
         "SetKiller",
         "SetMass",
+        "SetMenuDecoration",
         "SetMenuSize",
         "SetMenuTextProgress",
         "SetObjDrawTransform",

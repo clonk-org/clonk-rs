@@ -1966,6 +1966,11 @@ pub struct ObjectMenuState {
     /// distribution across captions is app-side presentation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_progress: Option<i32>,
+    /// SetMenuDecoration frame-deco source def (FrameDecoration::SetByDef,
+    /// C4GuiDialogs.cpp:110-142). The FrameDeco* border/facet queries on
+    /// that def are app-side presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoration: Option<String>,
 }
 
 /// C4Shape attach bookkeeping (`AttachMat`/`iAttachX`/`iAttachY`/
@@ -36752,6 +36757,80 @@ func Trigger() {
             progress(&engine),
             None,
             "negative n disables text progress (fTextProgressing = false)"
+        );
+    }
+
+    #[test]
+    fn set_menu_decoration_requires_a_known_def_and_a_menu_like_cpp() {
+        // FnSetMenuDecoration (C4Script.cpp:1737-1748): no cthr->Obj
+        // fallback — `if (!pMenuObj || !pMenuObj->Menu) return false;`.
+        // FrameDecoration::SetByDef (C4GuiDialogs.cpp:110-142) fails on an
+        // unknown def (C4Id2Def null, :113-114); with a known def it stores
+        // the deco and returns true (the FrameDeco* facet/border queries
+        // are presentation).
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func NoObj() { return SetMenuDecoration(DECO); }
+        func Deco(id) { return SetMenuDecoration(id, this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("DECO", "Deco", "").expect("script compiles"),
+            )
+            .expect("deco registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+
+        assert_eq!(
+            call(&mut engine, "Deco", vec![Value::C4Id("DECO".into())]),
+            Value::Bool(false),
+            "no menu -> false (C4Script.cpp:1739)"
+        );
+        call(&mut engine, "OpenMenu", Vec::new());
+        assert_eq!(
+            call(&mut engine, "NoObj", Vec::new()),
+            Value::Bool(false),
+            "nil menu object -> false even with a scope object (C4Script.cpp:1739)"
+        );
+        assert_eq!(
+            call(&mut engine, "Deco", vec![Value::C4Id("GOLD".into())]),
+            Value::Bool(false),
+            "unknown deco def -> SetByDef fails (C4GuiDialogs.cpp:113-114)"
+        );
+        assert_eq!(
+            engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .expect("menu is open")
+                .decoration,
+            None
+        );
+        assert_eq!(
+            call(&mut engine, "Deco", vec![Value::C4Id("DECO".into())]),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .expect("menu is open")
+                .decoration,
+            Some("DECO".to_string())
         );
     }
 
