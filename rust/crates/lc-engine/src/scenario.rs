@@ -7446,6 +7446,89 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn real_system_scripts_shake_viewport_global_effect_end_to_end() {
+        // System.c4g ShakeViewPort (planet/System.c4g/Explode.c:166-183)
+        // does a nil-target AddEffect("ShakeEffect", pObj, 200, 1) whose
+        // global FxShakeEffect* callbacks must fire: Start synchronously
+        // inside AddEffect (C4Effect ctor, C4Effect.cpp:128-129), Timer
+        // every frame from pGlobalEffects->Execute(nullptr)
+        // (C4Game.cpp:830-831, C4Effect.cpp:342-345), and the Timer's -1
+        // return kills the effect with its Stop (C4Effect.cpp:350,
+        // Explode.c:198 `return(-1)`).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
+        let probe = dir.path().join("Defs.c4d/Probe.c4d");
+        std::fs::create_dir_all(&probe).expect("probe dir");
+        std::fs::write(
+            probe.join("DefCore.txt"),
+            "[DefCore]\nid=PROB\nName=Probe\nCategory=16\nWidth=6\nHeight=6\nOffset=-3,-3\n",
+        )
+        .expect("probe defcore");
+        std::fs::write(
+            probe.join("Script.c"),
+            "#strict\npublic func Shake() { return(ShakeViewPort(100, 0, 10, 20)); }\n",
+        )
+        .expect("probe script");
+
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let planet = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../planet/System.c4g");
+        let system_scripts: Vec<(String, String)> = ["FindObject.c", "GetXVal.c", "Explode.c"]
+            .iter()
+            .map(|name| {
+                let bytes = std::fs::read(planet.join(name)).expect("system script reads");
+                (
+                    (*name).to_string(),
+                    bytes.iter().map(|&b| b as char).collect::<String>(),
+                )
+            })
+            .collect();
+        engine.install_global_scripts(&system_scripts);
+
+        let probe_id = engine
+            .spawn_object(SpawnConfig::new("PROB").with_position(Vector2::new(100, 100)))
+            .expect("probe spawns");
+        let probe_idx = engine.find_object_index(probe_id).expect("probe exists");
+        engine
+            .call_object_function(probe_idx, "Shake", Vec::new())
+            .expect("Shake runs without script errors");
+
+        // FxShakeEffectStart ran inside AddEffect; ShakeViewPort then
+        // seeds EffectVar 0..2 with the level and offsets (Explode.c:
+        // 175-178).
+        assert_eq!(engine.global_effects().len(), 1, "global effect added");
+        let effect = &engine.global_effects()[0];
+        assert_eq!(effect.name, "ShakeEffect");
+        assert_eq!(effect.priority, 200);
+        assert_eq!(effect.interval, 1);
+        assert_eq!(effect.var(0), crate::EffectVarValue::Int(100));
+        assert_eq!(effect.var(1), crate::EffectVarValue::Int(10));
+        assert_eq!(effect.var(2), crate::EffectVarValue::Int(20));
+
+        // FxShakeEffectTimer (Explode.c:188-199) fires every frame; its
+        // strength formula iLevel/((3*iTime)/2+3)-iTime**2/400 reaches 0
+        // at iTime 29 for level 100 -> return(-1) kills the effect.
+        let mut death_frame = None;
+        for frame in 1..=40 {
+            engine.tick().expect("tick runs");
+            if engine.global_effects().is_empty() {
+                death_frame = Some(frame);
+                break;
+            }
+            assert_eq!(
+                engine.global_effects()[0].timer,
+                frame,
+                "iTime advances every frame while the shake lives"
+            );
+        }
+        assert_eq!(
+            death_frame,
+            Some(29),
+            "the timer's C4Fx_Execute_Kill return removes the global effect"
+        );
+    }
+
+    #[test]
     fn appendto_scripts_link_into_their_targets_like_c4aullink() {
         // C4AulScript::ResolveAppends (C4AulLink.cpp:29-64) + AppendTo
         // (:114-141): a definition script with `#appendto GOOD` copies its
