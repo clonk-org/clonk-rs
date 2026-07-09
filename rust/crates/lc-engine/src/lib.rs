@@ -16974,8 +16974,11 @@ impl Engine {
         // LAST checker answering -2/-3 wins the merge.
         let mut annulled_started: HashMap<i32, (i32, bool)> = HashMap::new();
         // Anchors whose temp remove/readd bracket was already queued (a
-        // re-popped anchor event must not expand again).
+        // re-popped anchor event must not expand again). Start and stop
+        // anchors are tracked separately: numbers can be reused within one
+        // run after a removal (max existing + 1, C4Effect.cpp:76-78).
         let mut temp_wrapped_started: HashSet<i32> = HashSet::new();
+        let mut temp_wrapped_stopped: HashSet<i32> = HashSet::new();
 
         while let Some(event) = queue.pop_front() {
             // C4Effect::Check (C4Effect.cpp:97-116): before a new effect
@@ -17071,6 +17074,35 @@ impl Engine {
                             continue;
                         }
                     }
+                }
+            }
+            // C4Effect::Kill (C4Effect.cpp:365-405): the real removal is
+            // bracketed by temp-deactivating all upper effects
+            // (C4Effect.cpp:370-374) and reactivating them after the Stop
+            // (C4Effect.cpp:404). Clear/destroy removals go through
+            // ClearAll, which does NO temp calls (C4Effect.cpp:407-425);
+            // priority-1 victims skip the bracket (C4Effect.cpp:477).
+            if matches!(
+                event.kind,
+                EffectEventKind::Stopped(EffectStopReason::Removed)
+            ) && event.effect.priority != 1
+                && !temp_wrapped_stopped.contains(&event.effect.number)
+            {
+                let uppers = upper_effects_of(&object.state.effects, &event.effect);
+                if !uppers.is_empty() {
+                    temp_wrapped_stopped.insert(event.effect.number);
+                    let mut sequence: Vec<EffectEvent> = uppers
+                        .iter()
+                        .rev()
+                        .cloned()
+                        .map(EffectEvent::temp_removed)
+                        .collect();
+                    sequence.push(event);
+                    sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
+                    for queued in sequence.into_iter().rev() {
+                        queue.push_front(queued);
+                    }
+                    continue;
                 }
             }
             let snapshot_for_call = state_snapshot.clone();
@@ -42228,7 +42260,16 @@ func FxProbeTimer(pThis, iNumber) {
         );
         let calls = call_log.lock().unwrap().clone();
         let stop_calls = calls.iter().filter(|name| *name == "FxDoomedStop").count();
-        assert_eq!(stop_calls, 1, "the kill runs the Stop callback");
+        // The C++ list orders new-before-equal ([Inert, Mute, Doomed],
+        // C4Effect.cpp:80-94), so killing Mute at its timerless gate
+        // temp-removes the upper Doomed — FxDoomedStop(fTemp) fires there
+        // (C4Effect.cpp:370-374,489) — and Doomed's own -1 kill fires the
+        // real Stop later.
+        assert_eq!(
+            stop_calls, 2,
+            "one temp stop from Mute's kill bracket, one real stop from \
+             Doomed's own kill"
+        );
     }
 
     #[test]
@@ -42717,6 +42758,106 @@ func FxProbeTimer(pThis, iNumber) {
             !calls.iter().any(|(name, _)| name == "FxUpperStop"),
             "an effect without Fx*Start skips the temp bracket \
              (C4Effect.cpp:123)"
+        );
+    }
+
+    #[test]
+    fn effect_kill_temp_removes_and_readds_upper_effects() {
+        // C4Effect::Kill (C4Effect.cpp:365-405): killing an active effect
+        // temp-deactivates all upper effects first (C4Effect.cpp:370-374),
+        // runs the victim's Fx*Stop, then reactivates the uppers
+        // (C4Effect.cpp:404) — same bracket as the ctor, without an
+        // Fx*Stop requirement on the victim.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Upper", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxUpperStart(state, effect, temp) {
+            return nil;
+        }
+
+        global func FxUpperStop(state, effect, reason, temp) {
+            return nil;
+        }
+
+        global func FxLowerStop(state, effect, reason) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "add", name = "Lower", priority = 100, interval = 0 } ] };
+            }
+            if (frame == 3) {
+                return { effects = [ { op = "remove", name = "Lower" } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                call_log
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.to_vec()));
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        call_log.lock().unwrap().clear();
+
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Upper"], "only Lower is killed");
+
+        let calls: Vec<(String, Vec<Value>)> = call_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name.starts_with("Fx"))
+            .cloned()
+            .collect();
+        let call_names: Vec<&str> = calls.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            call_names,
+            vec!["FxUpperStop", "FxLowerStop", "FxUpperStart"],
+            "the kill is bracketed by the upper effect's temp stop and \
+             temp readd (C4Effect.cpp:370-374,404)"
+        );
+        let (_, temp_stop_args) = &calls[0];
+        assert_eq!(
+            temp_stop_args.get(3),
+            Some(&Value::Bool(true)),
+            "the bracket stop is temporary (fTemp, C4Effect.cpp:489)"
+        );
+        let (_, kill_stop_args) = &calls[1];
+        assert_eq!(
+            kill_stop_args.get(2),
+            Some(&Value::String("removed".to_string())),
+            "the victim's Stop is the real removal"
         );
     }
 
