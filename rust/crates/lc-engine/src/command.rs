@@ -297,6 +297,73 @@ mod tests {
     // C4Command::JumpControl trigger 1 (C4Command.cpp:1861-1872): target
     // in the ±(35±10)° diagonal, path free, farther than 30, 15px head
     // room -> a C4CMD_Jump goes on TOP of the MoveTo.
+    fn move_to_ctx_at_frame<'a>(
+        object: &'a CommandObjectSnapshot,
+        objects: &'a HashMap<ObjectId, CommandObjectSnapshot>,
+        players: &'a HashMap<i32, CommandPlayerSnapshot>,
+        definitions: &'a HashMap<DefinitionId, CommandDefinitionSnapshot>,
+        frame: u64,
+    ) -> CommandRuntimeContext<'a> {
+        CommandRuntimeContext {
+            landscape: None,
+            frame,
+            position: object.position,
+            object,
+            objects,
+            players,
+            definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        }
+    }
+
+    // C4Command::MoveTo DFA_SWIM arm (C4Command.cpp:370-382): on Tick2
+    // frames (Game.iTick2 != 0, i.e. odd FrameCounter) the swimmer steers
+    // horizontally toward Tx (with target range); on !Tick2 frames it
+    // steers vertically toward Ty with NO range (cy < Ty -> Down).
+    #[test]
+    fn move_to_swim_steers_horizontal_on_tick2_and_vertical_otherwise() {
+        let mut swimmer = snapshot_with_id(1);
+        swimmer.position = Vector2::new(100, 100);
+        swimmer.action_procedure = ActionProcedure::Swim;
+        swimmer.crew_member = true;
+        swimmer.ocf |= ocf::CREW_MEMBER;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        // Target right and below: dx = 60, dy = 40.
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(160))
+            .with_ty(Some(140))
+            .with_update_interval(1);
+
+        // Odd frame (iTick2 == 1): horizontal arm -> COMD_Right.
+        let ctx = move_to_ctx_at_frame(&swimmer, &objects, &players, &definitions, 1);
+        let mut state = MoveToState::from_request(&request);
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Right),
+            "Tick2 swim steering is horizontal (C4Command.cpp:372-376)"
+        );
+
+        // Even frame (iTick2 == 0): vertical arm -> COMD_Down (cy < Ty).
+        let ctx = move_to_ctx_at_frame(&swimmer, &objects, &players, &definitions, 2);
+        let mut state = MoveToState::from_request(&request);
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Down),
+            "!Tick2 swim steering is vertical (C4Command.cpp:377-381)"
+        );
+    }
+
     #[test]
     fn move_to_diagonal_free_jump_like_cpp() {
         let landscape = crate::Landscape::flat(300, 110);
@@ -7122,16 +7189,41 @@ impl MoveToState {
             return CommandStepResult::completed(Some(update));
         }
 
-        let direction = if dx > self.tolerance {
-            CommandDirection::Right
-        } else if dx < -self.tolerance {
-            CommandDirection::Left
-        } else if dy > self.tolerance {
-            CommandDirection::Down
-        } else if dy < -self.tolerance {
-            CommandDirection::Up
-        } else {
-            CommandDirection::Stop
+        let direction = match ctx.object.action_procedure {
+            // DFA_SWIM (C4Command.cpp:370-382): Tick2 frames (Game.iTick2
+            // != 0 — odd FrameCounter) steer horizontally with the target
+            // range; !Tick2 frames steer vertically toward Ty with no
+            // range. ComDir is left alone when no condition hits.
+            ActionProcedure::Swim => {
+                if ctx.frame % 2 != 0 {
+                    if dx > self.tolerance {
+                        CommandDirection::Right
+                    } else if dx < -self.tolerance {
+                        CommandDirection::Left
+                    } else {
+                        self.last_direction
+                    }
+                } else if dy > 0 {
+                    CommandDirection::Down
+                } else if dy < 0 {
+                    CommandDirection::Up
+                } else {
+                    self.last_direction
+                }
+            }
+            _ => {
+                if dx > self.tolerance {
+                    CommandDirection::Right
+                } else if dx < -self.tolerance {
+                    CommandDirection::Left
+                } else if dy > self.tolerance {
+                    CommandDirection::Down
+                } else if dy < -self.tolerance {
+                    CommandDirection::Up
+                } else {
+                    CommandDirection::Stop
+                }
+            }
         };
 
         // DFA_WALK movement controls, after the ComDir steering
