@@ -265,6 +265,29 @@ pub struct DefCore {
     pub timer_call: Option<String>,
     pub components: Vec<DefComponent>,
     pub line_connect: u32,
+    /// `Entrance` rect (C4Def.cpp:309): the enter/activate area for
+    /// OCF_Entrance (SetOCF, C4Object.cpp:584-587).
+    pub entrance: Option<PictureRect>,
+    /// `RotatedEntrance` (C4Def.cpp:377): 0 = upright only, 1 = any
+    /// rotation, N = up to N degrees (SetOCF, C4Object.cpp:586).
+    pub rotated_entrance: i32,
+    /// `Exclusive` (C4Def.cpp:313): blocks action/construction behind it
+    /// (OCF_Exclusive, SetOCF C4Object.cpp:581-583).
+    pub exclusive: bool,
+    /// `Prey` (C4Def.cpp:354): OCF_Prey while alive (SetOCF,
+    /// C4Object.cpp:615-618).
+    pub prey: bool,
+    /// `Edible` (C4Def.cpp:355): OCF_Edible (SetOCF, C4Object.cpp:630-632).
+    pub edible: bool,
+    /// `Chop` -> C4Def::Chopable (C4Def.cpp:378): OCF_Chop candidate
+    /// (SetOCF, C4Object.cpp:570-575).
+    pub chopable: bool,
+    /// `AttractLightning` (C4Def.cpp:391): OCF_AttractLightning at FullCon
+    /// (SetOCF, C4Object.cpp:623-626).
+    pub attract_lightning: bool,
+    /// `NoFight` (C4Def.cpp:413): suppresses OCF_FightReady (SetOCF,
+    /// C4Object.cpp:606-610).
+    pub no_fight: bool,
     /// `CanBeBase` (C4Def.cpp DefCore): marks structures usable as the
     /// FirstBase in PlaceReadyBase (C4Player.cpp:596-599).
     pub can_be_base: bool,
@@ -535,6 +558,14 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut timer_call: Option<String> = None;
     let mut components: Vec<DefComponent> = Vec::new();
     let mut line_connect: u32 = 0;
+    let mut entrance: Option<PictureRect> = None;
+    let mut rotated_entrance: i32 = 0;
+    let mut exclusive = false;
+    let mut prey = false;
+    let mut edible = false;
+    let mut chopable = false;
+    let mut attract_lightning = false;
+    let mut no_fight = false;
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -776,6 +807,31 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "lineconnect" => {
                 line_connect = parse_line_connect(value)?;
             }
+            // C4Object::SetOCF DefCore inputs (C4Def.cpp:309-413).
+            "entrance" => {
+                entrance = parse_rect(value);
+            }
+            "rotatedentrance" => {
+                rotated_entrance = parse_i32(value).unwrap_or(0);
+            }
+            "exclusive" => {
+                exclusive = parse_bool(value);
+            }
+            "prey" => {
+                prey = parse_bool(value);
+            }
+            "edible" => {
+                edible = parse_bool(value);
+            }
+            "chop" => {
+                chopable = parse_bool(value);
+            }
+            "attractlightning" => {
+                attract_lightning = parse_bool(value);
+            }
+            "nofight" => {
+                no_fight = parse_bool(value);
+            }
             _ => {}
         }
     }
@@ -856,6 +912,14 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         components,
         line_connect,
         can_be_base,
+        entrance,
+        rotated_entrance,
+        exclusive,
+        prey,
+        edible,
+        chopable,
+        attract_lightning,
+        no_fight,
     })
 }
 
@@ -2195,6 +2259,59 @@ NextAction=Dup
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
         assert_eq!(parsed.blast_incinerate, 0, "default: no blast incinerate");
+    }
+
+    #[test]
+    fn parse_def_core_set_ocf_fields() {
+        // The DefCore flags feeding C4Object::SetOCF (C4Object.cpp:526-666):
+        // Entrance rect (C4Def.cpp:309), Exclusive (:313), Prey (:354),
+        // Edible (:355), RotatedEntrance (:377), Chop -> Chopable (:378),
+        // AttractLightning (:391), NoFight (:413).
+        let data = br#"
+            [DefCore]
+            id=CSTL
+            Name=Castle
+            Entrance=-10,20,20,15
+            Exclusive=1
+            Prey=1
+            Edible=1
+            RotatedEntrance=45
+            Chop=1
+            AttractLightning=1
+            NoFight=1
+        "#;
+        let parsed = parse_def_core(data).expect("def core parses");
+        assert_eq!(
+            parsed.entrance,
+            Some(PictureRect {
+                x: -10,
+                y: 20,
+                width: 20,
+                height: 15
+            })
+        );
+        assert!(parsed.exclusive);
+        assert!(parsed.prey);
+        assert!(parsed.edible);
+        assert_eq!(parsed.rotated_entrance, 45);
+        assert!(parsed.chopable);
+        assert!(parsed.attract_lightning);
+        assert!(parsed.no_fight);
+
+        let data = br#"
+            [DefCore]
+            id=STON
+            Name=Stone
+        "#;
+        let parsed = parse_def_core(data).expect("def core parses");
+        assert_eq!(parsed.entrance, None, "default: no entrance area");
+        assert!(!parsed.exclusive);
+        assert!(!parsed.prey);
+        assert!(!parsed.edible);
+        assert_eq!(parsed.rotated_entrance, 0);
+        assert!(!parsed.chopable);
+        assert!(!parsed.attract_lightning);
+        assert!(!parsed.no_fight);
     }
 
     #[test]
