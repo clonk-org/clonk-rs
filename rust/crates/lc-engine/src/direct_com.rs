@@ -1444,6 +1444,86 @@ mod tests {
         crew
     }
 
+    /// A collector clonk + a collectible item inside it, ready for the
+    /// drop→NoCollectDelay→recollect window tests.
+    fn drop_window_fixture(engine: &mut Engine) -> (ObjectId, ObjectId) {
+        let mut clonk =
+            Definition::from_script("CLNK", "Clonk", "#strict\n").expect("clonk compiles");
+        clonk.configure_actions(Some("Walk".to_string()), clonk_actions());
+        clonk.set_movement_profile(MovementProfile::default());
+        clonk.set_collection_rect(Some(crate::DefinitionRect::new(-8, -16, 16, 32)));
+        engine.register_definition(clonk).expect("register clonk");
+        let mut item = Definition::from_script("GOLD", "Gold", "#strict\n").expect("item compiles");
+        item.set_collectible(true);
+        engine.register_definition(item).expect("register item");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(engine, "CLNK", 1);
+        let item = engine
+            .spawn_object(SpawnConfig::new("GOLD").with_container(crew))
+            .expect("spawn item");
+        (crew, item)
+    }
+
+    fn no_collect_delay(engine: &Engine, id: ObjectId) -> i32 {
+        let index = engine.find_object_index(id).expect("object exists");
+        engine.objects[index].state.no_collect_delay
+    }
+
+    #[test]
+    fn drop_command_arms_no_collect_delay_and_clears_collection_ocf() {
+        // ObjectComDrop (C4ObjectCom.cpp:668-671): after the item exits,
+        // `cObj->NoCollectDelay = 2` and the immediate SetOCF drop the
+        // dropper's OCF_Collection bit (SetOCF, C4Object.cpp:598-600).
+        let mut engine = Engine::new();
+        let (crew, item) = drop_window_fixture(&mut engine);
+
+        engine
+            .player_object_command(1, CommandId::Drop, None, 0, 0)
+            .expect("drop command");
+        engine.tick().expect("tick");
+        let item_index = engine.find_object_index(item).expect("item exists");
+        assert_eq!(
+            engine.objects[item_index].state.container, None,
+            "the drop exited the item"
+        );
+        assert_eq!(
+            no_collect_delay(&engine, crew),
+            2,
+            "ObjectComDrop arms NoCollectDelay = 2 (C4ObjectCom.cpp:669)"
+        );
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        assert_eq!(
+            engine.objects[crew_index].state.ocf & ocf::COLLECTION,
+            0,
+            "the post-drop SetOCF clears OCF_Collection (C4ObjectCom.cpp:671)"
+        );
+    }
+
+    #[test]
+    fn dropped_item_is_not_recollected_while_the_delay_is_armed() {
+        // While NoCollectDelay > 0 the dropper never regains OCF_Collection
+        // (SetOCF, C4Object.cpp:598), so the reverse-pass cross check
+        // (C4GameObjects.cpp:185-194) leaves the dropped item alone across
+        // any number of Tick3 frames.
+        let mut engine = Engine::new();
+        let (_, item) = drop_window_fixture(&mut engine);
+
+        engine
+            .player_object_command(1, CommandId::Drop, None, 0, 0)
+            .expect("drop command");
+        for _ in 0..9 {
+            engine.tick().expect("tick");
+        }
+        let item_index = engine.find_object_index(item).expect("item exists");
+        assert_eq!(
+            engine.objects[item_index].state.container, None,
+            "no control was issued, so the delay never counted down and the \
+             item stays on the ground"
+        );
+    }
+
     #[test]
     fn com_name_matches_cpp_comname_table() {
         // ComName (C4ObjectCom.cpp:800-852).

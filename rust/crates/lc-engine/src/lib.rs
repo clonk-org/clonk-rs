@@ -24744,6 +24744,15 @@ impl Engine {
             CommandEvent::AdjustPlayerWealth { player_id, delta } => {
                 let _ = self.adjust_player_wealth(player_id, delta)?;
             }
+            CommandEvent::ArmNoCollectDelay { object_id } => {
+                // ObjectComDrop (C4ObjectCom.cpp:668-671): NoCollectDelay = 2
+                // on the dropper, then its SetOCF so OCF_Collection clears
+                // immediately (SetOCF gate, C4Object.cpp:598).
+                if let Some(index) = self.find_object_index(object_id) {
+                    self.objects[index].state.no_collect_delay = 2;
+                    self.refresh_object_ocf(index);
+                }
+            }
         }
         Ok(())
     }

@@ -1747,12 +1747,20 @@ mod tests {
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
         assert!(result.operations.is_empty());
-        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events.len(), 2);
         match &result.events[0] {
             CommandEvent::ApplyObjectUpdate { object_id, update } => {
                 assert_eq!(*object_id, item_id);
                 assert_eq!(update.container, Some(None));
                 assert_eq!(update.position, Some(actor.position));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        // ObjectComDrop arms the DROPPER's NoCollectDelay after the exit
+        // (C4ObjectCom.cpp:668-671).
+        match &result.events[1] {
+            CommandEvent::ArmNoCollectDelay { object_id } => {
+                assert_eq!(*object_id, actor_id);
             }
             other => panic!("unexpected event: {:?}", other),
         }
@@ -7195,6 +7203,11 @@ pub enum CommandEvent {
         player_id: i32,
         delta: i32,
     },
+    /// ObjectComDrop's post-exit `cObj->NoCollectDelay = 2` plus the
+    /// immediate `SetOCF()` on the DROPPER (C4ObjectCom.cpp:668-671).
+    ArmNoCollectDelay {
+        object_id: ObjectId,
+    },
     OpenMenu(MenuRequest),
 }
 
@@ -10444,10 +10457,18 @@ impl DropState {
         item_update.position = Some(drop_position);
         item_update.velocity = Some(Vector2::ZERO);
 
-        CommandStepResult::completed(update).with_events(vec![CommandEvent::ApplyObjectUpdate {
-            object_id: item_id,
-            update: item_update,
-        }])
+        // ObjectComDrop (C4ObjectCom.cpp:640-676): after the item's Exit
+        // the dropper arms NoCollectDelay = 2 and refreshes its OCF so the
+        // Collection bit is off before the next cross check.
+        CommandStepResult::completed(update).with_events(vec![
+            CommandEvent::ApplyObjectUpdate {
+                object_id: item_id,
+                update: item_update,
+            },
+            CommandEvent::ArmNoCollectDelay {
+                object_id: ctx.object.id,
+            },
+        ])
     }
 }
 
