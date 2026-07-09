@@ -1548,8 +1548,62 @@ impl Engine {
         if overloaded {
             return Ok(());
         }
-        // Inside vehicle control (:3948-3961) needs the def VehicleControl
-        // flags, which are not parsed yet (see PORT_STATUS).
+        // Inside vehicle control overload (:3947-3961): the container's
+        // ControlCommand with the clonk appended in slot 7.
+        if let Some(container_index) = self
+            .objects
+            .get(index)
+            .and_then(|object| object.state.container)
+            .and_then(|id| self.find_object_index(id))
+        {
+            let inside = self
+                .definitions
+                .get(&self.objects[container_index].definition_id)
+                .is_some_and(|definition| {
+                    definition.vehicle_control() & crate::VEHICLE_CONTROL_INSIDE != 0
+                });
+            if inside {
+                let controller = self.objects[index].state.controller;
+                self.objects[container_index].state.controller = controller;
+                let mut vehicle_args = args.to_vec();
+                vehicle_args.push(compat::object_reference_value(object_id));
+                let consumed = self
+                    .contained_call(container_index, "ControlCommand", &vehicle_args)
+                    .map(|value| compat::value_raw_truthy(&value))
+                    .unwrap_or(false);
+                if consumed {
+                    return Ok(());
+                }
+            }
+        }
+        // Outside vehicle control overload (:3962-3974): the pushed
+        // target's ControlCommand, plain six args.
+        if self.object_procedure(index) == ActionProcedure::Push {
+            if let Some(target_index) = self.objects[index]
+                .state
+                .action
+                .target
+                .and_then(|id| self.find_object_index(id))
+            {
+                let outside = self
+                    .definitions
+                    .get(&self.objects[target_index].definition_id)
+                    .is_some_and(|definition| {
+                        definition.vehicle_control() & crate::VEHICLE_CONTROL_OUTSIDE != 0
+                    });
+                if outside {
+                    let controller = self.objects[index].state.controller;
+                    self.objects[target_index].state.controller = controller;
+                    let consumed = self
+                        .contained_call(target_index, "ControlCommand", &args)
+                        .map(|value| compat::value_raw_truthy(&value))
+                        .unwrap_or(false);
+                    if consumed {
+                        return Ok(());
+                    }
+                }
+            }
+        }
         self.objects[index].apply_command_operations([CommandOperation::PushFront(request)]);
         Ok(())
     }
@@ -1577,6 +1631,10 @@ mod tests {
         actions.insert(
             "Dig".to_string(),
             ActionSpec::default().with_procedure("dig"),
+        );
+        actions.insert(
+            "Push".to_string(),
+            ActionSpec::default().with_procedure("push"),
         );
         actions
     }
@@ -2031,6 +2089,108 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
         engine.player_in_com(1, COM_LEFT, 0).expect("in_com");
         let snapshot = engine.object_snapshot(crew).expect("snapshot");
         assert_eq!(snapshot.command_stack.command_names(), vec!["Take"]);
+    }
+
+    /// Crew contained in a VehicleControl=Inside vehicle whose script is
+    /// `vehicle_script`.
+    fn inside_vehicle_fixture(engine: &mut Engine, vehicle_script: &str) -> (ObjectId, ObjectId) {
+        register_clonk(engine, "CLNK", "#strict\n");
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", vehicle_script).expect("lorry compiles");
+        lorry.set_vehicle_control(crate::VEHICLE_CONTROL_INSIDE);
+        engine.register_definition(lorry).expect("register");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(engine, "CLNK", 1);
+        let lorry = engine
+            .spawn_object(SpawnConfig::new("LORY"))
+            .expect("spawn lorry");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(lorry))
+            .expect("enter lorry");
+        (crew, lorry)
+    }
+
+    #[test]
+    fn inside_vehicle_control_command_overloads_set_command() {
+        // SetCommand's inside vehicle control overload (C4Object.cpp:
+        // 3947-3961): a Contained def with C4D_VehicleControl_Inside gets
+        // ControlCommand(name, target, tx, ty, target2, data, this) — the
+        // CLONK rides in slot 7 — and a truthy return consumes the command.
+        let vehicle = r#"
+#strict
+protected func ControlCommand(szCommand, pTarget, iTx, iTy, pTarget2, iData, pByObj) {
+  if (pByObj) return(1);
+  return(0);
+}
+"#;
+        let mut engine = Engine::new();
+        let (crew, lorry) = inside_vehicle_fixture(&mut engine, vehicle);
+
+        engine.player_in_com(1, COM_DOWN, 0).expect("in_com");
+        let snapshot = engine.object_snapshot(crew).expect("snapshot");
+        assert!(
+            snapshot.command_stack.command_names().is_empty(),
+            "the vehicle's ControlCommand consumed the Exit SetCommand"
+        );
+        let lorry_index = engine.find_object_index(lorry).expect("lorry exists");
+        assert_eq!(
+            engine.objects[lorry_index].state.controller, 1,
+            "Contained->Controller = Controller (C4Object.cpp:3950)"
+        );
+    }
+
+    #[test]
+    fn inside_vehicle_falsy_control_command_keeps_the_exit() {
+        // A falsy overload falls through to the hardcoded push
+        // (C4Object.cpp:3976-3977).
+        let vehicle = r#"
+#strict
+protected func ControlCommand() { return(0); }
+"#;
+        let mut engine = Engine::new();
+        let (crew, _) = inside_vehicle_fixture(&mut engine, vehicle);
+
+        engine.player_in_com(1, COM_DOWN, 0).expect("in_com");
+        let snapshot = engine.object_snapshot(crew).expect("snapshot");
+        assert_eq!(snapshot.command_stack.command_names(), vec!["Exit"]);
+    }
+
+    #[test]
+    fn outside_vehicle_control_command_overloads_pushed_set_command() {
+        // The outside twin (C4Object.cpp:3962-3974): while pushing a
+        // C4D_VehicleControl_Outside target, its ControlCommand (six args,
+        // no clonk slot) may consume the Set command.
+        let vehicle = r#"
+#strict
+protected func ControlCommand(szCommand) { return(1); }
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", vehicle).expect("lorry compiles");
+        lorry.set_vehicle_control(crate::VEHICLE_CONTROL_OUTSIDE);
+        engine.register_definition(lorry).expect("register");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let lorry = engine
+            .spawn_object(SpawnConfig::new("LORY"))
+            .expect("spawn lorry");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.action.name = "Push".to_string();
+        engine.objects[crew_index].state.action.target = Some(lorry);
+
+        engine
+            .player_object_command(1, CommandId::Exit, None, 0, 0)
+            .expect("exit command");
+        let snapshot = engine.object_snapshot(crew).expect("snapshot");
+        assert!(
+            snapshot.command_stack.command_names().is_empty(),
+            "the pushed vehicle's ControlCommand consumed the command"
+        );
     }
 
     /// Crew contained in a hut that is player `base`'s home base.

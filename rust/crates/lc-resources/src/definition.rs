@@ -225,6 +225,10 @@ pub struct DefCore {
     /// `GrabPutGet` bitfield (src/C4Def.cpp:364-373): C4D_GrabPut=1 |
     /// C4D_GrabGet=2 — the grabbed-vehicle put/get commands.
     pub grab_put_get: i32,
+    /// `VehicleControl` (src/C4Def.cpp:398, default 0):
+    /// C4D_VehicleControl_Outside=1 | C4D_VehicleControl_Inside=2 — the
+    /// SetCommand ControlCommand overloads (src/C4Object.cpp:3944-3969).
+    pub vehicle_control: i32,
     /// `NoBreath` (C4Def.cpp:409): exempt from the ExecLife breathing check.
     pub no_breath: bool,
     /// NoBurnDamage=1: burning deals no damage (C4Object.cpp:780).
@@ -544,6 +548,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut physical = PhysicalInfo::default();
     let mut collectible = false;
     let mut grab_put_get: i32 = 0;
+    let mut vehicle_control: i32 = 0;
     let mut constructable = false;
     let mut con_size_off: i32 = 0;
     let mut stretch_growth = false;
@@ -728,6 +733,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "grab" => {
                 grab = parse_i32(value).unwrap_or(0).max(0);
             }
+            "vehiclecontrol" => {
+                // Plain integer compile (src/C4Def.cpp:398).
+                vehicle_control = parse_i32(value).unwrap_or(0);
+            }
             "grabputget" => {
                 // StdBitfieldAdapt over C4D_GrabPut/C4D_GrabGet tokens
                 // (src/C4Def.cpp:364-373); numeric values pass through.
@@ -900,6 +909,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         physical,
         collectible,
         grab_put_get,
+        vehicle_control,
         constructable,
         con_size_off,
         stretch_growth,
@@ -2444,6 +2454,26 @@ Attach=1
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
         assert_eq!(parsed.grab_put_get, 1);
+    }
+
+    #[test]
+    fn parse_def_core_vehicle_control() {
+        // Plain integer compile (src/C4Def.cpp:398), e.g. the Airship's
+        // `VehicleControl=2` (C4D_VehicleControl_Inside).
+        let data = br#"
+            [DefCore]
+            id=SHIP
+            VehicleControl=2
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(parsed.vehicle_control, 2);
+
+        let data = br#"
+            [DefCore]
+            id=CONT
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(parsed.vehicle_control, 0, "default 0");
     }
 
     #[test]

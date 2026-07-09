@@ -388,6 +388,12 @@ pub const DEFAULT_CATEGORY: i32 = CATEGORY_STATIC_BACK;
 pub const GRAB_PUT_GET_PUT: i32 = 1;
 pub const GRAB_PUT_GET_GET: i32 = 2;
 
+/// `C4D_VehicleControl_Outside` / `C4D_VehicleControl_Inside`
+/// (C4Def.h:111-113): the SetCommand ControlCommand overloads
+/// (C4Object.cpp:3944-3969).
+pub const VEHICLE_CONTROL_OUTSIDE: i32 = 1;
+pub const VEHICLE_CONTROL_INSIDE: i32 = 2;
+
 pub const LINE_CONNECT_POWER_INPUT: u32 = 1;
 pub const LINE_CONNECT_POWER_OUTPUT: u32 = 1 << 1;
 pub const LINE_CONNECT_LIQUID_INPUT: u32 = 1 << 2;
@@ -5575,6 +5581,10 @@ pub struct Definition {
     /// `GrabPutGet` DefCore bitfield (src/C4Def.cpp:364-373) — read by the
     /// viewport command-row presentation (C4Object::DrawCommands).
     grab_put_get: i32,
+    /// DefCore `VehicleControl` (src/C4Def.cpp:398):
+    /// C4D_VehicleControl_Outside=1 | C4D_VehicleControl_Inside=2, the
+    /// SetCommand ControlCommand overloads (C4Object.cpp:3944-3969).
+    vehicle_control: i32,
     constructable: bool,
     construction_offset: i32,
     stretch_growth: bool,
@@ -5766,6 +5776,7 @@ impl Definition {
             collection_limit: None,
             collectible: false,
             grab_put_get: 0,
+            vehicle_control: 0,
             constructable: false,
             construction_offset: 0,
             stretch_growth: false,
@@ -5943,6 +5954,7 @@ impl Definition {
         definition.set_physical(resource.core.physical);
         definition.set_collectible(resource.core.collectible);
         definition.set_grab_put_get(resource.core.grab_put_get);
+        definition.set_vehicle_control(resource.core.vehicle_control);
         definition.set_constructable(resource.core.constructable);
         definition.set_construction_offset(resource.core.con_size_off);
         definition.set_stretch_growth(resource.core.stretch_growth);
@@ -6813,6 +6825,14 @@ impl Definition {
 
     pub fn grab_put_get(&self) -> i32 {
         self.grab_put_get
+    }
+
+    pub fn vehicle_control(&self) -> i32 {
+        self.vehicle_control
+    }
+
+    pub fn set_vehicle_control(&mut self, vehicle_control: i32) {
+        self.vehicle_control = vehicle_control;
     }
 
     pub fn set_grab_put_get(&mut self, grab_put_get: i32) {
