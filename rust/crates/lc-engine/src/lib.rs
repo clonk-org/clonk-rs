@@ -25950,25 +25950,64 @@ impl Engine {
             // error path like the object runner.
             let rng_backup = rng.clone();
             let audio_backup = current_audio.clone();
+            let mut timer_kill = false;
+            let mut stop_denied = false;
             let call_result = match event.kind {
-                EffectEventKind::Timer => dispatch_definition.call_effect_timer(
-                    None,
-                    &event.effect,
-                    frame,
-                    rng,
-                    global_effects,
-                    current_physics,
-                    current_environment,
-                    world.clone(),
-                    game_over_triggered,
-                    current_audio,
-                ),
+                EffectEventKind::Timer => dispatch_definition
+                    .call_effect_timer(
+                        None,
+                        &event.effect,
+                        frame,
+                        rng,
+                        global_effects,
+                        current_physics,
+                        current_environment,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, timer_result)| {
+                        // C4Effect::Execute (C4Effect.cpp:342-357): Fx*Timer
+                        // returning C4Fx_Execute_Kill (-1, C4Effects.h:40)
+                        // kills the effect; an elapsed interval with NO
+                        // timer function kills too (:355-357).
+                        timer_kill = if dispatch_definition
+                            .has_effect_callback(&event.effect.name, "Timer")
+                        {
+                            matches!(timer_result, Some(Value::Int(-1)))
+                        } else {
+                            true
+                        };
+                        (outcome, audio_state, new_rng)
+                    }),
+                EffectEventKind::Stopped(reason) => dispatch_definition
+                    .call_effect_stop(
+                        None,
+                        &event.effect,
+                        reason,
+                        rng,
+                        global_effects,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, stop_result)| {
+                        // C4Fx_Stop_Deny (-1, C4Effects.h:42): the effect
+                        // refuses its removal and recovers
+                        // (C4Effect.cpp:389-396).
+                        stop_denied = matches!(reason, EffectStopReason::Removed)
+                            && matches!(stop_result, Some(Value::Int(-1)));
+                        (outcome, audio_state, new_rng)
+                    }),
                 // Started runs synchronously inside FnAddEffect for global
                 // effects; Check/AddTo (the priority check chain) are not
                 // generated for the global list (documented residual).
                 _ => continue,
             };
-            let (event_outcome, audio_state, new_rng, _call_value) = match call_result {
+            let (event_outcome, audio_state, new_rng) = match call_result {
                 Ok(value) => value,
                 Err(EngineError::Script {
                     definition,
@@ -25989,6 +26028,20 @@ impl Engine {
             };
             rng = new_rng;
             current_audio = audio_state;
+            if timer_kill {
+                // C4Effect::Execute kills THE elapsed effect (pEffect
+                // itself, C4Effect.cpp:342-357), not a same-name peer.
+                if let Some(removed) = remove_effect_from_stack(global_effects, event.effect.number)
+                {
+                    queue.push_back(EffectEvent::stopped(removed, EffectStopReason::Removed));
+                }
+            }
+            if stop_denied {
+                // Recover the refused effect at its priority position. C++
+                // restores the exact list node; the sorted reinsert may
+                // reorder equal-priority peers (documented divergence).
+                insert_effect_into_stack(global_effects, event.effect.clone());
+            }
 
             let compat::EffectContextOutcome {
                 global: global_effect_commands,
@@ -27495,6 +27548,14 @@ fn upper_effects_of(effects: &[EffectState], anchor: &EffectState) -> Vec<Effect
         })
         .cloned()
         .collect()
+}
+
+/// Removes THE effect by its C++ identity, iNumber (names may repeat).
+fn remove_effect_from_stack(stack: &mut Vec<EffectState>, number: i32) -> Option<EffectState> {
+    stack
+        .iter()
+        .position(|existing| existing.number == number)
+        .map(|index| stack.remove(index))
 }
 
 fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[EffectCommand]) {
@@ -44183,6 +44244,80 @@ func FxProbeTimer(pThis, iNumber) {
             engine.global_effects()[0].var(0),
             EffectVarValue::Int(4),
             "the timer keeps firing on every elapsed interval"
+        );
+    }
+
+    #[test]
+    fn global_effect_timer_kill_semantics_follow_cpp() {
+        // C4Effect::Execute (C4Effect.cpp:342-357) with pObj=nullptr
+        // (C4Game.cpp:831): an Fx*Timer returning C4Fx_Execute_Kill (-1,
+        // C4Effects.h:40) kills the elapsed GLOBAL effect via
+        // C4Effect::Kill, which fires Fx*Stop(nil, iNumber)
+        // (C4Effect.cpp:389-392); an elapsed interval with NO timer
+        // function kills too (the else arm :355-357); a zero interval
+        // never fires.
+        let script = r#"
+        global func Initialize(state, random) {
+            AddEffect("Inert", nil, 100, 0);
+            AddEffect("Doomed", nil, 150, 2);
+            AddEffect("Mute", nil, 200, 3);
+            return nil;
+        }
+
+        global func FxDoomedTimer(target, number, time) {
+            if (time >= 4) { return -1; }
+            return 0;
+        }
+
+        global func FxDoomedStop(target, number, reason, temp) {
+            return 0;
+        }
+
+        global func Step(state, frame, random) { return nil; }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        assert_eq!(engine.global_effects().len(), 3);
+        for _ in 0..8 {
+            engine.tick().expect("tick succeeds");
+        }
+
+        let names: Vec<&str> = engine
+            .global_effects()
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Inert"],
+            "Doomed killed by -1 at iTime 4, Mute killed at its first \
+             timerless gate, zero-interval Inert survives"
+        );
+        let calls = call_log.lock().unwrap().clone();
+        let stop_calls = calls.iter().filter(|name| *name == "FxDoomedStop").count();
+        assert_eq!(
+            stop_calls, 1,
+            "C4Effect::Kill fires the real Fx*Stop(nil, iNumber) once"
         );
     }
 
