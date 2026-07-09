@@ -177,6 +177,15 @@ pub const C4FX_CALL_DMG_SCRIPT: i32 = 0;
 pub const C4FX_CALL_DMG_BLAST: i32 = 1;
 pub const C4FX_CALL_DMG_FIRE: i32 = 2;
 pub const C4FX_CALL_DMG_CHOP: i32 = 3;
+/// The engine-internal fire effect (C4Effects.h:152-157).
+pub const C4FX_FIRE: &str = "Fire";
+pub const C4FX_FIRE_PRIORITY: i32 = 100;
+pub const C4FX_FIRE_TIMER_INTERVAL: i32 = 1;
+pub const MAX_FIRE_PHASE: i32 = 15;
+/// Fire appearance modes (C4Effects.h:70-74).
+pub const C4FX_FIRE_MODE_STRUCT_VEH: i32 = 1;
+pub const C4FX_FIRE_MODE_LIVING_VEG: i32 = 2;
+pub const C4FX_FIRE_MODE_OBJECT: i32 = 3;
 pub const C4FX_CALL_ENG_SCRIPT: i32 = 32;
 pub const C4FX_CALL_ENG_BLAST: i32 = 33;
 pub const C4FX_CALL_ENG_OBJ_HIT: i32 = 34;
@@ -22465,14 +22474,17 @@ impl Engine {
         Ok(())
     }
 
-    /// `C4Object::Incinerate` (C4Object.cpp:1230-1241) + the deterministic
+    /// `C4Object::Incinerate` (C4Object.cpp:1257-1266) + the deterministic
     /// core of fxFireStart (C4Effect.cpp:560-641): refuse when already
-    /// burning or a dead living; no fire in extinguishing material (checked
-    /// BEFORE the FirePhase draw); otherwise set OnFire, draw
-    /// `FirePhase = Random(MaxFirePhase)` (one synced draw), store the cause,
-    /// and run the Incineration script callback. Still open: BurnTurnTo
-    /// ChangeDef, contents ejection, attached-object detach, fire modes,
-    /// sounds, and the IncinerationEx blasted-in-water callback.
+    /// burning or a dead living; create the "Fire" C4Effect entry
+    /// (C4Fx_FirePriority 100, C4Fx_FireTimer 1); no fire in extinguishing
+    /// material (checked BEFORE the FirePhase draw — the denied Start kills
+    /// the fresh entry, ctor :128-131); otherwise store
+    /// [FireMode, CausedBy, Blasted, IncineratingObj] in the effect vars
+    /// (:628-631), set OnFire, draw `FirePhase = Random(MaxFirePhase)` (one
+    /// synced draw), and run the Incineration script callback. Still open:
+    /// attached-object detach, the check chain of other effects
+    /// (Fx*Effect), a script FxFireStart overload, and sounds.
     fn incinerate_object(
         &mut self,
         idx: usize,
@@ -22492,19 +22504,30 @@ impl Engine {
         idx: usize,
         caused_by: i32,
         blasted: bool,
-        _incinerating: Option<ObjectId>,
+        incinerating: Option<ObjectId>,
     ) -> Result<bool, EngineError> {
         {
             let state = &self.objects[idx].state;
-            // Already on fire (C4Object.cpp:1233)
+            // Already on fire (C4Object.cpp:1259)
             if state.on_fire {
                 return Ok(false);
             }
-            // Dead living don't burn (C4Object.cpp:1235)
+            // Dead living don't burn (C4Object.cpp:1261)
             if state.category & CATEGORY_LIVING != 0 && !state.alive {
                 return Ok(false);
             }
         }
+        // The effect entry exists BEFORE fxFireStart runs (C4Effect ctor,
+        // C4Object.cpp:1263-1265) — number allocation and GetEffect
+        // visibility from the callbacks below match C++.
+        let fire_number = {
+            let mut entry = EffectState::new(C4FX_FIRE)
+                .with_priority(C4FX_FIRE_PRIORITY)
+                .with_interval(C4FX_FIRE_TIMER_INTERVAL);
+            entry.start_dispatched = true;
+            let (inserted, _) = self.objects[idx].insert_effect(entry);
+            inserted.number
+        };
         // In extinguishing material: no fire caused (C4Effect.cpp:574-583)
         let position = self.objects[idx].state.position;
         let in_extinguisher = self
@@ -22548,6 +22571,9 @@ impl Engine {
         // (attached-object detach, C4Effect.cpp:595-600: needs the
         // DFA_ATTACH action scan — open)
         if !fire_caused {
+            // the denied Start kills the fresh effect without a Stop call
+            // (C4Effect ctor, C4Effect.cpp:128-131)
+            self.objects[idx].remove_effect_by_number(fire_number);
             // blasted but not incinerated: IncinerationEx (C4Effect.cpp:602-607)
             if blasted {
                 let _ =
@@ -22555,14 +22581,59 @@ impl Engine {
             }
             return Ok(false);
         }
+        // determine fire appearance (C4Effect.cpp:609-626): the ~FireMode
+        // script answer wins; zero falls back to the category default; an
+        // out-of-range answer degrades to Object mode.
+        let mode_answer = match self.call_object_function(idx, "FireMode", Vec::new())? {
+            Value::Int(mode) => mode,
+            Value::Bool(flag) => i32::from(flag),
+            _ => 0,
+        };
+        let fire_mode = if mode_answer == 0 {
+            let category = self.objects[idx].state.category;
+            if category & (CATEGORY_LIVING | CATEGORY_STATIC_BACK) != 0 {
+                C4FX_FIRE_MODE_LIVING_VEG
+            } else if category & (CATEGORY_STRUCTURE | CATEGORY_VEHICLE) != 0 {
+                C4FX_FIRE_MODE_STRUCT_VEH
+            } else {
+                C4FX_FIRE_MODE_OBJECT
+            }
+        } else if !(1..=C4FX_FIRE_MODE_OBJECT).contains(&mode_answer) {
+            tracing::warn!(
+                mode = mode_answer,
+                object = self.objects[idx].id.as_u64(),
+                "FireMode is invalid; using Object mode like C++"
+            );
+            C4FX_FIRE_MODE_OBJECT
+        } else {
+            mode_answer
+        };
+        // store causes in effect vars (C4Effect.cpp:628-631)
+        if let Some(entry) = self.objects[idx]
+            .state
+            .effects
+            .iter_mut()
+            .find(|effect| effect.number == fire_number)
+        {
+            entry.set_var(0, EffectVarValue::Int(fire_mode));
+            entry.set_var(1, EffectVarValue::Int(caused_by));
+            entry.set_var(2, EffectVarValue::Bool(blasted));
+            entry.set_var(
+                3,
+                incinerating
+                    .map(|id| EffectVarValue::Object(id.as_u64()))
+                    .unwrap_or(EffectVarValue::Nil),
+            );
+        }
         // Set values (C4Effect.cpp:632-634)
         {
             let object = &mut self.objects[idx];
             object.state.on_fire = true;
             object.state.fire_caused_by = caused_by;
         }
-        self.objects[idx].state.fire_phase = self.rng.random(15); // Random(MaxFirePhase)
-                                                                  // Engine script call (C4Effect.cpp:638)
+        // Random(MaxFirePhase) — one synced draw (C4Effect.cpp:634)
+        self.objects[idx].state.fire_phase = self.rng.random(MAX_FIRE_PHASE);
+        // Engine script call (C4Effect.cpp:638)
         let _ = self.call_object_function(idx, "Incineration", vec![Value::Int(caused_by)])?;
         Ok(true)
     }
@@ -30335,6 +30406,122 @@ mod tests {
         assert!(!engine.incinerate_object(soaked_idx, 1, false, None)?);
         assert!(!engine.objects[soaked_idx].state.on_fire);
         assert_eq!(engine.rng, mirror, "no draw when extinguished at start");
+        Ok(())
+    }
+
+    #[test]
+    fn incinerate_creates_fire_effect_entry_like_cpp() -> Result<(), EngineError> {
+        // C4Object::Incinerate (C4Object.cpp:1257-1266): fire is a real
+        // C4Effect entry — `new C4Effect(this, C4Fx_Fire "Fire",
+        // C4Fx_FirePriority 100, C4Fx_FireTimer 1, ...)` — whose vars carry
+        // [FireMode, CausedBy, Blasted, IncineratingObject]
+        // (C4Effect.cpp:628-631). The mode comes from the ~FireMode script
+        // answer, else the category default (C4Effect.cpp:609-626;
+        // C4Effects.h:70-74: StructVeh=1, LivingVeg=2, Object=3).
+        let mut engine = Engine::with_seed(23);
+        engine.register_definition(simple_definition("Bush"))?;
+        let bush =
+            engine.spawn_object(SpawnConfig::new("Bush").with_position(Vector2::new(10, 10)))?;
+        let idx = engine.find_object_index(bush).expect("bush exists");
+        assert!(engine.incinerate_object(idx, 3, true, None)?);
+        let fire = {
+            let effects = &engine.objects[idx].state.effects;
+            assert_eq!(effects.len(), 1, "exactly one Fire effect entry");
+            effects[0].clone()
+        };
+        assert_eq!(fire.name, "Fire", "C4Fx_Fire");
+        assert_eq!(fire.priority, 100, "C4Fx_FirePriority");
+        assert_eq!(fire.interval, 1, "C4Fx_FireTimer");
+        assert!(fire.number > 0, "allocated per-object number");
+        assert_eq!(
+            fire.vars(),
+            &[
+                // default StaticBack category → C4Fx_FireMode_LivingVeg
+                EffectVarValue::Int(2),
+                EffectVarValue::Int(3),
+                EffectVarValue::Bool(true),
+                EffectVarValue::Nil,
+            ],
+            "FxFireVar Mode/CausedBy/Blasted/IncineratingObj"
+        );
+
+        // vehicles default to C4Fx_FireMode_StructVeh (C4Effect.cpp:617-618);
+        // the incinerating object rides var 3 (C4Effect.cpp:631).
+        let mut cart_def = simple_definition("Cart");
+        cart_def.set_category(CATEGORY_VEHICLE);
+        engine.register_definition(cart_def)?;
+        let cart =
+            engine.spawn_object(SpawnConfig::new("Cart").with_position(Vector2::new(20, 10)))?;
+        let cart_idx = engine.find_object_index(cart).expect("cart exists");
+        assert!(engine.incinerate_object(cart_idx, 1, false, Some(bush))?);
+        let cart_fire = engine.objects[cart_idx].state.effects[0].clone();
+        assert_eq!(cart_fire.vars()[0], EffectVarValue::Int(1), "StructVeh");
+        assert_eq!(
+            cart_fire.vars()[3],
+            EffectVarValue::Object(bush.as_u64()),
+            "incinerating object stored"
+        );
+
+        // a ~FireMode script answer wins (C4Effect.cpp:611); an
+        // out-of-range answer falls back to Object mode (C4Effect.cpp:622-626).
+        let hot_def = Definition::from_script(
+            "Torch",
+            "Torch",
+            r#"
+            func FireMode() { return 3; }
+            "#,
+        )
+        .expect("script compiles");
+        engine.register_definition(hot_def)?;
+        let torch =
+            engine.spawn_object(SpawnConfig::new("Torch").with_position(Vector2::new(30, 10)))?;
+        let torch_idx = engine.find_object_index(torch).expect("torch exists");
+        assert!(engine.incinerate_object(torch_idx, 1, false, None)?);
+        assert_eq!(
+            engine.objects[torch_idx].state.effects[0].vars()[0],
+            EffectVarValue::Int(3),
+            "FireMode callback answer"
+        );
+
+        // refused incinerations leave no entry: a repeat is denied by the
+        // already-burning check (C4Object.cpp:1259) …
+        assert!(!engine.incinerate_object(idx, 5, false, None)?);
+        assert_eq!(engine.objects[idx].state.effects.len(), 1, "no duplicate");
+        Ok(())
+    }
+
+    #[test]
+    fn incinerate_in_extinguisher_leaves_no_fire_effect_entry() -> Result<(), EngineError> {
+        // fxFireStart deny (C4Effect.cpp:574-607 + ctor :128-131): in
+        // extinguishing material the Start returns -1 and the freshly
+        // created effect dies without a Stop call — no entry remains.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+            Extinguisher=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let mut engine = Engine::with_seed(24);
+        engine.set_materials(materials);
+        let mut landscape = Landscape::flat_with_material(40, 30, None);
+        landscape.set_liquid_column(10, vec![LiquidSegment::with_material(5, 12, Some(water))]);
+        engine.set_landscape(landscape);
+        engine.register_definition(simple_definition("Tree"))?;
+        let tree =
+            engine.spawn_object(SpawnConfig::new("Tree").with_position(Vector2::new(10, 8)))?;
+        let idx = engine.find_object_index(tree).expect("tree exists");
+        assert!(!engine.incinerate_object(idx, 1, false, None)?);
+        assert!(!engine.objects[idx].state.on_fire);
+        assert!(
+            engine.objects[idx].state.effects.is_empty(),
+            "denied fire start removes the effect entry"
+        );
         Ok(())
     }
 
