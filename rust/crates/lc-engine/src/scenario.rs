@@ -7303,6 +7303,84 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn real_system_scripts_explode_blasts_bystanders_end_to_end() {
+        // The FLNT class end-to-end: Hit -> Explode -> DoExplosion ->
+        // BlastObjects -> BlastObject through the REAL planet/System.c4g
+        // scripts (Explode.c, FindObject.c, GetXVal.c). The exploding
+        // object removes itself (Explode.c:18), bystanders inside the
+        // 10x10 direct-hit rect take the full level as Damage
+        // (Explode.c:93-94 -> C4Object::Blast, C4Object.cpp:1416), and
+        // the run stays script-error free (the former 'script error in
+        // Hit of FLNT' harness class).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
+        let defs_root = dir.path().join("Defs.c4d");
+        let flint = defs_root.join("Flint.c4d");
+        std::fs::create_dir_all(&flint).expect("flint dir");
+        std::fs::write(
+            flint.join("DefCore.txt"),
+            "[DefCore]\nid=FLNX\nName=Flint\nCategory=16\nWidth=6\nHeight=6\nOffset=-3,-3\n",
+        )
+        .expect("flint defcore");
+        std::fs::write(
+            flint.join("Script.c"),
+            "#strict\npublic func ExplodeSize() { return(18); }\nprotected func Hit() { Explode(ExplodeSize()); }\n",
+        )
+        .expect("flint script");
+        let bystander = defs_root.join("Bystander.c4d");
+        std::fs::create_dir_all(&bystander).expect("bystander dir");
+        std::fs::write(
+            bystander.join("DefCore.txt"),
+            "[DefCore]\nid=BYST\nName=Bystander\nCategory=16\nWidth=6\nHeight=6\nOffset=-3,-3\n",
+        )
+        .expect("bystander defcore");
+        std::fs::write(bystander.join("Script.c"), "#strict\n").expect("bystander script");
+
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        // The live game installs planet/System.c4g before the scenario.
+        let planet = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../planet/System.c4g");
+        let system_scripts: Vec<(String, String)> = ["FindObject.c", "GetXVal.c", "Explode.c"]
+            .iter()
+            .map(|name| {
+                let bytes = std::fs::read(planet.join(name)).expect("system script reads");
+                // ISO-8859-1 comments -> chars (the group loader does the
+                // same byte-transparent conversion).
+                (
+                    (*name).to_string(),
+                    bytes.iter().map(|&b| b as char).collect::<String>(),
+                )
+            })
+            .collect();
+        engine.install_global_scripts(&system_scripts);
+
+        let flint_id = engine
+            .spawn_object(SpawnConfig::new("FLNX").with_position(Vector2::new(100, 100)))
+            .expect("flint spawns");
+        let bystander_id = engine
+            .spawn_object(SpawnConfig::new("BYST").with_position(Vector2::new(102, 100)))
+            .expect("bystander spawns");
+        let flint_idx = engine.find_object_index(flint_id).expect("flint exists");
+        engine
+            .call_object_function(flint_idx, "Hit", Vec::new())
+            .expect("Hit runs without script errors");
+        assert!(
+            engine
+                .find_object_index(flint_id)
+                .map(|idx| engine.objects[idx].state.status == ObjectStatus::Deleted)
+                .unwrap_or(true),
+            "the exploding object removed itself (Explode.c RemoveObject)"
+        );
+        let bystander_idx = engine
+            .find_object_index(bystander_id)
+            .expect("bystander survives");
+        assert_eq!(
+            engine.objects[bystander_idx].state.damage, 18,
+            "direct-hit rect victims take the blast level as Damage"
+        );
+    }
+
+    #[test]
     fn appendto_scripts_link_into_their_targets_like_c4aullink() {
         // C4AulScript::ResolveAppends (C4AulLink.cpp:29-64) + AppendTo
         // (:114-141): a definition script with `#appendto GOOD` copies its
