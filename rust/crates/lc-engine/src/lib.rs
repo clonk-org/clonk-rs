@@ -8009,8 +8009,7 @@ impl Definition {
 
     fn call_effect_start(
         &self,
-        state: &ObjectState,
-        object_id: ObjectId,
+        carrier: Option<(&ObjectState, ObjectId)>,
         effect: &EffectState,
         rng: LcgRng,
         global_effects: &[EffectState],
@@ -8022,8 +8021,7 @@ impl Definition {
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         self.dispatch_effect_callback(
-            state,
-            object_id,
+            carrier,
             effect,
             "Start",
             "FxStart",
@@ -8041,8 +8039,7 @@ impl Definition {
 
     fn call_effect_timer(
         &self,
-        state: &ObjectState,
-        object_id: ObjectId,
+        carrier: Option<(&ObjectState, ObjectId)>,
         effect: &EffectState,
         frame: u64,
         rng: LcgRng,
@@ -8054,8 +8051,7 @@ impl Definition {
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         self.dispatch_effect_callback(
-            state,
-            object_id,
+            carrier,
             effect,
             "Timer",
             "FxTimer",
@@ -8081,8 +8077,7 @@ impl Definition {
     #[allow(clippy::too_many_arguments)]
     fn call_effect_damage(
         &self,
-        state: &ObjectState,
-        object_id: ObjectId,
+        carrier: Option<(&ObjectState, ObjectId)>,
         effect: &EffectState,
         change: i32,
         cause: i32,
@@ -8097,8 +8092,7 @@ impl Definition {
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         self.dispatch_effect_callback(
-            state,
-            object_id,
+            carrier,
             effect,
             "Damage",
             "FxDamage",
@@ -8121,8 +8115,7 @@ impl Definition {
     #[allow(clippy::too_many_arguments)]
     fn call_effect_effect(
         &self,
-        state: &ObjectState,
-        object_id: ObjectId,
+        carrier: Option<(&ObjectState, ObjectId)>,
         checker: &EffectState,
         pending: &EffectState,
         rng: LcgRng,
@@ -8146,8 +8139,7 @@ impl Definition {
             );
         }
         self.dispatch_effect_callback(
-            state,
-            object_id,
+            carrier,
             checker,
             "Effect",
             "FxEffect",
@@ -8169,8 +8161,7 @@ impl Definition {
     #[allow(clippy::too_many_arguments)]
     fn call_effect_add(
         &self,
-        state: &ObjectState,
-        object_id: ObjectId,
+        carrier: Option<(&ObjectState, ObjectId)>,
         acceptor: &EffectState,
         pending: &EffectState,
         rng: LcgRng,
@@ -8197,8 +8188,7 @@ impl Definition {
             );
         }
         self.dispatch_effect_callback(
-            state,
-            object_id,
+            carrier,
             acceptor,
             "Add",
             "FxAdd",
@@ -8216,8 +8206,7 @@ impl Definition {
 
     fn call_effect_stop(
         &self,
-        state: &ObjectState,
-        object_id: ObjectId,
+        carrier: Option<(&ObjectState, ObjectId)>,
         effect: &EffectState,
         reason: EffectStopReason,
         rng: LcgRng,
@@ -8235,8 +8224,7 @@ impl Definition {
             extras.push(Value::Bool(true));
         }
         self.dispatch_effect_callback(
-            state,
-            object_id,
+            carrier,
             effect,
             "Stop",
             "FxStop",
@@ -8258,8 +8246,7 @@ impl Definition {
     #[allow(clippy::too_many_arguments)]
     fn call_effect_temp_readd(
         &self,
-        state: &ObjectState,
-        object_id: ObjectId,
+        carrier: Option<(&ObjectState, ObjectId)>,
         effect: &EffectState,
         rng: LcgRng,
         global_effects: &[EffectState],
@@ -8271,8 +8258,7 @@ impl Definition {
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         self.dispatch_effect_callback(
-            state,
-            object_id,
+            carrier,
             effect,
             "Start",
             "FxStart",
@@ -8290,8 +8276,7 @@ impl Definition {
 
     fn dispatch_effect_callback(
         &self,
-        state: &ObjectState,
-        object_id: ObjectId,
+        carrier: Option<(&ObjectState, ObjectId)>,
         effect: &EffectState,
         event: &'static str,
         function_label: &'static str,
@@ -8316,12 +8301,15 @@ impl Definition {
         }
 
         let mut args = Vec::with_capacity(2 + extras.len());
-        args.push(build_state_value(
-            &self.id,
-            object_id,
-            state,
-            &self.action_library,
-        ));
+        // The affected object is the first argument — C++ passes nullptr
+        // (nil) for GLOBAL effects (C4Effect::Execute, C4Effect.cpp:345).
+        args.push(
+            carrier
+                .map(|(state, object_id)| {
+                    build_state_value(&self.id, object_id, state, &self.action_library)
+                })
+                .unwrap_or(Value::Nil),
+        );
         args.push(build_effect_value(effect));
         args.append(&mut extras);
 
@@ -8334,12 +8322,14 @@ impl Definition {
         let context_object = effect
             .command_target
             .map(|number| ObjectId::new(number as u64));
-        let context_is_self = context_object == Some(object_id);
+        let context_is_self =
+            carrier.is_some_and(|(_, object_id)| context_object == Some(object_id));
         let context_this = context_object
             .map(compat::object_reference_value)
             .unwrap_or(Value::Nil);
-        let context_locals = context_is_self
-            .then(|| state.local_vars.clone())
+        let context_locals = carrier
+            .filter(|(_, object_id)| context_object == Some(*object_id))
+            .map(|(state, _)| state.local_vars.clone())
             .unwrap_or_default();
         // The callback's LIVE local cells: registered as the object's
         // session so nested calls / cross-object references back onto it
@@ -8351,7 +8341,7 @@ impl Definition {
         let guard = enter_random_context(rng);
         let audio_guard = enter_audio_context(audio);
         let (result, mut commands) = compat::with_effect_context_with_state(
-            Some(
+            carrier.map(|(state, object_id)| {
                 compat::HostObjectContext::with_category(
                     object_id,
                     state.container,
@@ -8396,15 +8386,15 @@ impl Definition {
                 .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
-                .with_ocf(state.ocf),
-            ),
+                .with_ocf(state.ocf)
+            }),
             global_effects,
             world,
             next_object_id,
             game_over_triggered,
             || {
-                if context_is_self {
-                    compat::register_session_local_cells(object_id, context_cells.clone());
+                if let Some(session_id) = context_object.filter(|_| context_is_self) {
+                    compat::register_session_local_cells(session_id, context_cells.clone());
                     return self.script.call_effect_callback_in_context_with_cells(
                         &effect.name,
                         event,
@@ -17432,8 +17422,7 @@ impl Engine {
             let call_result = match event.kind {
                 EffectEventKind::Started => dispatch_definition
                     .call_effect_start(
-                        &snapshot_for_call,
-                        object_id,
+                        Some((&snapshot_for_call, object_id)),
                         &event.effect,
                         rng,
                         &global_view,
@@ -17454,8 +17443,7 @@ impl Engine {
                     }),
                 EffectEventKind::Timer => dispatch_definition
                     .call_effect_timer(
-                        &snapshot_for_call,
-                        object_id,
+                        Some((&snapshot_for_call, object_id)),
                         &event.effect,
                         frame,
                         rng,
@@ -17485,8 +17473,7 @@ impl Engine {
                     }),
                 EffectEventKind::Stopped(reason) => dispatch_definition
                     .call_effect_stop(
-                        &snapshot_for_call,
-                        object_id,
+                        Some((&snapshot_for_call, object_id)),
                         &event.effect,
                         reason,
                         rng,
@@ -17510,8 +17497,7 @@ impl Engine {
                     }),
                 EffectEventKind::Check { ref pending } => dispatch_definition
                     .call_effect_effect(
-                        &snapshot_for_call,
-                        object_id,
+                        Some((&snapshot_for_call, object_id)),
                         &event.effect,
                         pending,
                         rng,
@@ -17561,8 +17547,7 @@ impl Engine {
                     }),
                 EffectEventKind::AddTo { ref pending } => dispatch_definition
                     .call_effect_add(
-                        &snapshot_for_call,
-                        object_id,
+                        Some((&snapshot_for_call, object_id)),
                         &event.effect,
                         pending,
                         rng,
@@ -17582,8 +17567,7 @@ impl Engine {
                     }),
                 EffectEventKind::TempRemoved => dispatch_definition
                     .call_effect_stop(
-                        &snapshot_for_call,
-                        object_id,
+                        Some((&snapshot_for_call, object_id)),
                         &event.effect,
                         EffectStopReason::Temp,
                         rng,
@@ -17602,8 +17586,7 @@ impl Engine {
                     }),
                 EffectEventKind::TempReadded => dispatch_definition
                     .call_effect_temp_readd(
-                        &snapshot_for_call,
-                        object_id,
+                        Some((&snapshot_for_call, object_id)),
                         &event.effect,
                         rng,
                         &global_view,
@@ -22313,8 +22296,7 @@ impl Engine {
                 continue;
             };
             let Ok((outcome, audio_state, new_rng, result)) = definition.call_effect_damage(
-                &state_snapshot,
-                object_id,
+                Some((&state_snapshot, object_id)),
                 &effect,
                 change,
                 cause,
