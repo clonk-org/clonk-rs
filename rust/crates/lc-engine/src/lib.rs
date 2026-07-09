@@ -15557,84 +15557,7 @@ impl Engine {
             };
 
             if !timer_events.is_empty() {
-                let object_id = self.objects[idx].id;
-                let global_view = self.global_effects.clone();
-                let rng_state = self.rng.clone();
-                let world = self.host_world_context();
-                let (
-                    global_cmds,
-                    emitted_particles,
-                    physics_delta,
-                    audio_events,
-                    event_messages,
-                    player_commands,
-                    landscape_ops,
-                    effect_spawns,
-                    effect_other_objects,
-                    effect_next_object_id,
-                    triggered_game_over,
-                    effect_script_go,
-                    audio_state,
-                    new_rng,
-                ) = {
-                    let definition = self
-                        .definitions
-                        .get(&definition_id)
-                        .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
-                    let object = &mut self.objects[idx];
-                    Self::run_effect_events_for_object(
-                        definition,
-                        definitions_ref,
-                        self.game_over_triggered,
-                        rng_state,
-                        object_id,
-                        object,
-                        timer_events,
-                        global_view,
-                        &mut self.environment,
-                        self.physics,
-                        self.frame,
-                        world.clone(),
-                        self.audio_registry.clone(),
-                    )?
-                };
-                self.rng = new_rng;
-                self.audio_registry = audio_state;
-                self.sync_next_object_id(effect_next_object_id);
-                if !effect_spawns.is_empty() {
-                    self.process_spawn_queue(effect_spawns)?;
-                }
-                if !effect_other_objects.is_empty() {
-                    self.apply_nested_object_outcomes(effect_other_objects)?;
-                }
-                if !landscape_ops.is_empty() {
-                    self.apply_landscape_operations(landscape_ops);
-                }
-                if !player_commands.is_empty() {
-                    self.apply_player_commands(player_commands)?;
-                }
-                if !audio_events.is_empty() {
-                    self.pending_audio.extend(audio_events);
-                }
-                if !event_messages.is_empty() {
-                    for command in event_messages {
-                        self.messages.apply_command(command);
-                    }
-                }
-                if let Some(go) = effect_script_go {
-                    self.scenario_script_go = go;
-                }
-                if triggered_game_over {
-                    self.request_game_over()?;
-                }
-                if !physics_delta.is_empty() {
-                    self.apply_physics_delta(physics_delta);
-                }
-                if !global_cmds.is_empty() {
-                    self.apply_global_effect_commands(&global_cmds);
-                }
-                self.apply_particle_commands(emitted_particles);
+                self.dispatch_object_effect_events(idx, &definition_id, timer_events)?;
             }
             if self.objects[idx].destroyed
                 || !self.objects[idx].state.status.is_active()
@@ -17731,6 +17654,96 @@ impl Engine {
     pub fn restore_snapshot(&mut self, snapshot: &SimulationSnapshot) -> Result<(), EngineError> {
         let state = EngineState::from_snapshot(snapshot);
         self.restore_state(&state)
+    }
+
+    /// Runs a batch of effect events for one object and folds every side
+    /// channel back into the engine — the frame-loop half of
+    /// `pEffects->Execute` (C4Object::Execute, C4Object.cpp:1069-1090).
+    fn dispatch_object_effect_events(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        events: Vec<EffectEvent>,
+    ) -> Result<(), EngineError> {
+        let object_id = self.objects[idx].id;
+        let global_view = self.global_effects.clone();
+        let rng_state = self.rng.clone();
+        let world = self.host_world_context();
+        let (
+            global_cmds,
+            emitted_particles,
+            physics_delta,
+            audio_events,
+            event_messages,
+            player_commands,
+            landscape_ops,
+            effect_spawns,
+            effect_other_objects,
+            effect_next_object_id,
+            triggered_game_over,
+            effect_script_go,
+            audio_state,
+            new_rng,
+        ) = {
+            let definition = self
+                .definitions
+                .get(definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+            let definitions_ref = &self.definitions;
+            let object = &mut self.objects[idx];
+            Self::run_effect_events_for_object(
+                definition,
+                definitions_ref,
+                self.game_over_triggered,
+                rng_state,
+                object_id,
+                object,
+                events,
+                global_view,
+                &mut self.environment,
+                self.physics,
+                self.frame,
+                world.clone(),
+                self.audio_registry.clone(),
+            )?
+        };
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.sync_next_object_id(effect_next_object_id);
+        if !effect_spawns.is_empty() {
+            self.process_spawn_queue(effect_spawns)?;
+        }
+        if !effect_other_objects.is_empty() {
+            self.apply_nested_object_outcomes(effect_other_objects)?;
+        }
+        if !landscape_ops.is_empty() {
+            self.apply_landscape_operations(landscape_ops);
+        }
+        if !player_commands.is_empty() {
+            self.apply_player_commands(player_commands)?;
+        }
+        if !audio_events.is_empty() {
+            self.pending_audio.extend(audio_events);
+        }
+        if !event_messages.is_empty() {
+            for command in event_messages {
+                self.messages.apply_command(command);
+            }
+        }
+        if let Some(go) = effect_script_go {
+            self.scenario_script_go = go;
+        }
+        if triggered_game_over {
+            self.request_game_over()?;
+        }
+        if !physics_delta.is_empty() {
+            self.apply_physics_delta(physics_delta);
+        }
+        if !global_cmds.is_empty() {
+            self.apply_global_effect_commands(&global_cmds);
+        }
+        self.apply_particle_commands(emitted_particles);
+        Ok(())
     }
 
     fn run_effect_events_for_object(
