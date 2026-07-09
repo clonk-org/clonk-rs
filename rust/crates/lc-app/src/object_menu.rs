@@ -1128,6 +1128,7 @@ mod tests {
         ObjectSnapshot {
             id: ObjectId::new(id),
             definition_id: definition.to_string(),
+            custom_name: None,
             position: Vector2::new(0, 0),
             velocity: Vector2::new(0, 0),
             rotation: 0,
@@ -1144,6 +1145,8 @@ mod tests {
             vertices: Vec::new(),
             own_vertices: None,
             container: None,
+            layer: None,
+            blit_mode: 0,
             contents: Vec::new(),
             components: HashMap::new(),
             status: ObjectStatus::Normal,

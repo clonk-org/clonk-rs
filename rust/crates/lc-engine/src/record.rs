@@ -429,6 +429,7 @@ mod tests {
             objects: vec![ObjectSnapshot {
                 id: crate::ObjectId::new(1),
                 definition_id: "Test".into(),
+                custom_name: None,
                 position: Vector2::new(1, 2),
                 velocity: Vector2::new(0, 0),
                 rotation: 0,
@@ -445,6 +446,8 @@ mod tests {
                 vertices: Vec::new(),
                 own_vertices: None,
                 container: None,
+                layer: None,
+                blit_mode: 0,
                 contents: Vec::new(),
                 components: HashMap::new(),
                 status: ObjectStatus::Normal,

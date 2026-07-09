@@ -144,6 +144,8 @@ pub(crate) struct DefinitionMetadata {
     /// DefCore `Name` (FnGetName's def form, C4Script.cpp:992-1005).
     pub name: String,
     pub category: i32,
+    /// DefCore `BlitMode`, used by SetObjectBlitMode(0).
+    pub blit_mode: u32,
     pub ocf_base: u32,
     pub crew_member: bool,
     /// ActMap for building nested object scopes (Find_Func targets).
@@ -4894,6 +4896,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetObjectLayer", get_object_layer);
+    script.register_host_function("SetObjectLayer", set_object_layer);
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("InsertMaterial", insert_material);
     script.register_host_function("ExtractMaterialAmount", extract_material_amount);
@@ -4916,6 +4919,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ResetPhysical", reset_physical);
     script.register_host_function("GetBreath", get_breath);
     script.register_host_function("GetName", get_name);
+    script.register_host_function("SetName", set_name);
     script.register_host_function("GetCon", get_con);
     script.register_host_function("DoCon", do_con);
     script.register_host_function("DoDamage", do_damage);
@@ -8844,36 +8848,93 @@ fn get_breath(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 /// FnGetName (C4Script.cpp:992-1005): the definition Name for an id
-/// argument; the object's name otherwise (custom object names are
-/// unmodeled — the definition name stands in, matching fresh objects).
+/// argument; the object's custom/definition name otherwise. Crew-info name
+/// fallback awaits the object-info port.
 fn get_name(args: &[Value]) -> Result<Value, RuntimeError> {
-    let mut index = 0;
-    let target_id =
-        consume_optional_object_reference_argument(args, &mut index, "GetName", "target")?;
-    let def_id = match args.get(index) {
-        Some(Value::C4Id(id)) => Some(id.clone()),
-        Some(Value::String(id)) if !id.is_empty() => Some(id.clone()),
-        _ => None,
-    };
+    let target_id = args
+        .first()
+        .map(|value| parse_object_reference_argument(value, "GetName", "target"))
+        .transpose()?
+        .flatten();
+    let def_id = parse_definition_argument(args.get(1), "GetName")?.filter(|id| !id.is_empty());
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        let definition = if let Some(def_id) = def_id {
-            Some(def_id)
-        } else {
-            let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
-            target.and_then(|target| {
-                context
-                    .get_world_object(target)
-                    .map(|object| object.definition_id().to_string())
-            })
+        if let Some(definition) = def_id {
+            return Ok(context
+                .definition_metadata(&definition)
+                .map(|metadata| Value::String(metadata.name.clone()))
+                .unwrap_or(Value::Nil));
+        }
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Nil);
         };
+        if let Some(custom_name) = context.object_custom_name(target) {
+            return Ok(Value::String(custom_name));
+        }
+        let definition = context
+            .get_world_object(target)
+            .map(|object| object.definition_id().to_string())
+            .or_else(|| {
+                context
+                    .object_scope(target)
+                    .and_then(|scope| scope.definition_id.clone())
+            });
         Ok(definition
             .and_then(|id| context.definition_metadata(&id))
             .map(|metadata| Value::String(metadata.name.clone()))
             .unwrap_or(Value::Nil))
+    })
+}
+
+/// FnSetName ordinary-object branch (C4Script.cpp:1008-1061): a nil or
+/// empty string clears CustomName, and a missing object defaults to the
+/// calling object. Definition and crew-info renaming require mutable
+/// definition/object-info models and deliberately remain unsupported here.
+fn set_name(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 5 {
+        return Err(RuntimeError::new(
+            "SetName expects at most 5 arguments: name, object, definition, set-in-info, make-valid",
+        ));
+    }
+    let custom_name =
+        parse_optional_string(args.first(), "SetName", "name")?.filter(|name| !name.is_empty());
+    let target_id = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "SetName", "target"))
+        .transpose()?
+        .flatten();
+    let definition =
+        parse_definition_argument(args.get(2), "SetName")?.filter(|id| !id.is_empty());
+    let set_in_info = args
+        .get(3)
+        .map(|value| value_to_bool(value, "SetName", "set-in-info"))
+        .transpose()?
+        .unwrap_or(false);
+    let _make_valid = args
+        .get(4)
+        .map(|value| value_to_bool(value, "SetName", "make-valid"))
+        .transpose()?
+        .unwrap_or(false);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if definition.is_some() || set_in_info {
+            return Ok(Value::Bool(false));
+        }
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Bool(false));
+        };
+        Ok(Value::Bool(
+            context.set_object_custom_name(target, custom_name),
+        ))
     })
 }
 
@@ -14715,6 +14776,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
+                blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -14734,6 +14796,10 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 fire: DefinitionFireMetadata::default(),
             });
         let definition_category = metadata.category;
+        let creator_layer = context
+            .object_context()
+            .map(ObjectScopeContext::id)
+            .and_then(|creator| context.object_layer(creator));
 
         let base_position = context
             .object_context()
@@ -14773,6 +14839,9 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_owner(owner)
             .with_category(definition_category)
             .with_id(id);
+        if let Some(layer) = creator_layer {
+            spawn = spawn.with_layer(layer);
+        }
         // "Set initial controller to creating controller, so more
         // complicated cause-effect-chains can be traced back to the
         // causing player" (FnCreateObject, C4Script.cpp:1905-1906).
@@ -14831,14 +14900,18 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         // arrow-call them immediately (GoldRush: pObj->SetAI right after
         // CreateObject). The spawn stays authoritative; nested outcomes
         // fold only touched fields.
-        .with_full_state(Rc::new(crate::preview_spawn_state(
-            position,
-            owner,
-            creator_controller.unwrap_or(owner),
-            definition_category,
-            FULL_CON,
-            metadata.vertices.clone(),
-        )));
+        .with_full_state(Rc::new({
+            let mut state = crate::preview_spawn_state(
+                position,
+                owner,
+                creator_controller.unwrap_or(owner),
+                definition_category,
+                FULL_CON,
+                metadata.vertices.clone(),
+            );
+            state.layer = creator_layer;
+            state
+        }));
 
         context.register_spawn(spawn, preview);
         Ok(object_reference_value(id))
@@ -14969,6 +15042,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
+                blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -14988,6 +15062,10 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 fire: DefinitionFireMetadata::default(),
             });
         let definition_category = metadata.category;
+        let creator_layer = context
+            .object_context()
+            .map(ObjectScopeContext::id)
+            .and_then(|creator| context.object_layer(creator));
 
         let base_position = context
             .object_context()
@@ -15020,6 +15098,9 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_category(definition_category)
             .with_construction(construction_value)
             .with_id(id);
+        if let Some(layer) = creator_layer {
+            spawn = spawn.with_layer(layer);
+        }
         // The creating controller rides onto the site (FnCreateConstruction,
         // C4Script.cpp:1932-1933).
         let creator_controller = context
@@ -15063,14 +15144,18 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             None,
         )
         .with_ocf(preview_ocf)
-        .with_full_state(Rc::new(crate::preview_spawn_state(
-            position,
-            owner,
-            creator_controller.unwrap_or(owner),
-            definition_category,
-            construction_value,
-            metadata.vertices.clone(),
-        )));
+        .with_full_state(Rc::new({
+            let mut state = crate::preview_spawn_state(
+                position,
+                owner,
+                creator_controller.unwrap_or(owner),
+                definition_category,
+                construction_value,
+                metadata.vertices.clone(),
+            );
+            state.layer = creator_layer;
+            state
+        }));
 
         context.register_spawn(spawn, preview);
         Ok(object_reference_value(id))
@@ -16452,6 +16537,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 None => return Ok(Value::Nil),
             }
         };
+        let creator_layer = context.object_layer(container);
 
         let metadata = context
             .definition_metadata(&definition)
@@ -16461,6 +16547,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
+                blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -16501,12 +16588,15 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         let mut last = Value::Nil;
         for _ in 0..count {
             let id = context.allocate_object_id();
-            let spawn = SpawnConfig::new(definition.clone())
+            let mut spawn = SpawnConfig::new(definition.clone())
                 .with_position(position)
                 .with_owner(owner)
                 .with_category(metadata.category)
                 .with_container(container)
                 .with_id(id);
+            if let Some(layer) = creator_layer {
+                spawn = spawn.with_layer(layer);
+            }
             let preview_ocf = ocf::compute(
                 metadata.ocf_base,
                 metadata.crew_member,
@@ -16550,6 +16640,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                     metadata.vertices.clone(),
                 );
                 state.container = Some(container);
+                state.layer = creator_layer;
                 state
             }));
             context.register_spawn(spawn, preview);
@@ -17519,10 +17610,7 @@ fn set_view_offset(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnGetObjectLayer (C4Script.cpp:5160-5166): the object's pLayer — nil
-/// unless a layer was assigned (Objects.txt `Layer=`; SetObjectLayer is
-/// unported). Layers cannot change mid-call, so the world snapshot is
-/// authoritative for the context object too.
+/// FnGetObjectLayer (C4Script.cpp:5160-5166): the object's effective pLayer.
 fn get_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -17544,10 +17632,56 @@ fn get_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
-        let layer = target
-            .and_then(|target| context.get_world_object(target))
-            .and_then(|object| object.full_state().and_then(|state| state.layer));
+        let layer = target.and_then(|target| context.object_layer(target));
         Ok(layer.map(object_reference_value).unwrap_or(Value::Nil))
+    })
+}
+
+/// FnSetObjectLayer (C4Script.cpp:5168-5180): set or clear pLayer on the
+/// explicit target, defaulting a nil target to the calling object.
+fn set_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "SetObjectLayer expects at most 2 arguments: layer and target",
+        ));
+    }
+    let layer = args
+        .first()
+        .map(|value| parse_object_reference_argument(value, "SetObjectLayer", "layer"))
+        .transpose()?
+        .flatten();
+    let target_id = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "SetObjectLayer", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Bool(false));
+        };
+        let contents = context
+            .get_world_object(target)
+            .map(|object| object.contents().to_vec())
+            .unwrap_or_default();
+        if !context.set_object_layer(target, layer) {
+            return Ok(Value::Bool(false));
+        }
+        for content in contents {
+            if context
+                .get_world_object(content)
+                .map(|object| object.is_present())
+                .unwrap_or(false)
+            {
+                context.set_object_layer(content, layer);
+            }
+        }
+        Ok(Value::Bool(true))
     })
 }
 
@@ -19031,6 +19165,54 @@ impl EffectHostContext {
         }
         self.object_scope_mut(target)
             .map(|scope| scope.pending_update.menu = Some(menu))
+            .is_some()
+    }
+
+    /// The effective C4Object::CustomName mid-call. A pending clear must
+    /// shadow the frame-start snapshot just as a pending set does.
+    fn object_custom_name(&self, target: ObjectId) -> Option<String> {
+        if let Some(custom_name) = self
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.custom_name.as_ref())
+        {
+            return custom_name.clone().filter(|name| !name.is_empty());
+        }
+        self.get_world_object(target)
+            .and_then(|object| object.full_state().map(|state| state.custom_name.clone()))
+            .flatten()
+            .filter(|name| !name.is_empty())
+    }
+
+    /// Stage an ordinary-object SetName write through the normal scope fold.
+    fn set_object_custom_name(&mut self, target: ObjectId, custom_name: Option<String>) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        self.object_scope_mut(target)
+            .map(|scope| scope.pending_update.custom_name = Some(custom_name))
+            .is_some()
+    }
+
+    /// The effective C4Object::pLayer mid-call. A pending clear shadows the
+    /// frame-start state just like a pending layer assignment.
+    fn object_layer(&self, target: ObjectId) -> Option<ObjectId> {
+        if let Some(layer) = self
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.layer.as_ref())
+        {
+            return *layer;
+        }
+        self.get_world_object(target)
+            .and_then(|object| object.full_state().and_then(|state| state.layer))
+    }
+
+    /// Stage one object's pLayer through the normal nested-scope fold.
+    fn set_object_layer(&mut self, target: ObjectId, layer: Option<ObjectId>) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        self.object_scope_mut(target)
+            .map(|scope| scope.pending_update.layer = Some(layer))
             .is_some()
     }
 
@@ -20611,8 +20793,10 @@ mod tests {
         "SetMenuDecoration",
         "SetMenuSize",
         "SetMenuTextProgress",
+        "SetName",
         "SetObjDrawTransform",
         "SetObjDrawTransform2",
+        "SetObjectLayer",
         "SetObjectStatus",
         "SetOwner",
         "SetPhase",
@@ -20859,6 +21043,171 @@ mod tests {
         assert!(matches!(solid, Value::Bool(_)));
         let liquid = g_back_liquid(&[Value::Nil]).expect("GBackLiquid(nil) succeeds");
         assert!(matches!(liquid, Value::Bool(_)));
+    }
+
+    #[test]
+    fn get_name_zero_object_slot_selects_definition_like_cpp() {
+        // FnGetName's arguments are positional: (object, id). A falsy first
+        // slot still consumes the object parameter (C4Script.cpp:992-1005).
+        // Dragon Rock calls GetName(0, idSpell) in UpdateTransferZone.
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            HashMap::from([(
+                "FIRE".into(),
+                DefinitionMetadata {
+                    name: "Fire".into(),
+                    ..DefinitionMetadata::default()
+                },
+            )]),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            get_name(&[Value::Int(0), Value::C4Id("FIRE".into())])
+        });
+
+        assert_eq!(
+            result.expect("GetName succeeds"),
+            Value::String("Fire".into())
+        );
+    }
+
+    #[test]
+    fn set_name_self_is_immediately_visible_and_nil_restores_fallback() {
+        // FnSetName's ordinary-object branch writes CustomName immediately;
+        // C4Object::GetName then resolves custom -> info -> definition
+        // (C4Script.cpp:1008-1061; C4Object.cpp:2103-2116).
+        let script = r#"#strict
+local sInitial, bSet, sRenamed, bClear, sCleared;
+func Trigger()
+{
+    sInitial = GetName();
+    bSet = SetName("Renamed");
+    sRenamed = GetName();
+    bClear = SetName();
+    sCleared = GetName();
+    return(1);
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", script)
+                    .expect("name fixture compiles"),
+            )
+            .expect("name fixture registers");
+        let caller = engine
+            .spawn_object(
+                crate::SpawnConfig::new("CALL")
+                    .with_category(crate::CATEGORY_OBJECT)
+                    .with_loaded(true)
+                    .with_custom_name("Saved Caller"),
+            )
+            .expect("name fixture spawns");
+        let caller_index = engine
+            .find_object_index(caller)
+            .expect("name fixture exists");
+
+        engine
+            .call_object_function(caller_index, "Trigger", Vec::new())
+            .expect("name fixture runs");
+
+        let snapshot = engine.object_snapshot(caller).expect("name fixture remains");
+        assert_eq!(
+            snapshot.local_vars.get("sInitial"),
+            Some(&Value::String("Saved Caller".into()))
+        );
+        assert_eq!(snapshot.local_vars.get("bSet"), Some(&Value::Bool(true)));
+        assert_eq!(
+            snapshot.local_vars.get("sRenamed"),
+            Some(&Value::String("Renamed".into()))
+        );
+        assert_eq!(snapshot.local_vars.get("bClear"), Some(&Value::Bool(true)));
+        assert_eq!(
+            snapshot.local_vars.get("sCleared"),
+            Some(&Value::String("Caller".into()))
+        );
+        assert_eq!(snapshot.custom_name, None);
+    }
+
+    #[test]
+    fn set_name_foreign_and_arrow_targets_are_live_and_persisted() {
+        // FnSetName accepts an explicit object, while AB_CALL host fallback
+        // makes an arrow target the default cthr->Obj (C4Script.cpp:1008-1061;
+        // C4AulExec.cpp:1216-1305).
+        let script = r#"#strict
+local bForeign, sForeign, bArrow, sArrow;
+func Trigger(object pOther)
+{
+    bForeign = SetName("Foreign", pOther);
+    sForeign = GetName(pOther);
+    bArrow = pOther->SetName("Arrow");
+    sArrow = pOther->GetName();
+    return(1);
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", script)
+                    .expect("caller fixture compiles"),
+            )
+            .expect("caller fixture registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("OTHR", "Other", "#strict\n")
+                    .expect("target fixture compiles"),
+            )
+            .expect("target fixture registers");
+        let caller = engine
+            .spawn_object(crate::SpawnConfig::new("CALL").with_category(crate::CATEGORY_OBJECT))
+            .expect("caller fixture spawns");
+        let other = engine
+            .spawn_object(crate::SpawnConfig::new("OTHR").with_category(crate::CATEGORY_OBJECT))
+            .expect("target fixture spawns");
+        let caller_index = engine
+            .find_object_index(caller)
+            .expect("caller fixture exists");
+
+        engine
+            .call_object_function(
+                caller_index,
+                "Trigger",
+                vec![Value::Object(other.as_u64())],
+            )
+            .expect("foreign name fixture runs");
+
+        let caller_snapshot = engine
+            .object_snapshot(caller)
+            .expect("caller fixture remains");
+        assert_eq!(
+            caller_snapshot.local_vars.get("bForeign"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            caller_snapshot.local_vars.get("sForeign"),
+            Some(&Value::String("Foreign".into()))
+        );
+        assert_eq!(
+            caller_snapshot.local_vars.get("bArrow"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            caller_snapshot.local_vars.get("sArrow"),
+            Some(&Value::String("Arrow".into()))
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(other)
+                .expect("target fixture remains")
+                .custom_name
+                .as_deref(),
+            Some("Arrow")
+        );
     }
 
     #[test]
@@ -22110,6 +22459,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 0x1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -22156,6 +22506,7 @@ func ProbeBadIndex(id) {
                 DefinitionMetadata {
                     name: String::new(),
                     category: 0x1,
+                    blit_mode: 0,
                     ocf_base: 0,
                     crew_member: false,
                     action_library: ActionLibrary::default(),
@@ -22180,6 +22531,7 @@ func ProbeBadIndex(id) {
                 DefinitionMetadata {
                     name: String::new(),
                     category: 0x2,
+                    blit_mode: 0,
                     ocf_base: 0,
                     crew_member: false,
                     action_library: ActionLibrary::default(),
@@ -22228,6 +22580,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 0x1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -22288,6 +22641,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 0x1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -22358,6 +22712,7 @@ func ProbeBadIndex(id) {
         let mut metadata = DefinitionMetadata {
             name: String::new(),
             category: 0,
+            blit_mode: 0,
             ocf_base: 0,
             crew_member: false,
             action_library: ActionLibrary::default(),
@@ -22782,6 +23137,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -22827,6 +23183,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -22888,6 +23245,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -27098,6 +27456,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: crate::CATEGORY_STRUCTURE,
+                blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -27156,6 +27515,7 @@ func ProbeBadIndex(id) {
         let workshop_metadata = DefinitionMetadata {
             name: String::new(),
             category: crate::CATEGORY_STRUCTURE,
+            blit_mode: 0,
             ocf_base: ocf::NORMAL,
             crew_member: false,
             action_library: ActionLibrary::default(),

@@ -4093,6 +4093,7 @@ mod tests {
             objects: vec![ObjectSnapshot {
                 id: ObjectId::new(1),
                 definition_id: "TestObject".to_string(),
+                custom_name: None,
                 position: Vector2::new(100, 100),
                 velocity: Vector2::ZERO,
                 rotation: 0,
@@ -4109,6 +4110,8 @@ mod tests {
                 vertices: Vec::new(),
                 own_vertices: None,
                 container: None,
+                layer: None,
+                blit_mode: 0,
                 contents: Vec::new(),
                 components: HashMap::new(),
                 status: Default::default(),

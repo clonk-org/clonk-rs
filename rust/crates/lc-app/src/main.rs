@@ -55,6 +55,7 @@ use ingame_menu::{
 use input::{ControlBindingId, KeyboardBindings};
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::std_config::Config;
+use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
@@ -2761,6 +2762,7 @@ struct GameApp {
     recording: Option<RecordingSession>,
     local_owner: i32,
     player_name: String,
+    selected_player_file: Option<PlayerFile>,
     last_save_path: Option<PathBuf>,
     object_sprites: HashMap<String, DefinitionSprite>,
     sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
@@ -5201,6 +5203,84 @@ fn load_participants_label(paths: Option<&AppPaths>) -> String {
     label
 }
 
+/// Loads the first selected local player file, mirroring
+/// `C4Game::Init` -> `C4ClientPlayerInfos(Game.PlayerFilenames)`
+/// (C4Game.cpp:362-366; C4PlayerInfo.cpp:357-390).
+fn load_selected_player_file(paths: Option<&AppPaths>) -> Option<PlayerFile> {
+    let paths = paths?;
+    let config_path = paths.config_file();
+    let config = match Config::load(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(
+                    error = %err,
+                    path = %config_path.display(),
+                    "failed to read selected player from config"
+                );
+            }
+            return None;
+        }
+    };
+    let participant = config
+        .get_in(Some("General"), "Participants")?
+        .split(';')
+        .map(|entry| entry.trim().trim_matches('"'))
+        .find(|entry| !entry.is_empty())?;
+    let participant_path = Path::new(participant);
+
+    let mut candidates = Vec::new();
+    if participant_path.is_absolute() {
+        candidates.push(participant_path.to_path_buf());
+    } else {
+        // C++ stores participant names relative to ExePath. AppPaths uses
+        // the repository/install root, so accept that direct form first.
+        candidates.push(paths.install_root().join(participant_path));
+
+        if let Some(player_path) = config
+            .get_in(Some("General"), "PlayerPath")
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            let player_root = Path::new(player_path);
+            let player_root = if player_root.is_absolute() {
+                player_root.to_path_buf()
+            } else {
+                paths.install_root().join(player_root)
+            };
+            candidates.push(player_root.join(participant_path));
+        }
+
+        // Developer builds keep the C++ executable and its relative .c4p
+        // files here; this is the ExePath equivalent for the Rust binary.
+        candidates.push(paths.install_root().join("build").join(participant_path));
+        candidates.push(
+            paths
+                .install_root()
+                .join("build-arm64-native")
+                .join(participant_path),
+        );
+    }
+
+    candidates.dedup();
+    for candidate in candidates {
+        if !candidate.exists() {
+            continue;
+        }
+        match PlayerFile::load_from_path(&candidate) {
+            Ok(player) => return Some(player),
+            Err(err) => tracing::warn!(
+                error = %err,
+                path = %candidate.display(),
+                "failed to load selected player file"
+            ),
+        }
+    }
+
+    tracing::warn!(participant, "selected player file was not found");
+    None
+}
+
 fn overlay_text_needs_update(current: &str, default_prefix: &str) -> bool {
     current.is_empty() || current.starts_with(default_prefix)
 }
@@ -5219,6 +5299,7 @@ impl GameApp {
             None => None,
         };
         let player_name = runtime.player_name.clone();
+        let selected_player_file = load_selected_player_file(paths);
         let network_lobby = match (&network_mode, &network) {
             (Some(mode), Some(manager)) => Some(NetworkLobbyState::new(
                 manager.local_client_id(),
@@ -5344,6 +5425,7 @@ impl GameApp {
             recording: None,
             local_owner: runtime.player_owner,
             player_name: player_name.clone(),
+            selected_player_file,
             last_save_path: None,
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
@@ -5471,22 +5553,32 @@ impl GameApp {
         if self.engine.player(self.local_owner).is_some() {
             return Ok(());
         }
+        let (color_dw, pref_color, pref_position, crew, control_style) = self
+            .selected_player_file
+            .as_ref()
+            .map(|player| {
+                (
+                    player.pref_color_dw & 0x00ff_ffff,
+                    player.pref_color,
+                    player.pref_position,
+                    player.crew.clone(),
+                    player.pref_control_style,
+                )
+            })
+            .unwrap_or_else(|| {
+                // The C++ new-player dialog opts fresh players into
+                // Jump'n'Run controls (C4StartupPlrSelDlg.cpp:1103-1113).
+                (0xff, 0, 0, Vec::new(), true)
+            });
         let joined = self.engine.join_player(JoinPlayerConfig {
             name: self.player_name.clone(),
             team: None,
-            // Fresh-player defaults (C4PlayerInfoCore::Default,
-            // C4InfoCore.cpp:78-79): PrefColor 0, PrefColorDw 0xff.
-            // An empty crew roster recruits new infos like a brand-new
-            // player file (C4ObjectInfoList::New, C4ObjectInfoList.cpp:
-            // 144-185).
-            color_dw: 0xff,
-            pref_color: 0,
-            pref_position: 0,
-            crew: Vec::new(),
+            color_dw,
+            pref_color,
+            pref_position,
+            crew,
             startup_player_count: 1,
-            // AutoStopControl pref default 0 = classic control
-            // (C4InfoCore.cpp:84).
-            control_style: false,
+            control_style,
         })?;
         self.local_owner = joined.number;
         Ok(())
@@ -11846,6 +11938,115 @@ mod tests {
     }
 
     #[test]
+    fn selected_player_autostop_stops_horizontal_keys_on_release() {
+        // C4Game takes Config.General.Participants as PlayerFilenames
+        // (C4Game.cpp:362-366), and C4Player::InitControl copies the player
+        // file's AutoStopControl preference (C4Player.cpp:2371-2380).
+        let install = tempdir().expect("install root");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("create system group");
+        let player_dir = install.path().join("build/Tyler.c4p");
+        fs::create_dir_all(&player_dir).expect("create player file group");
+        fs::write(
+            player_dir.join("Player.txt"),
+            "[Player]\nName=Tyler\n\n[Preferences]\nAutoStopControl=1\n",
+        )
+        .expect("write player core");
+        let user_dir = install.path().join("user-data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        fs::create_dir_all(paths.config_dir()).expect("create config directory");
+        fs::write(
+            paths.config_file(),
+            "[General]\nParticipants=Tyler.c4p\nPlayerPath=\n",
+        )
+        .expect("write config");
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Tyler".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+
+        let mut definition =
+            Definition::from_script("WLKR", "Walker", walker_script()).expect("crew definition");
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([(
+                "Walk".to_string(),
+                ActionSpec::default().with_procedure("Walk"),
+            )]),
+        );
+        definition.set_movement_profile(MovementProfile::default());
+        definition.set_crew_member(true);
+        app.engine
+            .register_definition(definition)
+            .expect("register crew definition");
+        app.engine
+            .set_player_starts(vec![lc_engine::scenario::PlayerStart {
+                ready_crew: vec![("WLKR".to_string(), 1)],
+                ..Default::default()
+            }]);
+
+        app.join_local_player().expect("join selected player");
+
+        assert!(
+            app.engine
+                .snapshot()
+                .players
+                .iter()
+                .find(|player| player.id == app.local_owner)
+                .expect("joined player")
+                .control
+                .control_style,
+            "AutoStopControl=1 must enable Jump'n'Run release semantics"
+        );
+
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("crew cursor");
+        app.mode = AppMode::Running;
+        for (binding, held_direction) in [
+            (ControlBindingId::Right, CommandDirection::Right),
+            (ControlBindingId::Left, CommandDirection::Left),
+        ] {
+            let key = app.bindings.key_for(binding).expect("movement key binding");
+            app.handle_key(key, ElementState::Pressed)
+                .expect("press movement key");
+            assert_eq!(
+                app.engine
+                    .object_snapshot(cursor)
+                    .expect("cursor after press")
+                    .command_direction,
+                held_direction,
+                "pressed horizontal key must steer"
+            );
+
+            app.handle_key(key, ElementState::Released)
+                .expect("release movement key");
+            assert_eq!(
+                app.engine
+                    .object_snapshot(cursor)
+                    .expect("cursor after release")
+                    .command_direction,
+                CommandDirection::Stop,
+                "AutoStopControl release must stop horizontal movement"
+            );
+        }
+    }
+
+    #[test]
     fn activating_a_scenario_joins_the_local_player_with_crew() {
         // The scenario activation path must join like C4Game::InitPlayers ->
         // C4PlayerList::Join (C4PlayerList.cpp:271-318) so the [Player1]
@@ -11999,6 +12200,7 @@ mod tests {
         ObjectSnapshot {
             id: ObjectId::new(id),
             definition_id: definition.to_string(),
+            custom_name: None,
             position,
             velocity: Vector2::new(0, 0),
             rotation: 0,
@@ -12015,6 +12217,8 @@ mod tests {
             vertices: Vec::new(),
             own_vertices: None,
             container: None,
+            layer: None,
+            blit_mode: 0,
             contents: Vec::new(),
             components: HashMap::new(),
             status: ObjectStatus::Normal,
@@ -12362,6 +12566,7 @@ mod tests {
             ObjectSnapshot {
                 id: focus,
                 definition_id: "Clonk".into(),
+                custom_name: None,
                 position: Vector2::new(0, 0),
                 velocity: Vector2::ZERO,
                 rotation: 0,
@@ -12378,6 +12583,8 @@ mod tests {
                 vertices: Vec::new(),
                 own_vertices: None,
                 container: None,
+                layer: None,
+                blit_mode: 0,
                 contents: Vec::new(),
                 components: HashMap::new(),
                 status: ObjectStatus::Normal,
@@ -12413,6 +12620,7 @@ mod tests {
             ObjectSnapshot {
                 id: teammate,
                 definition_id: "Balloon".into(),
+                custom_name: None,
                 position: Vector2::new(10, 0),
                 velocity: Vector2::ZERO,
                 rotation: 0,
@@ -12429,6 +12637,8 @@ mod tests {
                 vertices: Vec::new(),
                 own_vertices: None,
                 container: None,
+                layer: None,
+                blit_mode: 0,
                 contents: Vec::new(),
                 components: HashMap::new(),
                 status: ObjectStatus::Normal,

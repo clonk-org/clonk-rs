@@ -3836,6 +3836,8 @@ struct LegacyObjectRecord {
     line: usize,
     id: Option<String>,
     number: Option<u64>,
+    /// C4Object::CustomName (`Name=`, C4Object.cpp:2749-2760).
+    custom_name: Option<String>,
     status: Option<ObjectStatus>,
     owner: Option<i32>,
     /// C4Object::Controller, compiled verbatim with default NO_OWNER
@@ -3892,6 +3894,8 @@ struct LegacyObjectRecord {
     action_data: Option<i32>,
     action_target: Option<u64>,
     action_target2: Option<u64>,
+    /// C4Object::pLayer (`Layer=`, C4Object.cpp:2819).
+    layer: Option<u64>,
     contained: Option<u64>,
     contents: Vec<u64>,
 }
@@ -3925,6 +3929,9 @@ impl LegacyObjectRecord {
                     )));
                 }
                 self.number = Some(number as u64);
+            }
+            "name" => {
+                self.custom_name = parse_legacy_object_name(trimmed_value, self.line)?;
             }
             "status" => {
                 let raw = parse_i32(trimmed_value).map_err(|err| {
@@ -4235,6 +4242,17 @@ impl LegacyObjectRecord {
                     ))
                 })?);
             }
+            "layer" => {
+                let value = parse_i64(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Layer `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                if value > 0 {
+                    self.layer = Some(value as u64);
+                }
+            }
             "contained" => {
                 let value = parse_i64(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
@@ -4278,6 +4296,7 @@ impl LegacyObjectRecord {
             line,
             id,
             number,
+            custom_name,
             status,
             owner,
             controller,
@@ -4314,6 +4333,7 @@ impl LegacyObjectRecord {
             action_data,
             action_target,
             action_target2,
+            layer,
             contained,
             contents: _,
         } = self;
@@ -4353,6 +4373,12 @@ impl LegacyObjectRecord {
             // Construction/Initialize (C4GameObjects.cpp:535-618).
             .with_loaded(true);
         config = config.with_position(Vector2::new(x.unwrap_or(0), y.unwrap_or(0)));
+        if let Some(custom_name) = custom_name {
+            config = config.with_custom_name(custom_name);
+        }
+        if let Some(layer) = layer {
+            config = config.with_layer(ObjectId::new(layer));
+        }
 
         if xdir.is_some() || ydir.is_some() {
             // Exact C4Fixed velocity (C4Object.cpp:2765-2766); the pixel
@@ -4575,6 +4601,88 @@ fn parse_legacy_objects(text: &str) -> Result<Vec<LegacyObjectRecord>, ScenarioE
     Ok(records)
 }
 
+/// C4Object::CustomName uses StdCompiler's escaped-string adapter. Modern
+/// saves quote the value; older shipped saves keep the whole unquoted line
+/// (StdCompiler.cpp:734-741, 936-976, 1006-1062).
+fn parse_legacy_object_name(
+    value: &str,
+    line: usize,
+) -> Result<Option<String>, ScenarioError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if !trimmed.starts_with('"') {
+        return Ok(Some(trimmed.to_string()));
+    }
+
+    let mut chars = trimmed[1..].chars().peekable();
+    let mut decoded = String::new();
+    let mut terminated = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                terminated = true;
+                break;
+            }
+            '\\' => {
+                let escaped = match chars.next() {
+                    Some('a') => '\u{0007}',
+                    Some('b') => '\u{0008}',
+                    Some('f') => '\u{000c}',
+                    Some('n') => '\n',
+                    Some('r') => '\r',
+                    Some('t') => '\t',
+                    Some('v') => '\u{000b}',
+                    Some('\'') => '\'',
+                    Some('"') => '"',
+                    Some('\\') => '\\',
+                    Some('?') => '?',
+                    Some('x') => {
+                        let mut code = 0u32;
+                        let mut found = false;
+                        while let Some(digit) = chars.peek().and_then(|next| next.to_digit(16)) {
+                            found = true;
+                            code = code.wrapping_mul(16).wrapping_add(digit);
+                            chars.next();
+                        }
+                        if found {
+                            char::from_u32(code & 0xff).unwrap_or('\0')
+                        } else {
+                            'x'
+                        }
+                    }
+                    Some(first @ '0'..='7') => {
+                        let mut code = first.to_digit(8).unwrap_or(0);
+                        while let Some(digit) = chars.peek().and_then(|next| next.to_digit(8)) {
+                            code = code.wrapping_mul(8).wrapping_add(digit);
+                            chars.next();
+                        }
+                        char::from_u32(code & 0xff).unwrap_or('\0')
+                    }
+                    Some(other) => other,
+                    None => {
+                        return Err(ScenarioError::LegacyObjectsParse(format!(
+                            "Objects.txt line {}: unterminated escape in Name",
+                            line
+                        )))
+                    }
+                };
+                decoded.push(escaped);
+            }
+            other => decoded.push(other),
+        }
+    }
+
+    if !terminated || chars.any(|ch| !ch.is_whitespace()) {
+        return Err(ScenarioError::LegacyObjectsParse(format!(
+            "Objects.txt line {}: unterminated or malformed quoted Name `{}`",
+            line, trimmed
+        )));
+    }
+    Ok((!decoded.is_empty()).then_some(decoded))
+}
+
 fn parse_i64(value: &str) -> Result<i64, std::num::ParseIntError> {
     let trimmed = value.trim();
     // Handle C4Fixed format: 'f' or 'F' prefix indicates a fixed-point number
@@ -4681,9 +4789,9 @@ fn split_outside_brackets(text: &str) -> Vec<&str> {
 /// One serialized C4Value (C4Value::CompileFunc, C4Value.cpp:717-800 +
 /// GetC4VID :368-394): `A`=any (zero data reads back nil, nonzero guesses
 /// int), `i`=int, `b`=bool, `O`=enumerated object number (0 = no object),
-/// `a[size;elems]`=array with trailing nils omitted on write. `I` (C4ID),
-/// `S` (string-table id) and `m` (map) are not modeled yet — they read as
-/// nil with a warning.
+/// `I`=C4ID stored as its signed 32-bit payload, `a[size;elems]`=array with
+/// trailing nils omitted on write. `S` (string-table id) and `m` (map) are
+/// not modeled yet — they read as nil with a warning.
 fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Value, ScenarioError> {
     use lc_script::Value;
     let parse_error = |detail: String| {
@@ -4708,6 +4816,18 @@ fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Val
         'O' => Ok(match int_payload()? {
             number if number > 0 => Value::Object(number as u64),
             _ => Value::Nil,
+        }),
+        'I' => Ok(match int_payload()? {
+            0 => Value::Nil,
+            raw @ 1..=9999 => Value::C4Id(format!("{raw:04}")),
+            raw => Value::C4Id(
+                (raw as u32)
+                    .to_le_bytes()
+                    .into_iter()
+                    .take_while(|byte| *byte != 0)
+                    .map(char::from)
+                    .collect(),
+            ),
         }),
         'a' => {
             let inner = payload
@@ -4737,7 +4857,7 @@ fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Val
             }
             Ok(Value::Array(elements))
         }
-        'I' | 'S' | 'm' => {
+        'S' | 'm' => {
             tracing::warn!(
                 value = encoded,
                 "LocalNamed C4Value type not modeled yet; reading as nil"
@@ -9888,6 +10008,17 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn legacy_object_name_decodes_cpp_escaped_strings() {
+        // StdCompilerINIRead::ReadEscapedChar (StdCompiler.cpp:1006-1062).
+        assert_eq!(
+            parse_legacy_object_name(r#""Script \"Wipf\" \\ \101\x42""#, 7)
+                .expect("escaped name parses")
+                .as_deref(),
+            Some("Script \"Wipf\" \\ AB")
+        );
+    }
+
+    #[test]
     fn loads_legacy_objects_txt_spawns_initial_objects() {
         let dir = tempdir().expect("tempdir");
 
@@ -9921,7 +10052,7 @@ public func ActualizePhase(pClonk)
             scenario_dir.join("Objects.txt"),
             // XDir/YDir are float-bit C4Fixed like real saves write them
             // (Fixed.h:247-266): f-1063256064 = -5.0, f1077936128 = 3.0.
-            "[Object]\nid=BOX1\nNumber=100\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nStatus=1\nCategory=0\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
+            "[Object]\nid=BOX1\nNumber=100\nName=Scroll: Alchemist's bag\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nName=\"ScriptWipf\"\nStatus=1\nCategory=0\nLayer=100\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
         )
         .expect("write objects");
 
@@ -9942,11 +10073,17 @@ public func ActualizePhase(pClonk)
         assert_eq!(first.config.controller, Some(2));
         assert_eq!(first.config.position, Vector2::new(10, 20));
         assert_eq!(first.config.id, Some(ObjectId::new(100)));
+        assert_eq!(
+            first.config.custom_name.as_deref(),
+            Some("Scroll: Alchemist's bag")
+        );
 
         let second = &scenario.initial_spawns[1];
         assert_eq!(second.handle.as_deref(), Some("101"));
         assert_eq!(second.container_handle.as_deref(), Some("100"));
         assert_eq!(second.config.definition_id, "GEM1");
+        assert_eq!(second.config.custom_name.as_deref(), Some("ScriptWipf"));
+        assert_eq!(second.config.layer, Some(ObjectId::new(100)));
         assert_eq!(second.config.position, Vector2::new(30, 40));
         assert_eq!(second.config.velocity, Vector2::new(-5, 3));
         assert_eq!(second.config.energy, Some(77));
@@ -9979,11 +10116,17 @@ public func ActualizePhase(pClonk)
         assert_eq!(box_snapshot.owner, 1);
         assert_eq!(box_snapshot.controller, 2, "loaded Controller= sticks");
         assert_eq!(box_snapshot.position, Vector2::new(10, 20));
+        assert_eq!(
+            box_snapshot.custom_name.as_deref(),
+            Some("Scroll: Alchemist's bag")
+        );
 
         let gem_snapshot = engine
             .object_snapshot(ObjectId::new(101))
             .expect("gem object");
         assert_eq!(gem_snapshot.definition_id, "GEM1");
+        assert_eq!(gem_snapshot.custom_name.as_deref(), Some("ScriptWipf"));
+        assert_eq!(gem_snapshot.layer, Some(ObjectId::new(100)));
         assert_eq!(gem_snapshot.position, Vector2::new(30, 40));
         // Loads denumerate Contained without the Enter transfer
         // (C4Object.cpp:1582 never runs): compile default NO_OWNER.
@@ -10332,9 +10475,9 @@ public func ActualizePhase(pClonk)
     // CompileFunc, C4ValueMap.cpp:236-295): per-object script locals load
     // verbatim with the C4Value type-char encoding (GetC4VID,
     // C4Value.cpp:368-394) — A=any (zero data reads back nil), i=int,
-    // b=bool, O=enumerated object number, a[size;elems]=array with
-    // trailing nils omitted. GoldRush trees carry MotionThreshold this
-    // way; bandit AI state (iOwner) too.
+    // b=bool, I=C4ID, O=enumerated object number, a[size;elems]=array with
+    // trailing nils omitted. The I payloads below are verbatim C++-written
+    // Dragon Rock values (C4Value.cpp:717-800; C4Id.cpp:26-45).
     #[test]
     fn objects_txt_restores_named_locals_like_cpp() {
         let dir = tempdir().expect("tempdir");
@@ -10358,7 +10501,9 @@ public func ActualizePhase(pClonk)
         std::fs::write(
             scenario_dir.join("Objects.txt"),
             "[Object]\nid=GOOD\nNumber=95\nStatus=1\nX=5\nY=5\n\
-             LocalNamed=5;iNum=i17,fFlag=b1,pRef=O80,junk=A0,aList=a[4;i1,i2]\n",
+             LocalNamed=10;iNum=i17,fFlag=b1,pRef=O80,junk=A0,aList=a[4;i1,i2],\
+             idSpell=I1112688205,aiFirst=I1145979202,numeric=I1337,none=I0,\
+             aSpells=a[3;I959858757,I1145979202]\n",
         )
         .expect("write objects");
 
@@ -10395,6 +10540,35 @@ public func ActualizePhase(pClonk)
                 lc_script::Value::Nil,
             ])),
             "arrays restore the declared size; trailing nils are omitted on write"
+        );
+        assert_eq!(
+            locals.get("idSpell"),
+            Some(&lc_script::Value::C4Id("MFRB".to_string())),
+            "C++'s signed int32 C4ID payload decodes in little-endian byte order"
+        );
+        assert_eq!(
+            locals.get("aiFirst"),
+            Some(&lc_script::Value::C4Id("BAND".to_string())),
+            "callback-suffix IDs survive even when they are not definitions"
+        );
+        assert_eq!(
+            locals.get("numeric"),
+            Some(&lc_script::Value::C4Id("1337".to_string())),
+            "numeric C4IDs use the four-digit C4IdText form"
+        );
+        assert_eq!(
+            locals.get("none"),
+            Some(&lc_script::Value::Nil),
+            "C4ID_None remains falsey instead of becoming the truthy text NONE"
+        );
+        assert_eq!(
+            locals.get("aSpells"),
+            Some(&lc_script::Value::Array(vec![
+                lc_script::Value::C4Id("EH69".to_string()),
+                lc_script::Value::C4Id("BAND".to_string()),
+                lc_script::Value::Nil,
+            ])),
+            "nested C4IDs restore through the recursive array decoder"
         );
     }
 

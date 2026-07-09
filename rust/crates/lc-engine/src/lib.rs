@@ -2015,6 +2015,10 @@ fn u32_is_zero(value: &u32) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectState {
+    /// C4Object::CustomName: Some overrides the crew-info/definition name;
+    /// None uses the fallback chain (C4Object.cpp:2103-2116).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
     pub position: Vector2,
     pub velocity: Vector2,
     /// Transient script-call mirror of the object's TRUE sub-pixel dirs:
@@ -2049,6 +2053,9 @@ pub struct ObjectState {
     pub container: Option<ObjectId>,
     #[serde(default)]
     pub layer: Option<ObjectId>,
+    /// C4Object::BlitMode, distinct from SetGraphics base/overlay modes.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub blit_mode: u32,
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
@@ -2228,6 +2235,7 @@ pub(crate) fn preview_spawn_state(
     vertices: Vec<ObjectVertex>,
 ) -> ObjectState {
     ObjectState {
+        custom_name: None,
         script_fixed_velocity: None,
         position,
         velocity: Vector2::ZERO,
@@ -2247,6 +2255,7 @@ pub(crate) fn preview_spawn_state(
         vertices,
         container: None,
         layer: None,
+        blit_mode: 0,
         contents: Vec::new(),
         components: HashMap::new(),
         status: ObjectStatus::Normal,
@@ -2294,6 +2303,15 @@ impl ObjectState {
         }
         if let Some(rotation) = delta.rotation {
             self.rotation = rotation.rem_euclid(360);
+        }
+        if let Some(custom_name) = &delta.custom_name {
+            self.custom_name = custom_name.clone();
+        }
+        if let Some(layer) = delta.layer {
+            self.layer = layer;
+        }
+        if let Some(blit_mode) = delta.blit_mode {
+            self.blit_mode = blit_mode;
         }
         let mut energy_died = false;
         if let Some(energy) = delta.energy {
@@ -2437,6 +2455,12 @@ impl ObjectState {
 
 #[derive(Debug, Default, Clone, PartialEq)]
 struct ObjectDelta {
+    /// Some(Some(name)) sets C4Object::CustomName; Some(None) clears it.
+    custom_name: Option<Option<String>>,
+    /// Some(Some(object)) sets C4Object::pLayer; Some(None) clears it.
+    layer: Option<Option<ObjectId>>,
+    /// C4Object::BlitMode overwrite.
+    blit_mode: Option<u32>,
     portrait_source: Option<String>,
     solid_mask_override: Option<DefinitionTargetRect>,
     /// Script menu write-through (FnCreateMenu/FnCloseMenu et al.):
@@ -2497,6 +2521,15 @@ struct ObjectDelta {
 
 impl ObjectDelta {
     fn merge_update(&mut self, update: ObjectUpdate) {
+        if let Some(custom_name) = update.custom_name {
+            self.custom_name = Some(custom_name);
+        }
+        if let Some(layer) = update.layer {
+            self.layer = Some(layer);
+        }
+        if let Some(blit_mode) = update.blit_mode {
+            self.blit_mode = Some(blit_mode);
+        }
         if let Some(position) = update.position {
             self.position = Some(position);
         }
@@ -2612,6 +2645,9 @@ impl ObjectDelta {
 impl From<ObjectUpdate> for ObjectDelta {
     fn from(update: ObjectUpdate) -> Self {
         Self {
+            custom_name: update.custom_name,
+            layer: update.layer,
+            blit_mode: update.blit_mode,
             fixed_velocity_x: update.fixed_velocity_x,
             fixed_velocity_y: update.fixed_velocity_y,
             position: update.position,
@@ -2653,8 +2689,32 @@ impl From<ObjectUpdate> for ObjectDelta {
     }
 }
 
+/// Serde's default nested-Option handling collapses an explicit JSON `null`
+/// into the same outer `None` as a missing field. Update fields need all three
+/// states, so a present value always wraps the decoded inner option.
+fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ObjectUpdate {
+    /// C4Object::CustomName write: Some(Some(name)) sets; Some(None) clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<Option<String>>,
+    /// C4Object::pLayer write: Some(Some(object)) sets; Some(None) clears.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_double_option"
+    )]
+    pub layer: Option<Option<ObjectId>>,
+    /// C4Object::BlitMode overwrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blit_mode: Option<u32>,
     /// SetPortrait's source-definition update (Some = set).
     #[serde(default)]
     pub portrait_source: Option<String>,
@@ -2889,6 +2949,21 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_layer(mut self, layer: ObjectId) -> Self {
+        self.layer = Some(Some(layer));
+        self
+    }
+
+    pub fn clear_layer(mut self) -> Self {
+        self.layer = Some(None);
+        self
+    }
+
+    pub fn with_blit_mode(mut self, blit_mode: u32) -> Self {
+        self.blit_mode = Some(blit_mode);
+        self
+    }
+
     pub fn clear_container(mut self) -> Self {
         self.container = Some(None);
         self
@@ -2905,7 +2980,10 @@ impl ObjectUpdate {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.position.is_none()
+        self.custom_name.is_none()
+            && self.layer.is_none()
+            && self.blit_mode.is_none()
+            && self.position.is_none()
             && self.velocity.is_none()
             && self.fixed_velocity.is_none()
             && self.fixed_velocity_x.is_none()
@@ -4166,6 +4244,7 @@ impl Object {
         ObjectSnapshot {
             id: self.id,
             definition_id: self.definition_id.clone(),
+            custom_name: self.state.custom_name.clone(),
             position,
             velocity,
             // C++ persists `r` verbatim; DoMovement keeps active rotation in
@@ -4184,6 +4263,8 @@ impl Object {
             vertices: self.state.vertices.clone(),
             own_vertices: self.own_shape_vertices.clone(),
             container: self.state.container,
+            layer: self.state.layer,
+            blit_mode: self.state.blit_mode,
             contents: self.state.contents.clone(),
             components: self.state.components.clone(),
             status: self.state.status,
@@ -4611,6 +4692,9 @@ pub struct SpawnConfig {
     #[serde(default)]
     pub id: Option<ObjectId>,
     pub definition_id: DefinitionId,
+    /// Saved or explicitly assigned C4Object::CustomName.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
     pub position: Vector2,
     pub velocity: Vector2,
     /// Exact sub-pixel velocity: savegame `XDir`/`YDir` are serialized
@@ -4654,6 +4738,9 @@ pub struct SpawnConfig {
     pub container: Option<ObjectId>,
     #[serde(default)]
     pub layer: Option<ObjectId>,
+    /// Saved C4Object::BlitMode. None uses the definition default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blit_mode: Option<u32>,
     #[serde(default)]
     pub alive: Option<bool>,
     #[serde(default)]
@@ -4713,6 +4800,7 @@ impl SpawnConfig {
         Self {
             id: None,
             definition_id: definition_id.into(),
+            custom_name: None,
             position: Vector2::ZERO,
             velocity: Vector2::ZERO,
             fixed_velocity: None,
@@ -4731,6 +4819,7 @@ impl SpawnConfig {
             status: None,
             container: None,
             layer: None,
+            blit_mode: None,
             alive: None,
             category: None,
             in_liquid: None,
@@ -4749,6 +4838,11 @@ impl SpawnConfig {
 
     pub fn with_in_liquid(mut self, in_liquid: bool) -> Self {
         self.in_liquid = Some(in_liquid);
+        self
+    }
+
+    pub fn with_custom_name(mut self, name: impl Into<String>) -> Self {
+        self.custom_name = Some(name.into());
         self
     }
 
@@ -4906,12 +5000,20 @@ impl SpawnConfig {
         self.layer = Some(layer);
         self
     }
+
+    pub fn with_blit_mode(mut self, blit_mode: u32) -> Self {
+        self.blit_mode = Some(blit_mode);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectSnapshot {
     pub id: ObjectId,
     pub definition_id: DefinitionId,
+    /// C4Object::CustomName; None falls back to crew-info/definition name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
     pub position: Vector2,
     pub velocity: Vector2,
     #[serde(default)]
@@ -4941,6 +5043,12 @@ pub struct ObjectSnapshot {
     pub own_vertices: Option<Vec<ObjectVertex>>,
     #[serde(default)]
     pub container: Option<ObjectId>,
+    /// C4Object::pLayer (Objects.txt `Layer=` / SetObjectLayer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<ObjectId>,
+    /// C4Object::BlitMode, including the C4GFXBLIT_CUSTOM marker.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub blit_mode: u32,
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
@@ -5533,6 +5641,8 @@ pub struct Definition {
     clonk_names: Option<String>,
     movement: MovementProfile,
     category: i32,
+    /// DefCore `BlitMode`, copied into C4Object::BlitMode at Init/reset.
+    blit_mode: u32,
     ocf_base: u32,
     value: i32,
     mass: i32,
@@ -5730,6 +5840,7 @@ impl Definition {
             clonk_names: None,
             movement: MovementProfile::default(),
             category: DEFAULT_CATEGORY,
+            blit_mode: 0,
             ocf_base: OCF_NORMAL,
             value: 0,
             mass: 0,
@@ -5864,6 +5975,7 @@ impl Definition {
 
         definition.set_crew_member(resource.core.crew_member);
         definition.set_category(resource.core.category);
+        definition.set_blit_mode(resource.core.blit_mode);
         definition.set_value(resource.core.value);
         definition.set_mass(resource.core.mass);
         definition.set_picture(resource.core.picture.map(DefinitionPicture::from));
@@ -6124,6 +6236,14 @@ impl Definition {
 
     pub fn set_category(&mut self, category: i32) {
         self.category = normalize_category(category, DEFAULT_CATEGORY);
+    }
+
+    pub fn blit_mode(&self) -> u32 {
+        self.blit_mode
+    }
+
+    pub fn set_blit_mode(&mut self, blit_mode: u32) {
+        self.blit_mode = blit_mode;
     }
 
     pub fn ocf_base(&self) -> u32 {
@@ -12547,6 +12667,7 @@ impl Engine {
                         DefinitionMetadata {
                             name: definition.name().to_string(),
                             category: definition.category(),
+                            blit_mode: definition.blit_mode(),
                             ocf_base: definition.ocf_base(),
                             crew_member: definition.is_crew(),
                             action_library: definition.action_library().clone(),
@@ -16084,6 +16205,9 @@ impl Engine {
             .ok_or(EngineError::UnknownObject(id))?;
 
         let ObjectUpdate {
+            custom_name,
+            layer,
+            blit_mode,
             position,
             velocity,
             fixed_velocity,
@@ -16153,6 +16277,15 @@ impl Engine {
             let previous_container = object.state.container;
             let mut container_change = None;
 
+            if let Some(custom_name) = custom_name {
+                object.state.custom_name = custom_name;
+            }
+            if let Some(layer) = layer {
+                object.state.layer = layer;
+            }
+            if let Some(blit_mode) = blit_mode {
+                object.state.blit_mode = blit_mode;
+            }
             if let Some(position) = position {
                 object.set_position(position);
             }
@@ -17527,24 +17660,28 @@ impl Engine {
         let mut container_assignments = Vec::new();
         for persisted in &state.objects {
             let snapshot = &persisted.snapshot;
-            let shape_template = {
+            let (shape_template, definition_blit_mode) = {
                 let definition =
                     self.definitions
                         .get(&snapshot.definition_id)
                         .ok_or_else(|| {
                             EngineError::UnknownDefinition(snapshot.definition_id.clone())
                         })?;
-                ObjectShapeTemplate::new(
-                    definition.shape_vertices().to_vec(),
-                    definition.shape_rect(),
-                    definition.stretch_growth(),
-                    definition.rotateable(),
+                (
+                    ObjectShapeTemplate::new(
+                        definition.shape_vertices().to_vec(),
+                        definition.shape_rect(),
+                        definition.stretch_growth(),
+                        definition.rotateable(),
+                    ),
+                    definition.blit_mode(),
                 )
             };
             let mut object = Object::new(
                 snapshot.id,
                 snapshot.definition_id.clone(),
                 ObjectState {
+                    custom_name: snapshot.custom_name.clone(),
                     script_fixed_velocity: None,
                     position: snapshot.position,
                     velocity: snapshot.velocity,
@@ -17565,7 +17702,12 @@ impl Engine {
                     effects: snapshot.effects.clone(),
                     vertices: snapshot.vertices.clone(),
                     container: None,
-                    layer: None,
+                    layer: snapshot.layer,
+                    blit_mode: if snapshot.blit_mode == 0 {
+                        definition_blit_mode
+                    } else {
+                        snapshot.blit_mode
+                    },
                     contents: Vec::new(),
                     components: snapshot.components.clone(),
                     status: snapshot.status,
@@ -23426,6 +23568,7 @@ impl Engine {
     ) {
         definition.set_crew_member(core.crew_member);
         definition.set_category(core.category);
+        definition.set_blit_mode(core.blit_mode);
         definition.set_value(core.value);
         definition.set_mass(core.mass);
         definition.set_picture(core.picture.map(DefinitionPicture::from));
@@ -26966,6 +27109,7 @@ impl Engine {
         let SpawnConfig {
             id: explicit_id,
             definition_id,
+            custom_name,
             position,
             velocity,
             fixed_velocity,
@@ -26984,6 +27128,7 @@ impl Engine {
             status,
             container,
             layer,
+            blit_mode,
             alive,
             category,
             in_liquid,
@@ -27009,6 +27154,7 @@ impl Engine {
             definition_stretch_growth,
             definition_rotateable,
             definition_line,
+            definition_blit_mode,
         ) = {
             let definition_ref = self
                 .definitions
@@ -27024,6 +27170,7 @@ impl Engine {
                 definition_ref.stretch_growth(),
                 definition_ref.rotateable(),
                 definition_ref.line(),
+                definition_ref.blit_mode(),
             )
         };
         let mut initial_action = match action {
@@ -27125,6 +27272,7 @@ impl Engine {
             id,
             definition_id.clone(),
             ObjectState {
+                custom_name,
                 script_fixed_velocity: None,
                 position,
                 velocity,
@@ -27156,6 +27304,9 @@ impl Engine {
                 vertices: initial_vertices,
                 container: None,
                 layer,
+                blit_mode: blit_mode
+                    .filter(|mode| *mode != 0)
+                    .unwrap_or(definition_blit_mode),
                 contents: Vec::new(),
                 components: HashMap::new(),
                 status: status.unwrap_or_default(),
@@ -27993,6 +28144,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
 /// denumeration is needed for a read-mostly scope seed).
 fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
     ObjectState {
+        custom_name: snapshot.custom_name.clone(),
         script_fixed_velocity: None,
         position: snapshot.position,
         velocity: snapshot.velocity,
@@ -28011,7 +28163,8 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         effects: snapshot.effects.clone(),
         vertices: snapshot.vertices.clone(),
         container: snapshot.container,
-        layer: None,
+        layer: snapshot.layer,
+        blit_mode: snapshot.blit_mode,
         contents: snapshot.contents.clone(),
         components: snapshot.components.clone(),
         status: snapshot.status,
@@ -28063,6 +28216,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 DefinitionMetadata {
                     name: String::new(),
                     category: *category,
+                    blit_mode: 0,
                     ocf_base: OCF_NORMAL,
                     crew_member: false,
                     action_library: ActionLibrary::default(),
@@ -28115,6 +28269,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.container,
                 object.draw_transform,
             ).with_direction(object.direction.to_script_value())
+            .with_contents(object.contents.clone())
             .with_commands(object.command_stack.command_views())
             .with_ocf(object.ocf)
             // Nested calls (obj->Method, foreign RemoveObject) need a full
@@ -42888,6 +43043,349 @@ func Trigger(object pLayered) {
         );
     }
 
+    #[test]
+    fn set_object_layer_self_foreign_and_clear_are_live_and_persisted() {
+        // FnSetObjectLayer writes pLayer immediately, defaults its target to
+        // the caller and accepts nil/0 to clear (C4Script.cpp:5168-5180).
+        // Dragon Rock self-layers the endboss and princess via arrow calls.
+        let caller_script = r#"#strict
+local bSelf, pSelfNow, bForeign, pForeignNow, bClear, pCleared;
+func Trigger(object pOther) {
+    bSelf = SetObjectLayer(this());
+    pSelfNow = GetObjectLayer();
+    bForeign = SetObjectLayer(this(), pOther);
+    pForeignNow = GetObjectLayer(pOther);
+    bClear = SetObjectLayer(0, pOther);
+    pCleared = GetObjectLayer(pOther);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("OTHR", "Other", "#strict\n").expect("other compiles"),
+            )
+            .expect("other registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let other_id = engine
+            .spawn_object(SpawnConfig::new("OTHR").with_category(CATEGORY_OBJECT))
+            .expect("other spawns");
+        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+
+        engine
+            .call_object_function(
+                caller_index,
+                "Trigger",
+                vec![Value::Object(other_id.as_u64())],
+            )
+            .expect("layer trigger runs");
+
+        let caller = engine.object_snapshot(caller_id).expect("caller remains");
+        assert_eq!(caller.local_vars.get("bSelf"), Some(&Value::Bool(true)));
+        assert_eq!(
+            caller.local_vars.get("pSelfNow"),
+            Some(&Value::Object(caller_id.as_u64()))
+        );
+        assert_eq!(caller.local_vars.get("bForeign"), Some(&Value::Bool(true)));
+        assert_eq!(
+            caller.local_vars.get("pForeignNow"),
+            Some(&Value::Object(caller_id.as_u64()))
+        );
+        assert_eq!(caller.local_vars.get("bClear"), Some(&Value::Bool(true)));
+        assert_eq!(caller.local_vars.get("pCleared"), Some(&Value::Nil));
+        assert_eq!(caller.layer, Some(caller_id));
+        assert_eq!(
+            engine
+                .object_snapshot(other_id)
+                .expect("other remains")
+                .layer,
+            None
+        );
+    }
+
+    #[test]
+    fn set_object_layer_propagates_to_direct_present_contents_only() {
+        // FnSetObjectLayer walks exactly the target's direct Contents and
+        // accepts both Status 1 and 2; it does not recurse into grandchildren
+        // (C4Script.cpp:5174-5178).
+        let caller_script = r#"#strict
+local bSet, pDirect, pInactive, pGrandchild;
+func Trigger(object direct, object inactive, object grandchild) {
+    bSet = SetObjectLayer(this());
+    pDirect = GetObjectLayer(direct);
+    pInactive = GetObjectLayer(inactive);
+    pGrandchild = GetObjectLayer(grandchild);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles"),
+            )
+            .expect("item registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let direct_id = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(caller_id),
+            )
+            .expect("direct content spawns");
+        let inactive_id = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_status(ObjectStatus::Inactive)
+                    .with_container(caller_id),
+            )
+            .expect("inactive content spawns");
+        let grandchild_id = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(direct_id),
+            )
+            .expect("grandchild spawns");
+        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+
+        engine
+            .call_object_function(
+                caller_index,
+                "Trigger",
+                vec![
+                    Value::Object(direct_id.as_u64()),
+                    Value::Object(inactive_id.as_u64()),
+                    Value::Object(grandchild_id.as_u64()),
+                ],
+            )
+            .expect("layer trigger runs");
+
+        let caller = engine.object_snapshot(caller_id).expect("caller remains");
+        assert_eq!(caller.local_vars.get("bSet"), Some(&Value::Bool(true)));
+        assert_eq!(
+            caller.local_vars.get("pDirect"),
+            Some(&Value::Object(caller_id.as_u64()))
+        );
+        assert_eq!(
+            caller.local_vars.get("pInactive"),
+            Some(&Value::Object(caller_id.as_u64()))
+        );
+        assert_eq!(caller.local_vars.get("pGrandchild"), Some(&Value::Nil));
+        assert_eq!(
+            engine
+                .object_snapshot(direct_id)
+                .expect("direct content remains")
+                .layer,
+            Some(caller_id)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(inactive_id)
+                .expect("inactive content remains")
+                .layer,
+            Some(caller_id)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(grandchild_id)
+                .expect("grandchild remains")
+                .layer,
+            None
+        );
+    }
+
+    #[test]
+    fn create_paths_inherit_the_creator_layer_immediately() {
+        // C4Object::Init copies pCreator->pLayer (C4Object.cpp:153-170).
+        // CreateObject uses the caller as creator; CreateContents uses its
+        // container (C4Script.cpp:1886-1902, C4Object.cpp:1866-1871).
+        let caller_script = r#"#strict
+local pObject, pConstruction, pContents;
+local pObjectLayer, pConstructionLayer, pContentsLayer;
+func Trigger(object pContainer) {
+    SetObjectLayer(this());
+    SetObjectLayer(pContainer, pContainer);
+    pObject = CreateObject(ITEM, 0, 0, -1);
+    pObjectLayer = GetObjectLayer(pObject);
+    pConstruction = CreateConstruction(ITEM, 0, 0, -1, 100);
+    pConstructionLayer = GetObjectLayer(pConstruction);
+    pContents = CreateContents(ITEM, pContainer);
+    pContentsLayer = GetObjectLayer(pContents);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles"),
+            )
+            .expect("item registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let container_id = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_category(CATEGORY_OBJECT))
+            .expect("foreign container spawns");
+        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+
+        engine
+            .call_object_function(
+                caller_index,
+                "Trigger",
+                vec![Value::Object(container_id.as_u64())],
+            )
+            .expect("creation trigger runs");
+
+        let caller = engine.object_snapshot(caller_id).expect("caller remains");
+        let object_id = match caller.local_vars.get("pObject") {
+            Some(Value::Object(id)) => ObjectId::new(*id),
+            other => panic!("CreateObject result should be an object, got {other:?}"),
+        };
+        let contents_id = match caller.local_vars.get("pContents") {
+            Some(Value::Object(id)) => ObjectId::new(*id),
+            other => panic!("CreateContents result should be an object, got {other:?}"),
+        };
+        let construction_id = match caller.local_vars.get("pConstruction") {
+            Some(Value::Object(id)) => ObjectId::new(*id),
+            other => panic!("CreateConstruction result should be an object, got {other:?}"),
+        };
+        assert_eq!(
+            caller.local_vars.get("pObjectLayer"),
+            Some(&Value::Object(caller_id.as_u64())),
+            "CreateObject exposes the inherited layer in the same call"
+        );
+        assert_eq!(
+            caller.local_vars.get("pConstructionLayer"),
+            Some(&Value::Object(caller_id.as_u64())),
+            "CreateConstruction exposes the inherited layer in the same call"
+        );
+        assert_eq!(
+            caller.local_vars.get("pContentsLayer"),
+            Some(&Value::Object(container_id.as_u64())),
+            "CreateContents uses the selected container as creator"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(object_id)
+                .expect("created object remains")
+                .layer,
+            Some(caller_id)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(construction_id)
+                .expect("construction remains")
+                .layer,
+            Some(caller_id)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(contents_id)
+                .expect("created content remains")
+                .layer,
+            Some(container_id)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(contents_id)
+                .expect("created content remains")
+                .container,
+            Some(container_id)
+        );
+    }
+
+    #[test]
+    fn scenario_set_object_layer_sees_and_updates_snapshot_contents() {
+        // Scenario callbacks run against host_world_context_from_snapshot.
+        // Its object list must carry Contents so FnSetObjectLayer can perform
+        // the same direct-only propagation as an object-script callback.
+        let scenario_script = r#"#strict
+global func ApplyLayer(object pLayer, object pTarget) {
+    return(SetObjectLayer(pLayer, pTarget));
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles"),
+            )
+            .expect("item registers");
+        engine
+            .install_scenario_script_with_convention("Scenario", scenario_script, true)
+            .expect("scenario installs");
+        let layer_id = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_category(CATEGORY_OBJECT))
+            .expect("layer spawns");
+        let target_id = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_category(CATEGORY_OBJECT))
+            .expect("target spawns");
+        let direct_id = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(target_id),
+            )
+            .expect("direct content spawns");
+        let grandchild_id = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(direct_id),
+            )
+            .expect("grandchild spawns");
+
+        engine
+            .call_scenario_script_function(
+                "ApplyLayer",
+                vec![
+                    Value::Object(layer_id.as_u64()),
+                    Value::Object(target_id.as_u64()),
+                ],
+            )
+            .expect("scenario layer call runs");
+
+        assert_eq!(
+            engine.object_snapshot(target_id).expect("target remains").layer,
+            Some(layer_id)
+        );
+        assert_eq!(
+            engine.object_snapshot(direct_id).expect("content remains").layer,
+            Some(layer_id),
+            "scenario host snapshot exposes the target's direct contents"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(grandchild_id)
+                .expect("grandchild remains")
+                .layer,
+            None,
+            "layer propagation remains direct-only"
+        );
+    }
+
     // FnChangeDef -> C4Object::ChangeDef (C4Object.cpp:1180-1231): the
     // object swaps to the new definition in place - number/position/owner
     // survive, the action resets to ActIdle, dir 0, rotation clears for
@@ -47453,6 +47951,75 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         let snapshot = engine.object_snapshot(id).expect("object snapshot");
         assert_eq!(snapshot.velocity, Vector2::new(5, -3));
         assert_eq!(snapshot.owner, 7);
+    }
+
+    #[test]
+    fn object_update_layer_serde_preserves_clear_vs_unchanged() {
+        // Queued/recorded updates must distinguish a missing layer field from
+        // an explicit null that clears pLayer.
+        let unchanged: ObjectUpdate = serde_json::from_str("{}").expect("unchanged decodes");
+        assert_eq!(unchanged.layer, None);
+
+        let clear_json = serde_json::to_string(&ObjectUpdate::new().clear_layer())
+            .expect("layer clear encodes");
+        let clear: ObjectUpdate = serde_json::from_str(&clear_json).expect("layer clear decodes");
+        assert_eq!(clear.layer, Some(None));
+
+        let layer = ObjectId::new(17);
+        let set_json =
+            serde_json::to_string(&ObjectUpdate::new().with_layer(layer)).expect("layer set encodes");
+        let set: ObjectUpdate = serde_json::from_str(&set_json).expect("layer set decodes");
+        assert_eq!(set.layer, Some(Some(layer)));
+    }
+
+    #[test]
+    fn object_update_blit_mode_round_trips() {
+        // C4Object::BlitMode is independent from SetGraphics' base/overlay
+        // modes and must survive queued-update serialization.
+        let encoded = serde_json::to_string(&ObjectUpdate::new().with_blit_mode(129))
+            .expect("blit mode update encodes");
+        let decoded: ObjectUpdate =
+            serde_json::from_str(&encoded).expect("blit mode update decodes");
+        assert_eq!(decoded.blit_mode, Some(129));
+    }
+
+    #[test]
+    fn object_blit_mode_survives_spawn_update_and_state_restore() {
+        let mut definition = build_definition();
+        definition.set_blit_mode(2);
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition.clone())
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test"))
+            .expect("object spawns");
+        assert_eq!(
+            engine.object_snapshot(id).expect("object exists").blit_mode,
+            2,
+            "fresh objects inherit the definition mode"
+        );
+
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_blit_mode(129))
+            .expect("blit mode update applies");
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("engine state encodes");
+        let state = EngineState::from_json_str(&encoded).expect("engine state decodes");
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(definition)
+            .expect("definition registers for restore");
+        restored.restore_state(&state).expect("state restores");
+        assert_eq!(
+            restored
+                .object_snapshot(id)
+                .expect("restored object exists")
+                .blit_mode,
+            129
+        );
     }
 
     #[test]
