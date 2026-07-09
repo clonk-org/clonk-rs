@@ -4757,6 +4757,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetTemperature", get_temperature);
     script.register_host_function("SetClimate", set_climate);
     script.register_host_function("GetClimate", get_climate);
+    script.register_host_function("SetSeason", set_season);
+    script.register_host_function("GetSeason", get_season);
     script.register_host_function("Sound", sound);
     script.register_host_function("SoundLevel", sound_level);
 }
@@ -6135,11 +6137,15 @@ pub(crate) struct EnvironmentDelta {
     pub wind: Option<i32>,
     pub temperature: Option<i32>,
     pub climate: Option<i32>,
+    pub season: Option<i32>,
 }
 
 impl EnvironmentDelta {
     pub(crate) fn is_empty(&self) -> bool {
-        self.wind.is_none() && self.temperature.is_none() && self.climate.is_none()
+        self.wind.is_none()
+            && self.temperature.is_none()
+            && self.climate.is_none()
+            && self.season.is_none()
     }
 
     pub fn apply(&self, environment: &mut EnvironmentSettings) {
@@ -6151,6 +6157,10 @@ impl EnvironmentDelta {
         }
         if let Some(climate) = self.climate {
             environment.climate = climate.clamp(-50, 50);
+        }
+        if let Some(season) = self.season {
+            // C4Weather::SetSeason (C4Weather.cpp:229-233): BoundBy 0..100.
+            environment.season = season.clamp(0, 100);
         }
     }
 }
@@ -6201,6 +6211,19 @@ impl EnvironmentContext {
 
     fn climate(&self) -> i32 {
         self.settings.borrow().climate
+    }
+
+    /// C4Weather::SetSeason (C4Weather.cpp:229-233): BoundBy(iSeason, 0,
+    /// 100); the SetSeasonGamma refresh is a derived presentation getter
+    /// on the Rust side.
+    fn set_season(&self, season: i32) {
+        let clamped = season.clamp(0, 100);
+        self.settings.borrow_mut().season = clamped;
+        self.pending.borrow_mut().season = Some(clamped);
+    }
+
+    fn season(&self) -> i32 {
+        self.settings.borrow().season
     }
 
     fn into_delta(self) -> EnvironmentDelta {
@@ -8411,6 +8434,50 @@ fn get_climate(args: &[Value]) -> Result<Value, RuntimeError> {
             .ok_or_else(|| RuntimeError::new("GetClimate requires an active engine context"))?
             .clone();
         Ok(Value::Int(context.climate()))
+    })
+}
+
+/// FnSetSeason (C4Script.cpp:3025-3028) -> C4Weather::SetSeason.
+fn set_season(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new("SetSeason expects 1 argument: season"));
+    }
+
+    let season = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetSeason: expected int or nil for season, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("SetSeason requires an active engine context"))?
+            .clone();
+        context.set_season(season);
+        Ok(Value::Nil)
+    })
+}
+
+/// FnGetSeason (C4Script.cpp:3030-3033) -> C4Weather::GetSeason.
+fn get_season(args: &[Value]) -> Result<Value, RuntimeError> {
+    if !args.is_empty() {
+        return Err(RuntimeError::new("GetSeason does not accept any arguments"));
+    }
+
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("GetSeason requires an active engine context"))?
+            .clone();
+        Ok(Value::Int(context.season()))
     })
 }
 
@@ -19503,6 +19570,7 @@ mod tests {
         "GetRDir",
         "GetScenarioVal",
         "GetScore",
+        "GetSeason",
         "GetSelectCount",
         "GetTemperature",
         "GetType",
@@ -19588,6 +19656,7 @@ mod tests {
         "SetPosition",
         "SetR",
         "SetRDir",
+        "SetSeason",
         "SetShape",
         "SetSolidMask",
         "SetTemperature",
@@ -22261,6 +22330,21 @@ func ProbeBadIndex(id) {
         let value = result.expect("SetClimate/GetClimate succeeds");
         assert_eq!(value, Value::Int(-50));
         assert_eq!(delta.climate, Some(-50));
+    }
+
+    #[test]
+    fn set_season_clamps_and_updates() {
+        // FnSetSeason/FnGetSeason (C4Script.cpp:3025-3033, registered
+        // :6894-6895) -> C4Weather::SetSeason/GetSeason: BoundBy(iSeason,
+        // 0, 100) (C4Weather.cpp:229-238).
+        let (result, delta) = with_environment_context(EnvironmentSettings::new(0), 0, || {
+            set_season(&[Value::Int(120)])?;
+            get_season(&[])
+        });
+
+        let value = result.expect("SetSeason/GetSeason succeeds");
+        assert_eq!(value, Value::Int(100));
+        assert_eq!(delta.season, Some(100));
     }
 
     #[test]
