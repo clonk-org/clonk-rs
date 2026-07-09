@@ -1391,6 +1391,14 @@ pub struct EnvironmentSettings {
     pub year_speed: i32,
     #[serde(default)]
     pub season_delay: i32,
+    /// Scenario `StartSeason.Min` — the wrap target of the season advance
+    /// (C4Weather.cpp:82-83); C4SVal default 0 (C4Scenario.h:30).
+    #[serde(default)]
+    pub season_min: i32,
+    /// Scenario `StartSeason.Max` — the wrap threshold of the season
+    /// advance (C4Weather.cpp:82); C4SVal default 100 (C4Scenario.h:30).
+    #[serde(default = "EnvironmentSettings::default_season_max")]
+    pub season_max: i32,
     #[serde(default = "EnvironmentSettings::default_temperature_range")]
     pub temperature_range: i32,
     #[serde(default)]
@@ -1419,6 +1427,10 @@ impl EnvironmentSettings {
         true
     }
 
+    const fn default_season_max() -> i32 {
+        100
+    }
+
     pub const fn new(wind: i32) -> Self {
         Self {
             wind,
@@ -1442,6 +1454,8 @@ impl EnvironmentSettings {
             season: 0,
             year_speed: 0,
             season_delay: 0,
+            season_min: 0,
+            season_max: Self::default_season_max(),
             temperature_range: Self::default_temperature_range(),
             lightning: 0,
             meteorite: 0,
@@ -1528,6 +1542,14 @@ impl EnvironmentSettings {
 
     pub fn with_year_speed(mut self, year_speed: i32) -> Self {
         self.year_speed = year_speed;
+        self
+    }
+
+    /// Scenario `StartSeason` Min/Max (C4SVal, C4Scenario.h:30) — the wrap
+    /// bounds of C4Weather::Execute's season advance (C4Weather.cpp:82-83).
+    pub fn with_season_bounds(mut self, min: i32, max: i32) -> Self {
+        self.season_min = min;
+        self.season_max = max;
         self
     }
 
@@ -1782,21 +1804,18 @@ impl EnvironmentSettings {
         self.time_of_day = next as u16;
     }
 
+    /// C4Weather::Execute's season advance (C4Weather.cpp:77-85):
+    /// `SeasonDelay += YearSpeed`; at 200 the delay resets to ZERO (not
+    /// modulo) and the season steps exactly once, wrapping to the scenario
+    /// `StartSeason.Min` only when it exceeds `StartSeason.Max`.
     fn update_season(&mut self) {
-        if self.year_speed == 0 {
-            return;
-        }
         self.season_delay = self.season_delay.saturating_add(self.year_speed);
-        while self.season_delay >= 200 {
-            self.season_delay -= 200;
-            self.season = (self.season + 1).rem_euclid(100);
-        }
-        while self.season_delay <= -200 {
-            self.season_delay += 200;
-            self.season = (self.season - 1).rem_euclid(100);
-        }
-        if self.season < 0 {
-            self.season += 100;
+        if self.season_delay >= 200 {
+            self.season_delay = 0;
+            self.season += 1;
+            if self.season > self.season_max {
+                self.season = self.season_min;
+            }
         }
     }
 
@@ -22052,7 +22071,12 @@ impl Engine {
         let volcano = init.volcano.evaluate(&mut self.rng);
         let earthquake = init.earthquake.evaluate(&mut self.rng);
 
-        self.environment.season = season.clamp(0, 100);
+        // C4Weather::Init (C4Weather.cpp:41) assigns the Evaluate result
+        // directly — StartSeason.Evaluate() is already bounded by the
+        // scenario C4SVal Min/Max, and those bounds drive Execute's wrap.
+        self.environment.season = season;
+        self.environment.season_min = init.season.min;
+        self.environment.season_max = init.season.max;
         self.environment.year_speed = year_speed;
         self.environment.climate = climate;
         self.environment.temperature = climate;
@@ -37132,6 +37156,139 @@ protected func Activity() { SetActionTargets(); return(1); }
         let settings = EnvironmentSettings::new(0).with_season(0);
         assert!(settings.no_gamma);
         assert_eq!(settings.season_gamma(), None);
+    }
+
+    // C4Weather::Execute season advance (C4Weather.cpp:74-86):
+    //   SeasonDelay += YearSpeed;
+    //   if (SeasonDelay >= 200) { SeasonDelay = 0; Season++;
+    //       if (Season > StartSeason.Max) Season = StartSeason.Min; }
+    // — one step per Tick35, delay reset to ZERO, wrap only past the
+    // scenario StartSeason.Max (default C4SVal bounds 0/100,
+    // C4Scenario.h:30).
+    #[test]
+    fn season_advance_resets_delay_to_zero() {
+        let mut settings = EnvironmentSettings::new(0)
+            .with_season(10)
+            .with_year_speed(150);
+        let mut rng = LcgRng::seed_from_u64(0);
+        settings.advance_frame(&mut rng, 35);
+        assert_eq!((settings.season, settings.season_delay), (10, 150));
+        settings.advance_frame(&mut rng, 70);
+        // 300 >= 200: advance once, delay = 0 (NOT 300 - 200 = 100).
+        assert_eq!((settings.season, settings.season_delay), (11, 0));
+    }
+
+    #[test]
+    fn season_advances_one_step_per_tick35_even_with_huge_year_speed() {
+        // YearSpeed=450 overshoots 200 twice over, but C++ still advances
+        // exactly one season per Tick35 (no loop, C4Weather.cpp:78-81).
+        let mut settings = EnvironmentSettings::new(0)
+            .with_season(10)
+            .with_year_speed(450);
+        let mut rng = LcgRng::seed_from_u64(0);
+        settings.advance_frame(&mut rng, 35);
+        assert_eq!((settings.season, settings.season_delay), (11, 0));
+    }
+
+    #[test]
+    fn season_reaches_the_default_max_of_one_hundred_before_wrapping() {
+        // Default bounds Min=0/Max=100: Season 99 -> 100 (100 > 100 is
+        // false, so no wrap yet), then 101 > 100 wraps to Min=0.
+        let mut settings = EnvironmentSettings::new(0)
+            .with_season(99)
+            .with_year_speed(200);
+        let mut rng = LcgRng::seed_from_u64(0);
+        settings.advance_frame(&mut rng, 35);
+        assert_eq!(settings.season, 100);
+        settings.advance_frame(&mut rng, 70);
+        assert_eq!(settings.season, 0);
+    }
+
+    #[test]
+    fn season_wraps_to_scenario_min_beyond_scenario_max() {
+        // Scenario StartSeason Min/Max are the wrap bounds
+        // (C4Weather.cpp:82-83), not hard-coded 0/100.
+        let mut settings = EnvironmentSettings::new(0)
+            .with_season(60)
+            .with_season_bounds(20, 60)
+            .with_year_speed(200);
+        let mut rng = LcgRng::seed_from_u64(0);
+        settings.advance_frame(&mut rng, 35);
+        assert_eq!(settings.season, 20);
+    }
+
+    #[test]
+    fn season_pins_at_min_when_max_below_min() {
+        // SeasonMax < SeasonMin: values <= Max keep incrementing; once
+        // past Max every advance re-assigns Min, which is itself > Max —
+        // the season pins at Min.
+        let mut settings = EnvironmentSettings::new(0)
+            .with_season(5)
+            .with_season_bounds(50, 10)
+            .with_year_speed(200);
+        let mut rng = LcgRng::seed_from_u64(0);
+        settings.advance_frame(&mut rng, 35);
+        assert_eq!(settings.season, 6, "below Max the advance is plain ++");
+        settings.season = 10;
+        settings.advance_frame(&mut rng, 70);
+        assert_eq!(settings.season, 50, "11 > Max(10) wraps to Min(50)");
+        settings.advance_frame(&mut rng, 105);
+        assert_eq!(settings.season, 50, "51 > Max(10) re-pins to Min(50)");
+    }
+
+    #[test]
+    fn preloaded_season_delay_advances_even_with_zero_year_speed() {
+        // C++ has no YearSpeed gate: a (savegame-)preloaded SeasonDelay
+        // >= 200 still advances once (C4Weather.cpp:77-81).
+        let mut settings = EnvironmentSettings::new(0).with_season(3);
+        settings.season_delay = 200;
+        let mut rng = LcgRng::seed_from_u64(0);
+        settings.advance_frame(&mut rng, 35);
+        assert_eq!((settings.season, settings.season_delay), (4, 0));
+    }
+
+    #[test]
+    fn negative_year_speed_never_advances_or_regresses_season() {
+        // C++ only tests SeasonDelay >= 200; a negative YearSpeed just
+        // accumulates negative delay forever (C4Weather.cpp:77-78).
+        let mut settings = EnvironmentSettings::new(0)
+            .with_season(40)
+            .with_year_speed(-300);
+        let mut rng = LcgRng::seed_from_u64(0);
+        settings.advance_frame(&mut rng, 35);
+        settings.advance_frame(&mut rng, 70);
+        assert_eq!((settings.season, settings.season_delay), (40, -600));
+    }
+
+    #[test]
+    fn weather_init_ingests_start_season_bounds_without_extra_clamp() {
+        // C4Weather::Init (C4Weather.cpp:41): `Season =
+        // StartSeason.Evaluate()` — already bounded by the C4SVal Min/Max,
+        // with NO additional 0..100 clamp; Execute's wrap then reuses the
+        // same scenario bounds (:82-83).
+        let mut engine = Engine::with_seed(7);
+        let flat = |value: i32| crate::scenario::LegacyC4SVal::new(value, 0, 0, 100);
+        let init = crate::scenario::LegacyWeatherInit {
+            season: crate::scenario::LegacyC4SVal::new(120, 0, 110, 130),
+            year_speed: flat(0),
+            climate: flat(50),
+            wind: flat(0),
+            rain: flat(0),
+            lightning: flat(0),
+            meteorite: flat(0),
+            volcano: flat(0),
+            earthquake: flat(0),
+            no_initialize: true,
+        };
+        engine.apply_weather_init(&init);
+        assert_eq!(engine.environment.season, 120);
+        assert_eq!(
+            (
+                engine.environment.season_min,
+                engine.environment.season_max
+            ),
+            (110, 130)
+        );
     }
 
     #[test]
