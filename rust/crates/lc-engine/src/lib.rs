@@ -14135,6 +14135,7 @@ impl Engine {
                             )
                         })
                     },
+                    action_time: object.state.action.time,
                     shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
                     shape: self.object_shape_rect(object),
                     status: object.state.status,
@@ -15127,6 +15128,7 @@ impl Engine {
                                 )
                             })
                     },
+                    action_time: self.objects[idx].state.action.time,
                     shape_top: self.objects[idx]
                         .current_shape_rect()
                         .map(|rect| rect.y)
