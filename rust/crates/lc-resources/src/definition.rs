@@ -200,6 +200,9 @@ pub struct DefCore {
     /// burning object (CrossCheck pass 1, C4GameObjects.cpp:121-125); 0 = not
     /// inflammable.
     pub contact_incinerate: i32,
+    /// BlastIncinerate=N: incinerate when accumulated Damage reaches N after
+    /// a blast (C4Object::Blast, C4Object.cpp:1421-1423); 0 = off.
+    pub blast_incinerate: i32,
     /// NoBurnDecay=1: burning does not reduce Con (C4Object.cpp:777-778).
     pub no_burn_decay: bool,
     /// `Float` (C4Def.cpp:379, default 0): buoyancy line offset in percent
@@ -492,6 +495,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut collection: Option<PictureRect> = None;
     let mut collection_limit: Option<u32> = None;
     let mut contact_incinerate: i32 = 0;
+    let mut blast_incinerate: i32 = 0;
     let mut no_burn_decay = false;
     let mut no_breath = false;
     let mut grab = 0;
@@ -642,6 +646,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "contactincinerate" => {
                 contact_incinerate = parse_i32(value).unwrap_or(0).max(0);
+            }
+            "blastincinerate" => {
+                blast_incinerate = parse_i32(value).unwrap_or(0);
             }
             "noburndecay" => {
                 no_burn_decay = parse_bool(value);
@@ -803,6 +810,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         collection,
         collection_limit,
         contact_incinerate,
+        blast_incinerate,
         no_burn_decay,
         no_breath,
         grab,
@@ -2120,6 +2128,29 @@ NextAction=Dup
         assert!(!parsed.no_burn_decay);
         assert!(!parsed.no_breath, "default: breathing");
         assert!(!parsed.no_burn_damage);
+    }
+
+    #[test]
+    fn parse_def_core_blast_incinerate() {
+        // BlastIncinerate=N: incinerate when accumulated Damage reaches N
+        // after a blast (C4Def.cpp:315, default 0 = off; consumed by
+        // C4Object::Blast, C4Object.cpp:1421-1423).
+        let data = br#"
+            [DefCore]
+            id=TRE1
+            Name=Tree
+            BlastIncinerate=50
+        "#;
+        let parsed = parse_def_core(data).expect("def core parses");
+        assert_eq!(parsed.blast_incinerate, 50);
+
+        let data = br#"
+            [DefCore]
+            id=STON
+            Name=Stone
+        "#;
+        let parsed = parse_def_core(data).expect("def core parses");
+        assert_eq!(parsed.blast_incinerate, 0, "default: no blast incinerate");
     }
 
     #[test]

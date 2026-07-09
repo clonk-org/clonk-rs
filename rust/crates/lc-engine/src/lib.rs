@@ -5485,6 +5485,9 @@ pub struct Definition {
     line_connect: u32,
     /// ContactIncinerate=N: 1-in-N contact-fire chance (0 = not inflammable).
     contact_incinerate: i32,
+    /// BlastIncinerate=N: incinerate once accumulated Damage reaches N after
+    /// a blast (C4Object::Blast, C4Object.cpp:1421-1423); 0 = off.
+    blast_incinerate: i32,
     no_burn_decay: bool,
     no_burn_damage: bool,
     /// NoBreath=1: exempt from the ExecLife breathing check (C4Object.cpp:880).
@@ -5627,6 +5630,7 @@ impl Definition {
             components: Vec::new(),
             line_connect: 0,
             contact_incinerate: 0,
+            blast_incinerate: 0,
             no_burn_decay: false,
             no_breath: false,
             float_line: 0,
@@ -5765,6 +5769,7 @@ impl Definition {
             resource.core.no_burn_decay,
             resource.core.no_burn_damage,
         );
+        definition.set_blast_incinerate(resource.core.blast_incinerate);
         definition.set_burn_turn_to(resource.core.burn_turn_to.clone());
         definition.set_incomplete_activity(resource.core.incomplete_activity);
         definition.set_no_breath(resource.core.no_breath);
@@ -6352,6 +6357,14 @@ impl Definition {
 
     pub fn contact_incinerate(&self) -> i32 {
         self.contact_incinerate
+    }
+
+    pub fn blast_incinerate(&self) -> i32 {
+        self.blast_incinerate
+    }
+
+    pub fn set_blast_incinerate(&mut self, blast_incinerate: i32) {
+        self.blast_incinerate = blast_incinerate;
     }
 
     pub fn no_burn_decay(&self) -> bool {
@@ -22213,6 +22226,7 @@ impl Engine {
             core.no_burn_decay,
             core.no_burn_damage,
         );
+        definition.set_blast_incinerate(core.blast_incinerate);
         definition.set_burn_turn_to(core.burn_turn_to.clone());
         definition.set_incomplete_activity(core.incomplete_activity);
         definition.set_no_breath(core.no_breath);

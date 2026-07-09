@@ -7280,6 +7280,29 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn def_core_blast_incinerate_reaches_the_engine_definition() {
+        // BlastIncinerate (C4Def.cpp:315) must survive the resource-core
+        // apply so C4Object::Blast can consult it (C4Object.cpp:1421-1423).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\nBlastIncinerate=50\n",
+        )
+        .expect("write defcore");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(
+            engine
+                .definitions
+                .get("GOOD")
+                .expect("definition registered")
+                .blast_incinerate(),
+            50
+        );
+    }
+
+    #[test]
     fn appendto_scripts_link_into_their_targets_like_c4aullink() {
         // C4AulScript::ResolveAppends (C4AulLink.cpp:29-64) + AppendTo
         // (:114-141): a definition script with `#appendto GOOD` copies its
