@@ -44503,8 +44503,73 @@ func FxProbeTimer(pThis, iNumber) {
             "Mute's kill temp-removes the upper effect (Fx*Stop fTemp)"
         );
         assert_eq!(
-            start_calls, 1,
-            "the upper effect reactivates after the kill (Fx*Start temp)"
+            start_calls, 2,
+            "one Fx*Start from the C4Effect ctor inside AddEffect \
+             (C4Effect.cpp:128-129), one temp reactivation after the kill \
+             (TempReaddUpperEffects, C4Effect.cpp:505)"
+        );
+    }
+
+    #[test]
+    fn nil_target_add_effect_dispatches_fx_start_like_c4effect_ctor() {
+        // The C4Effect ctor runs Fx*Start synchronously inside FnAddEffect
+        // (C4Effect.cpp:128-131): pFnStart->Exec(pCommandTarget,
+        // {C4VObj(pForObj), C4VInt(iNumber), C4VInt(0), rVal1..rVal4}) —
+        // pForObj is nullptr (nil) for a GLOBAL effect (ctor list select
+        // :74). A C4Fx_Start_Deny (-1) return marks the effect dead: it is
+        // deleted without a Stop callback (:128-131 + Execute :328-336).
+        let script = r#"
+        global func Initialize(state, random) {
+            AddEffect("Flash", nil, 200, 5, nil, nil, nil, 42);
+            AddEffect("Vetoed", nil, 200, 5);
+            return nil;
+        }
+
+        global func FxFlashStart(target, number, temp, var1) {
+            // pForObj is nil for global effects (C4Effect.cpp:129).
+            if (target) { return 0; }
+            EffectVar(0, nil, number) = var1 + 1;
+            return 0;
+        }
+
+        global func FxVetoedStart(target, number, temp) {
+            return -1;
+        }
+
+        global func FxVetoedStop(target, number, reason, temp) {
+            // must never fire: a Start-denied effect dies without Stop.
+            EffectVar(0, nil, number) = -99;
+            return 0;
+        }
+
+        global func Step(state, frame, random) { return nil; }
+        "#;
+
+        let definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        let names: Vec<&str> = engine
+            .global_effects()
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Flash"],
+            "the Start-denied effect was removed without a Stop callback"
+        );
+        assert_eq!(
+            engine.global_effects()[0].var(0),
+            EffectVarValue::Int(43),
+            "Fx*Start(nil, iNumber, 0, rVal1) ran synchronously inside \
+             AddEffect and saw rVal1"
         );
     }
 
