@@ -671,6 +671,26 @@ impl<'a> Vm<'a> {
         Ok((value, object_state.to_local_vars(self.var_decls)))
     }
 
+    /// [`Vm::direct_exec_with_locals`] against SHARED live cells (see
+    /// [`LocalCells`]): writes land live — deeper sessions on the same
+    /// object observe them mid-call.
+    pub(crate) fn direct_exec_with_cells(
+        &self,
+        source: &str,
+        cells: &LocalCells,
+        strict_level: Option<u8>,
+    ) -> Result<Value, RuntimeError> {
+        let Ok(expr) = crate::parser::Parser::new(source).parse_direct_exec_expression() else {
+            return Ok(Value::Nil);
+        };
+        let mut env =
+            Environment::new_with_params(&[], &[], strict_level, cells.state.clone())?;
+        for var_decl in self.var_decls {
+            env.define_object_local(&var_decl.name);
+        }
+        self.evaluate(&expr, &mut env, 0)
+    }
+
     fn invoke_value(
         &self,
         name: &str,

@@ -568,6 +568,35 @@ impl Engine {
             .map_err(ScriptError::from)
     }
 
+    /// Like [`direct_exec_with_locals_and_this`], against SHARED live
+    /// cells: the session mutates them in place (C++ object locals), so
+    /// nested calls the host routes back onto the same object see the
+    /// mid-exec writes. Callers fold via [`crate::vm::LocalCells::snapshot`].
+    ///
+    /// [`direct_exec_with_locals_and_this`]: Engine::direct_exec_with_locals_and_this
+    pub fn direct_exec_with_cells_and_this(
+        &self,
+        source: &str,
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<Value, ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        )
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_global_variables(self.globals_named.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_this(this);
+        vm.direct_exec_with_cells(source, cells, self.script_strict_level())
+            .map_err(ScriptError::from)
+    }
+
     /// The host script's strict level — the max over its own functions
     /// (C4AulScript::Strict is per script; every parsed function carries
     /// it).

@@ -6954,14 +6954,7 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || {
-                self.script.call_with_locals_and_this(
-                    "Initialize",
-                    &args,
-                    &state.local_vars,
-                    compat::object_reference_value(object_id),
-                )
-            },
+            || self.run_live_object_session("Initialize", &args, &state.local_vars, object_id),
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
@@ -7134,14 +7127,7 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || {
-                self.script.call_with_locals_and_this(
-                    "Construction",
-                    &args,
-                    &state.local_vars,
-                    compat::object_reference_value(object_id),
-                )
-            },
+            || self.run_live_object_session("Construction", &args, &state.local_vars, object_id),
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
@@ -7306,14 +7292,7 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || {
-                self.script.call_with_locals_and_this(
-                    "Step",
-                    &args,
-                    &state.local_vars,
-                    compat::object_reference_value(object_id),
-                )
-            },
+            || self.run_live_object_session("Step", &args, &state.local_vars, object_id),
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
@@ -7502,14 +7481,7 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || {
-                self.script.call_with_locals_and_this(
-                    function,
-                    &args,
-                    &state.local_vars,
-                    compat::object_reference_value(object_id),
-                )
-            },
+            || self.run_live_object_session(function, &args, &state.local_vars, object_id),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -7625,14 +7597,7 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || {
-                self.script.call_with_locals_and_this(
-                    "MenuEntries",
-                    &args,
-                    &state.local_vars,
-                    compat::object_reference_value(object_id),
-                )
-            },
+            || self.run_live_object_session("MenuEntries", &args, &state.local_vars, object_id),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -7763,14 +7728,7 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || {
-                self.script.call_with_locals_and_this(
-                    "MenuCommand",
-                    &args,
-                    &state.local_vars,
-                    compat::object_reference_value(object_id),
-                )
-            },
+            || self.run_live_object_session("MenuCommand", &args, &state.local_vars, object_id),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -7885,14 +7843,7 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || {
-                self.script.call_with_locals_and_this(
-                    function,
-                    &args,
-                    &state.local_vars,
-                    compat::object_reference_value(object_id),
-                )
-            },
+            || self.run_live_object_session(function, &args, &state.local_vars, object_id),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -7925,6 +7876,32 @@ impl Definition {
 
         let audio_state = audio_guard.finish();
         Ok((handled, host_effects, audio_state, rng))
+    }
+
+    /// Run one OUTER object VM call on LIVE local cells registered as the
+    /// object's session with the host context: nested calls the host
+    /// routes back onto this object (and cross-object Local/LocalN
+    /// references) share the storage, so mid-call local writes are visible
+    /// in both directions — C++ mutates the ONE live C4Object. Must run
+    /// inside `with_effect_context_with_state`; the caller folds the final
+    /// locals via the returned snapshot.
+    fn run_live_object_session(
+        &self,
+        function: &str,
+        args: &[Value],
+        local_vars: &HashMap<String, Value>,
+        object_id: ObjectId,
+    ) -> Result<(Value, HashMap<String, Value>), lc_script::ScriptError> {
+        let cells = lc_script::LocalCells::from_local_vars(local_vars);
+        compat::register_session_local_cells(object_id, cells.clone());
+        self.script
+            .call_with_cells_and_this(
+                function,
+                args,
+                &cells,
+                compat::object_reference_value(object_id),
+            )
+            .map(|value| (value, cells.snapshot()))
     }
 
     fn call_object_function(
@@ -7965,16 +7942,18 @@ impl Definition {
             game_over_triggered,
             audio,
             function,
-            |script, local_vars, this| {
-                script.call_with_locals_and_this(function, &arg_values, local_vars, this)
-            },
+            |script, cells, this| script.call_with_cells_and_this(function, &arg_values, cells, this),
         )
     }
 
     /// The shared object-context execution seam: installs the physics/
     /// environment/random/audio guards and the HostObjectContext, runs
-    /// `invoke` on the definition script, and folds the outcome — the body
-    /// every `call_object_function`-style entry shares.
+    /// `invoke` on the definition script against LIVE local cells
+    /// registered as the object's session — nested calls the host routes
+    /// back onto the same object share the storage, so mid-call local
+    /// writes are visible in both directions (C++ mutates the ONE live
+    /// C4Object; its object locals are by-reference) — and folds the
+    /// outcome. The body every `call_object_function`-style entry shares.
     #[allow(clippy::too_many_arguments)]
     fn exec_in_object_context<F>(
         &self,
@@ -7994,9 +7973,9 @@ impl Definition {
     where
         F: FnOnce(
             &lc_script::Engine,
-            &HashMap<String, Value>,
+            &lc_script::LocalCells,
             Value,
-        ) -> Result<(Value, HashMap<String, Value>), lc_script::ScriptError>,
+        ) -> Result<Value, lc_script::ScriptError>,
     {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
@@ -8049,6 +8028,7 @@ impl Definition {
                 .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
         .with_ocf(state.ocf);
+        let cells = lc_script::LocalCells::from_local_vars(&state.local_vars);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
@@ -8056,9 +8036,10 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
+                compat::register_session_local_cells(object_id, cells.clone());
                 invoke(
                     &self.script,
-                    &state.local_vars,
+                    &cells,
                     compat::object_reference_value(object_id),
                 )
             },
@@ -8066,12 +8047,14 @@ impl Definition {
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
+        let value = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: label.to_string(),
             source,
         })?;
-        // Store updated local variables
+        // Store updated local variables — the final cell snapshot carries
+        // nested-call writes too (shared live storage).
+        let updated_local_vars = cells.snapshot();
         if let Some(object_update) = &mut host_effects.object_update {
             object_update.local_vars = Some(updated_local_vars);
         } else {
@@ -8122,9 +8105,7 @@ impl Definition {
             game_over_triggered,
             audio,
             label,
-            |script, local_vars, this| {
-                script.direct_exec_with_locals_and_this(source, local_vars, this)
-            },
+            |script, cells, this| script.direct_exec_with_cells_and_this(source, cells, this),
         )
     }
 
@@ -8219,12 +8200,7 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             move || {
-                self.script.call_with_locals_and_this(
-                    &function_call,
-                    &args_call,
-                    &local_vars_call,
-                    compat::object_reference_value(object_id),
-                )
+                self.run_live_object_session(&function_call, &args_call, &local_vars_call, object_id)
             },
         );
         let rng = guard.finish();
@@ -44259,6 +44235,70 @@ public func Probe(pOther) {
             engine.objects[idx].state.local_vars.get("iOther"),
             Some(&Value::Int(9)),
             "GetDamage(pObj) reads the foreign object's damage"
+        );
+    }
+
+    // C4Aul object calls mutate the ONE live C4Object (C4AulExec object
+    // locals are by-reference): a nested call back onto an object whose
+    // OUTER call is in flight reads the outer call's mid-call local writes
+    // and its own writes surface in the outer VM when it resumes — for
+    // EVERY outer-call kind, not just effect callbacks (the host-initiated
+    // call_object_function / PSF-callback path here).
+    #[test]
+    fn nested_call_onto_outer_object_shares_live_locals_like_cpp() {
+        let opener_script = r#"#strict
+local state;
+public func Open(pOther) {
+  state = 7;
+  var seen = pOther->Query(this());
+  return(seen * 100 + state);
+}
+public func GetState() { return(state); }
+public func SetState(v) { state = v; }
+"#;
+        let prober_script = r#"#strict
+public func Query(pA) {
+  var got = pA->GetState();
+  pA->SetState(42);
+  return(got);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("Opnr", "Opener", opener_script).expect("script compiles"),
+            )
+            .expect("opener registers");
+        engine
+            .register_definition(
+                Definition::from_script("Prob", "Prober", prober_script).expect("script compiles"),
+            )
+            .expect("prober registers");
+        let opener = engine
+            .spawn_object(SpawnConfig::new("Opnr").with_category(CATEGORY_OBJECT))
+            .expect("opener spawns");
+        let prober = engine
+            .spawn_object(SpawnConfig::new("Prob").with_category(CATEGORY_OBJECT))
+            .expect("prober spawns");
+
+        let idx = engine.find_object_index(opener).expect("opener exists");
+        let result = engine
+            .call_object_function(idx, "Open", vec![Value::Object(prober.as_u64())])
+            .expect("open runs");
+        // The nested GetState sees the outer `state = 7` (not the pre-call
+        // snapshot) and the nested SetState(42) is live when the outer VM
+        // resumes: 7 * 100 + 42.
+        assert_eq!(
+            result,
+            Value::Int(742),
+            "nested calls onto the outer object must share its live locals \
+             (C++ mutates the one live C4Object)"
+        );
+        let idx = engine.find_object_index(opener).expect("opener exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("state"),
+            Some(&Value::Int(42)),
+            "the deepest write is the one that persists"
         );
     }
 
