@@ -6078,8 +6078,9 @@ impl Definition {
         if self.rotateable > 0 && state.construction > 100 {
             ocf |= crate::ocf::ROTATE;
         }
-        // OCF_Grab from the Grab DefCore value (SetOCF, C4Object.cpp:553-555)
-        if self.grab > 0 {
+        // OCF_Grab: Grab DefCore value, never on StaticBack objects
+        // (SetOCF, C4Object.cpp:553-555)
+        if self.grab > 0 && state.category & CATEGORY_STATIC_BACK == 0 {
             ocf |= crate::ocf::GRAB;
         }
         if self.collectible {
@@ -37441,6 +37442,9 @@ protected func Activity() { SetActionTargets(); return(1); }
         let crate_id = engine
             .spawn_object(
                 SpawnConfig::new("Crate")
+                    // Pushables are vehicles: StaticBack never has OCF_Grab
+                    // (SetOCF, C4Object.cpp:553-555).
+                    .with_category(CATEGORY_VEHICLE)
                     .with_position(Vector2::new(10, 0))
                     .with_vertices(vertices.clone()),
             )
@@ -47167,6 +47171,38 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             0,
             "Con 101 passes the gate"
         );
+    }
+
+    #[test]
+    fn ocf_grab_requires_non_static_back_category() {
+        // OCF_Grab: Def->Grab AND !(Category & C4D_StaticBack)
+        // (SetOCF, C4Object.cpp:553-555).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Cart");
+        definition.set_grab(1);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let static_back = engine
+            .spawn_object(SpawnConfig::new("Cart").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(static_back).expect("object exists");
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::GRAB,
+            0,
+            "StaticBack objects are never grabbable (C4Object.cpp:554)"
+        );
+
+        let vehicle = engine
+            .spawn_object(
+                SpawnConfig::new("Cart")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(vehicle).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::GRAB, 0);
     }
 
     #[test]
