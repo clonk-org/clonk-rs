@@ -4623,6 +4623,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("FindObjectOwner", find_object_owner);
     script.register_host_function("FindObject2", find_object2);
     script.register_host_function("FindObjects", find_objects_dispatch);
+    script.register_host_function("Object", object_by_number);
     script.register_host_function("ObjectCount2", object_count2);
     script.register_host_function("ObjectCount", object_count);
     script.register_host_function("ObjectDistance", object_distance);
@@ -12423,6 +12424,44 @@ fn object_count(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnObject (C4Script.cpp:3327-3330): resolve an exact saved object Number.
+/// SafeObjectPointer rejects only deleted status; inactive objects remain
+/// addressable (C4ObjectList.cpp:544-557, C4GameObjects.cpp:270-276).
+fn object_by_number(args: &[Value]) -> Result<Value, RuntimeError> {
+    let number = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "Object",
+        "number",
+    )?;
+    let Some(id) = (number > 0).then(|| ObjectId::new(number as u64)) else {
+        return Ok(Value::Nil);
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let status = context
+            .get_world_object(id)
+            .map(|object| object.status())
+            .or_else(|| {
+                context.object_scope(id).map(|scope| {
+                    if scope.destroy {
+                        ObjectStatus::Deleted
+                    } else {
+                        scope.status()
+                    }
+                })
+            });
+        Ok(if status.is_some_and(|status| status != ObjectStatus::Deleted) {
+            object_reference_value(id)
+        } else {
+            Value::Nil
+        })
+    })
+}
+
 fn collect_linear_matches(world: &impl WorldAccessor, params: &FindObjectParams) -> Vec<ObjectId> {
     let mut matches = Vec::new();
     let mut skip_until = params.find_next;
@@ -19626,6 +19665,7 @@ mod tests {
         "Min",
         "Mod",
         "NoContainer",
+        "Object",
         "ObjectCall",
         "ObjectCount",
         "ObjectCount2",
@@ -24572,6 +24612,93 @@ func ProbeBadIndex(id) {
         );
         let value = result.expect("ObjectDistance with missing other succeeds");
         assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn object_lookup_resolves_dragon_rock_saved_number_through_vm() {
+        // FnObject delegates to SafeObjectPointer (C4Script.cpp:3327-3330).
+        // Dragon Rock's GetEndboss resolves the loaded mage as Object(1758).
+        let mage_id = ObjectId::new(1758);
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            mage_id,
+            "MAGE",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )]);
+        let (result, _) = with_effect_context(None, &[], world, 1759, || {
+            let mut script = lc_script::Engine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script("global func Probe() { return Object(1758); }")
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call("Probe", &[])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(result.expect("Object lookup succeeds"), object_reference_value(mage_id));
+    }
+
+    #[test]
+    fn object_lookup_accepts_inactive_but_rejects_deleted_or_missing() {
+        // C4GameObjects::ObjectPointer checks normal then inactive objects;
+        // SafeObjectPointer rejects only Status==C4OS_DELETED
+        // (C4GameObjects.cpp:270-276; C4ObjectList.cpp:553-557).
+        let id = ObjectId::new(42);
+        let lookup = |status: Option<ObjectStatus>| {
+            let objects: Vec<HostWorldObject> = status
+                .map(|status| {
+                    HostWorldObject::new(
+                        id,
+                        "TEST",
+                        status,
+                        "Idle",
+                        None,
+                        None,
+                        None,
+                        OWNER_NONE,
+                        100,
+                        crate::FULL_CON,
+                        Vector2::ZERO,
+                        Vector2::ZERO,
+                        Vec::new(),
+                        0,
+                        0,
+                        None,
+                    )
+                })
+                .into_iter()
+                .collect();
+            with_effect_context(
+                None,
+                &[],
+                HostWorldContext::from_objects(objects),
+                43,
+                || object_by_number(&[Value::Int(42)]),
+            )
+            .0
+            .expect("Object lookup succeeds")
+        };
+
+        assert_eq!(lookup(Some(ObjectStatus::Normal)), object_reference_value(id));
+        assert_eq!(
+            lookup(Some(ObjectStatus::Inactive)),
+            object_reference_value(id)
+        );
+        assert_eq!(lookup(Some(ObjectStatus::Deleted)), Value::Nil);
+        assert_eq!(lookup(None), Value::Nil);
     }
 
     #[test]
