@@ -15509,7 +15509,7 @@ impl Engine {
         // Weather, Landscape, Players, Messages, Script. Objects observe
         // the PREVIOUS frame's weather/PXS state and their RNG draws
         // precede every world-system draw within the frame.
-        self.tick_global_effects();
+        self.tick_global_effects()?;
         self.tick_pxs();
         self.tick_particles();
         self.tick_mass_movers();
@@ -25814,10 +25814,256 @@ impl Engine {
         self.particle_system = system;
     }
 
-    fn tick_global_effects(&mut self) {
+    /// `pGlobalEffects->Execute(nullptr)` (C4Game.cpp:830-831): the global
+    /// effect list executes right after ExecObjects — C4Effect::Execute
+    /// (C4Effect.cpp:319-363) advances every live effect's iTime and fires
+    /// `Fx*Timer(nil, iNumber, iTime)` on elapsed intervals. Callback
+    /// outcomes fold exactly like the object timer batch.
+    fn tick_global_effects(&mut self) -> Result<(), EngineError> {
+        let mut events = Vec::new();
         for effect in &mut self.global_effects {
-            effect.advance_tick();
+            if effect.advance_tick() {
+                events.push(EffectEvent::timer(effect.clone()));
+            }
         }
+        if events.is_empty() {
+            return Ok(());
+        }
+        let world = self.host_world_context();
+        let rng_state = self.rng.clone();
+        let mut global_effects = std::mem::take(&mut self.global_effects);
+        let dispatch_fallback = self
+            .definition_load_order
+            .first()
+            .and_then(|id| self.definitions.get(id));
+        let outcome = Self::run_effect_events_for_global(
+            dispatch_fallback,
+            &self.definitions,
+            self.game_over_triggered,
+            rng_state,
+            events,
+            &mut global_effects,
+            &mut self.environment,
+            self.physics,
+            self.frame,
+            world,
+            self.audio_registry.clone(),
+        );
+        self.global_effects = global_effects;
+        let GlobalEffectRunOutcome {
+            particles,
+            physics_delta,
+            audio_events,
+            messages,
+            player_commands,
+            landscape_ops,
+            spawns,
+            other_objects,
+            next_object_id,
+            game_over,
+            script_go,
+            audio_state,
+            rng,
+        } = outcome?;
+        self.rng = rng;
+        self.audio_registry = audio_state;
+        self.sync_next_object_id(next_object_id);
+        if !spawns.is_empty() {
+            self.process_spawn_queue(spawns)?;
+        }
+        if !other_objects.is_empty() {
+            self.apply_nested_object_outcomes(other_objects)?;
+        }
+        if !landscape_ops.is_empty() {
+            self.apply_landscape_operations(landscape_ops);
+        }
+        if !player_commands.is_empty() {
+            self.apply_player_commands(player_commands)?;
+        }
+        if !audio_events.is_empty() {
+            self.pending_audio.extend(audio_events);
+        }
+        for command in messages {
+            self.messages.apply_command(command);
+        }
+        if let Some(go) = script_go {
+            self.scenario_script_go = go;
+        }
+        if game_over {
+            self.request_game_over()?;
+        }
+        if !physics_delta.is_empty() {
+            self.apply_physics_delta(physics_delta);
+        }
+        self.apply_particle_commands(particles);
+        Ok(())
+    }
+
+    /// Executes deferred Fx* events of the GLOBAL effect list — the
+    /// nil-object analog of [`Self::run_effect_events_for_object`]:
+    /// callbacks receive nil as the affected object (C4Effect::Execute
+    /// passes pObj=nullptr, C4Effect.cpp:345) and resolve against the
+    /// command target's def script, the command-id def script, or the
+    /// engine-global function table (C4Effect::DoCall, C4Effect.cpp:
+    /// 439-456).
+    #[allow(clippy::too_many_arguments)]
+    fn run_effect_events_for_global(
+        dispatch_fallback: Option<&Definition>,
+        definitions: &HashMap<DefinitionId, Definition>,
+        game_over_triggered: bool,
+        mut rng: LcgRng,
+        events: Vec<EffectEvent>,
+        global_effects: &mut Vec<EffectState>,
+        environment: &mut EnvironmentSettings,
+        physics: PhysicsSettings,
+        frame: u64,
+        world: HostWorldContext,
+        audio: AudioRegistry,
+    ) -> Result<GlobalEffectRunOutcome, EngineError> {
+        let mut world = world;
+        let mut pending_spawns: Vec<SpawnConfig> = Vec::new();
+        let mut queue: VecDeque<EffectEvent> = VecDeque::from(events);
+        let mut current_environment = *environment;
+        let mut current_physics = physics;
+        let mut accumulated_physics = PhysicsDelta::default();
+        let mut pending_particles = Vec::new();
+        let mut pending_audio = Vec::new();
+        let mut pending_messages = Vec::new();
+        let mut current_audio = audio;
+        let mut pending_player_commands = Vec::new();
+        let mut pending_landscape_ops = Vec::new();
+        let mut pending_other_objects = Vec::new();
+        let mut game_over_requested = false;
+        let mut script_go_requested: Option<bool> = None;
+
+        while let Some(event) = queue.pop_front() {
+            let Some(dispatch_definition) = resolve_global_effect_dispatch_definition(
+                &event.effect,
+                &world,
+                definitions,
+                dispatch_fallback,
+            ) else {
+                continue;
+            };
+            // C++ runs Fx* callbacks with fPassErrors=false (fail-safe
+            // exec); RNG/audio restore from the pre-call backups on the
+            // error path like the object runner.
+            let rng_backup = rng.clone();
+            let audio_backup = current_audio.clone();
+            let call_result = match event.kind {
+                EffectEventKind::Timer => dispatch_definition.call_effect_timer(
+                    None,
+                    &event.effect,
+                    frame,
+                    rng,
+                    global_effects,
+                    current_physics,
+                    current_environment,
+                    world.clone(),
+                    game_over_triggered,
+                    current_audio,
+                ),
+                // Started runs synchronously inside FnAddEffect for global
+                // effects; Check/AddTo (the priority check chain) are not
+                // generated for the global list (documented residual).
+                _ => continue,
+            };
+            let (event_outcome, audio_state, new_rng, _call_value) = match call_result {
+                Ok(value) => value,
+                Err(EngineError::Script {
+                    definition,
+                    function,
+                    source,
+                }) => {
+                    tracing::warn!(
+                        %definition,
+                        function,
+                        error = %source,
+                        "script error in global effect callback; continuing like the C++ fail-safe exec"
+                    );
+                    rng = rng_backup;
+                    current_audio = audio_backup;
+                    continue;
+                }
+                Err(other) => return Err(other),
+            };
+            rng = new_rng;
+            current_audio = audio_state;
+
+            let compat::EffectContextOutcome {
+                global: global_effect_commands,
+                environment: environment_update,
+                physics: physics_update,
+                landscape: host_landscape_ops,
+                particles: mut emitted_particles,
+                messages: event_messages,
+                player_commands: effect_player_commands,
+                audio: outcome_audio,
+                trigger_game_over,
+                script_go,
+                spawns,
+                next_object_id,
+                other_objects: event_other_objects,
+                ..
+            } = event_outcome;
+
+            if !spawns.is_empty() {
+                pending_spawns.extend(spawns);
+            }
+            if !event_other_objects.is_empty() {
+                pending_other_objects.extend(event_other_objects);
+            }
+            world = world.with_next_object_id(next_object_id);
+            if !host_landscape_ops.is_empty() {
+                pending_landscape_ops.extend(host_landscape_ops);
+            }
+            if !effect_player_commands.is_empty() {
+                pending_player_commands.extend(effect_player_commands);
+            }
+            if let Some(update) = environment_update {
+                update.apply(&mut current_environment);
+            }
+            if let Some(update) = physics_update {
+                merge_physics_delta(&mut accumulated_physics, &update);
+                update.apply(&mut current_physics);
+            }
+            if !global_effect_commands.is_empty() {
+                apply_effect_commands_to_stack(global_effects, &global_effect_commands);
+            }
+            if !emitted_particles.is_empty() {
+                pending_particles.append(&mut emitted_particles);
+            }
+            if !outcome_audio.events.is_empty() {
+                pending_audio.extend(outcome_audio.events);
+            }
+            if !event_messages.is_empty() {
+                pending_messages.extend(event_messages);
+            }
+            if script_go.is_some() {
+                script_go_requested = script_go;
+            }
+            if trigger_game_over {
+                game_over_requested = true;
+            }
+        }
+
+        *environment = current_environment;
+        let next_object_id = world.next_object_id();
+        Ok(GlobalEffectRunOutcome {
+            particles: pending_particles,
+            physics_delta: accumulated_physics,
+            audio_events: pending_audio,
+            messages: pending_messages,
+            player_commands: pending_player_commands,
+            landscape_ops: pending_landscape_ops,
+            spawns: pending_spawns,
+            other_objects: pending_other_objects,
+            next_object_id,
+            game_over: game_over_requested,
+            script_go: script_go_requested,
+            audio_state: current_audio,
+            rng,
+        })
     }
 
     fn spawn_single(
@@ -27162,6 +27408,45 @@ fn parse_scenario_command(
         }
         _ => Ok(ScenarioBatch::default()),
     }
+}
+
+/// Folded outcome of one global effect-event batch
+/// ([`Engine::run_effect_events_for_global`]) — the same channels the
+/// object timer batch returns, minus the carrier-object ones.
+struct GlobalEffectRunOutcome {
+    particles: Vec<ParticleCommand>,
+    physics_delta: PhysicsDelta,
+    audio_events: Vec<AudioCommand>,
+    messages: Vec<MessageCommand>,
+    player_commands: Vec<PlayerCommand>,
+    landscape_ops: Vec<LandscapeOperation>,
+    spawns: Vec<SpawnConfig>,
+    other_objects: Vec<compat::NestedObjectOutcome>,
+    next_object_id: u64,
+    game_over: bool,
+    script_go: Option<bool>,
+    audio_state: AudioRegistry,
+    rng: LcgRng,
+}
+
+/// C4Effect::GetCallbackScript for GLOBAL effects (C4Effect.cpp:42-57,
+/// DoCall :439-456): the command target object's def script, else the
+/// idCommandTarget def script, else Game.ScriptEngine — modeled as the
+/// first-registered definition, whose script shares the engine-global
+/// function table (`set_global_functions`) that owns every `global func`.
+fn resolve_global_effect_dispatch_definition<'a>(
+    effect: &EffectState,
+    world: &HostWorldContext,
+    definitions: &'a HashMap<DefinitionId, Definition>,
+    fallback: Option<&'a Definition>,
+) -> Option<&'a Definition> {
+    effect
+        .command_target
+        .and_then(|target| world.get(ObjectId::new(target as u64)))
+        .map(|target| target.definition_id().to_string())
+        .or_else(|| effect.command_id.clone())
+        .and_then(|def_id| definitions.get(&def_id))
+        .or(fallback)
 }
 
 /// C4Effect::GetCallbackScript (C4Effect.cpp:42-57): Fx* callbacks resolve
@@ -43833,6 +44118,71 @@ func FxProbeTimer(pThis, iNumber) {
             stop_calls, 2,
             "one temp stop from Mute's kill bracket, one real stop from \
              Doomed's own kill"
+        );
+    }
+
+    #[test]
+    fn global_effect_timer_fires_with_nil_target_like_c4effect_execute() {
+        // C4Game::Execute (C4Game.cpp:830-831): pGlobalEffects->
+        // Execute(nullptr) runs right after ExecObjects; C4Effect::Execute
+        // (C4Effect.cpp:339-345) advances iTime every frame and fires
+        // Fx*Timer(pTarget=nil, iNumber, iTime) on elapsed intervals. The
+        // callback resolves through Game.ScriptEngine when the effect has
+        // no command target (C4Effect::DoCall, C4Effect.cpp:448-452).
+        let script = r#"
+        global func Initialize(state, random) {
+            AddEffect("WorldPulse", nil, 200, 2);
+            return nil;
+        }
+
+        global func FxWorldPulseTimer(target, number, time) {
+            // pObj is nullptr for global effects (C4Effect.cpp:345).
+            if (target) { return 0; }
+            EffectVar(0, nil, number) = time;
+            return 0;
+        }
+
+        global func Step(state, frame, random) { return nil; }
+        "#;
+
+        let definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        assert_eq!(engine.global_effects().len(), 1);
+
+        engine.tick().expect("first tick succeeds");
+        assert_eq!(
+            engine.global_effects()[0].timer,
+            1,
+            "iTime advances every frame (C4Effect.cpp:340)"
+        );
+        assert_eq!(
+            engine.global_effects()[0].var(0),
+            EffectVarValue::Nil,
+            "interval 2 has not elapsed at iTime 1 (C4Effect.cpp:342)"
+        );
+
+        engine.tick().expect("second tick succeeds");
+        assert_eq!(
+            engine.global_effects()[0].var(0),
+            EffectVarValue::Int(2),
+            "Fx*Timer(nil, iNumber, iTime) fired at the elapsed interval \
+             and its EffectVar write folded back"
+        );
+
+        engine.tick().expect("third tick succeeds");
+        engine.tick().expect("fourth tick succeeds");
+        assert_eq!(
+            engine.global_effects()[0].var(0),
+            EffectVarValue::Int(4),
+            "the timer keeps firing on every elapsed interval"
         );
     }
 
