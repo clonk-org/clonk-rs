@@ -1741,13 +1741,20 @@ impl Landscape {
 
     /// One 17×15 `PixCnt` cell's occupancy: whether any pixel in the cell has
     /// nonzero density (`UpdatePixCnt` counts `_GetDensity(x, y) != 0`,
-    /// C4Landscape.cpp:2894-2908). Computed on demand from the column model
-    /// instead of C++'s incrementally-maintained counter cache.
+    /// C4Landscape.cpp:2894-2908). Computed from the authoritative pixel grid
+    /// when present, with the column model retained for fixture landscapes.
     fn pix_cnt_cell_occupied(&self, cell_x: i32, cell_y: i32, materials: &MaterialSet) -> bool {
         let top = cell_y * 15;
         let bottom = top + 15;
         let left = (cell_x * 17).max(0);
         let right = (cell_x * 17 + 17).min(self.width as i32);
+        if let Some(grid) = self.pixels.as_ref() {
+            let top = top.max(0);
+            let bottom = bottom.min(grid.height() as i32);
+            return (left..right).any(|x| {
+                (top..bottom).any(|y| grid.density_at(x, y).is_some_and(|density| density != 0))
+            });
+        }
         for x in left..right {
             // solid part of the column inside the cell rows
             if let Some(surface) = self.surface_height(x) {

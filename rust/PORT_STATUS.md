@@ -7,22 +7,21 @@
 
 ## Current status
 
-- **Live parity through frame 19 (2026-07-03, pinned seed).** Frames
-  1-16 fell in the first arc (see git log); frames 17-19 fell with:
-  the exact script PathFree (ForLine Bresenham + GBackSolid), the
-  C4SolidMask BAKE-IN (masks live as MCVehic pixels in the plane —
-  plane diff 0.34%→0.05%), SetDir gates + TurnAction + foreign
-  SetDir, the synchronous FnJump (ObjectComJump), the per-ExecAction
-  t_attach latch (phase wraps cannot retro-attach), component-only
-  SetXDir/SetYDir fixed writes, and the comparator now checking
-  DIRECTION. Current wall: **frame 21** — the
-  coach-rider contact-friction class (the horse's DFA_PULL pushes the
-  coach identically both sides; C++'s next coach move applies contact
-  friction 1.667→0.30 and the riders read the damped value). Ledgers
-  are DRAW-EXACT through frame 20 (frame-marked traces; the waterfall
-  WTFL InsertMaterial routing was the f18-20 fork). Menu subsystem,
-  persistent mass movers, PXS blast/border fidelity, rotated masks,
-  the C++-order tick phases, live in-flight locals, crew join with
+- **Pinned live shadow matched through frame 156 before the current fix
+  (2026-07-09, seed 424242).** The visible frame-157 animal mismatch was a
+  downstream RNG symptom: dual C++/Rust ledgers are exact through frame 143
+  draw 31818, then C++ performs Water's `Random(10)` splash check while Rust
+  incorrectly fast-paths the same PXS as path-free. Raw PXS state, target
+  `(900,372)`, and execution order are identical. C++ `_PathFree` sees the
+  authoritative Water pixel at the edge of coarse cell `(52,24)`; Rust's
+  `pix_cnt_cell_occupied` consulted only its lossy column approximation. The
+  grid-first occupancy fix is frozen by the real C++ `C4LandscapePath.h`
+  oracle with a single density-25 pixel at `(16,9)` in a 17×15 cell. The fix
+  removes the old frame-157 failure; the current live wall is **frame 170** on
+  WIPF #566 (Rust Walk/Right versus C++ Turn/Left, with sub-pixel x already
+  split), not yet localized.
+  Menu subsystem, persistent mass movers, PXS blast/border fidelity, rotated
+  masks, the C++-order tick phases, live in-flight locals, crew join with
   fair-crew physicals and the C4-style HUD are all merged.
   Debug: pin runs with `LC_PIN_SEED=424242` (C4GameParameters.cpp,
   env-gated) so C++ runs are reproducible; get the map seed from

@@ -5,8 +5,9 @@
 //! byte-for-byte identical to the C++ golden oracle in
 //! `parity/golden/parity_golden.json`. That golden is produced from the REAL
 //! engine code (`src/Fixed.h`, `src/Fixed.cpp`'s `SineTable`, `src/C4Random.h`,
-//! and `src/C4ScriptKiller.h`) by `parity/oracle/gen_golden.sh` — so this is a
-//! genuine differential against the C++ oracle, not a Rust-vs-Rust regression.
+//! `src/C4ScriptKiller.h`, and `src/C4LandscapePath.h`) by
+//! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
+//! the C++ oracle, not a Rust-vs-Rust regression.
 //!
 //! This gates Theme C (wiring fixed precision through physics): the gravity /
 //! velocity sub-pixel accumulation the harness exercises is exactly the
@@ -19,6 +20,7 @@
 use lc_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue};
 use serde_json::Value;
 
+use crate::landscape::{Landscape, PixelGrid};
 use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion};
 use crate::math::{fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed};
 use crate::rng::LcgRng;
@@ -618,7 +620,37 @@ func Trigger(object pOther) {
         );
     }
 
-    // 11. Movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 11. C4Landscape::_PathFree (C4Landscape.cpp:890-915): PixCnt scans the
+    //     authoritative Surface8 bytes. The second case is the minimized
+    //     Goldrush frame-143 divergence: one water pixel at the right edge of
+    //     a 17x15 cell must make the whole coarse cell occupied.
+    for (idx, case) in golden["landscape_path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let mut bytes = vec![0; 17 * 15];
+        let pixel_x = i(case, "pixel_x") as i32;
+        let pixel_y = i(case, "pixel_y") as i32;
+        if pixel_x >= 0 && pixel_y >= 0 {
+            bytes[pixel_y as usize * 17 + pixel_x as usize] = 1;
+        }
+        let mut densities = vec![0; 2];
+        densities[1] = i(case, "density") as i32;
+        let grid = PixelGrid::new(17, 15, bytes, densities, vec![None; 2], vec![None; 2]);
+        let mut landscape = Landscape::flat(17, 15);
+        landscape.set_pixel_grid(grid);
+        expect_eq(
+            "landscape_path",
+            idx,
+            "free",
+            i(case, "free"),
+            i64::from(landscape.path_free(0, 0, 16, 14, &crate::MaterialSet::new())),
+        );
+    }
+
+    // 12. Movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    fix_x += xdir; fix_y += (ydir += gravity); matching C4Movement.cpp.
     for scn in golden["movement"].as_array().unwrap() {
         let name = scn["name"].as_str().unwrap_or("?");
