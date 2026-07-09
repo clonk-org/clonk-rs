@@ -4201,6 +4201,7 @@ impl Object {
             components: self.state.components.clone(),
             status: self.state.status,
             owner: self.state.owner,
+            base: self.state.base,
             controller: self.state.controller,
             category: self.state.category,
             crew_member: self.state.crew_member,
@@ -5029,6 +5030,10 @@ pub struct ObjectSnapshot {
     /// `LastEngLossPlr` (C4Object.cpp:2740) — kill attribution.
     #[serde(default = "default_owner")]
     pub last_energy_loss_cause: i32,
+    /// `C4Object::Base` (C4Object.h:135): home-base player or NO_OWNER
+    /// (ExecBase flag assignment, C4Object.cpp:1000-1031).
+    #[serde(default = "default_owner")]
+    pub base: i32,
     /// Raw 16.16 fixed-point position, recorded only when it carries sub-pixel
     /// detail beyond the whole-pixel `position` (i.e. `position != fixtoi(fix)`).
     /// `None` ⇒ reconstruct losslessly via `itofix(position)`. Mirrors C++

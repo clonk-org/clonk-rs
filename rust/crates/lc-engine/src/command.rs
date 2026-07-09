@@ -7158,6 +7158,17 @@ pub enum MenuRequestKind {
     Get {
         container: ObjectId,
     },
+    /// ActivateMenu(C4MN_Buy) with the base container as target
+    /// (ContainedControl COM_Up, C4Object.cpp:3269-3274; ActivateMenu,
+    /// C4Object.cpp:1919-1930).
+    Buy {
+        base: ObjectId,
+    },
+    /// ActivateMenu(C4MN_Sell) (ContainedControl COM_Dig,
+    /// C4Object.cpp:3275-3280; ActivateMenu, C4Object.cpp:1932-1943).
+    Sell {
+        base: ObjectId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

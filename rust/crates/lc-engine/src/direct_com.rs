@@ -842,11 +842,13 @@ impl Engine {
                 self.player_object_command(owner, CommandId::Throw, None, 0, 0)?;
             }
             COM_UP => {
-                // Base buy menu (:3269-3274): the home-base menu still lives
-                // in the app layer (see PORT_STATUS player-controls).
+                // Base buy menu (:3269-3274): ValidPlr(Contained->Base),
+                // not hostile, BASEFUNC_Buy → ActivateMenu(C4MN_Buy).
+                self.contained_base_menu(index, /* buy */ true)?;
             }
             COM_DIG => {
-                // Base sell menu (:3275-3280): same as COM_Up.
+                // Base sell menu (:3275-3280): the BASEFUNC_Sell twin.
+                self.contained_base_menu(index, /* buy */ false)?;
             }
             _ => {}
         }
@@ -863,6 +865,52 @@ impl Engine {
             }
         }
         Ok(true)
+    }
+
+    /// The base buy/sell menu arms of ContainedControl
+    /// (C4Object.cpp:3269-3280): ValidPlr(Contained->Base), not hostile to
+    /// the clonk's Owner, and the scenario's BASEFUNC bit set →
+    /// ActivateMenu(C4MN_Buy/C4MN_Sell) on the clonk with the container as
+    /// target. The menu itself is app-side; the engine emits the request.
+    fn contained_base_menu(&mut self, index: usize, buy: bool) -> Result<(), EngineError> {
+        // Re-resolve the container: the early Contained{Com} script may
+        // have moved the clonk.
+        let Some(container_index) = self
+            .objects
+            .get(index)
+            .and_then(|object| object.state.container)
+            .and_then(|id| self.find_object_index(id))
+        else {
+            return Ok(());
+        };
+        let base = self.objects[container_index].state.base;
+        if !self.players.contains_key(&base) {
+            return Ok(());
+        }
+        let owner = self.objects[index].state.owner;
+        if self.players_hostile(owner, base) {
+            return Ok(());
+        }
+        let enabled = if buy {
+            self.base_buy_enabled
+        } else {
+            self.base_sell_enabled
+        };
+        if !enabled {
+            return Ok(());
+        }
+        let base_id = self.objects[container_index].id;
+        let kind = if buy {
+            crate::MenuRequestKind::Buy { base: base_id }
+        } else {
+            crate::MenuRequestKind::Sell { base: base_id }
+        };
+        self.pending_menu_requests.push(crate::MenuRequest {
+            crew_id: self.objects[index].id,
+            owner,
+            kind,
+        });
+        Ok(())
     }
 
     /// The `ContainedControlUpdate` notification for Jump'n'Run control
@@ -1983,6 +2031,92 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
         engine.player_in_com(1, COM_LEFT, 0).expect("in_com");
         let snapshot = engine.object_snapshot(crew).expect("snapshot");
         assert_eq!(snapshot.command_stack.command_names(), vec!["Take"]);
+    }
+
+    /// Crew contained in a hut that is player `base`'s home base.
+    fn contained_base_fixture(engine: &mut Engine, base: i32) -> (ObjectId, ObjectId) {
+        register_clonk(engine, "CLNK", "#strict\n");
+        let hut_def = Definition::from_script("HUT1", "Hut", "#strict\n").expect("hut compiles");
+        engine.register_definition(hut_def).expect("register");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        if base != 1 {
+            engine
+                .register_player(PlayerConfig::new(base, "Host"))
+                .expect("player 2");
+        }
+        let crew = spawn_crew(engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = base;
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+        (crew, hut)
+    }
+
+    #[test]
+    fn contained_com_up_opens_the_base_buy_menu() {
+        // ContainedControl COM_Up (C4Object.cpp:3269-3274): a valid,
+        // non-hostile base with BASEFUNC_Buy opens the buy menu on the
+        // clonk (ActivateMenu(C4MN_Buy), pTarget = Contained).
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 1);
+
+        engine.player_in_com(1, COM_UP, 0).expect("in_com");
+        assert!(
+            engine.pending_menu_requests.iter().any(|request| {
+                request.crew_id == crew
+                    && request.owner == 1
+                    && matches!(request.kind,
+                        crate::MenuRequestKind::Buy { base } if base == hut)
+            }),
+            "COM_Up in a friendly base activates the buy menu"
+        );
+    }
+
+    #[test]
+    fn contained_com_dig_opens_the_base_sell_menu() {
+        // ContainedControl COM_Dig (C4Object.cpp:3275-3280): the sell menu
+        // twin, gated on BASEFUNC_Sell.
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 1);
+
+        engine.player_in_com(1, COM_DIG, 0).expect("in_com");
+        assert!(
+            engine.pending_menu_requests.iter().any(|request| {
+                request.crew_id == crew
+                    && matches!(request.kind,
+                        crate::MenuRequestKind::Sell { base } if base == hut)
+            }),
+            "COM_Dig in a friendly base activates the sell menu"
+        );
+    }
+
+    #[test]
+    fn hostile_or_disabled_bases_never_open_buy_menus() {
+        // Hostile(Owner, Contained->Base) vetoes (C4Object.cpp:3271), as
+        // does a cleared BASEFUNC_Buy bit (:3272).
+        let mut engine = Engine::new();
+        let (_, _) = contained_base_fixture(&mut engine, 2);
+        engine.set_hostility(1, 2, true).expect("hostility");
+        engine.player_in_com(1, COM_UP, 0).expect("in_com");
+        assert!(
+            engine.pending_menu_requests.is_empty(),
+            "hostile bases sell nothing"
+        );
+
+        let mut engine = Engine::new();
+        let (_, _) = contained_base_fixture(&mut engine, 1);
+        engine.set_base_buy_enabled(false);
+        engine.player_in_com(1, COM_UP, 0).expect("in_com");
+        assert!(
+            engine.pending_menu_requests.is_empty(),
+            "BASEFUNC_Buy off keeps the menu closed"
+        );
     }
 
     #[test]

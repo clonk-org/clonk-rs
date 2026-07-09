@@ -472,6 +472,7 @@ mod tests {
                 physical_changes: Vec::new(),
                 breath: 0,
                 last_energy_loss_cause: -1,
+                base: -1,
                 fixed_position: None,
                 fixed_velocity: None,
                 rotation_velocity: None,
