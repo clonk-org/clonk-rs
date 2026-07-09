@@ -9020,7 +9020,7 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
+    let staged = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
@@ -9038,18 +9038,47 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         // `if (!pObj) pObj = cthr->Obj` is only the local-call default
         // (C4Script.cpp:494) — a named target may be FOREIGN.
         let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         };
         if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         }
+        // Kill-trace mark before the effects hook (C4Object.cpp:1351-1353).
         stage_energy_loss_cause(context, target, change, eng_type, caused_by);
-        let Some(scope) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
+        let Some(scope) = context.object_scope(target) else {
+            return Ok(None);
         };
-        scope.adjust_energy(change, exact);
-        Ok(Value::Bool(true))
-    })
+        Ok(Some((target, caused_by, scope.alive())))
+    })?;
+    let Some((target, caused_by, alive)) = staged else {
+        return Ok(Value::Bool(false));
+    };
+    // The percent scale precedes the effects hook (C4Object.cpp:1347 vs
+    // :1355): living targets' hooks see the SCALED change, and a zero
+    // chain outcome returns before the energy write (:1358).
+    let scaled = if exact {
+        change
+    } else {
+        change.saturating_mul(LEGACY_MAX_PHYSICAL / 100)
+    };
+    let scaled = match alive
+        .then(|| dispatch_effects_do_damage(target, scaled, eng_type, caused_by))
+        .flatten()
+    {
+        Some(0) => return Ok(Value::Bool(true)),
+        Some(modified) => modified,
+        None => scaled,
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.adjust_energy(scaled, true);
+        }
+    });
+    Ok(Value::Bool(true))
 }
 
 /// `MagicPhysicalFactor` (C4Object.h:81): raw MagicEnergy units per
@@ -9376,9 +9405,14 @@ fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
+    let mut damage_type = crate::C4FX_CALL_DMG_SCRIPT;
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::Int(_) | Value::Nil => {
+            Value::Int(value) => {
+                damage_type = *value;
+                index += 1;
+            }
+            Value::Nil => {
                 index += 1;
             }
             other => {
@@ -9438,21 +9472,36 @@ fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
         if !context.ensure_object_scope(target) {
             return Ok(None);
         }
-        let Some(scope) = context.object_scope_mut(target) else {
+        let Some(scope) = context.object_scope(target) else {
             return Ok(None);
         };
-        // Damage = max(Damage + iChange, 0) (C4Object.cpp:1288).
-        scope.adjust_damage(change);
-        Ok(Some((target, caused_by)))
+        Ok(Some((target, caused_by, scope.alive())))
     })?;
-    let Some((target, caused_by)) = staged else {
+    let Some((target, caused_by, alive)) = staged else {
         return Ok(Value::Bool(false));
     };
+    // Non-living: ask the effects first (C4Object.cpp:1282-1286); a zero
+    // chain outcome returns BEFORE the damage write and the ~Damage call.
+    let change = match (!alive)
+        .then(|| dispatch_effects_do_damage(target, change, damage_type, caused_by))
+        .flatten()
+    {
+        Some(0) => return Ok(Value::Bool(true)),
+        Some(modified) => modified,
+        None => change,
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if let Some(scope) = context.object_scope_mut(target) {
+            // Damage = max(Damage + iChange, 0) (C4Object.cpp:1288).
+            scope.adjust_damage(change);
+        }
+    });
     // The Damage engine call after the stat write (PSF_Damage "~Damage",
     // C4Object.cpp:1290 — fail-safe exec, errors log and continue).
-    // NOT modeled: the non-living Fx*Damage effects-first hook
-    // (C4Object.cpp:1282-1286) — the host scope path has no effect
-    // DoDamage dispatch (same gap as DoEnergy's living hook).
     if let Some(Err(error)) = call_world_object_own_function(
         target,
         "Damage",
@@ -9464,6 +9513,97 @@ fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
         );
     }
     Ok(Value::Bool(true))
+}
+
+/// C4Effect::DoDamage on the host seam (C4Effect.cpp:427-437): walks the
+/// target's live effects asking each Fx*Damage hook (on the effect's
+/// command target) to chain the damage value. The C++ walk is a do-while:
+/// the FIRST effect is asked even for a zero change; afterwards the chain
+/// continues only while the value stays nonzero, and a target removal
+/// mid-chain aborts (`if (pObj && !pObj->Status) return`). A hook the
+/// dispatch script does not define leaves the value untouched (the
+/// pFnDamage existence gate); an erroring hook folds to 0 like an
+/// fPassErrors=false Exec. `None` when the target has no effects at all
+/// (pEffects nullptr — the caller must not early-return then).
+fn dispatch_effects_do_damage(
+    target: ObjectId,
+    mut change: i32,
+    cause: i32,
+    caused_by: i32,
+) -> Option<i32> {
+    let effects: Vec<EffectState> = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Vec::new();
+        };
+        context
+            .object_scope(target)
+            .map(|scope| scope.effects.snapshot())
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .and_then(|object| object.full_state().map(|state| state.effects.clone()))
+            })
+            .unwrap_or_default()
+    });
+    if effects.is_empty() {
+        return None;
+    }
+    let target_value = object_reference_value(target);
+    for effect in effects {
+        // IsDead: a zero priority marks a dead effect (C4Effect.h).
+        if effect.priority != 0 {
+            let function = format!("Fx{}Damage", effect.name);
+            let call_args = [
+                target_value.clone(),
+                Value::Int(effect.number),
+                Value::Int(change),
+                Value::Int(cause),
+                Value::Int(caused_by),
+            ];
+            match dispatch_effect_fx_callback(
+                effect.command_target,
+                effect.command_id.as_deref(),
+                &function,
+                &call_args,
+            ) {
+                // No such hook anywhere: the chained value stays
+                // (pFnDamage existence gate, C4Effect.cpp:433).
+                None => {}
+                // getInt() conversion (bools 0/1, pointer types 0).
+                Some(Ok(value)) => {
+                    change = match value {
+                        Value::Int(next) => next,
+                        Value::Bool(flag) => i32::from(flag),
+                        _ => 0,
+                    }
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(
+                        %error,
+                        "script error in {function}; the chained damage folds to 0"
+                    );
+                    change = 0;
+                }
+            }
+        }
+        // `if (pObj && !pObj->Status) return` (C4Effect.cpp:435).
+        let target_gone = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| {
+                    context
+                        .get_world_object(target)
+                        .map(|object| object.status() == ObjectStatus::Deleted)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(true)
+        });
+        if target_gone || change == 0 {
+            break;
+        }
+    }
+    Some(change)
 }
 
 /// FnBlastObject (C4Script.cpp:2281-2289) -> C4Object::Blast
@@ -9512,35 +9652,59 @@ fn blast_object(args: &[Value]) -> Result<Value, RuntimeError> {
         if deleted || !context.ensure_object_scope(target) {
             return Ok(None);
         }
-        let Some(scope) = context.object_scope_mut(target) else {
+        let Some(scope) = context.object_scope(target) else {
             return Ok(None);
         };
-        // Damage = max(Damage + iChange, 0) (C4Object.cpp:1288, via Blast's
-        // DoDamage at :1416).
-        scope.adjust_damage(level);
-        Ok(Some((target, caused_by)))
+        Ok(Some((target, caused_by, scope.alive())))
     })?;
-    let Some((target, caused_by)) = staged else {
+    let Some((target, caused_by, alive)) = staged else {
         return Ok(Value::Bool(false));
     };
-    // The ~Damage engine call runs INSIDE DoDamage, before the energy leg
-    // (C4Object.cpp:1290 — fail-safe exec, errors log and continue).
-    if let Some(Err(error)) = call_world_object_own_function(
-        target,
-        "Damage",
-        &[Value::Int(level), Value::Int(caused_by)],
-    ) {
-        tracing::warn!(
-            %error,
-            "script error in Damage; continuing like the C++ fail-safe exec"
-        );
+    // DoDamage leg (C4Object.cpp:1416): non-living targets ask their
+    // effects first (C4Object.cpp:1282-1286); a zero chain outcome skips
+    // the write and the ~Damage call but the Blast proceeds.
+    let damage_change = match (!alive)
+        .then(|| {
+            dispatch_effects_do_damage(target, level, crate::C4FX_CALL_DMG_BLAST, caused_by)
+        })
+        .flatten()
+    {
+        Some(0) => None,
+        Some(modified) => Some(modified),
+        None => Some(level),
+    };
+    if let Some(damage_change) = damage_change {
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            if let Some(scope) = context.object_scope_mut(target) {
+                // Damage = max(Damage + iChange, 0) (C4Object.cpp:1288).
+                scope.adjust_damage(damage_change);
+            }
+        });
+        // The ~Damage engine call runs INSIDE DoDamage, before the energy
+        // leg (C4Object.cpp:1290 — fail-safe exec, errors log and continue).
+        if let Some(Err(error)) = call_world_object_own_function(
+            target,
+            "Damage",
+            &[Value::Int(damage_change), Value::Int(caused_by)],
+        ) {
+            tracing::warn!(
+                %error,
+                "script error in Damage; continuing like the C++ fail-safe exec"
+            );
+        }
     }
     // Energy leg (C4Object.cpp:1417-1418): only alive targets, reading
-    // Alive AFTER the ~Damage callback like the live C4Object would.
-    HOST_CONTEXT.with(|cell| {
+    // Alive AFTER the ~Damage callback like the live C4Object would; the
+    // living Fx*Damage hook sees the SCALED change (C4Object.cpp:1347,
+    // :1355-1359) and a zero chain outcome skips the write.
+    let alive_now = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return;
+            return false;
         };
         let alive = context
             .object_scope(target)
@@ -9554,11 +9718,33 @@ fn blast_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 crate::C4FX_CALL_ENG_BLAST,
                 caused_by,
             );
-            if let Some(scope) = context.object_scope_mut(target) {
-                scope.adjust_energy(-level / 3, false);
-            }
         }
+        alive
     });
+    if alive_now {
+        let scaled = (-level / 3).saturating_mul(LEGACY_MAX_PHYSICAL / 100);
+        let scaled = match dispatch_effects_do_damage(
+            target,
+            scaled,
+            crate::C4FX_CALL_ENG_BLAST,
+            caused_by,
+        ) {
+            Some(0) => None,
+            Some(modified) => Some(modified),
+            None => Some(scaled),
+        };
+        if let Some(scaled) = scaled {
+            HOST_CONTEXT.with(|cell| {
+                let mut borrow = cell.borrow_mut();
+                let Some(context) = borrow.as_mut() else {
+                    return;
+                };
+                if let Some(scope) = context.object_scope_mut(target) {
+                    scope.adjust_energy(scaled, true);
+                }
+            });
+        }
+    }
     // Incinerate arm (C4Object.cpp:1420-1423): the LIVE Damage — staged
     // writes plus whatever the ~Damage callback changed — against
     // Def->BlastIncinerate (truthy in C++, so any nonzero value arms it).

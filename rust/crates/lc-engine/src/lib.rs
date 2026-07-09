@@ -42691,6 +42691,178 @@ func IncinerationEx(int iCausedBy) { iIncineratedEx = iCausedBy + 100; return(1)
         Ok(())
     }
 
+    // C4Object::DoDamage asks the target's effects FIRST for non-living
+    // objects (C4Object.cpp:1282-1286): every live Fx*Damage hook chains
+    // the damage value on the effect's command target
+    // (C4Effect::DoDamage, C4Effect.cpp:427-437) — and this must hold on
+    // the HOST scope path (script DoDamage), not just the engine path.
+    #[test]
+    fn host_do_damage_asks_the_targets_fx_damage_effects_first_like_cpp() {
+        let victim_script = r#"#strict
+local iSeen, iCauseSeen, iDamageCalls;
+func FxShieldDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
+    iSeen = iChange;
+    iCauseSeen = iCause;
+    return(iChange / 2);
+}
+func Damage(int iChange, int iCausedBy) { iDamageCalls = iDamageCalls + 1; return(1); }
+"#;
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "ACTR",
+                    "Actor",
+                    "#strict\nfunc Zap(pVictim) {\n  AddEffect(\"Shield\", pVictim, 1, 0, pVictim);\n  return DoDamage(10, pVictim, 3, 8);\n}\n",
+                )
+                .expect("actor compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(
+                Definition::from_script("VCTM", "Victim", victim_script).expect("victim compiles"),
+            )
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(SpawnConfig::new("VCTM").with_category(CATEGORY_OBJECT))
+            .expect("victim spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_idx, "Zap", vec![Value::Object(victim.as_u64())])
+            .expect("zap runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        let locals = &engine.objects[victim_idx].state.local_vars;
+        assert_eq!(
+            locals.get("iSeen"),
+            Some(&Value::Int(10)),
+            "the hook sees the raw change"
+        );
+        assert_eq!(
+            locals.get("iCauseSeen"),
+            Some(&Value::Int(3)),
+            "the damage type threads through (FnDoDamage iDmgType)"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].state.damage, 5,
+            "the chained hook result is written (C4Object.cpp:1288)"
+        );
+        assert_eq!(
+            locals.get("iDamageCalls"),
+            Some(&Value::Int(1)),
+            "~Damage still fires for a nonzero outcome"
+        );
+    }
+
+    // C4Object::DoEnergy asks a LIVING target's effects AFTER the percent
+    // scale (C4Object.cpp:1347 precedes :1355-1359): the Fx*Damage hook
+    // sees the SCALED change with the C4FxCall_EngScript cause, and a
+    // zero chain outcome aborts before the energy write — on the HOST
+    // scope path too.
+    #[test]
+    fn host_do_energy_asks_fx_damage_effects_on_the_living_like_cpp() {
+        let warded_script = r#"#strict
+local iSeen, iCauseSeen;
+func FxWardDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
+    iSeen = iChange;
+    iCauseSeen = iCause;
+    return(iChange / 2);
+}
+"#;
+        let nulled_script = r#"#strict
+func FxNullDamage(pTarget, iNumber, iChange, iCause, iCausePlr) { return(0); }
+"#;
+        let mut engine = Engine::with_seed(12);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "ACTR",
+                    "Actor",
+                    "#strict\nfunc Zap(pVictim, szEffect) {\n  AddEffect(szEffect, pVictim, 1, 0, pVictim);\n  return DoEnergy(-10, pVictim);\n}\n",
+                )
+                .expect("actor compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(
+                Definition::from_script("WARD", "Warded", warded_script).expect("warded compiles"),
+            )
+            .expect("warded registers");
+        engine
+            .register_definition(
+                Definition::from_script("NULD", "Nulled", nulled_script).expect("nulled compiles"),
+            )
+            .expect("nulled registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let warded = engine
+            .spawn_object(
+                SpawnConfig::new("WARD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("warded spawns");
+        let nulled = engine
+            .spawn_object(
+                SpawnConfig::new("NULD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("nulled spawns");
+        for id in [warded, nulled] {
+            let idx = engine.find_object_index(id).expect("victim exists");
+            engine.objects[idx].state.energy = 50_000;
+        }
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+
+        engine
+            .call_object_function(
+                actor_idx,
+                "Zap",
+                vec![
+                    Value::Object(warded.as_u64()),
+                    Value::String("Ward".into()),
+                ],
+            )
+            .expect("zap runs");
+        let warded_idx = engine.find_object_index(warded).expect("warded exists");
+        let locals = &engine.objects[warded_idx].state.local_vars;
+        assert_eq!(
+            locals.get("iSeen"),
+            Some(&Value::Int(-10 * (C4_MAX_PHYSICAL / 100))),
+            "the hook sees the SCALED change"
+        );
+        assert_eq!(
+            locals.get("iCauseSeen"),
+            Some(&Value::Int(C4FX_CALL_ENG_SCRIPT)),
+            "script DoEnergy carries C4FxCall_EngScript (C4Script.cpp:495)"
+        );
+        assert_eq!(
+            engine.objects[warded_idx].state.energy,
+            50_000 - 5 * (C4_MAX_PHYSICAL / 100),
+            "the halved hook result is written"
+        );
+
+        engine
+            .call_object_function(
+                actor_idx,
+                "Zap",
+                vec![
+                    Value::Object(nulled.as_u64()),
+                    Value::String("Null".into()),
+                ],
+            )
+            .expect("zap runs");
+        let nulled_idx = engine.find_object_index(nulled).expect("nulled exists");
+        assert_eq!(
+            engine.objects[nulled_idx].state.energy, 50_000,
+            "a zero chain outcome aborts before the write (C4Object.cpp:1358)"
+        );
+    }
+
     // FnDoEnergy's caused-by (C4Script.cpp:496-497): iCausedByPlusOne - 1,
     // or the CALLER's controller when unset — marked on the target's
     // LastEnergyLossCausePlayer kill trace for negative changes
