@@ -5504,6 +5504,12 @@ pub struct Definition {
     /// BlastIncinerate=N: incinerate once accumulated Damage reaches N after
     /// a blast (C4Object::Blast, C4Object.cpp:1421-1423); 0 = off.
     blast_incinerate: i32,
+    /// ContainBlast=1: shields contents from explosions (the DoExplosion
+    /// container walk, C4Effect.cpp:884).
+    contain_blast: i32,
+    /// HorizontalFix=1 (C4Def::NoHorizontalMove, C4Def.cpp:383): exempt
+    /// from shockwave flings.
+    no_horizontal_move: i32,
     no_burn_decay: bool,
     no_burn_damage: bool,
     /// NoBreath=1: exempt from the ExecLife breathing check (C4Object.cpp:880).
@@ -5647,6 +5653,8 @@ impl Definition {
             line_connect: 0,
             contact_incinerate: 0,
             blast_incinerate: 0,
+            contain_blast: 0,
+            no_horizontal_move: 0,
             no_burn_decay: false,
             no_breath: false,
             float_line: 0,
@@ -5786,6 +5794,8 @@ impl Definition {
             resource.core.no_burn_damage,
         );
         definition.set_blast_incinerate(resource.core.blast_incinerate);
+        definition.set_contain_blast(resource.core.contain_blast);
+        definition.set_no_horizontal_move(resource.core.no_horizontal_move);
         definition.set_burn_turn_to(resource.core.burn_turn_to.clone());
         definition.set_incomplete_activity(resource.core.incomplete_activity);
         definition.set_no_breath(resource.core.no_breath);
@@ -6381,6 +6391,22 @@ impl Definition {
 
     pub fn set_blast_incinerate(&mut self, blast_incinerate: i32) {
         self.blast_incinerate = blast_incinerate;
+    }
+
+    pub fn contain_blast(&self) -> i32 {
+        self.contain_blast
+    }
+
+    pub fn set_contain_blast(&mut self, contain_blast: i32) {
+        self.contain_blast = contain_blast;
+    }
+
+    pub fn no_horizontal_move(&self) -> i32 {
+        self.no_horizontal_move
+    }
+
+    pub fn set_no_horizontal_move(&mut self, no_horizontal_move: i32) {
+        self.no_horizontal_move = no_horizontal_move;
     }
 
     pub fn no_burn_decay(&self) -> bool {
@@ -11985,6 +12011,10 @@ impl Engine {
                                 burn_turn_to: definition.burn_turn_to().map(str::to_string),
                                 incomplete_activity: definition.incomplete_activity(),
                                 no_burn_decay: definition.no_burn_decay(),
+                                contact_incinerate: definition.contact_incinerate(),
+                                contain_blast: definition.contain_blast(),
+                                no_horizontal_move: definition.no_horizontal_move(),
+                                grab: definition.grab(),
                             },
                         },
                     )
@@ -22259,6 +22289,8 @@ impl Engine {
             core.no_burn_damage,
         );
         definition.set_blast_incinerate(core.blast_incinerate);
+        definition.set_contain_blast(core.contain_blast);
+        definition.set_no_horizontal_move(core.no_horizontal_move);
         definition.set_burn_turn_to(core.burn_turn_to.clone());
         definition.set_incomplete_activity(core.incomplete_activity);
         definition.set_no_breath(core.no_breath);
@@ -39441,6 +39473,52 @@ func Trigger(object pOther) {
             engine.objects[other_idx].state.controller, 1,
             "foreign target updated"
         );
+    }
+
+    // FnGetDefCoreVal (C4Script.cpp:4177) must resolve the blast-chain
+    // entries that BlastObjectsShockwaveCheck and DoExplosion read through
+    // the System.c4g GetXVal wrappers (GetDefGrab/GetDefHorizontalFix/
+    // GetDefContainBlast, GetXVal.c): Grab, HorizontalFix, ContainBlast,
+    // and the fire thresholds.
+    #[test]
+    fn get_def_core_val_resolves_the_blast_chain_entries() {
+        let caller_script = r#"#strict
+local iGrab, iFix, iShield, iBlast, iContact;
+func Probe() {
+    iGrab = GetDefCoreVal("Grab", "DefCore", HUTX);
+    iFix = GetDefCoreVal("HorizontalFix", "DefCore", HUTX);
+    iShield = GetDefCoreVal("ContainBlast", "DefCore", HUTX);
+    iBlast = GetDefCoreVal("BlastIncinerate", "DefCore", HUTX);
+    iContact = GetDefCoreVal("ContactIncinerate", "DefCore", HUTX);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let mut hut = simple_definition("HUTX");
+        hut.set_grab(2);
+        hut.set_no_horizontal_move(1);
+        hut.set_contain_blast(1);
+        hut.set_blast_incinerate(50);
+        hut.set_fire_properties(10, false, false);
+        engine.register_definition(hut).expect("hut registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let caller_idx = engine.find_object_index(caller).expect("caller exists");
+        engine
+            .call_object_function(caller_idx, "Probe", Vec::new())
+            .expect("probe runs");
+        let locals = &engine.objects[caller_idx].state.local_vars;
+        assert_eq!(locals.get("iGrab"), Some(&Value::Int(2)));
+        assert_eq!(locals.get("iFix"), Some(&Value::Int(1)));
+        assert_eq!(locals.get("iShield"), Some(&Value::Int(1)));
+        assert_eq!(locals.get("iBlast"), Some(&Value::Int(50)));
+        assert_eq!(locals.get("iContact"), Some(&Value::Int(10)));
     }
 
     // C4FindObjectLayer::Check is `pObj->pLayer == pLayer`

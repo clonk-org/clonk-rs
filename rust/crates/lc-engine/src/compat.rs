@@ -114,9 +114,10 @@ pub(crate) struct HostWorldObject {
     pub last_energy_loss_cause: i32,
 }
 
-/// The DefCore fire fields the host-path incinerate consults
-/// (C4Object::Blast, C4Object.cpp:1420-1423 + the fxFireStart core,
-/// C4Effect.cpp:560-641).
+/// The DefCore fields the blast/fire chain consults: the host-path
+/// incinerate (C4Object::Blast, C4Object.cpp:1420-1423 + the fxFireStart
+/// core, C4Effect.cpp:560-641) and the GetDefCoreVal reflection entries
+/// System.c4g's DoExplosion/BlastObjectsShockwaveCheck read (GetXVal.c).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DefinitionFireMetadata {
     /// BlastIncinerate threshold (0 = off).
@@ -127,6 +128,15 @@ pub(crate) struct DefinitionFireMetadata {
     /// (C4Effect.cpp:586-594).
     pub incomplete_activity: bool,
     pub no_burn_decay: bool,
+    /// ContactIncinerate 1-in-N contact-fire chance (0 = not inflammable).
+    pub contact_incinerate: i32,
+    /// ContainBlast=1 shields contents from explosions (C4Effect.cpp:884).
+    pub contain_blast: i32,
+    /// HorizontalFix (C4Def::NoHorizontalMove): no shockwave flings.
+    pub no_horizontal_move: i32,
+    /// Grab (0 none, 1 grab+push, 2 grab-only) — the shockwave check's
+    /// vehicle/FLOAT exemption reads it (Explode.c BlastObjectsShockwaveCheck).
+    pub grab: i32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2966,6 +2976,14 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "Offset" => Value::Int(if entry_index == 0 { shape.x } else { shape.y }),
             "Value" => Value::Int(metadata.value),
             "Mass" => Value::Int(metadata.mass),
+            // The blast-chain entries System.c4g reads through the GetXVal
+            // wrappers (GetDefGrab/GetDefHorizontalFix/GetDefContainBlast,
+            // BlastObjectsShockwaveCheck + DoExplosion).
+            "Grab" => Value::Int(metadata.fire.grab),
+            "HorizontalFix" => Value::Int(metadata.fire.no_horizontal_move),
+            "ContainBlast" => Value::Int(metadata.fire.contain_blast),
+            "BlastIncinerate" => Value::Int(metadata.fire.blast_incinerate),
+            "ContactIncinerate" => Value::Int(metadata.fire.contact_incinerate),
             other => {
                 tracing::debug!(entry = other, "GetDefCoreVal entry not modeled; nil");
                 Value::Nil

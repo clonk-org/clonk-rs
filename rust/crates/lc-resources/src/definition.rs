@@ -203,6 +203,12 @@ pub struct DefCore {
     /// BlastIncinerate=N: incinerate when accumulated Damage reaches N after
     /// a blast (C4Object::Blast, C4Object.cpp:1421-1423); 0 = off.
     pub blast_incinerate: i32,
+    /// ContainBlast=1: this container shields its contents from explosions
+    /// (the DoExplosion container walk, C4Effect.cpp:884; C4Def.cpp:380).
+    pub contain_blast: i32,
+    /// HorizontalFix=1 (C4Def::NoHorizontalMove, C4Def.cpp:383): exempt
+    /// from shockwave flings (Game::BlastObjects, C4Game.cpp:1272).
+    pub no_horizontal_move: i32,
     /// NoBurnDecay=1: burning does not reduce Con (C4Object.cpp:777-778).
     pub no_burn_decay: bool,
     /// `Float` (C4Def.cpp:379, default 0): buoyancy line offset in percent
@@ -496,6 +502,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut collection_limit: Option<u32> = None;
     let mut contact_incinerate: i32 = 0;
     let mut blast_incinerate: i32 = 0;
+    let mut contain_blast: i32 = 0;
+    let mut no_horizontal_move: i32 = 0;
     let mut no_burn_decay = false;
     let mut no_breath = false;
     let mut grab = 0;
@@ -649,6 +657,12 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "blastincinerate" => {
                 blast_incinerate = parse_i32(value).unwrap_or(0);
+            }
+            "containblast" => {
+                contain_blast = parse_i32(value).unwrap_or(0);
+            }
+            "horizontalfix" => {
+                no_horizontal_move = parse_i32(value).unwrap_or(0);
             }
             "noburndecay" => {
                 no_burn_decay = parse_bool(value);
@@ -811,6 +825,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         collection_limit,
         contact_incinerate,
         blast_incinerate,
+        contain_blast,
+        no_horizontal_move,
         no_burn_decay,
         no_breath,
         grab,
@@ -2128,6 +2144,34 @@ NextAction=Dup
         assert!(!parsed.no_burn_decay);
         assert!(!parsed.no_breath, "default: breathing");
         assert!(!parsed.no_burn_damage);
+    }
+
+    #[test]
+    fn parse_def_core_blast_shield_and_horizontal_fix() {
+        // ContainBlast=1 shields contents from explosions (the DoExplosion
+        // container walk, C4Effect.cpp:884; C4Def.cpp:380) and
+        // HorizontalFix=1 exempts a def from shockwave flings
+        // (C4Def::NoHorizontalMove, C4Def.cpp:383; read back through
+        // GetDefCoreVal by BlastObjectsShockwaveCheck).
+        let data = br#"
+            [DefCore]
+            id=HUT1
+            Name=Hut
+            ContainBlast=1
+            HorizontalFix=1
+        "#;
+        let parsed = parse_def_core(data).expect("def core parses");
+        assert_eq!(parsed.contain_blast, 1);
+        assert_eq!(parsed.no_horizontal_move, 1);
+
+        let data = br#"
+            [DefCore]
+            id=STON
+            Name=Stone
+        "#;
+        let parsed = parse_def_core(data).expect("def core parses");
+        assert_eq!(parsed.contain_blast, 0, "default: contents take blasts");
+        assert_eq!(parsed.no_horizontal_move, 0, "default: movable");
     }
 
     #[test]
