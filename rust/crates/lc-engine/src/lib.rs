@@ -5569,6 +5569,15 @@ pub struct Definition {
     /// through this, no construction in front of it (SetOCF,
     /// C4Object.cpp:581-583).
     exclusive: bool,
+    /// `Edible` DefCore flag (C4Def.cpp:355): OCF_Edible (SetOCF,
+    /// C4Object.cpp:630-632).
+    edible: bool,
+    /// `Prey` DefCore flag (C4Def.cpp:354): OCF_Prey while alive (SetOCF,
+    /// C4Object.cpp:615-618).
+    prey: bool,
+    /// `AttractLightning` DefCore flag (C4Def.cpp:391): OCF_AttractLightning
+    /// at FullCon (SetOCF, C4Object.cpp:623-626).
+    attract_lightning: bool,
     /// The [Physical] DefCore section (C4Def::Physical).
     physical: PhysicalInfo,
     /// Real C4Script content gets the C++ callback arguments — no parameters
@@ -5711,6 +5720,9 @@ impl Definition {
             burn_turn_to: None,
             incomplete_activity: false,
             exclusive: false,
+            edible: false,
+            prey: false,
+            attract_lightning: false,
             physical: PhysicalInfo::default(),
             c4_callback_args: false,
             solid_mask_pixels: SolidMaskPixels::default(),
@@ -5879,6 +5891,9 @@ impl Definition {
         }
         definition.set_line_connect(resource.core.line_connect);
         definition.set_exclusive(resource.core.exclusive);
+        definition.set_edible(resource.core.edible);
+        definition.set_prey(resource.core.prey);
+        definition.set_attract_lightning(resource.core.attract_lightning);
         Ok(definition)
     }
 
@@ -6088,10 +6103,23 @@ impl Definition {
                 ocf |= crate::ocf::ALIVE;
             }
         }
+        // OCF_Prey: Def->Prey && the RAW Alive flag (SetOCF,
+        // C4Object.cpp:615-618)
+        if self.prey && state.alive {
+            ocf |= crate::ocf::PREY;
+        }
         // OCF_CrewMember: Def->CrewMember && the RAW Alive flag
         // (SetOCF, C4Object.cpp:619-622)
         if self.crew_member && state.alive {
             ocf |= crate::ocf::CREW_MEMBER;
+        }
+        // OCF_AttractLightning at FullCon (SetOCF, C4Object.cpp:623-626)
+        if self.attract_lightning && ocf & crate::ocf::FULL_CON != 0 {
+            ocf |= crate::ocf::ATTRACT_LIGHTNING;
+        }
+        // OCF_Edible (SetOCF, C4Object.cpp:630-632)
+        if self.edible {
+            ocf |= crate::ocf::EDIBLE;
         }
         // OCF_FightReady seeds from the OCF_Alive BIT (SetOCF,
         // C4Object.cpp:606-610); the NoFight/ActMap-Disabled gates join
@@ -6552,6 +6580,18 @@ impl Definition {
 
     pub fn set_exclusive(&mut self, exclusive: bool) {
         self.exclusive = exclusive;
+    }
+
+    pub fn set_edible(&mut self, edible: bool) {
+        self.edible = edible;
+    }
+
+    pub fn set_prey(&mut self, prey: bool) {
+        self.prey = prey;
+    }
+
+    pub fn set_attract_lightning(&mut self, attract_lightning: bool) {
+        self.attract_lightning = attract_lightning;
     }
 
     pub fn physical(&self) -> &PhysicalInfo {
@@ -47374,6 +47414,79 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         assert_ne!(engine.object_ocf_at_index(idx) & ocf::EXCLUSIVE, 0);
+    }
+
+    #[test]
+    fn ocf_edible_comes_from_the_def_flag() {
+        // OCF_Edible: straight from Def->Edible (SetOCF,
+        // C4Object.cpp:630-632).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Loaf");
+        definition.set_edible(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Loaf").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::EDIBLE, 0);
+    }
+
+    #[test]
+    fn ocf_prey_requires_def_flag_and_raw_alive() {
+        // OCF_Prey: Def->Prey && the RAW Alive flag (SetOCF,
+        // C4Object.cpp:615-618) — no category gate.
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Sheep");
+        definition.set_prey(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Sheep").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        engine.objects[idx].state.alive = false;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::PREY,
+            0,
+            "dead prey is no prey (C4Object.cpp:617)"
+        );
+
+        engine.objects[idx].state.alive = true;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::PREY, 0);
+    }
+
+    #[test]
+    fn ocf_attract_lightning_requires_full_con() {
+        // OCF_AttractLightning: Def->AttractLightning at FullCon (SetOCF,
+        // C4Object.cpp:623-626).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Mast");
+        definition.set_attract_lightning(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Mast").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::ATTRACT_LIGHTNING, 0);
+
+        engine.objects[idx].state.construction = FULL_CON - 1;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::ATTRACT_LIGHTNING,
+            0,
+            "incomplete objects do not attract lightning (C4Object.cpp:625)"
+        );
     }
 
     #[test]
