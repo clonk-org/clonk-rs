@@ -1011,6 +1011,106 @@ mod tests {
         }
     }
 
+    // FnGetCommand serves the LIVE C4Command fields (C4Script.cpp:
+    // 926-945) — the snapshot stack (which backs the world-context views
+    // every frame) must carry the same elements, not nil.
+    #[test]
+    fn snapshot_command_views_expose_live_elements() {
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(140))
+                    .with_ty(Some(90))
+                    .with_data(CommandData::Integer(1)),
+            )
+            .expect("push");
+
+        let snapshot = stack.snapshot();
+        let views = snapshot.command_views();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].name, "MoveTo");
+        assert_eq!(
+            (views[0].tx, views[0].ty),
+            (Some(140), Some(90)),
+            "restored views keep Tx/Ty (C4Script.cpp:934-937)"
+        );
+        assert_eq!(views[0].data, CommandData::Integer(1));
+
+        let mut restored = CommandStack::new();
+        restored.restore_from_snapshot(&snapshot);
+        let views = restored.command_views();
+        assert_eq!(
+            (views[0].tx, views[0].ty),
+            (Some(140), Some(90)),
+            "a restored stack keeps its elements"
+        );
+    }
+
+    // The element view follows the InitEvaluation rewrites: MoveTo's
+    // Target folds into Tx/Ty and clears (C4Command.cpp:1637), so
+    // GetCommand element 1 goes nil and element 2 reads the absorbed X.
+    #[test]
+    fn command_views_follow_move_to_target_absorption() {
+        let walker = walking_jumper(Vector2::new(100, 100));
+        let target_id = ObjectId::new(9);
+        let mut target = snapshot_with_id(9);
+        target.position = Vector2::new(200, 100);
+        let mut objects = HashMap::new();
+        objects.insert(target_id, target);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_target(Some(target_id))
+                    .with_update_interval(1),
+            )
+            .expect("push");
+
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let _ = stack.step(&ctx); // InitEvaluation execute
+
+        let views = stack.command_views();
+        assert_eq!(views[0].target, None, "Target cleared (C4Command.cpp:1637)");
+        assert_eq!(
+            (views[0].tx, views[0].ty),
+            (Some(200), Some(100)),
+            "Tx/Ty absorbed the target position"
+        );
+
+        // The same live values survive the snapshot round-trip.
+        let views = stack.snapshot().command_views();
+        assert_eq!(views[0].target, None);
+        assert_eq!((views[0].tx, views[0].ty), (Some(200), Some(100)));
+    }
+
+    // Acquire's element view reads the defaulted 500/250 search range
+    // (InitEvaluation, C4Command.cpp:1666-1670).
+    #[test]
+    fn command_views_show_acquire_range_defaults() {
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Acquire)
+                    .with_data(CommandData::Text("WOOD".into())),
+            )
+            .expect("push");
+
+        let views = stack.command_views();
+        assert_eq!(
+            (views[0].tx, views[0].ty),
+            (Some(500), Some(250)),
+            "defaulted search range is live-visible (C4Command.cpp:1668-1669)"
+        );
+        assert_eq!(views[0].data, CommandData::Text("WOOD".into()));
+
+        let views = stack.snapshot().command_views();
+        assert_eq!((views[0].tx, views[0].ty), (Some(500), Some(250)));
+    }
+
     #[test]
     fn wait_takes_its_duration_from_data_then_tx() {
         // C4CMD_Wait InitEvaluation (C4Command.cpp:1659-1663): a nonzero
@@ -7256,6 +7356,11 @@ pub struct CommandSnapshot {
     mode: CommandMode,
     retries: i32,
     failures: i32,
+    /// The creating request — the base of the FnGetCommand element view
+    /// (persisted so restored stacks keep their elements; pre-existing
+    /// saves without it degrade to name-only views).
+    #[serde(default)]
+    request: Option<CommandRequest>,
 }
 
 impl CommandSnapshot {
@@ -7265,16 +7370,17 @@ impl CommandSnapshot {
             mode: entry.mode,
             retries: entry.retries,
             failures: entry.failures,
+            request: entry.request.clone(),
         }
     }
 }
 
 /// The FnGetCommand element view of one stack entry (C4Script.cpp:926-945):
-/// name, Target, Tx, Ty, Target2, Data. Sourced from the creating
-/// CommandRequest — C++ reads the LIVE C4Command fields, which only the
-/// Acquire/Wait InitEvaluation defaults ever rewrite (C4Command.cpp:
-/// 1659-1670); restored snapshots (no retained request) expose nil
-/// elements.
+/// name, Target, Tx, Ty, Target2, Data — the LIVE C4Command fields. The
+/// creating CommandRequest is the base; states whose C++ counterpart
+/// rewrites the fields (MoveTo's target absorption C4Command.cpp:1637,
+/// Acquire's 500/250 range defaults :1666-1670, Construct's found site
+/// :1757-1766) override it with their live values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandView {
     pub name: String,
@@ -7286,8 +7392,8 @@ pub struct CommandView {
 }
 
 impl CommandView {
-    fn from_entry(name: String, request: Option<&CommandRequest>) -> Self {
-        Self {
+    fn from_entry(name: String, request: Option<&CommandRequest>, state: &CommandState) -> Self {
+        let mut view = Self {
             name,
             target: request.and_then(|request| request.target),
             tx: request.and_then(|request| request.tx),
@@ -7296,7 +7402,9 @@ impl CommandView {
             data: request
                 .map(|request| request.data.clone())
                 .unwrap_or(CommandData::None),
-        }
+        };
+        state.apply_live_overrides(&mut view);
+        view
     }
 }
 
@@ -7326,12 +7434,23 @@ impl CommandStackSnapshot {
             .collect()
     }
 
-    /// FnGetCommand element views; snapshots keep no request, so only
-    /// the names survive a restore.
+    /// FnGetCommand element views from the persisted request + live
+    /// state overrides — restored stacks keep their elements.
     pub fn command_views(&self) -> Vec<CommandView> {
-        self.command_names()
-            .into_iter()
-            .map(|name| CommandView::from_entry(name, None))
+        self.commands
+            .iter()
+            .map(|command| {
+                CommandView::from_entry(
+                    command
+                        .state
+                        .id()
+                        .map(CommandId::to_name)
+                        .unwrap_or("None")
+                        .to_string(),
+                    command.request.as_ref(),
+                    &command.state,
+                )
+            })
             .collect()
     }
 }
@@ -7381,6 +7500,7 @@ impl CommandStack {
                         .unwrap_or("None")
                         .to_string(),
                     entry.request.as_ref(),
+                    &entry.state,
                 )
             })
             .collect()
@@ -12383,6 +12503,36 @@ impl CommandState {
             CommandState::Unsupported => None,
         }
     }
+
+    /// Live C4Command-field overrides for the FnGetCommand view
+    /// (C4Script.cpp:926-945 reads the LIVE fields): only the states
+    /// whose C++ counterpart rewrites Target/Tx/Ty after Set do so —
+    /// MoveTo's InitEvaluation absorption/adjust (C4Command.cpp:
+    /// 1634-1643), Acquire's 500/250 range defaults (:1666-1670) and
+    /// Construct's found-site write (:1757-1766). Put's Ty reminder
+    /// flag (:1384) is unmodeled.
+    fn apply_live_overrides(&self, view: &mut CommandView) {
+        match self {
+            CommandState::MoveTo(state) => {
+                view.target = state.target;
+                view.tx = state.tx;
+                view.ty = state.ty;
+            }
+            CommandState::Acquire(state) => {
+                view.target = state.target;
+                view.tx = Some(state.range_x);
+                view.ty = Some(state.range_y);
+                view.target2 = state.ignore_container;
+            }
+            CommandState::Construct(state) => {
+                if let Some(site) = state.site {
+                    view.tx = Some(site.x);
+                    view.ty = Some(site.y);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn stop_update(ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
@@ -12399,9 +12549,9 @@ struct ActiveCommand {
     mode: CommandMode,
     retries: i32,
     failures: i32,
-    /// The creating request, retained for the FnGetCommand element view
-    /// (C4Script.cpp:926-945). Not persisted — restored stacks expose
-    /// nil elements.
+    /// The creating request, the FnGetCommand element-view base
+    /// (C4Script.cpp:926-945); persisted through CommandSnapshot so
+    /// restored stacks keep their elements.
     request: Option<CommandRequest>,
 }
 
@@ -12462,7 +12612,7 @@ impl ActiveCommand {
             mode: snapshot.mode,
             retries: snapshot.retries,
             failures: snapshot.failures,
-            request: None,
+            request: snapshot.request,
         }
     }
 
