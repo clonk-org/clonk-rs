@@ -2,6 +2,7 @@ set(FILE_LIST
 src/Bitmap256.cpp
 src/Bitmap256.h
 src/C4Action.cpp
+src/C4ActionCallbacks.h
 src/C4ActionDirection.h
 src/C4Application.cpp
 src/C4Application.h

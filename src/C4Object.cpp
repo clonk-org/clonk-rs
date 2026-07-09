@@ -17,6 +17,7 @@
 /* That which fills the world with life */
 
 #include <C4Include.h>
+#include <C4ActionCallbacks.h>
 #include <C4ActionDirection.h>
 #include <C4Object.h>
 #include <C4Version.h>
@@ -4167,49 +4168,34 @@ bool C4Object::SetAction(int32_t iAct, C4Object *pTarget, C4Object *pTarget2, in
 	// Reset fixed position...
 	fix_x = itofix(x); fix_y = itofix(y);
 
-	// issue calls
-
-	// Execute StartCall
-	if (iCalls & SAC_StartCall)
-		if (Action.Act > ActIdle)
+	// Issue calls synchronously. The helper owns the production order so the
+	// same decision can be exercised by the differential oracle.
+	const bool callbacksCompleted = C4ActionCallbacks::Dispatch(
+		iCalls & SAC_StartCall, iCalls & SAC_EndCall, iCalls & SAC_AbortCall,
+		fForce, iLastAction > ActIdle, Action.Act > ActIdle,
+		[&](C4ActionCallbacks::Kind kind)
 		{
-			pAction = &(Def->ActMap[Action.Act]);
-			if (pAction->StartCall)
+			pAction = &(Def->ActMap[kind == C4ActionCallbacks::Kind::Start ? Action.Act : iLastAction]);
+			C4Def *pOldDef = Def;
+			switch (kind)
 			{
-				C4Def *pOldDef = Def;
+			case C4ActionCallbacks::Kind::Start:
+				if (!pAction->StartCall) return true;
 				pAction->StartCall->Exec(this);
-				// abort exeution if def changed
-				if (Def != pOldDef || !Status) return true;
-			}
-		}
-
-	// Execute EndCall
-	if (iCalls & SAC_EndCall && !fForce)
-		if (iLastAction > ActIdle)
-		{
-			pAction = &(Def->ActMap[iLastAction]);
-			if (pAction->EndCall)
-			{
-				C4Def *pOldDef = Def;
+				break;
+			case C4ActionCallbacks::Kind::End:
+				if (!pAction->EndCall) return true;
 				pAction->EndCall->Exec(this);
-				// abort exeution if def changed
-				if (Def != pOldDef || !Status) return true;
-			}
-		}
-
-	// Execute AbortCall
-	if (iCalls & SAC_AbortCall && !fForce)
-		if (iLastAction > ActIdle)
-		{
-			pAction = &(Def->ActMap[iLastAction]);
-			if (pAction->AbortCall)
-			{
-				C4Def *pOldDef = Def;
+				break;
+			case C4ActionCallbacks::Kind::Abort:
+				if (!pAction->AbortCall) return true;
 				pAction->AbortCall->Exec(this, {C4VInt(iLastPhase)});
-				// abort exeution if def changed
-				if (Def != pOldDef || !Status) return true;
+				break;
 			}
-		}
+			// Abort execution if a callback changed the definition or removed the object.
+			return Def == pOldDef && Status;
+		});
+	if (!callbacksCompleted) return true;
 
 	return true;
 }
