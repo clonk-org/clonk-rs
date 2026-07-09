@@ -25935,8 +25935,40 @@ impl Engine {
         let mut pending_other_objects = Vec::new();
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
+        // Anchors whose temp remove/readd bracket was already queued (a
+        // re-popped anchor event must not expand again); see the object
+        // runner's temp_wrapped_stopped.
+        let mut temp_wrapped_stopped: HashSet<i32> = HashSet::new();
 
         while let Some(event) = queue.pop_front() {
+            // C4Effect::Kill (C4Effect.cpp:365-405): the real removal is
+            // bracketed by temp-deactivating all upper effects
+            // (C4Effect.cpp:370-374) and reactivating them after the Stop
+            // (C4Effect.cpp:404); priority-1 victims skip the bracket
+            // (C4Effect.cpp:477).
+            if matches!(
+                event.kind,
+                EffectEventKind::Stopped(EffectStopReason::Removed)
+            ) && event.effect.priority != 1
+                && !temp_wrapped_stopped.contains(&event.effect.number)
+            {
+                let uppers = upper_effects_of(global_effects, &event.effect);
+                if !uppers.is_empty() {
+                    temp_wrapped_stopped.insert(event.effect.number);
+                    let mut sequence: Vec<EffectEvent> = uppers
+                        .iter()
+                        .rev()
+                        .cloned()
+                        .map(EffectEvent::temp_removed)
+                        .collect();
+                    sequence.push(event);
+                    sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
+                    for queued in sequence.into_iter().rev() {
+                        queue.push_front(queued);
+                    }
+                    continue;
+                }
+            }
             let Some(dispatch_definition) = resolve_global_effect_dispatch_definition(
                 &event.effect,
                 &world,
@@ -26000,6 +26032,43 @@ impl Engine {
                         // (C4Effect.cpp:389-396).
                         stop_denied = matches!(reason, EffectStopReason::Removed)
                             && matches!(stop_result, Some(Value::Int(-1)));
+                        (outcome, audio_state, new_rng)
+                    }),
+                EffectEventKind::TempRemoved => dispatch_definition
+                    .call_effect_stop(
+                        None,
+                        &event.effect,
+                        EffectStopReason::Temp,
+                        rng,
+                        global_effects,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, _temp_result)| {
+                        // The temp stop's result is ignored
+                        // (C4Effect.cpp:489 does not check it).
+                        (outcome, audio_state, new_rng)
+                    }),
+                EffectEventKind::TempReadded => dispatch_definition
+                    .call_effect_temp_readd(
+                        None,
+                        &event.effect,
+                        rng,
+                        global_effects,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, _temp_result)| {
+                        // The temp readd's result is ignored
+                        // (C4Effect.cpp:505 does not check it).
                         (outcome, audio_state, new_rng)
                     }),
                 // Started runs synchronously inside FnAddEffect for global
@@ -44318,6 +44387,124 @@ func FxProbeTimer(pThis, iNumber) {
         assert_eq!(
             stop_calls, 1,
             "C4Effect::Kill fires the real Fx*Stop(nil, iNumber) once"
+        );
+    }
+
+    #[test]
+    fn global_effect_stop_deny_recovers_like_cpp() {
+        // C4Effect::Kill (C4Effect.cpp:389-396): an Fx*Stop returning
+        // C4Fx_Stop_Deny (-1, C4Effects.h:42) refuses the removal — the
+        // effect recovers its priority and stays in the GLOBAL list.
+        let script = r#"
+        global func Initialize(state, random) {
+            AddEffect("Stubborn", nil, 100, 2);
+            return nil;
+        }
+
+        global func FxStubbornTimer(target, number, time) {
+            if (time >= 2) { return -1; }
+            return 0;
+        }
+
+        global func FxStubbornStop(target, number, reason, temp) {
+            return -1;
+        }
+
+        global func Step(state, frame, random) { return nil; }
+        "#;
+
+        let definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        for _ in 0..6 {
+            engine.tick().expect("tick succeeds");
+        }
+        assert_eq!(
+            engine.global_effects().len(),
+            1,
+            "the denied removal keeps the effect alive through repeated kills"
+        );
+        assert_eq!(engine.global_effects()[0].name, "Stubborn");
+        assert_eq!(
+            engine.global_effects()[0].timer,
+            6,
+            "iTime keeps advancing on the recovered effect"
+        );
+    }
+
+    #[test]
+    fn global_effect_kill_brackets_upper_effects_like_cpp() {
+        // C4Effect::Kill (C4Effect.cpp:365-405): the real removal is
+        // bracketed by temp-deactivating all upper effects
+        // (TempRemoveUpperEffects, :370-374 — Fx*Stop with fTemp) and
+        // reactivating them after the Stop (TempReaddUpperEffects, :404 —
+        // Fx*Start(C4FxCall_Temp)). Execute(nullptr) kills pass
+        // pObj=nullptr, so the GLOBAL list takes the same bracket.
+        let script = r#"
+        global func Initialize(state, random) {
+            AddEffect("Upper", nil, 200, 0);
+            AddEffect("Mute", nil, 150, 3);
+            return nil;
+        }
+
+        global func FxUpperStart(target, number, temp) { return 0; }
+        global func FxUpperStop(target, number, reason, temp) { return 0; }
+
+        global func Step(state, frame, random) { return nil; }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        for _ in 0..4 {
+            engine.tick().expect("tick succeeds");
+        }
+
+        let names: Vec<&str> = engine
+            .global_effects()
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Upper"],
+            "Mute dies at its timerless gate; the bracketed Upper survives"
+        );
+        let calls = call_log.lock().unwrap().clone();
+        let stop_calls = calls.iter().filter(|name| *name == "FxUpperStop").count();
+        let start_calls = calls.iter().filter(|name| *name == "FxUpperStart").count();
+        assert_eq!(
+            stop_calls, 1,
+            "Mute's kill temp-removes the upper effect (Fx*Stop fTemp)"
+        );
+        assert_eq!(
+            start_calls, 1,
+            "the upper effect reactivates after the kill (Fx*Start temp)"
         );
     }
 
