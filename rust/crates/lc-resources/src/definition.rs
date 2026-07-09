@@ -189,6 +189,8 @@ pub struct DefCore {
     pub mass: i32,
     pub picture: Option<PictureRect>,
     pub color_by_owner: bool,
+    /// Definition-default C4Object::BlitMode (DefCore `BlitMode`).
+    pub blit_mode: u32,
     pub shape: Option<PictureRect>,
     pub solid_mask: Option<TargetRect>,
     pub vertices: Vec<DefVertex>,
@@ -477,6 +479,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut object_mass: i32 = 0;
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
+    let blit_mode: u32 = 0;
     let mut shape: Option<PictureRect> = None;
     let mut shape_width: Option<i32> = None;
     let mut shape_height: Option<i32> = None;
@@ -783,6 +786,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         mass: object_mass,
         picture,
         color_by_owner,
+        blit_mode,
         shape: shape.or_else(|| {
             (shape_width.is_some() || shape_height.is_some() || shape_offset.is_some()).then(
                 || {

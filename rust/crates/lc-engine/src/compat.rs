@@ -119,6 +119,8 @@ pub(crate) struct DefinitionMetadata {
     /// DefCore `Name` (FnGetName's def form, C4Script.cpp:992-1005).
     pub name: String,
     pub category: i32,
+    /// DefCore `BlitMode`, used by SetObjectBlitMode(0).
+    pub blit_mode: u32,
     pub ocf_base: u32,
     pub crew_member: bool,
     /// ActMap for building nested object scopes (Find_Func targets).
@@ -13902,6 +13904,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
+                blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -14165,6 +14168,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
+                blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -15667,6 +15671,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
+                blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -21499,6 +21504,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 0x1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -21544,6 +21550,7 @@ func ProbeBadIndex(id) {
                 DefinitionMetadata {
                     name: String::new(),
                     category: 0x1,
+                    blit_mode: 0,
                     ocf_base: 0,
                     crew_member: false,
                     action_library: ActionLibrary::default(),
@@ -21567,6 +21574,7 @@ func ProbeBadIndex(id) {
                 DefinitionMetadata {
                     name: String::new(),
                     category: 0x2,
+                    blit_mode: 0,
                     ocf_base: 0,
                     crew_member: false,
                     action_library: ActionLibrary::default(),
@@ -21614,6 +21622,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 0x1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -21673,6 +21682,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 0x1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -21742,6 +21752,7 @@ func ProbeBadIndex(id) {
         let mut metadata = DefinitionMetadata {
             name: String::new(),
             category: 0,
+            blit_mode: 0,
             ocf_base: 0,
             crew_member: false,
             action_library: ActionLibrary::default(),
@@ -22165,6 +22176,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -22209,6 +22221,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -22269,6 +22282,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: 1,
+                blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -26463,6 +26477,7 @@ func ProbeBadIndex(id) {
             DefinitionMetadata {
                 name: String::new(),
                 category: crate::CATEGORY_STRUCTURE,
+                blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
@@ -26520,6 +26535,7 @@ func ProbeBadIndex(id) {
         let workshop_metadata = DefinitionMetadata {
             name: String::new(),
             category: crate::CATEGORY_STRUCTURE,
+            blit_mode: 0,
             ocf_base: ocf::NORMAL,
             crew_member: false,
             action_library: ActionLibrary::default(),

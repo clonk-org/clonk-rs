@@ -447,6 +447,7 @@ mod tests {
                 own_vertices: None,
                 container: None,
                 layer: None,
+                blit_mode: 0,
                 contents: Vec::new(),
                 components: HashMap::new(),
                 status: ObjectStatus::Normal,

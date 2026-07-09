@@ -2002,6 +2002,9 @@ pub struct ObjectState {
     pub container: Option<ObjectId>,
     #[serde(default)]
     pub layer: Option<ObjectId>,
+    /// C4Object::BlitMode, distinct from SetGraphics base/overlay modes.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub blit_mode: u32,
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
@@ -2193,6 +2196,7 @@ pub(crate) fn preview_spawn_state(
         vertices,
         container: None,
         layer: None,
+        blit_mode: 0,
         contents: Vec::new(),
         components: HashMap::new(),
         status: ObjectStatus::Normal,
@@ -2246,6 +2250,9 @@ impl ObjectState {
         }
         if let Some(layer) = delta.layer {
             self.layer = layer;
+        }
+        if let Some(blit_mode) = delta.blit_mode {
+            self.blit_mode = blit_mode;
         }
         let mut energy_died = false;
         if let Some(energy) = delta.energy {
@@ -2378,6 +2385,8 @@ struct ObjectDelta {
     custom_name: Option<Option<String>>,
     /// Some(Some(object)) sets C4Object::pLayer; Some(None) clears it.
     layer: Option<Option<ObjectId>>,
+    /// C4Object::BlitMode overwrite.
+    blit_mode: Option<u32>,
     portrait_source: Option<String>,
     solid_mask_override: Option<DefinitionTargetRect>,
     /// Script menu write-through (FnCreateMenu/FnCloseMenu et al.):
@@ -2440,6 +2449,9 @@ impl ObjectDelta {
         }
         if let Some(layer) = update.layer {
             self.layer = Some(layer);
+        }
+        if let Some(blit_mode) = update.blit_mode {
+            self.blit_mode = Some(blit_mode);
         }
         if let Some(position) = update.position {
             self.position = Some(position);
@@ -2558,6 +2570,7 @@ impl From<ObjectUpdate> for ObjectDelta {
         Self {
             custom_name: update.custom_name,
             layer: update.layer,
+            blit_mode: update.blit_mode,
             fixed_velocity_x: update.fixed_velocity_x,
             fixed_velocity_y: update.fixed_velocity_y,
             position: update.position,
@@ -2621,6 +2634,9 @@ pub struct ObjectUpdate {
         deserialize_with = "deserialize_double_option"
     )]
     pub layer: Option<Option<ObjectId>>,
+    /// C4Object::BlitMode overwrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blit_mode: Option<u32>,
     /// SetPortrait's source-definition update (Some = set).
     #[serde(default)]
     pub portrait_source: Option<String>,
@@ -2859,6 +2875,11 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_blit_mode(mut self, blit_mode: u32) -> Self {
+        self.blit_mode = Some(blit_mode);
+        self
+    }
+
     pub fn clear_container(mut self) -> Self {
         self.container = Some(None);
         self
@@ -2877,6 +2898,7 @@ impl ObjectUpdate {
     pub fn is_empty(&self) -> bool {
         self.custom_name.is_none()
             && self.layer.is_none()
+            && self.blit_mode.is_none()
             && self.position.is_none()
             && self.velocity.is_none()
             && self.fixed_velocity.is_none()
@@ -4158,6 +4180,7 @@ impl Object {
             own_vertices: self.own_shape_vertices.clone(),
             container: self.state.container,
             layer: self.state.layer,
+            blit_mode: self.state.blit_mode,
             contents: self.state.contents.clone(),
             components: self.state.components.clone(),
             status: self.state.status,
@@ -4622,6 +4645,9 @@ pub struct SpawnConfig {
     pub container: Option<ObjectId>,
     #[serde(default)]
     pub layer: Option<ObjectId>,
+    /// Saved C4Object::BlitMode. None uses the definition default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blit_mode: Option<u32>,
     #[serde(default)]
     pub alive: Option<bool>,
     #[serde(default)]
@@ -4700,6 +4726,7 @@ impl SpawnConfig {
             status: None,
             container: None,
             layer: None,
+            blit_mode: None,
             alive: None,
             category: None,
             in_liquid: None,
@@ -4880,6 +4907,11 @@ impl SpawnConfig {
         self.layer = Some(layer);
         self
     }
+
+    pub fn with_blit_mode(mut self, blit_mode: u32) -> Self {
+        self.blit_mode = Some(blit_mode);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4921,6 +4953,9 @@ pub struct ObjectSnapshot {
     /// C4Object::pLayer (Objects.txt `Layer=` / SetObjectLayer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer: Option<ObjectId>,
+    /// C4Object::BlitMode, including the C4GFXBLIT_CUSTOM marker.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub blit_mode: u32,
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
@@ -5508,6 +5543,8 @@ pub struct Definition {
     clonk_names: Option<String>,
     movement: MovementProfile,
     category: i32,
+    /// DefCore `BlitMode`, copied into C4Object::BlitMode at Init/reset.
+    blit_mode: u32,
     ocf_base: u32,
     value: i32,
     mass: i32,
@@ -5670,6 +5707,7 @@ impl Definition {
             clonk_names: None,
             movement: MovementProfile::default(),
             category: DEFAULT_CATEGORY,
+            blit_mode: 0,
             ocf_base: OCF_NORMAL,
             value: 0,
             mass: 0,
@@ -5793,6 +5831,7 @@ impl Definition {
 
         definition.set_crew_member(resource.core.crew_member);
         definition.set_category(resource.core.category);
+        definition.set_blit_mode(resource.core.blit_mode);
         definition.set_value(resource.core.value);
         definition.set_mass(resource.core.mass);
         definition.set_picture(resource.core.picture.map(DefinitionPicture::from));
@@ -6039,6 +6078,14 @@ impl Definition {
 
     pub fn set_category(&mut self, category: i32) {
         self.category = normalize_category(category, DEFAULT_CATEGORY);
+    }
+
+    pub fn blit_mode(&self) -> u32 {
+        self.blit_mode
+    }
+
+    pub fn set_blit_mode(&mut self, blit_mode: u32) {
+        self.blit_mode = blit_mode;
     }
 
     pub fn ocf_base(&self) -> u32 {
@@ -12113,6 +12160,7 @@ impl Engine {
                         DefinitionMetadata {
                             name: definition.name().to_string(),
                             category: definition.category(),
+                            blit_mode: definition.blit_mode(),
                             ocf_base: definition.ocf_base(),
                             crew_member: definition.is_crew(),
                             action_library: definition.action_library().clone(),
@@ -15520,6 +15568,7 @@ impl Engine {
         let ObjectUpdate {
             custom_name,
             layer,
+            blit_mode,
             position,
             velocity,
             fixed_velocity,
@@ -15593,6 +15642,9 @@ impl Engine {
             }
             if let Some(layer) = layer {
                 object.state.layer = layer;
+            }
+            if let Some(blit_mode) = blit_mode {
+                object.state.blit_mode = blit_mode;
             }
             if let Some(position) = position {
                 object.set_position(position);
@@ -16943,18 +16995,21 @@ impl Engine {
         let mut container_assignments = Vec::new();
         for persisted in &state.objects {
             let snapshot = &persisted.snapshot;
-            let shape_template = {
+            let (shape_template, definition_blit_mode) = {
                 let definition =
                     self.definitions
                         .get(&snapshot.definition_id)
                         .ok_or_else(|| {
                             EngineError::UnknownDefinition(snapshot.definition_id.clone())
                         })?;
-                ObjectShapeTemplate::new(
-                    definition.shape_vertices().to_vec(),
-                    definition.shape_rect(),
-                    definition.stretch_growth(),
-                    definition.rotateable(),
+                (
+                    ObjectShapeTemplate::new(
+                        definition.shape_vertices().to_vec(),
+                        definition.shape_rect(),
+                        definition.stretch_growth(),
+                        definition.rotateable(),
+                    ),
+                    definition.blit_mode(),
                 )
             };
             let mut object = Object::new(
@@ -16982,6 +17037,11 @@ impl Engine {
                     vertices: snapshot.vertices.clone(),
                     container: None,
                     layer: snapshot.layer,
+                    blit_mode: if snapshot.blit_mode == 0 {
+                        definition_blit_mode
+                    } else {
+                        snapshot.blit_mode
+                    },
                     contents: Vec::new(),
                     components: snapshot.components.clone(),
                     status: snapshot.status,
@@ -22612,6 +22672,7 @@ impl Engine {
     ) {
         definition.set_crew_member(core.crew_member);
         definition.set_category(core.category);
+        definition.set_blit_mode(core.blit_mode);
         definition.set_value(core.value);
         definition.set_mass(core.mass);
         definition.set_picture(core.picture.map(DefinitionPicture::from));
@@ -25641,6 +25702,7 @@ impl Engine {
             status,
             container,
             layer,
+            blit_mode,
             alive,
             category,
             in_liquid,
@@ -25666,6 +25728,7 @@ impl Engine {
             definition_stretch_growth,
             definition_rotateable,
             definition_line,
+            definition_blit_mode,
         ) = {
             let definition_ref = self
                 .definitions
@@ -25681,6 +25744,7 @@ impl Engine {
                 definition_ref.stretch_growth(),
                 definition_ref.rotateable(),
                 definition_ref.line(),
+                definition_ref.blit_mode(),
             )
         };
         let mut initial_action = match action {
@@ -25813,6 +25877,9 @@ impl Engine {
                 vertices: initial_vertices,
                 container: None,
                 layer,
+                blit_mode: blit_mode
+                    .filter(|mode| *mode != 0)
+                    .unwrap_or(definition_blit_mode),
                 contents: Vec::new(),
                 components: HashMap::new(),
                 status: status.unwrap_or_default(),
@@ -26669,6 +26736,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         vertices: snapshot.vertices.clone(),
         container: snapshot.container,
         layer: snapshot.layer,
+        blit_mode: snapshot.blit_mode,
         contents: snapshot.contents.clone(),
         components: snapshot.components.clone(),
         status: snapshot.status,
@@ -26720,6 +26788,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 DefinitionMetadata {
                     name: String::new(),
                     category: *category,
+                    blit_mode: 0,
                     ocf_base: OCF_NORMAL,
                     crew_member: false,
                     action_library: ActionLibrary::default(),
@@ -43574,6 +43643,56 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             serde_json::to_string(&ObjectUpdate::new().with_layer(layer)).expect("layer set encodes");
         let set: ObjectUpdate = serde_json::from_str(&set_json).expect("layer set decodes");
         assert_eq!(set.layer, Some(Some(layer)));
+    }
+
+    #[test]
+    fn object_update_blit_mode_round_trips() {
+        // C4Object::BlitMode is independent from SetGraphics' base/overlay
+        // modes and must survive queued-update serialization.
+        let encoded = serde_json::to_string(&ObjectUpdate::new().with_blit_mode(129))
+            .expect("blit mode update encodes");
+        let decoded: ObjectUpdate =
+            serde_json::from_str(&encoded).expect("blit mode update decodes");
+        assert_eq!(decoded.blit_mode, Some(129));
+    }
+
+    #[test]
+    fn object_blit_mode_survives_spawn_update_and_state_restore() {
+        let mut definition = build_definition();
+        definition.set_blit_mode(2);
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition.clone())
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test"))
+            .expect("object spawns");
+        assert_eq!(
+            engine.object_snapshot(id).expect("object exists").blit_mode,
+            2,
+            "fresh objects inherit the definition mode"
+        );
+
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_blit_mode(129))
+            .expect("blit mode update applies");
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("engine state encodes");
+        let state = EngineState::from_json_str(&encoded).expect("engine state decodes");
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(definition)
+            .expect("definition registers for restore");
+        restored.restore_state(&state).expect("state restores");
+        assert_eq!(
+            restored
+                .object_snapshot(id)
+                .expect("restored object exists")
+                .blit_mode,
+            129
+        );
     }
 
     #[test]
