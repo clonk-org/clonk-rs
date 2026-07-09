@@ -4608,6 +4608,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("BlastFree", blast_free);
     script.register_host_function("ShakeFree", shake_free);
     script.register_host_function("SetSkyParallax", set_sky_parallax);
+    script.register_host_function("SetGamma", set_gamma);
+    script.register_host_function("ResetGamma", reset_gamma);
     script.register_host_function("GBackSolid", g_back_solid);
     script.register_host_function("GBackSemiSolid", g_back_semi_solid);
     script.register_host_function("GBackLiquid", g_back_liquid);
@@ -11392,6 +11394,22 @@ fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
         });
         Ok(Value::Bool(true))
     })
+}
+
+/// FnSetGamma (C4Script.cpp:5004-5008) -> C4GraphicsSystem::SetGamma
+/// (C4GraphicsSystem.cpp:772-786): a display gamma ramp write — pure
+/// presentation (out-of-range ramp index silently ignored, DisableGamma
+/// config gate). Nothing sim-side reads the ramp back; the port only
+/// guarantees the call SUCCEEDS so the calling script continues. The
+/// renderer-side ramp is not modeled.
+fn set_gamma(_args: &[Value]) -> Result<Value, RuntimeError> {
+    Ok(Value::Nil)
+}
+
+/// FnResetGamma (C4Script.cpp:5010-5013): SetGamma with the default
+/// 0x000000/0x808080/0xffffff ramp — the same presentation no-op.
+fn reset_gamma(_args: &[Value]) -> Result<Value, RuntimeError> {
+    Ok(Value::Nil)
 }
 
 /// FnSetSkyParallax (C4Script.cpp:4955-4970): seven plain ints; nil and
@@ -19664,6 +19682,7 @@ mod tests {
         "Random",
         "RemoveEffect",
         "RemoveObject",
+        "ResetGamma",
         "ResetPhysical",
         "ScriptGo",
         "SelectMenuItem",
@@ -19684,6 +19703,7 @@ mod tests {
         "SetCursor",
         "SetDir",
         "SetEntrance",
+        "SetGamma",
         "SetGraphics",
         "SetGravity",
         "SetMass",
@@ -20694,6 +20714,27 @@ mod tests {
             }
             other => panic!("unexpected landscape operation: {:?}", other),
         }
+    }
+
+    #[test]
+    fn gamma_host_fns_succeed_as_presentation_no_ops() {
+        // FnSetGamma/FnResetGamma (C4Script.cpp:5004-5013) write a display
+        // gamma ramp (C4GraphicsSystem::SetGamma,
+        // C4GraphicsSystem.cpp:772-786) — nothing sim-side ever reads it
+        // back; the sim-observable contract is only that the calls SUCCEED
+        // so the calling Initialize continues (Tutorial06/07/10,
+        // ArcticOcean, Chasm, PolarNight call them).
+        let args = [
+            Value::Int(0x000000),
+            Value::Int(0x808080),
+            Value::Int(0xffffff),
+            Value::Int(4),
+        ];
+        assert_eq!(set_gamma(&args).expect("SetGamma succeeds"), Value::Nil);
+        assert_eq!(
+            reset_gamma(&[Value::Int(4)]).expect("ResetGamma succeeds"),
+            Value::Nil
+        );
     }
 
     #[test]
