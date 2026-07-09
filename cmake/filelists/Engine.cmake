@@ -2,6 +2,7 @@ set(FILE_LIST
 src/Bitmap256.cpp
 src/Bitmap256.h
 src/C4Action.cpp
+src/C4ActionCallbacks.h
 src/C4ActionDirection.h
 src/C4Application.cpp
 src/C4Application.h
@@ -273,6 +274,7 @@ src/C4Sky.cpp
 src/C4Sky.h
 src/C4SolidMask.cpp
 src/C4SolidMask.h
+src/C4SolidMaskBitmap.h
 src/C4SoundSystem.cpp
 src/C4SoundSystem.h
 src/C4Startup.cpp

@@ -6,7 +6,7 @@
 //! `parity/golden/parity_golden.json`. That golden is produced from the REAL
 //! engine code (`src/Fixed.h`, `src/Fixed.cpp`'s `SineTable`, `src/C4Random.h`,
 //! `src/C4ScriptKiller.h`, `src/C4LandscapePath.h`, and
-//! `src/C4ActionDirection.h`) by
+//! `src/C4ActionDirection.h`, and `src/C4SolidMaskBitmap.h`) by
 //! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
 //! the C++ oracle, not a Rust-vs-Rust regression.
 //!
@@ -29,10 +29,12 @@ use crate::math::{
 };
 use crate::rng::LcgRng;
 use crate::{
-    ActionSpec, ActionState, CommandDirection, Definition, Direction, Engine, PhysicalInfo,
+    ActionSpec, ActionState, CommandDirection, Definition, DefinitionRect, DefinitionSpriteImage,
+    DefinitionTargetRect, Direction, Engine, ObjectBaseGraphics, ObjectUpdate, PhysicalInfo,
     PhysicsSettings, PlayerConfig, SpawnConfig, CATEGORY_OBJECT, OWNER_NONE,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const GOLDEN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -155,6 +157,54 @@ fn action_direction_engine() -> (Engine, crate::ObjectId) {
                 .with_loaded(true),
         )
         .expect("oracle fixture spawns");
+    (engine, id)
+}
+
+fn solid_mask_sprite(alpha: u8) -> DefinitionSpriteImage {
+    const WIDTH: u32 = 220;
+    const HEIGHT: u32 = 87;
+    const SOURCE_X: usize = 219;
+    const SOURCE_Y: usize = 86;
+    let mut pixels = vec![0; (WIDTH * HEIGHT * 4) as usize];
+    pixels[(SOURCE_Y * WIDTH as usize + SOURCE_X) * 4 + 3] = alpha;
+    DefinitionSpriteImage {
+        width: WIDTH,
+        height: HEIGHT,
+        pixels: Arc::from(pixels.into_boxed_slice()),
+        color_mask: None,
+    }
+}
+
+fn solid_mask_graphics_engine() -> (Engine, crate::ObjectId) {
+    let mut definition =
+        Definition::from_script("CTWR", "Castle Tower", "#strict\n").expect("fixture compiles");
+    definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+    definition.set_solid_mask(Some(DefinitionTargetRect::new(219, 86, 1, 1, 0, 0)));
+    definition.set_sprite_image(Some(solid_mask_sprite(0)));
+    definition.set_sprite_variants(HashMap::from([("2".to_string(), solid_mask_sprite(255))]));
+
+    let mut engine = Engine::with_seed(7);
+    let grid = PixelGrid::new(
+        3,
+        3,
+        vec![0; 9],
+        vec![0, 100, 100],
+        vec![None, Some("Earth".into()), Some("Vehicle".into())],
+        vec![None; 3],
+    );
+    let mut landscape = Landscape::flat(3, 3);
+    landscape.set_pixel_grid(grid);
+    engine.set_landscape(landscape);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let id = engine
+        .spawn_object(
+            SpawnConfig::new("CTWR")
+                .with_position(crate::Vector2::new(1, 1))
+                .with_loaded(true),
+        )
+        .expect("tower spawns");
     (engine, id)
 }
 
@@ -802,7 +852,78 @@ func Trigger(object pOther) {
         );
     }
 
-    // 13. Movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 13. C4SolidMask constructor bitmap selection (C4SolidMask.cpp:400-412,
+    //     C4Object.cpp:5908-5923). Minimized from Goldrush frame 184, CTWR
+    //     #1351: source pixel (219,86) is transparent in Graphics.png but
+    //     opaque in Graphics2.png. SetGraphics selects Graphics2 and rebuilds
+    //     the put solid mask immediately.
+    {
+        let cases = golden["solid_mask_graphics"]
+            .as_array()
+            .expect("solid_mask_graphics is an array");
+        let (mut engine, id) = solid_mask_graphics_engine();
+        let vehicle = engine
+            .landscape()
+            .and_then(Landscape::grid_vehicle_byte)
+            .expect("vehicle material exists");
+
+        for (idx, case) in cases.iter().enumerate() {
+            if i(case, "selected_variant") != 0 {
+                let mut update = ObjectUpdate::new();
+                update.base_graphics = Some(Some(ObjectBaseGraphics {
+                    definition: "CTWR".to_string(),
+                    graphics_name: Some("2".to_string()),
+                    blit_mode: 0,
+                }));
+                engine
+                    .apply_object_update(id, update)
+                    .expect("SetGraphics update applies");
+            }
+
+            let object =
+                &engine.objects[engine.find_object_index(id).expect("tower object survives")];
+            let active_variant = object
+                .state
+                .base_graphics
+                .as_ref()
+                .and_then(|graphics| graphics.graphics_name.as_deref())
+                == Some("2");
+            expect_eq(
+                "solid_mask_graphics",
+                idx,
+                "active_variant",
+                i(case, "active_variant"),
+                i64::from(active_variant),
+            );
+            expect_eq(
+                "solid_mask_graphics",
+                idx,
+                "source_x",
+                i(case, "source_x"),
+                219,
+            );
+            expect_eq(
+                "solid_mask_graphics",
+                idx,
+                "source_y",
+                i(case, "source_y"),
+                86,
+            );
+            let mask_pixel = engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(1, 1))
+                .map_or(0, |pixel| if pixel == vehicle { 0xff } else { 0x00 });
+            expect_eq(
+                "solid_mask_graphics",
+                idx,
+                "mask_pixel",
+                i(case, "mask_pixel"),
+                mask_pixel,
+            );
+        }
+    }
+
+    // 14. Movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    fix_x += xdir; fix_y += (ydir += gravity); matching C4Movement.cpp.
     for scn in golden["movement"].as_array().unwrap() {
         let name = scn["name"].as_str().unwrap_or("?");

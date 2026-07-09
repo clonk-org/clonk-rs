@@ -4,8 +4,9 @@
 # Produces parity/golden/parity_golden.json from the REAL engine determinism
 # primitives (src/Fixed.h, src/Fixed.cpp SineTable, src/C4Random.h), the
 # production script-host helper (src/C4ScriptKiller.h), coarse landscape
-# traversal (src/C4LandscapePath.h), and action-direction decisions
-# (src/C4ActionDirection.h). The Rust side
+# traversal (src/C4LandscapePath.h), action-direction decisions
+# (src/C4ActionDirection.h), and active solid-mask bitmap sampling
+# (src/C4SolidMaskBitmap.h). The Rust side
 # (rust/crates/lc-engine/src/parity_differential.rs) diffs against the committed
 # JSON, so this script only needs to run when the C++ primitives or oracle
 # coverage change.
@@ -40,8 +41,9 @@ awk '
 ' "$src/Fixed.cpp" > "$gen/sine_table.cpp"
 
 # 3. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
-#    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h production helpers,
-#    and the generated header/table; then run it to produce the golden JSON.
+#    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
+#    C4SolidMaskBitmap.h production helpers, and the generated header/table;
+#    then run it to produce the golden JSON.
 cxx="${CXX:-clang++}"
 "$cxx" -std=c++20 -O0 \
   -I"$gen" -I"$src" \

@@ -7,7 +7,21 @@
 
 ## Current status
 
-- **Pinned live shadow matches through frame 183 (2026-07-09, seed 424242).**
+- **Pinned live shadow matches through frame 191 (2026-07-09, seed 424242).**
+  The frame-184 SNKE #571 wall was its left vertex contacting CTWR #1351's
+  alternate `Graphics2` solid mask. At mask source pixel `(219,86)`, the
+  default `Graphics.png` is transparent and `Graphics2.png` is opaque. C++
+  constructs `C4SolidMask` from `pForObject->GetGraphics()->GetBitmap()`;
+  Rust always decoded the owning definition's default sprite and keyed its
+  cache only by mask rect, so the snake missed `ContactLeft -> TurnRight`.
+  Rust now resolves mask alpha through `ObjectBaseGraphics` (source definition
+  plus named variant), separates variant cache entries, and immediately
+  removes/re-puts masks when `SetGraphics` changes. The production
+  `C4SolidMaskBitmap.h` differential freezes default=transparent versus
+  Graphics2=opaque, and a real script-host test covers cross-definition
+  selection and reset. The current live wall is **frame 192**: several animals
+  diverge together in Walk/Turn/Jump state; the first report is object 577,
+  Rust Jump/Right with velocity `(91750,-196608)` versus C++ Turn/Left at rest.
   The frame-170 WIPF #566 wall was `DFA_WALK`/`SetDir` ordering, not contact:
   Right steering changes raw xdir `-52430 -> -19662`, which still has a
   negative C4Fixed sign even though `fixtoi` rounds it to zero. C++ therefore
@@ -16,9 +30,7 @@
   rounded velocity and assigned direction directly. Rust now uses the raw
   sign, full SetDir/TurnAction + fixed-resync semantics, and the pre-transition
   phase source. The production `C4ActionDirection.h` oracle freezes the exact
-  result (Turn/Left, phase 1, time 0, fix_x 35435314). The current live wall is
-  **frame 184**, object 571: Rust Walk/Left and moving versus C++ Turn/Right and
-  resting, not yet localized.
+  result (Turn/Left, phase 1, time 0, fix_x 35435314).
   The preceding frame-157 animal mismatch was a downstream RNG symptom from
   frame 143: C++ saw the authoritative Water pixel at coarse cell `(52,24)`
   and consumed Water's `Random(10)`, while Rust consulted only its lossy column
