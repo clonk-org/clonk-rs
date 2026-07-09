@@ -22785,6 +22785,9 @@ impl Engine {
             // C++ resets (C4Object.cpp:3805-3807) have no persistent
             // counterpart here. OCF refreshes on the next tick's compute.
             object.upright_t_attach = 0;
+            // Menus never survive a Synchronize (CloseMenu(true),
+            // C4Object.cpp:3842).
+            object.state.menu = None;
         }
         self.rng = LcgRng::seed_from_u64(self.random_seed);
         self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
@@ -36359,6 +36362,42 @@ func Trigger() {
             engine.debug_object_menu(clonk.as_u64()),
             Some(None),
             "the exiting object's menu closes (C4Object.cpp:1555)"
+        );
+    }
+
+    #[test]
+    fn sync_clearance_closes_the_object_menu_like_cpp() {
+        // C4Object::SyncClearance (C4Object.cpp:3829-3850) force-closes any
+        // open menu among its no-save safeties (CloseMenu(true),
+        // C4Object.cpp:3842) — menus never survive a Synchronize.
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        engine
+            .call_object_function(idx, "OpenMenu", Vec::new())
+            .expect("OpenMenu succeeds");
+        assert!(engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .is_some());
+
+        engine.game_start_synchronize();
+        assert_eq!(
+            engine.debug_object_menu(clonk.as_u64()),
+            Some(None),
+            "SyncClearance closes menus (C4Object.cpp:3842)"
         );
     }
 
