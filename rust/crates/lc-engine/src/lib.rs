@@ -5565,6 +5565,10 @@ pub struct Definition {
     grab: i32,
     burn_turn_to: Option<String>,
     incomplete_activity: bool,
+    /// `Exclusive` DefCore flag (C4Def.cpp:313): OCF_Exclusive — no action
+    /// through this, no construction in front of it (SetOCF,
+    /// C4Object.cpp:581-583).
+    exclusive: bool,
     /// The [Physical] DefCore section (C4Def::Physical).
     physical: PhysicalInfo,
     /// Real C4Script content gets the C++ callback arguments — no parameters
@@ -5706,6 +5710,7 @@ impl Definition {
             no_burn_damage: false,
             burn_turn_to: None,
             incomplete_activity: false,
+            exclusive: false,
             physical: PhysicalInfo::default(),
             c4_callback_args: false,
             solid_mask_pixels: SolidMaskPixels::default(),
@@ -5873,6 +5878,7 @@ impl Definition {
             definition.set_components(components);
         }
         definition.set_line_connect(resource.core.line_connect);
+        definition.set_exclusive(resource.core.exclusive);
         Ok(definition)
     }
 
@@ -6105,6 +6111,10 @@ impl Definition {
         // construction site (SetOCF, C4Object.cpp:576-580)
         if self.rotateable > 0 && state.construction > 100 {
             ocf |= crate::ocf::ROTATE;
+        }
+        // OCF_Exclusive (SetOCF, C4Object.cpp:581-583)
+        if self.exclusive {
+            ocf |= crate::ocf::EXCLUSIVE;
         }
         // OCF_Grab: Grab DefCore value, never on StaticBack objects
         // (SetOCF, C4Object.cpp:553-555)
@@ -6534,6 +6544,14 @@ impl Definition {
 
     pub fn set_incomplete_activity(&mut self, enabled: bool) {
         self.incomplete_activity = enabled;
+    }
+
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive
+    }
+
+    pub fn set_exclusive(&mut self, exclusive: bool) {
+        self.exclusive = exclusive;
     }
 
     pub fn physical(&self) -> &PhysicalInfo {
@@ -47337,6 +47355,25 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         engine.objects[idx].state.alive = true;
         engine.refresh_object_ocf(idx);
         assert_ne!(engine.object_ocf_at_index(idx) & ocf::ALIVE, 0);
+    }
+
+    #[test]
+    fn ocf_exclusive_comes_from_the_def_flag() {
+        // OCF_Exclusive: no action through this, no construction in front
+        // of this — straight from Def->Exclusive (SetOCF,
+        // C4Object.cpp:581-583; DefCore "Exclusive", C4Def.cpp:313).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Gate");
+        definition.set_exclusive(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Gate").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::EXCLUSIVE, 0);
     }
 
     #[test]
