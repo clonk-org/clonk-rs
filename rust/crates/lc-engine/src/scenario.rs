@@ -3724,7 +3724,11 @@ fn derive_legacy_environment(
 
     let season_defaults = LegacyC4SVal::new(50, 50, 0, 100);
     let season_value = legacy_c4s_value(weather_entries, "startseason", season_defaults)?;
-    environment = environment.with_season(season_value.base().clamp(0, 100));
+    // C4Weather::Init assigns StartSeason.Evaluate() without an extra
+    // clamp (C4Weather.cpp:41); the C4SVal Min/Max also bound Execute's
+    // season wrap (:82-83).
+    environment.season = season_value.base();
+    environment = environment.with_season_bounds(season_value.min, season_value.max);
 
     let year_defaults = LegacyC4SVal::new(50, 0, 0, 100);
     let year_speed = legacy_c4s_value(weather_entries, "yearspeed", year_defaults)?.base();

@@ -4641,6 +4641,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("BlastFree", blast_free);
     script.register_host_function("BlastObject", blast_object);
     script.register_host_function("ShakeFree", shake_free);
+    script.register_host_function("SetSkyParallax", set_sky_parallax);
+    script.register_host_function("SetSkyAdjust", set_sky_adjust);
+    script.register_host_function("SetGamma", set_gamma);
+    script.register_host_function("ResetGamma", reset_gamma);
     script.register_host_function("GBackSolid", g_back_solid);
     script.register_host_function("GBackSemiSolid", g_back_semi_solid);
     script.register_host_function("GBackLiquid", g_back_liquid);
@@ -4793,6 +4797,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetTemperature", get_temperature);
     script.register_host_function("SetClimate", set_climate);
     script.register_host_function("GetClimate", get_climate);
+    script.register_host_function("SetSeason", set_season);
+    script.register_host_function("GetSeason", get_season);
     script.register_host_function("Sound", sound);
     script.register_host_function("SoundLevel", sound_level);
 }
@@ -6170,11 +6176,15 @@ pub(crate) struct EnvironmentDelta {
     pub wind: Option<i32>,
     pub temperature: Option<i32>,
     pub climate: Option<i32>,
+    pub season: Option<i32>,
 }
 
 impl EnvironmentDelta {
     pub(crate) fn is_empty(&self) -> bool {
-        self.wind.is_none() && self.temperature.is_none() && self.climate.is_none()
+        self.wind.is_none()
+            && self.temperature.is_none()
+            && self.climate.is_none()
+            && self.season.is_none()
     }
 
     pub fn apply(&self, environment: &mut EnvironmentSettings) {
@@ -6186,6 +6196,10 @@ impl EnvironmentDelta {
         }
         if let Some(climate) = self.climate {
             environment.climate = climate.clamp(-50, 50);
+        }
+        if let Some(season) = self.season {
+            // C4Weather::SetSeason (C4Weather.cpp:229-233): BoundBy 0..100.
+            environment.season = season.clamp(0, 100);
         }
     }
 }
@@ -6236,6 +6250,19 @@ impl EnvironmentContext {
 
     fn climate(&self) -> i32 {
         self.settings.borrow().climate
+    }
+
+    /// C4Weather::SetSeason (C4Weather.cpp:229-233): BoundBy(iSeason, 0,
+    /// 100); the SetSeasonGamma refresh is a derived presentation getter
+    /// on the Rust side.
+    fn set_season(&self, season: i32) {
+        let clamped = season.clamp(0, 100);
+        self.settings.borrow_mut().season = clamped;
+        self.pending.borrow_mut().season = Some(clamped);
+    }
+
+    fn season(&self) -> i32 {
+        self.settings.borrow().season
     }
 
     fn into_delta(self) -> EnvironmentDelta {
@@ -6438,6 +6465,21 @@ pub(crate) enum LandscapeOperation {
         material: i32,
         position: Vector2,
         amount: i32,
+    },
+    /// FnSetSkyAdjust (C4Script.cpp:4626-4630) -> C4Sky::SetModulation
+    /// (C4Sky.cpp:238-244).
+    SkyAdjust { modulation: u32, back_color: u32 },
+    /// FnSetSkyParallax (C4Script.cpp:4955-4970) — Sky is a C4Landscape
+    /// member; the raw int args carry the SkyPar_KEEP magic through to
+    /// `SkyState::apply_parallax`.
+    SkyParallax {
+        mode: i32,
+        par_x: i32,
+        par_y: i32,
+        xdir: i32,
+        ydir: i32,
+        x: i32,
+        y: i32,
     },
 }
 
@@ -8490,6 +8532,50 @@ fn get_climate(args: &[Value]) -> Result<Value, RuntimeError> {
             .ok_or_else(|| RuntimeError::new("GetClimate requires an active engine context"))?
             .clone();
         Ok(Value::Int(context.climate()))
+    })
+}
+
+/// FnSetSeason (C4Script.cpp:3025-3028) -> C4Weather::SetSeason.
+fn set_season(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new("SetSeason expects 1 argument: season"));
+    }
+
+    let season = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetSeason: expected int or nil for season, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("SetSeason requires an active engine context"))?
+            .clone();
+        context.set_season(season);
+        Ok(Value::Nil)
+    })
+}
+
+/// FnGetSeason (C4Script.cpp:3030-3033) -> C4Weather::GetSeason.
+fn get_season(args: &[Value]) -> Result<Value, RuntimeError> {
+    if !args.is_empty() {
+        return Err(RuntimeError::new("GetSeason does not accept any arguments"));
+    }
+
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("GetSeason requires an active engine context"))?
+            .clone();
+        Ok(Value::Int(context.season()))
     })
 }
 
@@ -11638,6 +11724,78 @@ fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
             radius,
         });
         Ok(Value::Bool(true))
+    })
+}
+
+/// FnSetGamma (C4Script.cpp:5004-5008) -> C4GraphicsSystem::SetGamma
+/// (C4GraphicsSystem.cpp:772-786): a display gamma ramp write — pure
+/// presentation (out-of-range ramp index silently ignored, DisableGamma
+/// config gate). Nothing sim-side reads the ramp back; the port only
+/// guarantees the call SUCCEEDS so the calling script continues. The
+/// renderer-side ramp is not modeled.
+fn set_gamma(_args: &[Value]) -> Result<Value, RuntimeError> {
+    Ok(Value::Nil)
+}
+
+/// FnResetGamma (C4Script.cpp:5010-5013): SetGamma with the default
+/// 0x000000/0x808080/0xffffff ramp — the same presentation no-op.
+fn reset_gamma(_args: &[Value]) -> Result<Value, RuntimeError> {
+    Ok(Value::Nil)
+}
+
+/// FnSetSkyAdjust (C4Script.cpp:4626-4630) -> C4Sky::SetModulation: sky
+/// blit modulation plus the alpha-gated background fill color.
+fn set_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
+    let modulation =
+        value_to_i32(args.first().unwrap_or(&Value::Nil), "SetSkyAdjust", "adjust")? as u32;
+    let back_color = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetSkyAdjust",
+        "back color",
+    )? as u32;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetSkyAdjust requires an active engine context"))?;
+        context.register_landscape_operation(LandscapeOperation::SkyAdjust {
+            modulation,
+            back_color,
+        });
+        Ok(Value::Nil)
+    })
+}
+
+/// FnSetSkyParallax (C4Script.cpp:4955-4970): seven plain ints; nil and
+/// missing args are 0 at the C4Aul boundary (zeroing the scroll slots) —
+/// only the explicit SkyPar_KEEP magic preserves a slot.
+fn set_sky_parallax(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut slots = [0i32; 7];
+    for (index, slot) in slots.iter_mut().enumerate() {
+        *slot = value_to_i32(
+            args.get(index).unwrap_or(&Value::Nil),
+            "SetSkyParallax",
+            "parameter",
+        )?;
+    }
+    let [mode, par_x, par_y, xdir, ydir, x, y] = slots;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("SetSkyParallax requires an active engine context")
+        })?;
+        context.register_landscape_operation(LandscapeOperation::SkyParallax {
+            mode,
+            par_x,
+            par_y,
+            xdir,
+            ydir,
+            x,
+            y,
+        });
+        Ok(Value::Nil)
     })
 }
 
@@ -19900,6 +20058,7 @@ mod tests {
         "GetRDir",
         "GetScenarioVal",
         "GetScore",
+        "GetSeason",
         "GetSelectCount",
         "GetTemperature",
         "GetType",
@@ -19948,6 +20107,7 @@ mod tests {
         "Random",
         "RemoveEffect",
         "RemoveObject",
+        "ResetGamma",
         "ResetPhysical",
         "ScriptGo",
         "SelectMenuItem",
@@ -19968,6 +20128,7 @@ mod tests {
         "SetCursor",
         "SetDir",
         "SetEntrance",
+        "SetGamma",
         "SetGraphics",
         "SetGravity",
         "SetKiller",
@@ -19986,7 +20147,10 @@ mod tests {
         "SetPosition",
         "SetR",
         "SetRDir",
+        "SetSeason",
         "SetShape",
+        "SetSkyAdjust",
+        "SetSkyParallax",
         "SetSolidMask",
         "SetTemperature",
         "SetTransferZone",
@@ -20978,6 +21142,54 @@ mod tests {
             LandscapeOperation::ShakeCircle { center, radius } => {
                 assert_eq!(*center, Vector2::new(30, 40));
                 assert_eq!(*radius, 5);
+            }
+            other => panic!("unexpected landscape operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn gamma_host_fns_succeed_as_presentation_no_ops() {
+        // FnSetGamma/FnResetGamma (C4Script.cpp:5004-5013) write a display
+        // gamma ramp (C4GraphicsSystem::SetGamma,
+        // C4GraphicsSystem.cpp:772-786) — nothing sim-side ever reads it
+        // back; the sim-observable contract is only that the calls SUCCEED
+        // so the calling Initialize continues (Tutorial06/07/10,
+        // ArcticOcean, Chasm, PolarNight call them).
+        let args = [
+            Value::Int(0x000000),
+            Value::Int(0x808080),
+            Value::Int(0xffffff),
+            Value::Int(4),
+        ];
+        assert_eq!(set_gamma(&args).expect("SetGamma succeeds"), Value::Nil);
+        assert_eq!(
+            reset_gamma(&[Value::Int(4)]).expect("ResetGamma succeeds"),
+            Value::Nil
+        );
+    }
+
+    #[test]
+    fn set_sky_parallax_registers_operation_with_keep_defaults() {
+        // FnSetSkyParallax (C4Script.cpp:4955-4970): all seven ints pass
+        // through; missing/nil args are 0 at the C4Aul boundary (which
+        // ZEROES the scroll slots — only the explicit SkyPar_KEEP magic
+        // preserves them).
+        let args = [Value::Int(1), Value::Int(20), Value::Int(20)];
+        let (result, outcome) = with_object_host_context(|| set_sky_parallax(&args));
+        assert_eq!(result.expect("SetSkyParallax succeeds"), Value::Nil);
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::SkyParallax {
+                mode,
+                par_x,
+                par_y,
+                xdir,
+                ydir,
+                x,
+                y,
+            } => {
+                assert_eq!((*mode, *par_x, *par_y), (1, 20, 20));
+                assert_eq!((*xdir, *ydir, *x, *y), (0, 0, 0, 0));
             }
             other => panic!("unexpected landscape operation: {:?}", other),
         }
@@ -22672,6 +22884,21 @@ func ProbeBadIndex(id) {
         let value = result.expect("SetClimate/GetClimate succeeds");
         assert_eq!(value, Value::Int(-50));
         assert_eq!(delta.climate, Some(-50));
+    }
+
+    #[test]
+    fn set_season_clamps_and_updates() {
+        // FnSetSeason/FnGetSeason (C4Script.cpp:3025-3033, registered
+        // :6894-6895) -> C4Weather::SetSeason/GetSeason: BoundBy(iSeason,
+        // 0, 100) (C4Weather.cpp:229-238).
+        let (result, delta) = with_environment_context(EnvironmentSettings::new(0), 0, || {
+            set_season(&[Value::Int(120)])?;
+            get_season(&[])
+        });
+
+        let value = result.expect("SetSeason/GetSeason succeeds");
+        assert_eq!(value, Value::Int(100));
+        assert_eq!(delta.season, Some(100));
     }
 
     #[test]
