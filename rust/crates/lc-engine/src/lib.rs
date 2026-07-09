@@ -4289,6 +4289,15 @@ impl Object {
             .map(|index| self.state.effects.remove(index))
     }
 
+    /// Remove THE effect (by its C++ identity, iNumber — names may repeat).
+    fn remove_effect_by_number(&mut self, number: i32) -> Option<EffectState> {
+        self.state
+            .effects
+            .iter()
+            .position(|existing| existing.number == number)
+            .map(|index| self.state.effects.remove(index))
+    }
+
     fn drain_effects_with_reason(&mut self, reason: EffectStopReason) -> Vec<EffectEvent> {
         self.state
             .effects
@@ -8072,15 +8081,17 @@ impl Definition {
         )
     }
 
-    /// `Fx<Name>Effect` check call (C4Effect.cpp:178): the checker effect is
-    /// asked about a pending new effect by name.
+    /// `Fx<Name>Effect` check call (C4Effect.cpp:280-282): the checker
+    /// effect is asked about a pending new effect — the callback receives
+    /// the new name plus the AddEffect rVal1-4 (C++ passes them at
+    /// positions 5-8; the deferred convention appends them after the name).
     #[allow(clippy::too_many_arguments)]
     fn call_effect_effect(
         &self,
         state: &ObjectState,
         object_id: ObjectId,
         checker: &EffectState,
-        pending: &str,
+        pending: &EffectState,
         rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
@@ -8090,13 +8101,24 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        let mut extras = vec![Value::String(pending.name.clone())];
+        // rVal1-4 (C4Effect.cpp:282): always four slots, missing = nil.
+        for index in 0..4 {
+            extras.push(
+                pending
+                    .vars()
+                    .get(index)
+                    .map(compat::effect_var_to_value)
+                    .unwrap_or(Value::Nil),
+            );
+        }
         self.dispatch_effect_callback(
             state,
             object_id,
             checker,
             "Effect",
             "FxEffect",
-            vec![Value::String(pending.to_string())],
+            extras,
             rng,
             global_effects,
             physics,
@@ -8108,15 +8130,16 @@ impl Definition {
         )
     }
 
+    /// `Fx<Name>Add` merge seam (DoCall PSFS_FxAdd, C4Effect.cpp:300-301):
+    /// the ACCEPTOR effect receives the annulled new effect's name, timer
+    /// interval and the first four AddEffect parameters.
     #[allow(clippy::too_many_arguments)]
-    fn dispatch_effect_callback_3(
+    fn call_effect_add(
         &self,
         state: &ObjectState,
         object_id: ObjectId,
-        effect: &EffectState,
-        event: &'static str,
-        function_label: &'static str,
-        extras: Vec<Value>,
+        acceptor: &EffectState,
+        pending: &EffectState,
         rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
@@ -8125,13 +8148,27 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        let mut extras = vec![
+            Value::String(pending.name.clone()),
+            Value::Int(pending.interval),
+        ];
+        // rVal1-4 (C4Effect.cpp:301): always four slots, missing = nil.
+        for index in 0..4 {
+            extras.push(
+                pending
+                    .vars()
+                    .get(index)
+                    .map(compat::effect_var_to_value)
+                    .unwrap_or(Value::Nil),
+            );
+        }
         self.dispatch_effect_callback(
             state,
             object_id,
-            effect,
-            event,
-            function_label,
+            acceptor,
+            "Add",
+            "FxAdd",
             extras,
             rng,
             global_effects,
@@ -8142,7 +8179,6 @@ impl Definition {
             game_over_triggered,
             audio,
         )
-        .map(|(outcome, audio, rng, _)| (outcome, audio, rng))
     }
 
     fn call_effect_stop(
@@ -8159,14 +8195,55 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
-        self.dispatch_effect_callback_3(
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        let mut extras = vec![effect_stop_reason_value(reason)];
+        if matches!(reason, EffectStopReason::Temp) {
+            // fTemp = true (TempRemoveUpperEffects, C4Effect.cpp:489).
+            extras.push(Value::Bool(true));
+        }
+        self.dispatch_effect_callback(
             state,
             object_id,
             effect,
             "Stop",
             "FxStop",
-            vec![effect_stop_reason_value(reason)],
+            extras,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+        )
+    }
+
+    /// Reactivate a temp-removed effect (TempReaddUpperEffects,
+    /// C4Effect.cpp:505): Fx*Start with iTemp = C4FxCall_Temp
+    /// (C4Effects.h:47); the result is ignored like C++.
+    #[allow(clippy::too_many_arguments)]
+    fn call_effect_temp_readd(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        effect: &EffectState,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        self.dispatch_effect_callback(
+            state,
+            object_id,
+            effect,
+            "Start",
+            "FxStart",
+            vec![Value::Int(1)],
             rng,
             global_effects,
             physics,
@@ -16963,8 +17040,20 @@ impl Engine {
         let mut pending_other_objects = Vec::new();
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
-        let mut checked_started: HashSet<String> = HashSet::new();
-        let mut denied_started: HashSet<String> = HashSet::new();
+        // Pending-effect bookkeeping is keyed by the effect NUMBER — the
+        // C++ identity (C4Effect.cpp:76-78); names may repeat.
+        let mut checked_started: HashSet<i32> = HashSet::new();
+        let mut denied_started: HashSet<i32> = HashSet::new();
+        // C4Fx_Effect_Annul/AnnulCalls (C4Effect.cpp:287-291): pending
+        // number -> (acceptor number, AnnulCalls temp-call request). The
+        // LAST checker answering -2/-3 wins the merge.
+        let mut annulled_started: HashMap<i32, (i32, bool)> = HashMap::new();
+        // Anchors whose temp remove/readd bracket was already queued (a
+        // re-popped anchor event must not expand again). Start and stop
+        // anchors are tracked separately: numbers can be reused within one
+        // run after a removal (max existing + 1, C4Effect.cpp:76-78).
+        let mut temp_wrapped_started: HashSet<i32> = HashSet::new();
+        let mut temp_wrapped_stopped: HashSet<i32> = HashSet::new();
 
         while let Some(event) = queue.pop_front() {
             // C4Effect::Check (C4Effect.cpp:97-116): before a new effect
@@ -16978,22 +17067,26 @@ impl Engine {
                 if event.effect.start_dispatched {
                     continue;
                 }
-                if denied_started.remove(&event.effect.name) {
+                if denied_started.remove(&event.effect.number) {
                     continue;
                 }
-                if event.effect.priority != 1 && !checked_started.contains(&event.effect.name) {
-                    checked_started.insert(event.effect.name.clone());
+                if event.effect.priority != 1 && !checked_started.contains(&event.effect.number) {
+                    checked_started.insert(event.effect.number);
+                    // C4Effect::Check (C4Effect.cpp:278-282): every OTHER
+                    // effect with iPriority >= the new priority is asked —
+                    // the walk starts at the new effect's pNext, so only
+                    // the effect itself is excluded, never same-name peers.
                     let checkers: Vec<EffectState> = state_snapshot
                         .effects
                         .iter()
                         .filter(|existing| {
-                            existing.name != event.effect.name
+                            existing.number != event.effect.number
                                 && existing.priority >= event.effect.priority
                         })
                         .cloned()
                         .collect();
                     if !checkers.is_empty() {
-                        let pending = event.effect.name.clone();
+                        let pending = event.effect.clone();
                         queue.push_front(event);
                         for checker in checkers.into_iter().rev() {
                             queue.push_front(EffectEvent::check(checker, pending.clone()));
@@ -17001,21 +17094,116 @@ impl Engine {
                         continue;
                     }
                 }
+                if let Some((acceptor_number, do_temp_calls)) =
+                    annulled_started.remove(&event.effect.number)
+                {
+                    // Add-to-other-effect (C4Effect.cpp:295-313): the new
+                    // effect stays dead — no Start, no Stop — and the
+                    // acceptor's Fx*Add merges its parameters.
+                    object.remove_effect_by_number(event.effect.number);
+                    state_snapshot.effects = object.state.effects.clone();
+                    if let Some(acceptor) = object
+                        .state
+                        .effects
+                        .iter()
+                        .find(|existing| existing.number == acceptor_number)
+                        .cloned()
+                    {
+                        // AnnulCalls (C4Fx_Effect_AnnulCalls,
+                        // C4Effects.h:38): the Add runs inside a temp
+                        // remove/readd bracket of the effects above the
+                        // ACCEPTOR (C4Effect.cpp:297-304).
+                        let uppers = do_temp_calls
+                            .then(|| upper_effects_of(&object.state.effects, &acceptor))
+                            .unwrap_or_default();
+                        let mut sequence: Vec<EffectEvent> = uppers
+                            .iter()
+                            .rev()
+                            .cloned()
+                            .map(EffectEvent::temp_removed)
+                            .collect();
+                        sequence.push(EffectEvent::add_to(acceptor, event.effect.clone()));
+                        sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
+                        for queued in sequence.into_iter().rev() {
+                            queue.push_front(queued);
+                        }
+                    }
+                    continue;
+                }
+                // C4Effect ctor (C4Effect.cpp:118-133): a validating
+                // Fx*Start is bracketed by temp-deactivating all upper
+                // effects (high to low) and reactivating them afterwards
+                // (low to high) — only when the new effect HAS an Fx*Start
+                // and is not priority 1 (`fRemoveUpper && pNext &&
+                // pFnStart`, C4Effect.cpp:123). The bracket runs even when
+                // the Start then denies (C4Effect.cpp:128-133).
+                if event.effect.priority != 1
+                    && !temp_wrapped_started.contains(&event.effect.number)
+                {
+                    let has_start = resolve_effect_dispatch_definition(
+                        &event.effect,
+                        &world,
+                        definitions,
+                        definition,
+                    )
+                    .has_effect_callback(&event.effect.name, "Start");
+                    if has_start {
+                        let uppers = upper_effects_of(&object.state.effects, &event.effect);
+                        if !uppers.is_empty() {
+                            temp_wrapped_started.insert(event.effect.number);
+                            let mut sequence: Vec<EffectEvent> = uppers
+                                .iter()
+                                .rev()
+                                .cloned()
+                                .map(EffectEvent::temp_removed)
+                                .collect();
+                            sequence.push(event);
+                            sequence
+                                .extend(uppers.into_iter().map(EffectEvent::temp_readded));
+                            for queued in sequence.into_iter().rev() {
+                                queue.push_front(queued);
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            // C4Effect::Kill (C4Effect.cpp:365-405): the real removal is
+            // bracketed by temp-deactivating all upper effects
+            // (C4Effect.cpp:370-374) and reactivating them after the Stop
+            // (C4Effect.cpp:404). Clear/destroy removals go through
+            // ClearAll, which does NO temp calls (C4Effect.cpp:407-425);
+            // priority-1 victims skip the bracket (C4Effect.cpp:477).
+            if matches!(
+                event.kind,
+                EffectEventKind::Stopped(EffectStopReason::Removed)
+            ) && event.effect.priority != 1
+                && !temp_wrapped_stopped.contains(&event.effect.number)
+            {
+                let uppers = upper_effects_of(&object.state.effects, &event.effect);
+                if !uppers.is_empty() {
+                    temp_wrapped_stopped.insert(event.effect.number);
+                    let mut sequence: Vec<EffectEvent> = uppers
+                        .iter()
+                        .rev()
+                        .cloned()
+                        .map(EffectEvent::temp_removed)
+                        .collect();
+                    sequence.push(event);
+                    sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
+                    for queued in sequence.into_iter().rev() {
+                        queue.push_front(queued);
+                    }
+                    continue;
+                }
             }
             let snapshot_for_call = state_snapshot.clone();
-            // C4Effect::GetCallbackScript: the command target object's def
-            // script, else the idCommandTarget def script, else the host
-            // object's script (the C++ global script engine is unmodeled).
-            let dispatch_definition = event
-                .effect
-                .command_target
-                .and_then(|target| world.get(ObjectId::new(target as u64)))
-                .map(|target| target.definition_id().to_string())
-                .or_else(|| event.effect.command_id.clone())
-                .and_then(|def_id| definitions.get(&def_id))
-                .unwrap_or(definition);
+            let dispatch_definition =
+                resolve_effect_dispatch_definition(&event.effect, &world, definitions, definition);
             let mut timer_kill = false;
             let mut start_denied = false;
+            let mut stop_denied = false;
+            let mut add_denied = false;
             // C++ runs Fx* callbacks with fPassErrors=false: a script
             // error logs and the game continues (the erroring callback
             // yields nil). RNG/audio are restored from the pre-call
@@ -17078,20 +17266,31 @@ impl Engine {
                         };
                         (outcome, audio_state, new_rng)
                     }),
-                EffectEventKind::Stopped(reason) => dispatch_definition.call_effect_stop(
-                    &snapshot_for_call,
-                    object_id,
-                    &event.effect,
-                    reason,
-                    rng,
-                    &global_view,
-                    current_physics,
-                    current_environment,
-                    frame,
-                    world.clone(),
-                    game_over_triggered,
-                    current_audio,
-                ),
+                EffectEventKind::Stopped(reason) => dispatch_definition
+                    .call_effect_stop(
+                        &snapshot_for_call,
+                        object_id,
+                        &event.effect,
+                        reason,
+                        rng,
+                        &global_view,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, stop_result)| {
+                        // C4Fx_Stop_Deny (-1, C4Effects.h:42): the effect
+                        // refuses its removal and recovers
+                        // (C4Effect.cpp:389-396). Clear/destroy-driven
+                        // removals delete regardless — C++ ClearAll runs on
+                        // objects that are going away (C4Object.cpp:262).
+                        stop_denied = matches!(reason, EffectStopReason::Removed)
+                            && matches!(stop_result, Some(Value::Int(-1)));
+                        (outcome, audio_state, new_rng)
+                    }),
                 EffectEventKind::Check { ref pending } => dispatch_definition
                     .call_effect_effect(
                         &snapshot_for_call,
@@ -17108,15 +17307,99 @@ impl Engine {
                         current_audio,
                     )
                     .map(|(outcome, audio_state, new_rng, check_result)| {
-                        // C4Fx_Effect_Deny (-1, C4Effects.h:36) blocks the
-                        // new effect entirely. Annul/AnnulCalls (-2/-3) —
-                        // the add-to-other-effect FxAdd path — are still
-                        // open and currently let the effect proceed.
-                        if matches!(check_result, Some(Value::Int(-1))) {
-                            denied_started.insert(pending.clone());
-                            object.remove_effect(pending);
-                            state_snapshot.effects = object.state.effects.clone();
+                        match check_result {
+                            // C4Fx_Effect_Deny (-1, C4Effects.h:36) blocks
+                            // the new effect entirely.
+                            Some(Value::Int(-1)) => {
+                                denied_started.insert(pending.number);
+                                annulled_started.remove(&pending.number);
+                                object.remove_effect_by_number(pending.number);
+                                state_snapshot.effects = object.state.effects.clone();
+                                // The deny returns immediately from the
+                                // checker walk (C4Effect.cpp:283-285) —
+                                // checkers later in the chain are never
+                                // asked.
+                                queue.retain(|queued| match &queued.kind {
+                                    EffectEventKind::Check { pending: queued_pending } => {
+                                        queued_pending.number != pending.number
+                                    }
+                                    _ => true,
+                                });
+                            }
+                            // C4Fx_Effect_Annul/AnnulCalls (-2/-3,
+                            // C4Effects.h:37-38): this checker accepts the
+                            // new effect; the walk continues and the LAST
+                            // acceptor wins (C4Effect.cpp:287-291).
+                            Some(Value::Int(-2)) => {
+                                annulled_started
+                                    .insert(pending.number, (event.effect.number, false));
+                            }
+                            Some(Value::Int(-3)) => {
+                                annulled_started
+                                    .insert(pending.number, (event.effect.number, true));
+                            }
+                            _ => {}
                         }
+                        (outcome, audio_state, new_rng)
+                    }),
+                EffectEventKind::AddTo { ref pending } => dispatch_definition
+                    .call_effect_add(
+                        &snapshot_for_call,
+                        object_id,
+                        &event.effect,
+                        pending,
+                        rng,
+                        &global_view,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, add_result)| {
+                        // C4Fx_Start_Deny from Fx*Add kills the ACCEPTOR
+                        // (C4Effect.cpp:306-309).
+                        add_denied = matches!(add_result, Some(Value::Int(-1)));
+                        (outcome, audio_state, new_rng)
+                    }),
+                EffectEventKind::TempRemoved => dispatch_definition
+                    .call_effect_stop(
+                        &snapshot_for_call,
+                        object_id,
+                        &event.effect,
+                        EffectStopReason::Temp,
+                        rng,
+                        &global_view,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, _temp_result)| {
+                        // The temp stop's result is ignored
+                        // (C4Effect.cpp:489 does not check it).
+                        (outcome, audio_state, new_rng)
+                    }),
+                EffectEventKind::TempReadded => dispatch_definition
+                    .call_effect_temp_readd(
+                        &snapshot_for_call,
+                        object_id,
+                        &event.effect,
+                        rng,
+                        &global_view,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, _temp_result)| {
+                        // The temp readd's result is ignored
+                        // (C4Effect.cpp:505 does not check it).
                         (outcome, audio_state, new_rng)
                     }),
             };
@@ -17142,13 +17425,30 @@ impl Engine {
             rng = new_rng;
             current_audio = audio_state;
             if timer_kill {
-                if let Some(removed) = object.remove_effect(&event.effect.name) {
+                // C4Effect::Execute kills THE elapsed effect (pEffect
+                // itself, C4Effect.cpp:342-357), not a same-name peer.
+                if let Some(removed) = object.remove_effect_by_number(event.effect.number) {
                     queue.push_back(EffectEvent::stopped(removed, EffectStopReason::Removed));
                 }
                 state_snapshot.effects = object.state.effects.clone();
             }
             if start_denied {
-                object.remove_effect(&event.effect.name);
+                object.remove_effect_by_number(event.effect.number);
+                state_snapshot.effects = object.state.effects.clone();
+            }
+            if stop_denied {
+                // Recover the refused effect at its priority position. C++
+                // restores the exact list node; the sorted reinsert may
+                // reorder equal-priority peers (documented divergence).
+                object.insert_effect(event.effect.clone());
+                state_snapshot.effects = object.state.effects.clone();
+            }
+            if add_denied {
+                // pAddToEffect->Kill (C4Effect.cpp:308): a full Kill with
+                // the acceptor's own Stop callback.
+                if let Some(removed) = object.remove_effect_by_number(event.effect.number) {
+                    queue.push_back(EffectEvent::stopped(removed, EffectStopReason::Removed));
+                }
                 state_snapshot.effects = object.state.effects.clone();
             }
 
@@ -26580,14 +26880,52 @@ fn parse_scenario_command(
     }
 }
 
+/// C4Effect::GetCallbackScript (C4Effect.cpp:42-57): Fx* callbacks resolve
+/// against the command target object's def script, else the idCommandTarget
+/// def script, else the host object's script (the C++ global script engine
+/// is unmodeled).
+fn resolve_effect_dispatch_definition<'a>(
+    effect: &EffectState,
+    world: &HostWorldContext,
+    definitions: &'a HashMap<DefinitionId, Definition>,
+    fallback: &'a Definition,
+) -> &'a Definition {
+    effect
+        .command_target
+        .and_then(|target| world.get(ObjectId::new(target as u64)))
+        .map(|target| target.definition_id().to_string())
+        .or_else(|| effect.command_id.clone())
+        .and_then(|def_id| definitions.get(&def_id))
+        .unwrap_or(fallback)
+}
+
 fn effect_stop_reason_value(reason: EffectStopReason) -> Value {
     let label = match reason {
         EffectStopReason::Removed => "removed",
         EffectStopReason::Cleared => "cleared",
         EffectStopReason::Destroyed => "destroyed",
         EffectStopReason::Replaced => "replaced",
+        // C4FxCall_Temp (C4Effects.h:47) in the deferred string convention.
+        EffectStopReason::Temp => "temp",
     };
     Value::String(label.to_string())
+}
+
+/// Active effects AFTER `anchor` in the C++ effect list — the list orders
+/// ascending by |iPriority| with new-before-equal insertion
+/// (C4Effect.cpp:80-94), so an upper effect has a higher priority magnitude
+/// or is an equal-magnitude peer inserted earlier (lower number).
+/// Priority-1 effects never take temp callbacks (C4Effect.cpp:489,505).
+fn upper_effects_of(effects: &[EffectState], anchor: &EffectState) -> Vec<EffectState> {
+    effects
+        .iter()
+        .filter(|existing| existing.number != anchor.number && existing.priority != 1)
+        .filter(|existing| {
+            let (upper, base) = (existing.priority.abs(), anchor.priority.abs());
+            upper > base || (upper == base && existing.number < anchor.number)
+        })
+        .cloned()
+        .collect()
 }
 
 fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[EffectCommand]) {
@@ -42418,7 +42756,16 @@ func FxProbeTimer(pThis, iNumber) {
         );
         let calls = call_log.lock().unwrap().clone();
         let stop_calls = calls.iter().filter(|name| *name == "FxDoomedStop").count();
-        assert_eq!(stop_calls, 1, "the kill runs the Stop callback");
+        // The C++ list orders new-before-equal ([Inert, Mute, Doomed],
+        // C4Effect.cpp:80-94), so killing Mute at its timerless gate
+        // temp-removes the upper Doomed — FxDoomedStop(fTemp) fires there
+        // (C4Effect.cpp:370-374,489) — and Doomed's own -1 kill fires the
+        // real Stop later.
+        assert_eq!(
+            stop_calls, 2,
+            "one temp stop from Mute's kill bracket, one real stop from \
+             Doomed's own kill"
+        );
     }
 
     #[test]
@@ -42581,6 +42928,150 @@ func FxProbeTimer(pThis, iNumber) {
     }
 
     #[test]
+    fn effect_check_deny_short_circuits_remaining_checkers() {
+        // C4Effect::Check (C4Effect.cpp:283-285): the FIRST Fx<Name>Effect
+        // answering C4Fx_Effect_Deny returns immediately — checkers later
+        // in the chain (higher priority, asked in ascending list order) are
+        // never called for the denied effect.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Armor", priority = 100, interval = 0 } ] };
+        }
+
+        global func FxArmorEffect(state, effect, new_name) {
+            if (new_name == "Fire") {
+                return -1;
+            }
+            return nil;
+        }
+
+        global func FxWatcherEffect(state, effect, new_name) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "add", name = "Watcher", priority = 200, interval = 0 } ] };
+            }
+            if (frame == 3) {
+                return { effects = [ { op = "add", name = "Fire", priority = 50, interval = 0 } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        assert!(
+            !object.effects.iter().any(|effect| effect.name == "Fire"),
+            "Armor denies Fire"
+        );
+
+        let calls = call_log.lock().unwrap().clone();
+        // Adding Fire asks Armor (100) first in ascending list order; its
+        // deny must stop the chain before Watcher (200) is reached.
+        assert!(
+            calls.iter().any(|name| name == "FxArmorEffect"),
+            "Armor is asked about Fire"
+        );
+        assert!(
+            !calls.iter().any(|name| name == "FxWatcherEffect"),
+            "the deny returns immediately (C4Effect.cpp:283-285) — Watcher \
+             is never asked about the already-denied Fire"
+        );
+    }
+
+    #[test]
+    fn effect_check_chain_asks_same_name_effects() {
+        // C4Effect::Check (C4Effect.cpp:278-282) has NO name filter: the
+        // new effect is inserted BEFORE existing effects of equal priority
+        // (new-before-equal, C4Effect.cpp:80-94), so an already-present
+        // same-name effect sits in the pNext chain and its Fx<Name>Effect
+        // callback IS asked about the new addition.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Guard", priority = 100, interval = 0 } ] };
+        }
+
+        global func FxGuardEffect(state, effect, new_name) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "add", name = "Guard", priority = 100, interval = 0 } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        let second = engine.tick().expect("tick succeeds");
+        let object = second.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Guard", "Guard"], "same-name effects coexist");
+
+        let calls = call_log.lock().unwrap().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|name| *name == "FxGuardEffect")
+                .count(),
+            1,
+            "the pre-existing Guard is asked about the new same-name Guard \
+             (C4Effect.cpp:278-282 filters by priority only, not name)"
+        );
+    }
+
+    #[test]
     fn effect_start_deny_drops_effect_without_stop() {
         // C4Fx_Start_Deny (-1, C4Effects.h:43): an FxStart returning it
         // marks the effect dead before it ever validates
@@ -42644,6 +43135,647 @@ func FxProbeTimer(pThis, iNumber) {
         assert!(
             !calls.iter().any(|name| name == "FxDeniedStop"),
             "dead effects are deleted without the Stop callback"
+        );
+    }
+
+    #[test]
+    fn new_effect_start_temp_removes_and_readds_upper_effects() {
+        // C4Effect ctor (C4Effect.cpp:118-133): when a new effect WITH an
+        // Fx*Start validates, active higher-priority effects are
+        // temp-deactivated first — Fx*Stop(reason temp, fTemp = true),
+        // high to low (TempRemoveUpperEffects, C4Effect.cpp:473-492) — and
+        // reactivated after the new Start via Fx*Start(C4FxCall_Temp),
+        // low to high (TempReaddUpperEffects, C4Effect.cpp:494-510). A new
+        // effect WITHOUT an Fx*Start skips the whole bracket
+        // (`fRemoveUpper && pNext && pFnStart`, C4Effect.cpp:123).
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Upper", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxUpperStart(state, effect, temp) {
+            return nil;
+        }
+
+        global func FxUpperStop(state, effect, reason, temp) {
+            return nil;
+        }
+
+        global func FxLowerStart(state, effect) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "add", name = "Lower", priority = 100, interval = 0 } ] };
+            }
+            if (frame == 3) {
+                return { effects = [ { op = "add", name = "Plain", priority = 100, interval = 0 } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                call_log
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.to_vec()));
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        call_log.lock().unwrap().clear();
+
+        let second = engine.tick().expect("tick succeeds");
+        let object = second.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Lower", "Upper"], "both effects survive");
+
+        let calls: Vec<(String, Vec<Value>)> = call_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name.starts_with("Fx"))
+            .cloned()
+            .collect();
+        let call_names: Vec<&str> = calls.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            call_names,
+            vec!["FxUpperStop", "FxLowerStart", "FxUpperStart"],
+            "the validating Start is bracketed by the upper effect's temp \
+             stop and temp readd (C4Effect.cpp:122-133)"
+        );
+        let (_, stop_args) = &calls[0];
+        assert_eq!(
+            stop_args.get(2),
+            Some(&Value::String("temp".to_string())),
+            "the temp stop's reason is C4FxCall_Temp (C4Effect.cpp:489)"
+        );
+        assert_eq!(
+            stop_args.get(3),
+            Some(&Value::Bool(true)),
+            "fTemp = true (C4Effect.cpp:489)"
+        );
+        let (_, readd_args) = &calls[2];
+        assert_eq!(
+            readd_args.get(2),
+            Some(&Value::Int(1)),
+            "the temp readd's Start gets iTemp = C4FxCall_Temp \
+             (C4Effect.cpp:505, C4Effects.h:47)"
+        );
+
+        call_log.lock().unwrap().clear();
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        assert_eq!(object.effects.len(), 3, "Plain registers too");
+        let calls = call_log.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|(name, _)| name == "FxUpperStop"),
+            "an effect without Fx*Start skips the temp bracket \
+             (C4Effect.cpp:123)"
+        );
+    }
+
+    #[test]
+    fn effect_kill_temp_removes_and_readds_upper_effects() {
+        // C4Effect::Kill (C4Effect.cpp:365-405): killing an active effect
+        // temp-deactivates all upper effects first (C4Effect.cpp:370-374),
+        // runs the victim's Fx*Stop, then reactivates the uppers
+        // (C4Effect.cpp:404) — same bracket as the ctor, without an
+        // Fx*Stop requirement on the victim.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Upper", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxUpperStart(state, effect, temp) {
+            return nil;
+        }
+
+        global func FxUpperStop(state, effect, reason, temp) {
+            return nil;
+        }
+
+        global func FxLowerStop(state, effect, reason) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "add", name = "Lower", priority = 100, interval = 0 } ] };
+            }
+            if (frame == 3) {
+                return { effects = [ { op = "remove", name = "Lower" } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                call_log
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.to_vec()));
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        call_log.lock().unwrap().clear();
+
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Upper"], "only Lower is killed");
+
+        let calls: Vec<(String, Vec<Value>)> = call_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name.starts_with("Fx"))
+            .cloned()
+            .collect();
+        let call_names: Vec<&str> = calls.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            call_names,
+            vec!["FxUpperStop", "FxLowerStop", "FxUpperStart"],
+            "the kill is bracketed by the upper effect's temp stop and \
+             temp readd (C4Effect.cpp:370-374,404)"
+        );
+        let (_, temp_stop_args) = &calls[0];
+        assert_eq!(
+            temp_stop_args.get(3),
+            Some(&Value::Bool(true)),
+            "the bracket stop is temporary (fTemp, C4Effect.cpp:489)"
+        );
+        let (_, kill_stop_args) = &calls[1];
+        assert_eq!(
+            kill_stop_args.get(2),
+            Some(&Value::String("removed".to_string())),
+            "the victim's Stop is the real removal"
+        );
+    }
+
+    #[test]
+    fn effect_check_annul_merges_into_accepting_effect() {
+        // C4Effect::Check (C4Effect.cpp:287-291, 295-313): a checker
+        // answering C4Fx_Effect_Annul (-2) accepts the new effect — the
+        // new effect dies without Start or Stop callbacks, and the
+        // acceptor's Fx<Name>Add merge seam receives the new effect's
+        // name, timer interval and parameters (DoCall PSFS_FxAdd with
+        // Par1 = name, Par2 = iTimer, rVal1.., C4Effect.cpp:300-301).
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxShieldEffect(state, effect, new_name) {
+            if (new_name == "Fire") {
+                return -2;
+            }
+            return nil;
+        }
+
+        global func FxShieldAdd(state, effect, new_name, new_interval, strength) {
+            return nil;
+        }
+
+        global func FxFireStart(state, effect) {
+            return nil;
+        }
+
+        global func FxFireStop(state, effect, reason) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                AddEffect("Fire", state, 100, 7, nil, nil, nil, 42);
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                call_log
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.to_vec()));
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        let second = engine.tick().expect("tick succeeds");
+        let object = second.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Shield"],
+            "the annulled Fire merges into Shield instead of registering"
+        );
+
+        let calls = call_log.lock().unwrap().clone();
+        let add_calls: Vec<&Vec<Value>> = calls
+            .iter()
+            .filter(|(name, _)| name == "FxShieldAdd")
+            .map(|(_, args)| args)
+            .collect();
+        assert_eq!(add_calls.len(), 1, "the acceptor's Fx*Add runs once");
+        let args = add_calls[0];
+        assert_eq!(
+            args.get(2),
+            Some(&Value::String("Fire".to_string())),
+            "Par1 is the new effect's name (C4Effect.cpp:300)"
+        );
+        assert_eq!(
+            args.get(3),
+            Some(&Value::Int(7)),
+            "Par2 is the new effect's timer interval (C4Effect.cpp:300)"
+        );
+        assert_eq!(
+            args.get(4),
+            Some(&Value::Int(42)),
+            "rVal1 carries the AddEffect parameter (C4Effect.cpp:301)"
+        );
+        assert!(
+            !calls.iter().any(|(name, _)| name == "FxFireStart"),
+            "the annulled effect never starts (it stays dead, C4Effect.cpp:108-115)"
+        );
+        assert!(
+            !calls.iter().any(|(name, _)| name == "FxFireStop"),
+            "the annulled effect dies without a Stop callback"
+        );
+    }
+
+    #[test]
+    fn effect_check_callback_receives_new_effect_parameters() {
+        // Fx*Effect check calls carry the pending AddEffect's rVal1-4
+        // (C4Effect.cpp:282) — a checker can decide on the parameters, not
+        // just the name. Here Shield denies only strength-42 additions.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxShieldEffect(state, effect, new_name, strength) {
+            if (strength == 42) {
+                return -1;
+            }
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                AddEffect("Fire", state, 100, 0, nil, nil, nil, 42);
+            }
+            if (frame == 3) {
+                AddEffect("Frost", state, 100, 0, nil, nil, nil, 5);
+            }
+            return nil;
+        }
+        "#;
+
+        let definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Frost", "Shield"],
+            "the checker saw strength 42 on Fire (denied) and 5 on Frost \
+             (passed) — C4Effect.cpp:282 forwards rVal1-4"
+        );
+    }
+
+    #[test]
+    fn effect_annul_calls_temp_brackets_the_add_call() {
+        // C4Fx_Effect_AnnulCalls (-3, C4Effects.h:38): like Annul, but the
+        // acceptor's Fx*Add runs inside a temp remove/readd bracket of the
+        // effects ABOVE the acceptor (C4Effect.cpp:297-304). Plain Annul
+        // (-2) must not fire the bracket.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxShieldEffect(state, effect, new_name) {
+            if (new_name == "Fire") {
+                return -3;
+            }
+            return nil;
+        }
+
+        global func FxShieldAdd(state, effect, new_name, new_interval) {
+            return nil;
+        }
+
+        global func FxUpperStart(state, effect, temp) {
+            return nil;
+        }
+
+        global func FxUpperStop(state, effect, reason, temp) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "add", name = "Upper", priority = 300, interval = 0 } ] };
+            }
+            if (frame == 3) {
+                AddEffect("Fire", state, 100, 0);
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                call_log
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.to_vec()));
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        call_log.lock().unwrap().clear();
+
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Shield", "Upper"],
+            "Fire merges into Shield; Upper is only temp-cycled"
+        );
+
+        let calls: Vec<(String, Vec<Value>)> = call_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name.starts_with("FxUpper") || name.starts_with("FxShieldAdd"))
+            .cloned()
+            .collect();
+        let call_names: Vec<&str> = calls.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            call_names,
+            vec!["FxUpperStop", "FxShieldAdd", "FxUpperStart"],
+            "AnnulCalls brackets the Add with the acceptor's upper effects \
+             (C4Effect.cpp:297-304)"
+        );
+        let (_, temp_stop_args) = &calls[0];
+        assert_eq!(
+            temp_stop_args.get(3),
+            Some(&Value::Bool(true)),
+            "the bracket stop is temporary (fTemp, C4Effect.cpp:489)"
+        );
+    }
+
+    #[test]
+    fn effect_add_returning_start_deny_kills_the_acceptor() {
+        // C4Effect::Check (C4Effect.cpp:306-309): when the acceptor's
+        // Fx*Add answers C4Fx_Start_Deny (-1), the ACCEPTOR itself is
+        // killed (full Kill — its Stop callback runs) and the check
+        // reports C4Fx_Effect_Annul. Neither effect survives.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxShieldEffect(state, effect, new_name) {
+            if (new_name == "Fire") {
+                return -2;
+            }
+            return nil;
+        }
+
+        global func FxShieldAdd(state, effect, new_name, new_interval) {
+            return -1;
+        }
+
+        global func FxShieldStop(state, effect, reason) {
+            return nil;
+        }
+
+        global func FxFireStart(state, effect) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                AddEffect("Fire", state, 100, 7);
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        let second = engine.tick().expect("tick succeeds");
+        let object = second.object(id).expect("object present");
+        assert!(
+            object.effects.is_empty(),
+            "the Fire is annulled and Shield killed itself in its Add call \
+             (C4Effect.cpp:306-309)"
+        );
+
+        let calls = call_log.lock().unwrap().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|name| *name == "FxShieldStop")
+                .count(),
+            1,
+            "the acceptor's Kill runs its Stop callback (C4Effect.cpp:390-392)"
+        );
+        assert!(
+            !calls.iter().any(|name| name == "FxFireStart"),
+            "the annulled effect still never starts"
+        );
+    }
+
+    #[test]
+    fn effect_stop_deny_recovers_the_effect() {
+        // C4Fx_Stop_Deny (-1, C4Effects.h:42): an Fx*Stop answering it on
+        // C4Effect::Kill refuses the removal — the effect's priority is
+        // restored and it stays alive (C4Effect.cpp:389-396).
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Sticky", priority = 100, interval = 0 } ] };
+        }
+
+        global func FxStickyStop(state, effect, reason) {
+            return -1;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "remove", name = "Sticky" } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Sticky"],
+            "the denied removal recovers the effect (C4Effect.cpp:393-396)"
+        );
+
+        let calls = call_log.lock().unwrap().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|name| *name == "FxStickyStop")
+                .count(),
+            1,
+            "the Stop callback ran exactly once for the refused removal"
         );
     }
 

@@ -164,6 +164,10 @@ pub enum EffectStopReason {
     Cleared,
     Destroyed,
     Replaced,
+    /// Temporary deactivation (C4FxCall_Temp, C4Effects.h:47): the effect
+    /// is NOT removed — Fx*Stop runs with fTemp = true
+    /// (TempRemoveUpperEffects, C4Effect.cpp:489).
+    Temp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,11 +175,27 @@ pub enum EffectEventKind {
     Started,
     Timer,
     Stopped(EffectStopReason),
-    /// `C4Effect::Check` (C4Effect.cpp:167-189): the carried effect is the
-    /// CHECKER asked about a pending new effect by name.
+    /// `C4Effect::Check` (C4Effect.cpp:271-317): the carried effect is the
+    /// CHECKER asked about a pending new effect (whose full state rides
+    /// along so the add-to-other-effect merge can hand its parameters to
+    /// `Fx*Add`, C4Effect.cpp:300-301).
     Check {
-        pending: String,
+        pending: EffectState,
     },
+    /// Add-to-other-effect merge (C4Effect.cpp:295-313): the carried
+    /// effect is the ACCEPTOR whose `Fx<Name>Add` receives the annulled
+    /// pending effect's parameters.
+    AddTo {
+        pending: EffectState,
+    },
+    /// Temporary deactivation of an upper effect (TempRemoveUpperEffects,
+    /// C4Effect.cpp:473-492): Fx*Stop(C4FxCall_Temp, fTemp = true); the
+    /// effect stays in the list.
+    TempRemoved,
+    /// Reactivation of a temp-removed upper effect
+    /// (TempReaddUpperEffects, C4Effect.cpp:494-510):
+    /// Fx*Start(C4FxCall_Temp).
+    TempReadded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,10 +219,31 @@ impl EffectEvent {
         }
     }
 
-    pub fn check(checker: EffectState, pending: String) -> Self {
+    pub fn check(checker: EffectState, pending: EffectState) -> Self {
         Self {
             effect: checker,
             kind: EffectEventKind::Check { pending },
+        }
+    }
+
+    pub fn add_to(acceptor: EffectState, pending: EffectState) -> Self {
+        Self {
+            effect: acceptor,
+            kind: EffectEventKind::AddTo { pending },
+        }
+    }
+
+    pub fn temp_removed(effect: EffectState) -> Self {
+        Self {
+            effect,
+            kind: EffectEventKind::TempRemoved,
+        }
+    }
+
+    pub fn temp_readded(effect: EffectState) -> Self {
+        Self {
+            effect,
+            kind: EffectEventKind::TempReadded,
         }
     }
 
