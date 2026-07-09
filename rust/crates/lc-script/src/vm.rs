@@ -647,6 +647,30 @@ impl<'a> Vm<'a> {
         Ok((value, object_state.to_local_vars(self.var_decls)))
     }
 
+    /// C4AulScript::DirectExec (C4AulExec.cpp:1658-1707): parse `source`
+    /// as ONE expression (ParseFn fExprOnly — trailing text is ignored)
+    /// and evaluate it in the object context — the host-side twin of the
+    /// script-language `eval` special form. Parse errors yield C4VNull
+    /// (DirectExec's catch, :1693-1699); runtime errors propagate for the
+    /// caller's fPassErrors handling. Returns (result, updated_local_vars).
+    pub fn direct_exec_with_locals(
+        &self,
+        source: &str,
+        local_vars: &HashMap<String, Value>,
+        strict_level: Option<u8>,
+    ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
+        let object_state = ObjectState::from_local_vars(local_vars);
+        let Ok(expr) = crate::parser::Parser::new(source).parse_direct_exec_expression() else {
+            return Ok((Value::Nil, object_state.to_local_vars(self.var_decls)));
+        };
+        let mut env = Environment::new_with_params(&[], &[], strict_level, object_state.clone())?;
+        for var_decl in self.var_decls {
+            env.define_object_local(&var_decl.name);
+        }
+        let value = self.evaluate(&expr, &mut env, 0)?;
+        Ok((value, object_state.to_local_vars(self.var_decls)))
+    }
+
     fn invoke_value(
         &self,
         name: &str,
