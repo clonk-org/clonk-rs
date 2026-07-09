@@ -148,6 +148,9 @@ pub(crate) struct DefinitionMetadata {
     /// DefCore StretchGrowth (the con-scaling mode; DoCon's bottom
     /// adjust shape math).
     pub stretch_growth: bool,
+    /// DefCore Rotateable; C4Object::Init clears initial rotation/rdir
+    /// when this is zero (C4Object.cpp:169-170).
+    pub rotateable: i32,
     /// DefCore Line type (C4D_Line*; nonzero skips con-scaling and the
     /// DoCon bottom adjust — C4Object::UpdateShape's early return).
     pub line: i32,
@@ -13939,6 +13942,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
             });
@@ -14204,6 +14208,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
             });
@@ -15708,6 +15713,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
             });
@@ -21739,6 +21745,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
             },
@@ -21785,6 +21792,7 @@ func ProbeBadIndex(id) {
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,
+                    rotateable: 0,
                     line: 0,
                     vertices: Vec::new(),
                 },
@@ -21809,6 +21817,7 @@ func ProbeBadIndex(id) {
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,
+                    rotateable: 0,
                     line: 0,
                     vertices: Vec::new(),
                 },
@@ -21857,6 +21866,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
             },
@@ -21917,6 +21927,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
             },
@@ -21987,6 +21998,7 @@ func ProbeBadIndex(id) {
             line_connect: 0,
             clonk_name_newlines: None,
             stretch_growth: false,
+            rotateable: 0,
             line: 0,
             vertices: Vec::new(),
         };
@@ -22411,6 +22423,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
             },
@@ -22456,6 +22469,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
             },
@@ -22517,6 +22531,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
             },
@@ -26712,6 +26727,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
             },
@@ -26770,6 +26786,7 @@ func ProbeBadIndex(id) {
             line_connect: 0,
             clonk_name_newlines: None,
             stretch_growth: false,
+            rotateable: 0,
             line: 0,
             vertices: Vec::new(),
         };

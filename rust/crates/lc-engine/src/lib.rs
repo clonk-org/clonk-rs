@@ -12181,6 +12181,7 @@ impl Engine {
                                 .collect(),
                             line_connect: definition.line_connect(),
                             stretch_growth: definition.stretch_growth(),
+                            rotateable: definition.rotateable(),
                             line: definition.line(),
                             vertices: definition.shape_vertices().to_vec(),
                             clonk_name_newlines: definition
@@ -26810,6 +26811,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,
+                    rotateable: 0,
                     line: 0,
                     vertices: Vec::new(),
                 },
