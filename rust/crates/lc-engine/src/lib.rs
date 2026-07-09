@@ -42427,6 +42427,85 @@ func Eject() {
         }
     }
 
+    // C++ mutates the ONE live C4Object mid-call: after a nested call
+    // stages SetOwner/SetXDir/SetAlive on a foreign object, later host
+    // reads in the SAME outer call (GetOwner/GetXDir/GetOCF through the
+    // world view) see the staged values — owner (C4Object.cpp:5495-5500),
+    // xdir (C4Script.cpp:697-708 / 1163-1167), and the OCF bits SetOCF
+    // re-derives synchronously on the alive change (C4Object::AssignDeath
+    // -> SetOCF, C4Object.cpp:600-622).
+    #[test]
+    fn mid_call_reads_see_staged_owner_velocity_and_ocf() {
+        let prober_script = r#"#strict
+local iOwn, iXd, iOcfAlive;
+public func Probe(pB) {
+  pB->Prep();
+  iOwn = GetOwner(pB);
+  iXd = GetXDir(pB);
+  iOcfAlive = GetOCF(pB) & OCF_Alive;
+  return(1);
+}
+"#;
+        let victim_script = r#"#strict
+public func Prep() {
+  SetOwner(5);
+  SetXDir(30);
+  SetAlive(0);
+  return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("Prob", "Prober", prober_script).expect("script compiles"),
+            )
+            .expect("prober registers");
+        engine
+            .register_definition(
+                Definition::from_script("Vict", "Victim", victim_script).expect("script compiles"),
+            )
+            .expect("victim registers");
+        let prober = engine
+            .spawn_object(SpawnConfig::new("Prob").with_category(CATEGORY_OBJECT))
+            .expect("prober spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("Vict")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                    .with_alive(true),
+            )
+            .expect("victim spawns");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_ne!(
+            engine.objects[victim_idx].state.ocf & crate::ocf::ALIVE,
+            0,
+            "sanity: the living victim starts with OCF_Alive"
+        );
+
+        let idx = engine.find_object_index(prober).expect("prober exists");
+        engine
+            .call_object_function(idx, "Probe", vec![Value::Object(victim.as_u64())])
+            .expect("probe runs");
+
+        let idx = engine.find_object_index(prober).expect("prober exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(
+            locals.get("iOwn"),
+            Some(&Value::Int(5)),
+            "GetOwner sees the staged SetOwner mid-call"
+        );
+        assert_eq!(
+            locals.get("iXd"),
+            Some(&Value::Int(30)),
+            "GetXDir sees the staged SetXDir mid-call"
+        );
+        assert_eq!(
+            locals.get("iOcfAlive"),
+            Some(&Value::Int(0)),
+            "GetOCF drops OCF_Alive after the staged SetAlive(0) (SetOCF runs synchronously in C++)"
+        );
+    }
+
     // FnExit (C4Script.cpp:372-388): the optional position args are
     // CALLER-relative (`tx += cthr->Obj->x`), the y target gets the
     // subject's Shape.y added, and C4Object::Exit writes position,

@@ -18684,6 +18684,25 @@ impl EffectHostContext {
             object.action_data = scope.current_action_data;
             object.damage = scope.current_damage;
             object.direction = scope.current_direction.to_script_value();
+            object.owner = scope.owner();
+            // Staged dir writes surface at whole-pixel grain (the foreign
+            // read reconstructs via itofix — sub-pixel foreign fidelity is
+            // the snapshot work, task B).
+            if scope.pending_update.fixed_velocity.is_some()
+                || scope.pending_update.fixed_velocity_x.is_some()
+                || scope.pending_update.fixed_velocity_y.is_some()
+                || scope.pending_update.velocity.is_some()
+            {
+                let fixed = scope.fixed_velocity();
+                object.velocity = Vector2::new(fixed.int_x(), fixed.int_y());
+            }
+            // Energy stays the snapshot value on purpose: the paths that
+            // depend on mid-call energy (DoEnergy, the death checks, the
+            // active-scope GetEnergy) read the scope state directly, and
+            // the foreign GetEnergy stale read is pinned by existing
+            // behavior — do not overlay without a differential test
+            // (PORT_STATUS, Script host model).
+            object.ocf = scope.staged_ocf(object.ocf);
         }
         // The snapshot contents list re-checks each child's live state:
         // C4Object::Exit removes the child from its container's Contents
@@ -18993,6 +19012,10 @@ impl EffectHostContext {
         );
         scope.definition_id = Some(object.definition_id().to_string());
         scope.current_magic_energy = state.magic_energy;
+        // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358) —
+        // nested scopes carry the snapshot mask like outer scopes do, not
+        // the preview-grade recompute.
+        scope.cached_ocf = Some(state.ocf);
         Some((scope, state.local_vars.clone()))
     }
 
@@ -19968,6 +19991,50 @@ impl ObjectScopeContext {
                 self.current_category,
             )
         })
+    }
+
+    /// The OCF mask mid-call world reads see: `base` (the snapshot mask)
+    /// with the bits re-derived whose driving state THIS call staged.
+    /// C++ SetOCF runs synchronously on Enter/Exit (C4Object.cpp:
+    /// 1531,1570), DoCon and the alive transitions (AssignDeath/
+    /// AssignAlive -> SetOCF), so the live mask never lags those changes;
+    /// bits driven by unstaged state keep their cached value (the NoFight
+    /// and landscape gates stay unevaluated here).
+    fn staged_ocf(&self, base: u32) -> u32 {
+        let mut mask = base;
+        if self.pending_update.container.is_some() {
+            // OCF_NotContained / OCF_Available (SetOCF, C4Object.cpp:
+            // 611-618; Available's open-entrance arm is unmodeled).
+            if self.container().is_some() {
+                mask &= !(ocf::NOT_CONTAINED | ocf::AVAILABLE);
+            } else {
+                mask |= ocf::NOT_CONTAINED | ocf::AVAILABLE;
+            }
+        }
+        if self.pending_update.construction.is_some() {
+            if self.construction() >= FULL_CON {
+                mask |= ocf::FULL_CON;
+            } else {
+                mask &= !ocf::FULL_CON;
+            }
+        }
+        if self.pending_update.alive.is_some() || self.pending_update.category.is_some() {
+            // OCF_Living/OCF_Alive gate on C4D_Living (C4Object.cpp:
+            // 600-605), OCF_CrewMember on Def->CrewMember && Alive
+            // (:619-622), OCF_FightReady on the Alive BIT (:606-610).
+            mask &= !(ocf::LIVING | ocf::ALIVE | ocf::CREW_MEMBER | ocf::FIGHT_READY);
+            let alive = self.alive();
+            if self.category() & crate::CATEGORY_LIVING != 0 {
+                mask |= ocf::LIVING;
+                if alive {
+                    mask |= ocf::ALIVE | ocf::FIGHT_READY;
+                }
+            }
+            if self.crew_member && alive {
+                mask |= ocf::CREW_MEMBER;
+            }
+        }
+        mask
     }
 
     fn container(&self) -> Option<ObjectId> {
