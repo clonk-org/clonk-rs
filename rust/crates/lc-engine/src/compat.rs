@@ -2727,14 +2727,32 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_mut() else {
             return Ok(Value::Bool(false));
         };
-        let known = context.world.definition_metadata(&new_id).is_some();
-        if !known {
+        let Some(new_blit_mode) = context
+            .world
+            .definition_metadata(&new_id)
+            .map(|metadata| metadata.blit_mode)
+        else {
             return Ok(Value::Bool(false)); // C4Id2Def miss
-        }
+        };
+        let Some(object_id) = context.object_context().map(|object| object.id()) else {
+            return Ok(Value::Bool(false));
+        };
+        let follows_definition = context
+            .object_blit_mode(object_id)
+            .is_none_or(|mode| mode & GFX_BLIT_CUSTOM == 0);
+        let had_pending_blit = context
+            .object_context()
+            .is_some_and(|object| object.pending_update.blit_mode.is_some());
         let Some(object) = context.object_context_mut() else {
             return Ok(Value::Bool(false));
         };
         object.pending_update.change_def = Some(new_id);
+        // A preceding SetObjectBlitMode already staged a write, so update that
+        // write to the new default. A pure ChangeDef needs no separate write:
+        // the engine's definition swap applies the default atomically.
+        if follows_definition && had_pending_blit {
+            object.pending_update.blit_mode = Some(new_blit_mode);
+        }
         Ok(Value::Bool(true))
     })
 }
@@ -4698,6 +4716,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetObjectLayer", get_object_layer);
     script.register_host_function("SetObjectLayer", set_object_layer);
+    script.register_host_function("GetObjectBlitMode", get_object_blit_mode);
+    script.register_host_function("SetObjectBlitMode", set_object_blit_mode);
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("InsertMaterial", insert_material);
     script.register_host_function("ExtractMaterialAmount", extract_material_amount);
@@ -14036,6 +14056,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 metadata.vertices.clone(),
             );
             state.layer = creator_layer;
+            state.blit_mode = metadata.blit_mode;
             state
         }));
 
@@ -14278,6 +14299,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 metadata.vertices.clone(),
             );
             state.layer = creator_layer;
+            state.blit_mode = metadata.blit_mode;
             state
         }));
 
@@ -15763,6 +15785,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 );
                 state.container = Some(container);
                 state.layer = creator_layer;
+                state.blit_mode = metadata.blit_mode;
                 state
             }));
             context.register_spawn(spawn, preview);
@@ -16662,14 +16685,18 @@ fn incinerate_landscape(args: &[Value]) -> Result<Value, RuntimeError> {
             None,
         )
         .with_ocf(preview_ocf)
-        .with_full_state(Rc::new(crate::preview_spawn_state(
-            Vector2::new(x, y),
-            OWNER_NONE,
-            OWNER_NONE,
-            metadata.category,
-            FULL_CON,
-            metadata.vertices.clone(),
-        )));
+        .with_full_state(Rc::new({
+            let mut state = crate::preview_spawn_state(
+                Vector2::new(x, y),
+                OWNER_NONE,
+                OWNER_NONE,
+                metadata.category,
+                FULL_CON,
+                metadata.vertices.clone(),
+            );
+            state.blit_mode = metadata.blit_mode;
+            state
+        }));
         context.register_spawn(spawn, preview);
         Ok(Value::Bool(true))
     })
@@ -16803,6 +16830,105 @@ fn set_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
         Ok(Value::Bool(true))
+    })
+}
+
+const GFX_BLIT_CUSTOM: u32 = 128;
+
+/// FnGetObjectBlitMode (C4Script.cpp:5663-5679): read the raw base-object
+/// mode or one existing graphics overlay's literal mode.
+fn get_object_blit_mode(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "GetObjectBlitMode expects at most 2 arguments: object and overlay id",
+        ));
+    }
+    let target_id = args
+        .first()
+        .map(|value| parse_object_reference_argument(value, "GetObjectBlitMode", "object"))
+        .transpose()?
+        .flatten();
+    let overlay_id = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetObjectBlitMode",
+        "overlay id",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Nil);
+        };
+        let mode = if overlay_id == 0 {
+            context.object_blit_mode(target)
+        } else {
+            context.object_overlay_blit_mode(target, overlay_id)
+        };
+        Ok(mode
+            .map(|mode| Value::Int(mode as i32))
+            .unwrap_or(Value::Nil))
+    })
+}
+
+/// FnSetObjectBlitMode (C4Script.cpp:5634-5661): base-object nonzero modes
+/// gain CUSTOM, zero resets to the effective definition default; overlays
+/// store the literal mode and return true rather than their previous value.
+fn set_object_blit_mode(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "SetObjectBlitMode expects at most 3 arguments: mode, object and overlay id",
+        ));
+    }
+    let requested = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetObjectBlitMode",
+        "mode",
+    )? as u32;
+    let target_id = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "SetObjectBlitMode", "object"))
+        .transpose()?
+        .flatten();
+    let overlay_id = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetObjectBlitMode",
+        "overlay id",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Nil);
+        };
+
+        if overlay_id != 0 {
+            return Ok(if context.set_object_overlay_blit_mode(target, overlay_id, requested) {
+                Value::Int(1)
+            } else {
+                Value::Nil
+            });
+        }
+
+        let Some(previous) = context.object_blit_mode(target) else {
+            return Ok(Value::Nil);
+        };
+        let mode = if requested == 0 {
+            context.object_definition_blit_mode(target).unwrap_or(0)
+        } else {
+            requested | GFX_BLIT_CUSTOM
+        };
+        if !context.set_object_blit_mode(target, mode) {
+            return Ok(Value::Nil);
+        }
+        Ok(Value::Int(previous as i32))
     })
 }
 
@@ -18335,6 +18461,98 @@ impl EffectHostContext {
             .is_some()
     }
 
+    /// Effective C4Object::BlitMode, including pending same-call writes.
+    fn object_blit_mode(&self, target: ObjectId) -> Option<u32> {
+        let scope = self.object_scope(target);
+        if let Some(blit_mode) = scope.and_then(|scope| scope.pending_update.blit_mode) {
+            return Some(blit_mode);
+        }
+        let current = self
+            .get_world_object(target)
+            .and_then(|object| object.full_state().map(|state| state.blit_mode))?;
+        if current & GFX_BLIT_CUSTOM == 0 {
+            if let Some(blit_mode) = scope
+                .and_then(|scope| scope.pending_update.change_def.as_deref())
+                .and_then(|definition| self.definition_metadata(definition))
+                .map(|metadata| metadata.blit_mode)
+            {
+                return Some(blit_mode);
+            }
+        }
+        Some(current)
+    }
+
+    fn set_object_blit_mode(&mut self, target: ObjectId, blit_mode: u32) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        self.object_scope_mut(target)
+            .map(|scope| scope.pending_update.blit_mode = Some(blit_mode))
+            .is_some()
+    }
+
+    /// The target's effective definition follows a same-call ChangeDef.
+    fn object_definition_blit_mode(&self, target: ObjectId) -> Option<u32> {
+        let definition_id = self
+            .object_scope(target)
+            .and_then(|scope| {
+                scope
+                    .pending_update
+                    .change_def
+                    .clone()
+                    .or_else(|| scope.definition_id.clone())
+            })
+            .or_else(|| {
+                self.get_world_object(target)
+                    .map(|object| object.definition_id().to_string())
+            })?;
+        self.definition_metadata(&definition_id)
+            .map(|metadata| metadata.blit_mode)
+    }
+
+    fn object_overlay_blit_mode(&self, target: ObjectId, overlay_id: i32) -> Option<u32> {
+        if let Some(scope) = self.object_scope(target) {
+            return scope
+                .graphics_overlays
+                .iter()
+                .find(|overlay| overlay.id == overlay_id)
+                .map(|overlay| overlay.blit_mode);
+        }
+        self.get_world_object(target)
+            .and_then(|object| object.full_state().cloned())
+            .and_then(|state| {
+                state
+                    .graphics_overlays
+                    .iter()
+                    .find(|overlay| overlay.id == overlay_id)
+                    .map(|overlay| overlay.blit_mode)
+            })
+    }
+
+    fn set_object_overlay_blit_mode(
+        &mut self,
+        target: ObjectId,
+        overlay_id: i32,
+        blit_mode: u32,
+    ) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        let Some(scope) = self.object_scope_mut(target) else {
+            return false;
+        };
+        let Some(overlay) = scope
+            .graphics_overlays
+            .iter_mut()
+            .find(|overlay| overlay.id == overlay_id)
+        else {
+            return false;
+        };
+        overlay.blit_mode = blit_mode;
+        scope.pending_update.graphics_overlays = Some(scope.graphics_overlays.clone());
+        true
+    }
+
     /// C4Object::Status of `target` as the current call sees it.
     fn object_status_active(&self, target: ObjectId) -> bool {
         self.object_scope(target)
@@ -19790,6 +20008,7 @@ mod tests {
         "GetMenu",
         "GetName",
         "GetOCF",
+        "GetObjectBlitMode",
         "GetObjectLayer",
         "GetObjectStatus",
         "GetObjectVal",
@@ -19892,6 +20111,7 @@ mod tests {
         "SetName",
         "SetObjDrawTransform",
         "SetObjDrawTransform2",
+        "SetObjectBlitMode",
         "SetObjectLayer",
         "SetObjectStatus",
         "SetOwner",

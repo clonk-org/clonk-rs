@@ -2899,6 +2899,7 @@ impl ObjectUpdate {
         self.custom_name.is_none()
             && self.layer.is_none()
             && self.blit_mode.is_none()
+            && self.change_def.is_none()
             && self.position.is_none()
             && self.velocity.is_none()
             && self.fixed_velocity.is_none()
@@ -22327,12 +22328,18 @@ impl Engine {
             definition.rotateable(),
         );
         let category = definition.category();
+        let blit_mode = definition.blit_mode();
         let rotateable = definition.rotateable();
         let material_capacity = self.materials.len();
         let object = &mut self.objects[idx];
         object.definition_id = new_def.to_string();
         object.state.action = action_state;
         object.state.category = category;
+        // C4Object::ChangeDef follows the new definition's mode unless a
+        // script explicitly marked the old mode custom (C4Object.cpp:1231).
+        if object.state.blit_mode & 128 == 0 {
+            object.state.blit_mode = blit_mode;
+        }
         object.state.vertices = vertices;
         object.shape_template = template;
         object.own_shape_vertices = None;
@@ -40677,6 +40684,222 @@ global func ApplyLayer(object pLayer, object pTarget) {
             None,
             "layer propagation remains direct-only"
         );
+    }
+
+    #[test]
+    fn object_blit_mode_base_get_set_reset_and_foreign_target_match_cpp() {
+        // FnSetObjectBlitMode returns the previous raw base mode, marks a
+        // nonzero mode CUSTOM (128), and resets zero to the target def mode.
+        let caller_script = r#"#strict
+local iSelfInitial, iForeignInitial, iSetPrevious, iSelfCustom;
+local iResetPrevious, iSelfReset, iForeignPrevious, iForeignCustom;
+func Trigger(object pOther) {
+    iSelfInitial = GetObjectBlitMode();
+    iForeignInitial = GetObjectBlitMode(pOther);
+    iSetPrevious = SetObjectBlitMode(1);
+    iSelfCustom = GetObjectBlitMode();
+    iResetPrevious = SetObjectBlitMode();
+    iSelfReset = GetObjectBlitMode();
+    iForeignPrevious = SetObjectBlitMode(2, pOther);
+    iForeignCustom = GetObjectBlitMode(pOther);
+    return(1);
+}
+"#;
+        let mut caller =
+            Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles");
+        caller.set_blit_mode(2);
+        let mut other =
+            Definition::from_script("OTHR", "Other", "#strict\n").expect("other compiles");
+        other.set_blit_mode(4);
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        engine
+            .register_definition(other)
+            .expect("other registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let other_id = engine
+            .spawn_object(SpawnConfig::new("OTHR"))
+            .expect("other spawns");
+
+        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+        engine
+            .call_object_function(
+                caller_index,
+                "Trigger",
+                vec![Value::Object(other_id.as_u64())],
+            )
+            .expect("blit mode trigger runs");
+
+        let caller = engine.object_snapshot(caller_id).expect("caller remains");
+        let locals = &caller.local_vars;
+        assert_eq!(locals.get("iSelfInitial"), Some(&Value::Int(2)));
+        assert_eq!(locals.get("iForeignInitial"), Some(&Value::Int(4)));
+        assert_eq!(locals.get("iSetPrevious"), Some(&Value::Int(2)));
+        assert_eq!(locals.get("iSelfCustom"), Some(&Value::Int(129)));
+        assert_eq!(locals.get("iResetPrevious"), Some(&Value::Int(129)));
+        assert_eq!(locals.get("iSelfReset"), Some(&Value::Int(2)));
+        assert_eq!(locals.get("iForeignPrevious"), Some(&Value::Int(4)));
+        assert_eq!(locals.get("iForeignCustom"), Some(&Value::Int(130)));
+        assert_eq!(caller.blit_mode, 2);
+        assert_eq!(
+            engine
+                .object_snapshot(other_id)
+                .expect("other remains")
+                .blit_mode,
+            130
+        );
+    }
+
+    #[test]
+    fn object_blit_mode_overlay_updates_existing_only_and_returns_true() {
+        let script = r#"#strict
+local iSetExisting, iGetExisting, iSetMissing, iGetMissing;
+func Trigger() {
+    iSetExisting = SetObjectBlitMode(2, 0, 7);
+    iGetExisting = GetObjectBlitMode(0, 7);
+    iSetMissing = SetObjectBlitMode(4, 0, 8);
+    iGetMissing = GetObjectBlitMode(0, 8);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        engine
+            .apply_object_update(
+                id,
+                ObjectUpdate {
+                    graphics_overlays: Some(vec![ObjectGraphicsOverlay::new(
+                        7,
+                        GraphicsOverlayMode::Base,
+                    )
+                    .with_blit_mode(1)]),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("overlay seeds");
+
+        let index = engine.find_object_index(id).expect("caller exists");
+        engine
+            .call_object_function(index, "Trigger", Vec::new())
+            .expect("overlay trigger runs");
+
+        let snapshot = engine.object_snapshot(id).expect("caller remains");
+        assert_eq!(snapshot.local_vars.get("iSetExisting"), Some(&Value::Int(1)));
+        assert_eq!(snapshot.local_vars.get("iGetExisting"), Some(&Value::Int(2)));
+        assert_eq!(snapshot.local_vars.get("iSetMissing"), Some(&Value::Nil));
+        assert_eq!(snapshot.local_vars.get("iGetMissing"), Some(&Value::Nil));
+        assert_eq!(snapshot.graphics_overlays.len(), 1);
+        assert_eq!(snapshot.graphics_overlays[0].id, 7);
+        assert_eq!(snapshot.graphics_overlays[0].blit_mode, 2);
+    }
+
+    #[test]
+    fn create_paths_expose_definition_blit_mode_before_materialization() {
+        let script = r#"#strict
+local iObject, iConstruction, iContents;
+func Trigger() {
+    var pObject = CreateObject(ITEM, 0, 0, -1);
+    iObject = GetObjectBlitMode(pObject);
+    var pConstruction = CreateConstruction(ITEM, 0, 0, -1, 100);
+    iConstruction = GetObjectBlitMode(pConstruction);
+    var pContents = CreateContents(ITEM);
+    iContents = GetObjectBlitMode(pContents);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let mut item =
+            Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles");
+        item.set_blit_mode(2);
+        engine.register_definition(item).expect("item registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let index = engine.find_object_index(id).expect("caller exists");
+
+        engine
+            .call_object_function(index, "Trigger", Vec::new())
+            .expect("creation trigger runs");
+
+        let snapshot = engine.object_snapshot(id).expect("caller remains");
+        assert_eq!(snapshot.local_vars.get("iObject"), Some(&Value::Int(2)));
+        assert_eq!(
+            snapshot.local_vars.get("iConstruction"),
+            Some(&Value::Int(2))
+        );
+        assert_eq!(snapshot.local_vars.get("iContents"), Some(&Value::Int(2)));
+        assert_eq!(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "ITEM")
+                .map(|object| object.blit_mode)
+                .collect::<Vec<_>>(),
+            vec![2, 2, 2]
+        );
+    }
+
+    #[test]
+    fn change_def_updates_default_blit_mode_but_preserves_custom_mode() {
+        // C4Object::ChangeDef follows the new definition only when the old
+        // mode lacks C4GFXBLIT_CUSTOM (C4Object.cpp:1231-1233).
+        let script = r#"#strict
+local bChanged, iAfter;
+func Switch() {
+    bChanged = ChangeDef(NEWD);
+    iAfter = GetObjectBlitMode();
+    return(1);
+}
+"#;
+        let mut old =
+            Definition::from_script("OLDD", "Old", script).expect("old definition compiles");
+        old.set_blit_mode(2);
+        let mut new = Definition::from_script("NEWD", "New", "#strict\n")
+            .expect("new definition compiles");
+        new.set_blit_mode(4);
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(old).expect("old registers");
+        engine.register_definition(new).expect("new registers");
+        let default_id = engine
+            .spawn_object(SpawnConfig::new("OLDD"))
+            .expect("default object spawns");
+        let custom_id = engine
+            .spawn_object(SpawnConfig::new("OLDD").with_blit_mode(129))
+            .expect("custom object spawns");
+
+        for id in [default_id, custom_id] {
+            let index = engine.find_object_index(id).expect("object exists");
+            engine
+                .call_object_function(index, "Switch", Vec::new())
+                .expect("definition switch runs");
+        }
+
+        let default = engine.object_snapshot(default_id).expect("default remains");
+        assert_eq!(default.local_vars.get("bChanged"), Some(&Value::Bool(true)));
+        assert_eq!(default.definition_id, "NEWD");
+        assert_eq!(default.local_vars.get("iAfter"), Some(&Value::Int(4)));
+        assert_eq!(default.blit_mode, 4);
+        let custom = engine.object_snapshot(custom_id).expect("custom remains");
+        assert_eq!(custom.definition_id, "NEWD");
+        assert_eq!(custom.local_vars.get("iAfter"), Some(&Value::Int(129)));
+        assert_eq!(custom.blit_mode, 129);
     }
 
     // FnChangeDef -> C4Object::ChangeDef (C4Object.cpp:1180-1231): the
