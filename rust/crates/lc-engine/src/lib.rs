@@ -42427,6 +42427,72 @@ func Eject() {
         }
     }
 
+    // FnExit (C4Script.cpp:372-388): the optional position args are
+    // CALLER-relative (`tx += cthr->Obj->x`), the y target gets the
+    // subject's Shape.y added, and C4Object::Exit writes position,
+    // rotation and the three dirs unconditionally (C4Object.cpp:
+    // 1549-1553: `x = iX; y = iY; r = iR; xdir = iXDir; ...`), with
+    // rdir scaled `itofix(trdir) / 10`.
+    #[test]
+    fn exit_applies_caller_relative_position_and_dir_args_like_cpp() {
+        let script = r#"#strict
+public func Launch(pItem) {
+    return(Exit(pItem, 10, 5, 90, 3, -2, 20));
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CONT", "Container", script).expect("container compiles"),
+            )
+            .expect("container registers");
+        let mut item_def = simple_definition("ITEM");
+        item_def.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
+        engine
+            .register_definition(item_def)
+            .expect("item registers");
+        let container = engine
+            .spawn_object(
+                SpawnConfig::new("CONT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(40, 40)),
+            )
+            .expect("container spawns");
+        let item = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(container),
+            )
+            .expect("item spawns");
+
+        let idx = engine.find_object_index(container).expect("container exists");
+        let result = engine
+            .call_object_function(idx, "Launch", vec![Value::Object(item.as_u64())])
+            .expect("launch runs");
+        assert_eq!(result, Value::Bool(true), "the contained item exits");
+
+        let item_idx = engine.find_object_index(item).expect("item exists");
+        let state = &engine.objects[item_idx].state;
+        assert_eq!(state.container, None, "the Exit committed");
+        assert_eq!(
+            state.position,
+            Vector2::new(50, 42),
+            "x = caller.x + tx, y = caller.y + ty + Shape.y (40+5-3)"
+        );
+        assert_eq!(state.rotation, 90, "r = tr (C4Object.cpp:1552)");
+        assert_eq!(
+            engine.objects[item_idx].fixed_velocity,
+            FixedVec2::new(itofix(3), itofix(-2)),
+            "xdir/ydir = itofix(txdir/tydir)"
+        );
+        assert_eq!(
+            engine.objects[item_idx].rotation_velocity,
+            itofix(20) / 10,
+            "rdir = itofix(trdir) / 10 (C4Script.cpp:388)"
+        );
+    }
+
     // C4Object::Enter adds the object to the container's Contents list
     // IMMEDIATELY (`Contents.Add(this, C4ObjectList::stContents)`,
     // C4Object.cpp:1601-1605) — the mirror of the same-call Exit shrink

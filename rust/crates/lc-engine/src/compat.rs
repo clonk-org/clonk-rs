@@ -2997,38 +2997,83 @@ fn enter(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnExit (C4Script.cpp:372-390): pObj leaves its container
-/// (C4Object::Exit; fails when not contained). The exit position falls to
-/// the container-change fold; the optional offset/rotation/speed
-/// parameters are not modeled yet (PORT_STATUS).
+/// FnExit (C4Script.cpp:372-388): pObj (or the scope object) leaves its
+/// container via C4Object::Exit. The optional tx/ty are CALLER-relative
+/// (`tx += cthr->Obj->x`, :377-381), tr == -1 draws Random(360) (:382),
+/// and Exit writes position/rotation/dirs unconditionally — bare Exit()
+/// re-places the object at the caller's position with r = 0 and zeroed
+/// dirs (C4Object.cpp:1549-1553), the y target offset by the SUBJECT's
+/// Shape.y (:385) and rdir scaled `itofix(trdir) / 10` (:388). The
+/// ObjectComCancelAttach and BoundsCheck side arms plus the
+/// Ejection/Departure engine calls stay unmodeled (PORT_STATUS).
 fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 7 {
+        return Err(RuntimeError::new(
+            "Exit expects at most 7 arguments: obj, x, y, r, xdir, ydir, rdir",
+        ));
+    }
     let subject =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "Exit", "obj")?;
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
-    });
-    if let Some(subject) = subject {
-        if Some(subject) != active {
-            return match call_world_object_function(subject, "Exit", &[]) {
-                Some(result) => result,
-                None => Ok(Value::Bool(false)),
-            };
-        }
-    }
+    let tx = parse_optional_i32(args.get(1), "Exit", "x")?.unwrap_or(0);
+    let ty = parse_optional_i32(args.get(2), "Exit", "y")?.unwrap_or(0);
+    let tr = parse_optional_i32(args.get(3), "Exit", "r")?.unwrap_or(0);
+    let txdir = parse_optional_i32(args.get(4), "Exit", "xdir")?.unwrap_or(0);
+    let tydir = parse_optional_i32(args.get(5), "Exit", "ydir")?.unwrap_or(0);
+    let trdir = parse_optional_i32(args.get(6), "Exit", "rdir")?.unwrap_or(0);
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return Ok(Value::Bool(false));
         };
-        let Some(object) = context.object_context_mut() else {
+        let active = context.object_context().map(|object| object.id());
+        let Some(target) = subject.or(active) else {
+            return Ok(Value::Bool(false)); // no pObj and no scope object
+        };
+        // Caller-relative offset: the CALLING object, also for foreign
+        // subjects (C4Script.cpp:377-381).
+        let (mut abs_x, mut abs_y) = (tx, ty);
+        if let Some(caller) = context.object_context() {
+            let position = caller.effective_position();
+            abs_x = abs_x.saturating_add(position.x);
+            abs_y = abs_y.saturating_add(position.y);
+        }
+        // The Random(360) draw happens before the contained check — it
+        // runs even when Exit then fails (C4Script.cpp:382).
+        let rotation = if tr == -1 {
+            draw_context_random(360)?
+        } else {
+            tr
+        };
+        // The SUBJECT's live Shape.y (C4Script.cpp:385): a same-call
+        // SetShape override wins over the def shape.
+        let shape_y = context
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.shape_override)
+            .map(|shape| shape.y)
+            .or_else(|| {
+                effective_definition_id(context, target)
+                    .and_then(|id| context.world.definition_metadata(&id))
+                    .and_then(|metadata| metadata.shape)
+                    .map(|shape| shape.y)
+            })
+            .unwrap_or(0);
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        let Some(scope) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
-        if object.container().is_none() {
-            return Ok(Value::Bool(false)); // not contained
+        if scope.container().is_none() {
+            return Ok(Value::Bool(false)); // not contained (C4Object.cpp:1539)
         }
-        object.set_container(None);
+        scope.set_container(None);
+        scope.set_position(Vector2::new(abs_x, abs_y.saturating_add(shape_y)));
+        // Raw r write — C4Object::Exit assigns without SetRotation's
+        // normalization (C4Object.cpp:1552).
+        scope.current_rotation = rotation;
+        scope.pending_update.rotation = Some(rotation);
+        scope.set_fixed_velocity(FixedVec2::new(itofix(txdir), itofix(tydir)));
+        scope.set_rotation_velocity(itofix(trdir) / 10);
         Ok(Value::Bool(true))
     })
 }
