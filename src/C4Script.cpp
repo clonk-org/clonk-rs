@@ -21,6 +21,7 @@
 
 #include <C4Include.h>
 #include <C4Script.h>
+#include <C4ScriptKiller.h>
 #include <C4Version.h>
 
 #include <C4Application.h>
@@ -1332,19 +1333,12 @@ static bool FnSetController(C4AulContext *cthr, C4ValueInt iNewController, C4Obj
 
 static C4ValueInt FnGetKiller(C4AulContext *cthr, C4Object *pObj)
 {
-	if (!pObj) pObj = cthr->Obj; if (!pObj) return NO_OWNER;
-	return pObj->LastEnergyLossCausePlayer;
+	return C4ScriptKiller::Get(cthr->Obj, pObj);
 }
 
 static bool FnSetKiller(C4AulContext *cthr, C4ValueInt iNewKiller, C4Object *pObj)
 {
-	// validate player
-	if (iNewKiller != NO_OWNER && !ValidPlr(iNewKiller)) return false;
-	// object safety
-	if (!pObj) pObj = cthr->Obj; if (!pObj) return false;
-	// set killer as last energy loss cause
-	pObj->LastEnergyLossCausePlayer = iNewKiller;
-	return true;
+	return C4ScriptKiller::Set(iNewKiller, cthr->Obj, pObj, ValidPlr);
 }
 
 static std::optional<C4ValueInt> FnGetCategory(C4AulContext *cthr, C4Object *pObj, C4ID idDef)
