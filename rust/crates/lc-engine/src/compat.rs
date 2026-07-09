@@ -4904,6 +4904,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("InsertMaterial", insert_material);
     script.register_host_function("ExtractMaterialAmount", extract_material_amount);
     script.register_host_function("IncinerateLandscape", incinerate_landscape);
+    script.register_host_function("Incinerate", incinerate);
+    script.register_host_function("Extinguish", extinguish);
     script.register_host_function("OnFire", on_fire);
     script.register_host_function("SetGraphics", set_graphics);
     script.register_host_function("SetObjDrawTransform", set_obj_draw_transform);
@@ -7192,7 +7194,27 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     let removed = with_context_mut(scope, |ctx| {
         ctx.remove_effect(name_filter.as_deref(), index, no_callbacks)
     })?;
-    Ok(Value::Bool(removed))
+    // C4Effect::Kill runs the resolved Fx*Stop synchronously — for the
+    // engine-internal fire that clears OnFire on the spot (FnFxFireStop,
+    // C4Effect.cpp:787). Script Fx*Stop overloads ride the deferred
+    // Stopped dispatch instead; fDoNoCalls skips the Stop entirely
+    // (C4Effect.cpp:404 vs FnRemoveEffect's no-call flag).
+    if matches!(scope, EffectScope::Object)
+        && !no_callbacks
+        && removed
+            .as_ref()
+            .is_some_and(|effect| effect.name == crate::C4FX_FIRE)
+        && !script_shadows_engine_fx("FxFireStop")
+    {
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                if let Some(object) = context.object_context_mut() {
+                    object.pending_update.stage_fire_flag(false);
+                }
+            }
+        });
+    }
+    Ok(Value::Bool(removed.is_some()))
 }
 
 fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -9975,38 +9997,66 @@ fn effective_definition_id(context: &EffectHostContext, target: ObjectId) -> Opt
 /// Incineration/IncinerationEx callback — with the fire state bits riding
 /// `ObjectUpdate::fire` to the fold.
 fn incinerate_target_blasted(target: ObjectId, caused_by: i32) -> Result<(), RuntimeError> {
-    enum FireCall {
-        Incineration,
-        IncinerationEx,
+    incinerate_target(target, caused_by, true).map(|_| ())
+}
+
+/// `C4Object::Incinerate(iCausedBy, fBlasted)` on the host seam —
+/// the staged mirror of the engine-side `incinerate_object_inner`
+/// (fxFireStart deterministic core, C4Effect.cpp:560-641): same refusal
+/// checks, the "Fire" C4Effect entry (C4Object.cpp:1263-1265, denied
+/// starts remove it again per the ctor :128-131), BurnTurnTo changedef,
+/// burning contents ejection, extinguisher gate, the ~FireMode
+/// determination, ONE FirePhase = Random(15) draw on the shared ledger,
+/// and the Incineration/IncinerationEx callback — with the fire state
+/// bits riding `ObjectUpdate::fire` to the fold.
+fn incinerate_target(target: ObjectId, caused_by: i32, blasted: bool) -> Result<bool, RuntimeError> {
+    enum FireStage {
+        Refused,
+        NoFire { blasted: bool },
+        Ignite { fire_number: i32, category: i32 },
     }
-    let call = HOST_CONTEXT.with(|cell| -> Result<Option<FireCall>, RuntimeError> {
+    let stage = HOST_CONTEXT.with(|cell| -> Result<FireStage, RuntimeError> {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(None);
+            return Ok(FireStage::Refused);
         };
         if !context.ensure_object_scope(target) {
-            return Ok(None);
+            return Ok(FireStage::Refused);
         }
-        // Already on fire (C4Object.cpp:1258) — a same-call incinerate
+        // Already on fire (C4Object.cpp:1259) — a same-call incinerate
         // shows through the staged fire channel.
         let already_burning = context
             .object_scope(target)
-            .is_some_and(|scope| scope.pending_update.fire.is_some())
-            || context
-                .get_world_object(target)
-                .and_then(|object| object.full_state().map(|state| state.on_fire))
-                .unwrap_or(false);
+            .and_then(|scope| scope.pending_update.staged_on_fire())
+            .unwrap_or_else(|| {
+                context
+                    .get_world_object(target)
+                    .and_then(|object| object.full_state().map(|state| state.on_fire))
+                    .unwrap_or(false)
+            });
         if already_burning {
-            return Ok(None);
+            return Ok(FireStage::Refused);
         }
-        // Dead living don't burn (C4Object.cpp:1260).
+        // Dead living don't burn (C4Object.cpp:1261).
         let (category, alive) = context
             .object_scope(target)
             .map(|scope| (scope.current_category, scope.alive()))
             .unwrap_or((0, false));
         if category & crate::CATEGORY_LIVING != 0 && !alive {
-            return Ok(None);
+            return Ok(FireStage::Refused);
         }
+        // The effect entry exists BEFORE fxFireStart runs (C4Effect ctor,
+        // C4Object.cpp:1263-1265).
+        let fire_number = context
+            .object_scope_mut(target)
+            .map(|scope| {
+                let mut entry = EffectState::new(crate::C4FX_FIRE)
+                    .with_priority(crate::C4FX_FIRE_PRIORITY)
+                    .with_interval(crate::C4FX_FIRE_TIMER_INTERVAL);
+                entry.start_dispatched = true;
+                scope.effects.add_effect(entry)
+            })
+            .unwrap_or(0);
         // In extinguishing material: no fire caused, checked BEFORE the
         // FirePhase draw (C4Effect.cpp:574-583).
         let position = context
@@ -10059,33 +10109,223 @@ fn incinerate_target_blasted(target: ObjectId, caused_by: i32) -> Result<(), Run
             }
         }
         if !fire_caused {
+            // The denied Start kills the fresh entry without a Stop call
+            // (C4Effect ctor, C4Effect.cpp:128-131).
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.effects.remove_effect(Some(crate::C4FX_FIRE), 0, true);
+            }
+            return Ok(FireStage::NoFire { blasted });
+        }
+        Ok(FireStage::Ignite {
+            fire_number,
+            category,
+        })
+    })?;
+    let (fire_number, category) = match stage {
+        FireStage::Refused => return Ok(false),
+        FireStage::NoFire { blasted } => {
             // Blasted but not incinerated: IncinerationEx
-            // (C4Effect.cpp:602-607).
-            return Ok(Some(FireCall::IncinerationEx));
+            // (C4Effect.cpp:602-607) — fail-safe exec.
+            if blasted {
+                if let Some(Err(error)) = call_world_object_own_function(
+                    target,
+                    "IncinerationEx",
+                    &[Value::Int(caused_by)],
+                ) {
+                    tracing::warn!(
+                        %error,
+                        "script error in IncinerationEx; continuing like the C++ fail-safe exec"
+                    );
+                }
+            }
+            return Ok(false);
+        }
+        FireStage::Ignite {
+            fire_number,
+            category,
+        } => (fire_number, category),
+    };
+    // determine fire appearance (C4Effect.cpp:609-626): the ~FireMode
+    // script answer wins; zero falls back to the category default; an
+    // out-of-range answer degrades to Object mode.
+    let mode_answer = match call_world_object_own_function(target, "FireMode", &[]) {
+        Some(Ok(Value::Int(mode))) => mode,
+        Some(Ok(Value::Bool(flag))) => i32::from(flag),
+        Some(Err(error)) => {
+            tracing::warn!(
+                %error,
+                "script error in FireMode; continuing like the C++ fail-safe exec"
+            );
+            0
+        }
+        _ => 0,
+    };
+    let fire_mode = if mode_answer == 0 {
+        if category & (crate::CATEGORY_LIVING | crate::CATEGORY_STATIC_BACK) != 0 {
+            crate::C4FX_FIRE_MODE_LIVING_VEG
+        } else if category & (crate::CATEGORY_STRUCTURE | crate::CATEGORY_VEHICLE) != 0 {
+            crate::C4FX_FIRE_MODE_STRUCT_VEH
+        } else {
+            crate::C4FX_FIRE_MODE_OBJECT
+        }
+    } else if !(1..=crate::C4FX_FIRE_MODE_OBJECT).contains(&mode_answer) {
+        tracing::warn!(
+            mode = mode_answer,
+            object = target.as_u64(),
+            "FireMode is invalid; using Object mode like C++"
+        );
+        crate::C4FX_FIRE_MODE_OBJECT
+    } else {
+        mode_answer
+    };
+    HOST_CONTEXT.with(|cell| -> Result<(), RuntimeError> {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(());
+        };
+        // store causes in effect vars (C4Effect.cpp:628-631)
+        if let Some(scope) = context.object_scope_mut(target) {
+            let number = fire_number.max(0) as usize;
+            scope
+                .effects
+                .effect_var(number, 0, Some(EffectVarValue::Int(fire_mode)));
+            scope
+                .effects
+                .effect_var(number, 1, Some(EffectVarValue::Int(caused_by)));
+            scope
+                .effects
+                .effect_var(number, 2, Some(EffectVarValue::Bool(blasted)));
+            scope
+                .effects
+                .effect_var(number, 3, Some(EffectVarValue::Nil));
         }
         // Set values + FirePhase = Random(15), one synced draw
         // (C4Effect.cpp:632-634).
         let phase = draw_context_random(15)?;
         if let Some(scope) = context.object_scope_mut(target) {
-            scope.pending_update.fire = Some((caused_by, phase));
+            scope.pending_update.stage_ignite(caused_by, phase);
         }
-        Ok(Some(FireCall::Incineration))
+        Ok(())
     })?;
-    // Engine script call (C4Effect.cpp:638 / :605) — fail-safe exec.
-    let name = match call {
-        Some(FireCall::Incineration) => "Incineration",
-        Some(FireCall::IncinerationEx) => "IncinerationEx",
-        None => return Ok(()),
-    };
+    // Engine script call (C4Effect.cpp:638) — fail-safe exec.
     if let Some(Err(error)) =
-        call_world_object_own_function(target, name, &[Value::Int(caused_by)])
+        call_world_object_own_function(target, "Incineration", &[Value::Int(caused_by)])
     {
         tracing::warn!(
             %error,
-            "script error in {name}; continuing like the C++ fail-safe exec"
+            "script error in Incineration; continuing like the C++ fail-safe exec"
         );
     }
-    Ok(())
+    Ok(true)
+}
+
+/// FnIncinerate (C4Script.cpp:245-252): the target defaults to the
+/// caller; iCausedBy is the CALLING object's controller (NO_OWNER
+/// without one).
+fn incinerate(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "Incinerate expects at most 1 argument: target",
+        ));
+    }
+    let target_id = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "Incinerate", "target"))
+        .transpose()?
+        .flatten();
+    let (active, caused_by) = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context())
+            .map(|object| (Some(object.id()), object.controller()))
+            .unwrap_or((None, OWNER_NONE))
+    });
+    let Some(target) = target_id.or(active) else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(incinerate_target(target, caused_by, false)?))
+}
+
+/// FnExtinguish (C4Script.cpp:264-270) → C4Object::Extinguish(0)
+/// (C4Object.cpp:1269-1301): kill every "*Fire*" effect, skipping the
+/// engine-internal "Int*" names (C4Fx_AnyFire/C4Fx_Internal,
+/// C4Effects.h:154-155).
+fn extinguish(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "Extinguish expects at most 1 argument: target",
+        ));
+    }
+    let target_id = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "Extinguish", "target"))
+        .transpose()?
+        .flatten();
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    let Some(target) = target_id.or(active) else {
+        return Ok(Value::Bool(false));
+    };
+    extinguish_target(target).map(Value::Bool)
+}
+
+/// The staged half of C4Object::Extinguish(0): the kill loop over
+/// "*Fire*"-matching, non-"Int*" effects (C4Object.cpp:1281-1298). The
+/// engine-internal FnFxFireStop clears the OnFire flag synchronously
+/// (C4Effect.cpp:787) unless a script global shadows it; script Fx*Stop
+/// callbacks ride the deferred Stopped dispatch of the staged removals.
+fn extinguish_target(target: ObjectId) -> Result<bool, RuntimeError> {
+    let engine_fire_stop = !script_shadows_engine_fx("FxFireStop");
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(false);
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(false);
+        }
+        let Some(scope) = context.object_scope_mut(target) else {
+            return Ok(false);
+        };
+        let mut killed = 0usize;
+        loop {
+            let name = scope.effects.effects.iter().find_map(|effect| {
+                (effect.name.contains("Fire") && !effect.name.starts_with("Int"))
+                    .then(|| effect.name.clone())
+            });
+            let Some(name) = name else { break };
+            if scope.effects.remove_effect(Some(&name), 0, false).is_none() {
+                break;
+            }
+            if name == crate::C4FX_FIRE && engine_fire_stop {
+                scope.pending_update.stage_fire_flag(false);
+            }
+            killed += 1;
+        }
+        Ok(killed > 0)
+    })
+}
+
+/// Whether a script global shadows an engine-registered Fx* function —
+/// C4Effect callback resolution finds script functions before the
+/// engine's own (GetFuncRecursive over AddFunc'd C++ functions,
+/// C4Effect.cpp:30-56 + C4Script.cpp:6994-6997).
+fn script_shadows_engine_fx(function: &str) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow().as_ref().is_some_and(|context| {
+            context
+                .world
+                .scenario_script()
+                .is_some_and(|script| script.has_global_function(function))
+                || context
+                    .world
+                    .definition_scripts()
+                    .any(|script| script.has_global_function(function))
+        })
+    })
 }
 
 fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -16907,8 +17147,10 @@ fn extract_material_amount(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnOnFire (C4Script.cpp:1870-1877): burning when the fire flag is set or/// FnOnFire (C4Script.cpp:1870-1877): burning when the fire flag is set or
-/// any *Fire* effect (C4Fx_AnyFire) sits on the object; nil without one.
+/// FnOnFire (C4Script.cpp:1866-1877): burning when the OnFire flag is set
+/// or any *Fire* effect (C4Fx_AnyFire) sits on the object; nil without one.
+/// Staged same-call writes (Incinerate/Extinguish/RemoveEffect) win over
+/// the world snapshot like C++'s live flag.
 fn on_fire(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let target_id =
@@ -16919,25 +17161,36 @@ fn on_fire(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(context) => context,
             None => return Ok(Value::Nil),
         };
-        if let Some(object) = context.object_context() {
-            if target_id.is_none() || target_id == Some(object.id()) {
-                let burning = object
+        let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(target) = target else {
+            return Ok(Value::Nil);
+        };
+        let world_flag = || {
+            context
+                .get_world_object(target)
+                .and_then(|object| object.full_state().map(|state| state.on_fire))
+                .unwrap_or(false)
+        };
+        if let Some(scope) = context.object_scope(target) {
+            let flag = scope
+                .pending_update
+                .staged_on_fire()
+                .unwrap_or_else(world_flag);
+            let burning = flag
+                || scope
                     .effects
                     .snapshot()
                     .iter()
                     .any(|effect| effect.name.contains("Fire"));
-                return Ok(Value::Bool(burning));
-            }
+            return Ok(Value::Bool(burning));
         }
-        let Some(target) = target_id else {
-            return Ok(Value::Nil);
-        };
         match context.get_world_object(target) {
             Some(other) => Ok(Value::Bool(other.full_state().is_some_and(|state| {
-                state
-                    .effects
-                    .iter()
-                    .any(|effect| effect.name.contains("Fire"))
+                state.on_fire
+                    || state
+                        .effects
+                        .iter()
+                        .any(|effect| effect.name.contains("Fire"))
             }))),
             None => Ok(Value::Nil),
         }
@@ -19302,7 +19555,7 @@ impl EffectScopeContext {
         name_filter: Option<&str>,
         index: usize,
         no_callbacks: bool,
-    ) -> bool {
+    ) -> Option<EffectState> {
         let position = if let Some(name) = name_filter {
             let mut remaining = index;
             self.effects.iter().position(|effect| {
@@ -19334,19 +19587,16 @@ impl EffectScopeContext {
                 .flatten()
         };
 
-        let position = match position {
-            Some(pos) => pos,
-            None => return false,
-        };
+        let position = position?;
 
         let effect = self.effects.remove(position);
         let command = if no_callbacks {
-            EffectCommand::remove_without_callbacks(effect.name)
+            EffectCommand::remove_without_callbacks(effect.name.clone())
         } else {
-            EffectCommand::remove(effect.name)
+            EffectCommand::remove(effect.name.clone())
         };
         self.commands.push(command);
-        true
+        Some(effect)
     }
 
     fn into_commands(self) -> Vec<EffectCommand> {
@@ -20376,6 +20626,7 @@ mod tests {
         "EnergyCheck",
         "Enter",
         "Exit",
+        "Extinguish",
         "ExtractMaterialAmount",
         "FindConstructionSite",
         "FindContents",
@@ -20485,6 +20736,7 @@ mod tests {
         "GetYDir",
         "GrabObjectInfo",
         "InLiquid",
+        "Incinerate",
         "IncinerateLandscape",
         "InsertMaterial",
         "Inside",

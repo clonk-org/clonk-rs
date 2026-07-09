@@ -2318,6 +2318,10 @@ impl ObjectState {
             self.fire_caused_by = fire_caused_by;
             self.fire_phase = fire_phase;
         }
+        if let Some(flag) = delta.fire_flag {
+            // Bare SetOnFire write — see ObjectUpdate::fire_flag.
+            self.on_fire = flag;
+        }
         if let Some(magic_energy) = delta.magic_energy {
             self.magic_energy = magic_energy.max(0);
         }
@@ -2474,6 +2478,8 @@ struct ObjectDelta {
     /// Staged incinerate outcome `(caused_by, fire_phase)` — see
     /// `ObjectUpdate::fire`.
     fire: Option<(i32, i32)>,
+    /// Bare OnFire flag write — see `ObjectUpdate::fire_flag`.
+    fire_flag: Option<bool>,
     damage: Option<i32>,
     magic_energy: Option<i32>,
     magic_capacity: Option<i32>,
@@ -2632,6 +2638,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             energy: update.energy,
             energy_loss_cause: update.energy_loss_cause,
             fire: update.fire,
+            fire_flag: update.fire_flag,
             construction: update.construction,
             damage: update.damage,
             magic_energy: update.magic_energy,
@@ -2702,6 +2709,12 @@ pub struct ObjectUpdate {
     /// (fxFireStart core, C4Effect.cpp:632-634).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fire: Option<(i32, i32)>,
+    /// Bare OnFire flag write — the engine-internal FnFxFireStop /
+    /// FnFxFireStart temp arms (C4Effect.cpp:563-565, 775-791). Mutually
+    /// exclusive with `fire`: staging one clears the other, so the last
+    /// in-call write wins like C++'s sequential SetOnFire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_flag: Option<bool>,
     #[serde(default)]
     pub damage: Option<i32>,
     #[serde(default)]
@@ -2784,6 +2797,24 @@ pub struct PhysicalsUpdate {
 impl ObjectUpdate {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The staged OnFire outcome, if any fire write is pending.
+    pub fn staged_on_fire(&self) -> Option<bool> {
+        self.fire_flag.or_else(|| self.fire.map(|_| true))
+    }
+
+    /// Stage the full fxFireStart outcome (C4Effect.cpp:632-634).
+    pub fn stage_ignite(&mut self, caused_by: i32, phase: i32) {
+        self.fire = Some((caused_by, phase));
+        self.fire_flag = None;
+    }
+
+    /// Stage a bare SetOnFire write (FnFxFireStop / temp arms,
+    /// C4Effect.cpp:563-565, 775-791).
+    pub fn stage_fire_flag(&mut self, flag: bool) {
+        self.fire_flag = Some(flag);
+        self.fire = None;
     }
 
     pub fn with_position(mut self, position: Vector2) -> Self {
@@ -30734,6 +30765,100 @@ mod tests {
     }
 
     #[test]
+    fn incinerate_and_extinguish_script_functions_manage_the_fire_effect(
+    ) -> Result<(), EngineError> {
+        // FnIncinerate (C4Script.cpp:245-252): the target defaults to the
+        // caller and iCausedBy is the CALLING object's controller.
+        // FnExtinguish (C4Script.cpp:264-270) extinguishes all fires via
+        // C4Object::Extinguish(0) (C4Object.cpp:1269-1301) — killing the
+        // "Fire" effect and clearing OnFire through the engine-internal
+        // FnFxFireStop (C4Effect.cpp:787).
+        let mut engine = Engine::with_seed(37);
+        engine.register_definition(
+            Definition::from_script(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc Ignite(pVictim) { return Incinerate(pVictim); }\nfunc Quench(pVictim) { return Extinguish(pVictim); }\n",
+            )
+            .expect("actor compiles"),
+        )?;
+        engine.register_definition(simple_definition("Hut"))?;
+        let actor =
+            engine.spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))?;
+        let hut = engine.spawn_object(SpawnConfig::new("Hut"))?;
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_idx].state.controller = 5;
+        let hut_value = Value::Object(hut.as_u64());
+
+        let result =
+            engine.call_object_function(actor_idx, "Ignite", vec![hut_value.clone()])?;
+        assert_eq!(result, Value::Bool(true), "Incinerate reports success");
+        let hut_idx = engine.find_object_index(hut).expect("hut exists");
+        assert!(engine.objects[hut_idx].state.on_fire);
+        assert_eq!(
+            engine.objects[hut_idx].state.fire_caused_by, 5,
+            "caused by the caller's controller"
+        );
+        assert!(engine.objects[hut_idx]
+            .state
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Fire"));
+
+        let result = engine.call_object_function(actor_idx, "Quench", vec![hut_value])?;
+        assert_eq!(result, Value::Bool(true), "Extinguish reports success");
+        let hut_idx = engine.find_object_index(hut).expect("hut exists");
+        assert!(!engine.objects[hut_idx].state.on_fire, "flag cleared");
+        assert!(
+            !engine.objects[hut_idx]
+                .state
+                .effects
+                .iter()
+                .any(|effect| effect.name == "Fire"),
+            "the fire effect was killed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_effect_fire_extinguishes_like_the_engine_fire_stop() -> Result<(), EngineError> {
+        // RemoveEffect("Fire", obj) → C4Effect::Kill → the engine-internal
+        // FnFxFireStop clears OnFire (C4Effect.cpp:787); with fDoNoCalls
+        // the Stop is skipped and the flag survives (FnRemoveEffect,
+        // C4Script.cpp:5493-5507).
+        let mut engine = Engine::with_seed(41);
+        engine.register_definition(
+            Definition::from_script(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc Douse(pVictim) { return RemoveEffect(\"Fire\", pVictim); }\n",
+            )
+            .expect("actor compiles"),
+        )?;
+        engine.register_definition(simple_definition("Hut"))?;
+        let actor =
+            engine.spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))?;
+        let hut = engine.spawn_object(SpawnConfig::new("Hut"))?;
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        let hut_idx = engine.find_object_index(hut).expect("hut exists");
+        assert!(engine.incinerate_object(hut_idx, 1, false, None)?);
+        let result = engine.call_object_function(
+            actor_idx,
+            "Douse",
+            vec![Value::Object(hut.as_u64())],
+        )?;
+        assert_eq!(result, Value::Bool(true));
+        let hut_idx = engine.find_object_index(hut).expect("hut exists");
+        assert!(!engine.objects[hut_idx].state.on_fire, "OnFire cleared");
+        assert!(!engine.objects[hut_idx]
+            .state
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Fire"));
+        Ok(())
+    }
+
+    #[test]
     fn incinerate_in_extinguisher_leaves_no_fire_effect_entry() -> Result<(), EngineError> {
         // fxFireStart deny (C4Effect.cpp:574-607 + ctor :128-131): in
         // extinguishing material the Start returns -1 and the freshly
@@ -44981,6 +45106,28 @@ func Incineration(int iCausedBy) { iIncinerated = iCausedBy + 100; return(1); }
             engine.objects[victim_idx].state.local_vars.get("iIncinerated"),
             Some(&Value::Int(103)),
             "Incineration callback got the causing player (C4Effect.cpp:638)"
+        );
+        // The host path creates the same Fire C4Effect entry as the
+        // engine-side incinerate (C4Object.cpp:1263-1265; vars
+        // C4Effect.cpp:628-631 — mode Object=3 for a C4D_Object victim,
+        // blasted fire).
+        let fire = engine.objects[victim_idx]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Fire")
+            .cloned()
+            .expect("fire effect entry staged through the host seam");
+        assert_eq!(fire.priority, 100);
+        assert_eq!(fire.interval, 1);
+        assert_eq!(
+            fire.vars(),
+            &[
+                EffectVarValue::Int(3),
+                EffectVarValue::Int(3),
+                EffectVarValue::Bool(true),
+                EffectVarValue::Nil,
+            ]
         );
     }
 
