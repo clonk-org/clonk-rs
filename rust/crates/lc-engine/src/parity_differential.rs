@@ -4,9 +4,9 @@
 //! per-frame sub-pixel accumulation) through the Rust port and asserts they are
 //! byte-for-byte identical to the C++ golden oracle in
 //! `parity/golden/parity_golden.json`. That golden is produced from the REAL
-//! engine code (`src/Fixed.h`, `src/Fixed.cpp`'s `SineTable`, `src/C4Random.h`)
-//! by `parity/oracle/gen_golden.sh` — so this is a genuine differential against
-//! the C++ oracle, not a Rust-vs-Rust regression.
+//! engine code (`src/Fixed.h`, `src/Fixed.cpp`'s `SineTable`, `src/C4Random.h`,
+//! and `src/C4ScriptKiller.h`) by `parity/oracle/gen_golden.sh` — so this is a
+//! genuine differential against the C++ oracle, not a Rust-vs-Rust regression.
 //!
 //! This gates Theme C (wiring fixed precision through physics): the gravity /
 //! velocity sub-pixel accumulation the harness exercises is exactly the
@@ -22,6 +22,7 @@ use serde_json::Value;
 use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion};
 use crate::math::{fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed};
 use crate::rng::LcgRng;
+use crate::{Definition, Engine, PlayerConfig, SpawnConfig, CATEGORY_OBJECT, OWNER_NONE};
 
 const GOLDEN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -462,7 +463,162 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
-    // 10. Movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 10. FnGetKiller/FnSetKiller (C4Script.cpp:1333-1347), whose C++
+    // implementation delegates to the production C4ScriptKiller helper used
+    // by the oracle. Drive the Rust HOST FUNCTIONS through the real script VM
+    // so registration, default-self behavior, foreign/arrow dispatch and the
+    // pending-update seam all participate in the differential.
+    {
+        let section = &golden["script_killer"];
+        let caller_script = r#"#strict
+local iInitial, iSetSelf, iReadSelf, iInvalid, iAfterInvalid;
+local iClearSelf, iReadCleared, iSetForeign, iReadForeign;
+local iArrowClear, iArrowRead;
+func Trigger(object pOther) {
+    iInitial = GetKiller();
+    iSetSelf = SetKiller(1);
+    iReadSelf = GetKiller();
+    iInvalid = SetKiller(9);
+    iAfterInvalid = GetKiller();
+    iClearSelf = SetKiller(-1);
+    iReadCleared = GetKiller();
+    iSetForeign = SetKiller(1, pOther);
+    iReadForeign = GetKiller(pOther);
+    iArrowClear = pOther->SetKiller(-1);
+    iArrowRead = pOther->GetKiller();
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(1, "P1"))
+            .expect("killer differential player registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("killer differential caller compiles"),
+            )
+            .expect("killer differential caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("OTHR", "Other", "#strict\n")
+                    .expect("killer differential target compiles"),
+            )
+            .expect("killer differential target registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("killer differential caller spawns");
+        let other_id = engine
+            .spawn_object(SpawnConfig::new("OTHR").with_category(CATEGORY_OBJECT))
+            .expect("killer differential target spawns");
+        let caller_idx = engine
+            .find_object_index(caller_id)
+            .expect("killer differential caller exists");
+        engine
+            .call_object_function(
+                caller_idx,
+                "Trigger",
+                vec![ScriptValue::Object(other_id.as_u64())],
+            )
+            .expect("killer differential script runs");
+
+        let caller_idx = engine
+            .find_object_index(caller_id)
+            .expect("killer differential caller remains");
+        let locals = &engine.objects[caller_idx].state.local_vars;
+        let rust_local = |name: &str| match locals.get(name) {
+            Some(ScriptValue::Int(value)) => i64::from(*value),
+            Some(ScriptValue::Bool(value)) => i64::from(*value),
+            value => panic!("killer differential local `{name}` has unexpected value {value:?}"),
+        };
+        for (idx, (golden_key, local_name)) in [
+            ("initial", "iInitial"),
+            ("set_self", "iSetSelf"),
+            ("read_self", "iReadSelf"),
+            ("set_invalid", "iInvalid"),
+            ("after_invalid", "iAfterInvalid"),
+            ("clear_self", "iClearSelf"),
+            ("read_cleared", "iReadCleared"),
+            ("set_foreign", "iSetForeign"),
+            ("read_foreign", "iReadForeign"),
+            ("arrow_clear", "iArrowClear"),
+            ("arrow_read", "iArrowRead"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            expect_eq(
+                "script_killer",
+                idx,
+                golden_key,
+                i(section, golden_key),
+                rust_local(local_name),
+            );
+        }
+        expect_eq(
+            "script_killer",
+            11,
+            "self_final",
+            i(section, "self_final"),
+            i64::from(engine.objects[caller_idx].last_energy_loss_cause),
+        );
+        let other_idx = engine
+            .find_object_index(other_id)
+            .expect("killer differential target remains");
+        expect_eq(
+            "script_killer",
+            12,
+            "foreign_final",
+            i(section, "foreign_final"),
+            i64::from(engine.objects[other_idx].last_energy_loss_cause),
+        );
+
+        // No C4Aul object context: invoke the same registered Rust hosts from
+        // a bare lc-script engine. This matches C4ScriptKiller's null/null
+        // oracle cases and pins the NO_OWNER/false fallbacks.
+        let mut bare = lc_script::Engine::new();
+        crate::compat::register_host_functions(&mut bare);
+        bare.add_script(
+            lc_script::Script::compile(
+                "global func ReadNoContext() { return GetKiller(); }\n\
+                 global func WriteNoContext() { return SetKiller(1); }\n",
+            )
+            .expect("bare killer differential script compiles"),
+        );
+        let bare_result = |function: &str, bare: &mut lc_script::Engine| {
+            match bare
+                .call(function, &[])
+                .unwrap_or_else(|error| panic!("bare killer call `{function}` failed: {error}"))
+            {
+                ScriptValue::Int(value) => i64::from(value),
+                ScriptValue::Bool(value) => i64::from(value),
+                value => panic!("bare killer call `{function}` returned {value:?}"),
+            }
+        };
+        expect_eq(
+            "script_killer",
+            13,
+            "get_no_context",
+            i(section, "get_no_context"),
+            bare_result("ReadNoContext", &mut bare),
+        );
+        expect_eq(
+            "script_killer",
+            14,
+            "set_no_context",
+            i(section, "set_no_context"),
+            bare_result("WriteNoContext", &mut bare),
+        );
+        expect_eq(
+            "script_killer",
+            15,
+            "no_owner_constant",
+            i(section, "get_no_context"),
+            i64::from(OWNER_NONE),
+        );
+    }
+
+    // 11. Movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    fix_x += xdir; fix_y += (ydir += gravity); matching C4Movement.cpp.
     for scn in golden["movement"].as_array().unwrap() {
         let name = scn["name"].as_str().unwrap_or("?");

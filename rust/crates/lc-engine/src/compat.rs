@@ -4696,6 +4696,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetViewOffset", set_view_offset);
     script.register_host_function("GetController", get_controller);
     script.register_host_function("SetController", set_controller);
+    script.register_host_function("GetKiller", get_killer);
+    script.register_host_function("SetKiller", set_killer);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetObjectLayer", get_object_layer);
@@ -16357,6 +16359,86 @@ fn get_controller(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetKiller (C4Script.cpp:1333-1337): read the object's
+/// LastEnergyLossCausePlayer, defaulting a nil target to the calling object
+/// and returning NO_OWNER without an object.
+fn get_killer(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetKiller expects at most 1 argument: target",
+        ));
+    }
+
+    let target_id = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "GetKiller", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Int(OWNER_NONE));
+        };
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Int(OWNER_NONE));
+        };
+        // C++ writes the live field directly, so a SetKiller earlier in the
+        // same call must win over the frame-start world snapshot.
+        let killer = context
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.energy_loss_cause)
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .map(|object| object.last_energy_loss_cause)
+            })
+            .unwrap_or(OWNER_NONE);
+        Ok(Value::Int(killer))
+    })
+}
+
+/// FnSetKiller (C4Script.cpp:1339-1347): accept NO_OWNER or a valid player,
+/// default a nil target to the calling object, and directly replace
+/// LastEnergyLossCausePlayer (without the DoEnergy self-damage guard).
+fn set_killer(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "SetKiller expects at most 2 arguments: killer and optional target",
+        ));
+    }
+
+    let new_killer = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetKiller", "killer")?;
+    let target_id = args
+        .get(1)
+        .map(|arg| parse_object_reference_argument(arg, "SetKiller", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if new_killer != OWNER_NONE && context.player_state(new_killer).is_none() {
+            return Ok(Value::Bool(false));
+        }
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        let Some(scope) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
+        scope.pending_update.energy_loss_cause = Some(new_killer);
+        Ok(Value::Bool(true))
+    })
+}
+
 /// FnIncinerateLandscape (C4Script.cpp:253-261) -> C4Landscape::Incinerate
 /// (C4Landscape.cpp:1430-1441): caller-relative point; inflammable
 /// material lights one FLAM unless another already burns in the
@@ -19484,6 +19566,7 @@ mod tests {
         "GetID",
         "GetIndexOf",
         "GetKeys",
+        "GetKiller",
         "GetLeague",
         "GetLength",
         "GetMagicEnergy",
@@ -19589,6 +19672,7 @@ mod tests {
         "SetEntrance",
         "SetGraphics",
         "SetGravity",
+        "SetKiller",
         "SetMass",
         "SetObjDrawTransform",
         "SetObjDrawTransform2",

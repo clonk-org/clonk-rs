@@ -26,6 +26,7 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `mass_mover_transfer_rng` | `src/C4MassMover.cpp` transfer calls | `Random(10)` before `Rnd3()` immediate-execution decision |
 | `script_value_hash` | `src/C4Value.cpp` `hashCombine` / `std::hash<C4Value>` | map-key lookup for nested script values |
 | `script_value_convert` | `src/C4Value.cpp:488-598` `C4ScriptCnvMap` + `ConvertTo` | type-coercion rules for `getInt`/`getStr`/… and parameter marshaling |
+| `script_killer` | `src/C4ScriptKiller.h`, called by `src/C4Script.cpp:1333-1347` | GetKiller/SetKiller fallback target, player validation, direct assignment, foreign/arrow targeting |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
 
 **Out of scope (Phase 2):** the C++ per-pixel collision/contact loop
@@ -59,6 +60,12 @@ see "Phase 2" below.
   transcription slip on either side surfaces as a divergence. The Game-dependent
   `FnCnvGuess`/`GuessType` branch only runs for a non-zero `C4V_Any`; every input
   is a concrete type or nil, so no engine setup is needed.
+- `script_killer` calls the production `C4ScriptKiller.h` helper verbatim.
+  `C4Script.cpp` delegates both static engine functions to this same helper, so
+  the oracle can vary context/target pointers and the player-validity predicate
+  without copying the decision logic or linking the full game executable. The
+  Rust checker drives its registered host functions through real C4Script calls,
+  including explicit foreign and arrow targets plus a context-free call.
 
 If a divergence is ever a *bug in the golden* rather than the Rust port, fix the
 C++ source and regenerate.
