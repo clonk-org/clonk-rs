@@ -20,6 +20,8 @@
 //     `C4Landscape::_PathFree`; the oracle feeds it real PixCnt-style inputs.
 //   * `C4ActionDirection.h` is the production raw-xdir direction decision used
 //     by `C4Object::ExecAction` and `C4Object::SetDir`.
+//   * `C4ActionCallbacks.h` is the production synchronous callback sequence
+//     used by `C4Object::SetAction`.
 //   * `C4SolidMaskBitmap.h` is the production active-graphics bitmap selection
 //     and transparency conversion used by `C4SolidMask`.
 //   * `Randomize3`/`Rnd3` are reproduced verbatim from `src/C4Random.cpp`
@@ -37,6 +39,7 @@
 
 #include "oracle_fixed.h" // generated from src/Fixed.h by gen_golden.sh
 #include <C4Random.h>     // real engine header (no DEBUGREC)
+#include <C4ActionCallbacks.h> // real production SetAction callback sequence
 #include <C4ActionDirection.h> // real production ExecAction/SetDir decisions
 #include <C4LandscapePath.h> // real production coarse-path traversal
 #include <C4ScriptKiller.h> // real production script-host helper
@@ -190,6 +193,67 @@ static void printActionDirectionCase()
            xdir.val, requestedDirection, update.PhaseAdvance, runsTurnAction ? 1 : 0,
            actionIsTurn ? 1 : 0, requestedDirection, actionTime, actionPhase,
            actionPhaseDelay, fixXAfterSetDir, fixX.val);
+}
+
+static void printActionCallbackCases()
+{
+    // Minimized from Goldrush frame 192, WIPF #565. Script SetAction requests
+    // Start+Abort; Sit's StartCall must run exactly once, before Walk's
+    // optional AbortCall. Natural phase wraps request Start+End in that order.
+    struct CallbackCase
+    {
+        const char *Name;
+        bool EndRequested;
+        bool AbortRequested;
+        bool EndInstalled;
+        bool AbortInstalled;
+    };
+    const CallbackCase cases[] = {
+        {"script_start_only", false, true, false, false},
+        {"script_start_abort", false, true, false, true},
+        {"natural_start_end", true, false, true, false},
+    };
+
+    printf("\"action_callbacks\":[");
+    bool first = true;
+    for (const auto &test : cases)
+    {
+        int32_t order = 0, startCount = 0, oldCount = 0;
+        const bool completed = C4ActionCallbacks::Dispatch(
+            true, test.EndRequested, test.AbortRequested,
+            false, true, true,
+            [&](C4ActionCallbacks::Kind kind)
+            {
+                switch (kind)
+                {
+                case C4ActionCallbacks::Kind::Start:
+                    order = order * 10 + 1;
+                    ++startCount;
+                    break;
+                case C4ActionCallbacks::Kind::End:
+                    if (test.EndInstalled)
+                    {
+                        order = order * 10 + 2;
+                        ++oldCount;
+                    }
+                    break;
+                case C4ActionCallbacks::Kind::Abort:
+                    if (test.AbortInstalled)
+                    {
+                        order = order * 10 + 3;
+                        ++oldCount;
+                    }
+                    break;
+                }
+                return true;
+            });
+        if (!first) printf(",");
+        first = false;
+        printf("{\"name\":\"%s\",\"completed\":%d,\"callback_order\":%d,"
+               "\"start_count\":%d,\"old_count\":%d}",
+               test.Name, completed ? 1 : 0, order, startCount, oldCount);
+    }
+    printf("]");
 }
 
 struct SolidMaskOracleBitmap
@@ -699,12 +763,17 @@ int main()
     printActionDirectionCase();
     printf(",\n");
 
-    // 13. C4SolidMask active graphics sampling. The variant_2 case is the
+    // 13. C4Object::SetAction callback order/count. The first case is the
+    //     minimized Goldrush frame-192 WIPF duplicate StartCall divergence.
+    printActionCallbackCases();
+    printf(",\n");
+
+    // 14. C4SolidMask active graphics sampling. The variant_2 case is the
     //     minimized Goldrush frame-184 CTWR/SNKE contact divergence.
     printSolidMaskGraphicsCases();
     printf(",\n");
 
-    // 14. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 15. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");

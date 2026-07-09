@@ -481,7 +481,7 @@ impl ActionLibrary {
         if state.phase >= length {
             // C++ runs the phase-end transition through
             // SetAction(NextAction, SAC_StartCall | SAC_EndCall)
-            // (C4Object.cpp:5462) — EndCall + StartCall fire even when
+            // (C4Object.cpp:5462) — StartCall + EndCall fire even when
             // NextAction chains the SAME action (the palm's Breeze
             // StartCall re-evaluates the wind every cycle). Hold clamps
             // without a transition.
@@ -540,7 +540,7 @@ impl Default for ActionLibrary {
 pub struct ActionAdvanceOutcome {
     pub phase_event: Option<ActionPhaseEvent>,
     /// The phase-end NextAction transition ran (C4Object.cpp:5462) —
-    /// the caller owes an EndCall+StartCall pair even for a same-name
+    /// the caller owes a StartCall+EndCall pair even for a same-name
     /// chain.
     pub wrapped: bool,
 }
@@ -723,7 +723,7 @@ pub struct ActionUpdate {
     pub target: Option<Option<ObjectId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target2: Option<Option<ObjectId>>,
-    /// The script SetAction seam already ran AbortCall/StartCall
+    /// The script SetAction seam already ran StartCall/AbortCall
     /// synchronously (C4Object::SetAction fires them inside the call) —
     /// the fold must not queue duplicate transition callbacks.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -796,7 +796,12 @@ impl ActionUpdate {
 
     pub fn merge(&mut self, other: ActionUpdate) {
         if other.name.is_some() {
+            self.callbacks_dispatched = other.callbacks_dispatched;
             self.name = other.name;
+        } else {
+            // Phase/data/target writes belong to the current action change and
+            // must not erase its already-dispatched callback marker.
+            self.callbacks_dispatched |= other.callbacks_dispatched;
         }
         if other.phase.is_some() {
             self.phase = other.phase;
@@ -977,5 +982,36 @@ mod tests {
         assert_eq!(state.time, 7, "Action.Time counts every frame");
         assert_eq!(state.phase, 2, "two full 3-frame delays elapsed");
         assert_eq!(state.ticks, 1, "PhaseDelay restarts after each advance");
+    }
+
+    #[test]
+    fn merge_preserves_synchronously_dispatched_set_action_callbacks() {
+        let mut accumulated = ActionUpdate::default().with_phase(7);
+        accumulated.merge(ActionUpdate {
+            name: Some("Sit".to_string()),
+            callbacks_dispatched: true,
+            ..ActionUpdate::default()
+        });
+
+        assert!(
+            accumulated.callbacks_dispatched,
+            "the outcome fold must not replay SetAction's synchronous callbacks"
+        );
+    }
+
+    #[test]
+    fn merge_carries_the_dispatch_state_of_a_replacing_action_name() {
+        let mut accumulated = ActionUpdate {
+            name: Some("Sit".to_string()),
+            callbacks_dispatched: true,
+            ..ActionUpdate::default()
+        };
+        accumulated.merge(ActionUpdate {
+            name: Some("Walk".to_string()),
+            callbacks_dispatched: false,
+            ..ActionUpdate::default()
+        });
+
+        assert!(!accumulated.callbacks_dispatched);
     }
 }

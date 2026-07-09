@@ -10189,22 +10189,22 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             object.id(),
             object
                 .action_library
-                .abort_call_for_action(&current_action)
+                .start_call_for_action(&name)
                 .map(str::to_string),
             object
                 .action_library
-                .start_call_for_action(&name)
+                .abort_call_for_action(&current_action)
                 .map(str::to_string),
         ));
 
         Ok(Value::Bool(true))
     })?;
-    // C4Object::SetAction runs the AbortCall for the OLD action and the
-    // StartCall for the NEW one SYNCHRONOUSLY inside the call
+    // C4Object::SetAction runs the StartCall for the NEW action and then the
+    // AbortCall for the OLD one SYNCHRONOUSLY inside the call
     // (SetActionByName defaults SAC_StartCall|SAC_AbortCall) — the
     // coach's Drive0 StartCall reads the PRE-SetDir facing for its seat
     // vertex, so deferral changes the result.
-    if let Some((id, abort_call, start_call)) = sync_callbacks {
+    if let Some((id, start_call, abort_call)) = sync_callbacks {
         let depth = SETACTION_DEPTH.with(|d| {
             d.set(d.get() + 1);
             d.get()
@@ -10221,7 +10221,7 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             SETACTION_DEPTH.with(|d| d.set(d.get() - 1));
             return Ok(staged);
         }
-        for callback in [abort_call, start_call].into_iter().flatten() {
+        for callback in [start_call, abort_call].into_iter().flatten() {
             if let Some(Err(error)) = call_world_object_own_function(id, &callback, &[]) {
                 tracing::warn!(
                     %error,

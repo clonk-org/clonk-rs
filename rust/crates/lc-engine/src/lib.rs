@@ -15159,7 +15159,7 @@ impl Engine {
                         object.state.position.y,
                     );
                 }
-                // A same-name NextAction chain still owes its EndCall+StartCall
+                // A same-name NextAction chain still owes its StartCall+EndCall
                 // pair (SetAction with SAC_StartCall|SAC_EndCall,
                 // C4Object.cpp:5462); name-changing wraps are recorded by the
                 // block below.
@@ -15206,7 +15206,7 @@ impl Engine {
                 }
             }
 
-            // ExecAction's action transitions fire their EndCall/StartCall
+            // ExecAction's action transitions fire their StartCall/EndCall
             // INSIDE SetAction (C4Object.cpp:4160-4185), i.e. BEFORE
             // ExecMovement (C4Object::Execute order, :1074/:1079). A
             // StartCall that SetActions again (the coach's Driving ->
@@ -16168,18 +16168,6 @@ impl Engine {
                 self.objects[index].pending_action_events.clear();
                 break;
             }
-            let callback_kind = match event.kind {
-                ActionTransitionKind::Natural => ActionCallbackKind::End,
-                ActionTransitionKind::Forced => ActionCallbackKind::Abort,
-            };
-
-            self.invoke_action_callback(index, callback_kind, &event.previous_action, None, None)?;
-            if self.objects[index].destroyed
-                || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
-            {
-                return Ok(());
-            }
-
             let current_action = self.objects[index].state.action.name.clone();
             self.invoke_action_callback(
                 index,
@@ -16188,6 +16176,17 @@ impl Engine {
                 None,
                 None,
             )?;
+            if self.objects[index].destroyed
+                || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+            {
+                return Ok(());
+            }
+
+            let callback_kind = match event.kind {
+                ActionTransitionKind::Natural => ActionCallbackKind::End,
+                ActionTransitionKind::Forced => ActionCallbackKind::Abort,
+            };
+            self.invoke_action_callback(index, callback_kind, &event.previous_action, None, None)?;
             if self.objects[index].destroyed
                 || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
             {
@@ -16431,11 +16430,18 @@ impl Engine {
             }
 
             if let Some(update) = object_update {
+                let callbacks_dispatched = update
+                    .action
+                    .as_ref()
+                    .map(|action| action.callbacks_dispatched)
+                    .unwrap_or(false);
                 let delta: ObjectDelta = update.into();
                 let outcome = object.apply_delta(&delta, action_library);
                 energy_died = outcome.energy_died;
                 if let Some(change) = outcome.action_change {
-                    object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                    if !callbacks_dispatched {
+                        object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                    }
                 }
                 if let Some(change) = outcome.container_change {
                     container_changes.push(change);
@@ -16644,11 +16650,21 @@ impl Engine {
             {
                 let object = &mut self.objects[index];
                 if let Some(update) = outcome.update {
+                    let callbacks_dispatched = update
+                        .action
+                        .as_ref()
+                        .map(|action| action.callbacks_dispatched)
+                        .unwrap_or(false);
                     let delta: ObjectDelta = update.into();
                     let apply_outcome = object.apply_delta(&delta, &action_library);
                     energy_died = apply_outcome.energy_died;
                     if let Some(change) = apply_outcome.action_change {
-                        object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                        if !callbacks_dispatched {
+                            object.record_action_event(
+                                change.previous,
+                                ActionTransitionKind::Forced,
+                            );
+                        }
                     }
                     if let Some(change) = apply_outcome.container_change {
                         container_changes.push(change);
@@ -18008,9 +18024,16 @@ impl Engine {
             if let Some(update) = object_update {
                 let mut delta = ObjectDelta::default();
                 delta.merge_update(update);
+                let callbacks_dispatched = delta
+                    .action
+                    .as_ref()
+                    .map(|action| action.callbacks_dispatched)
+                    .unwrap_or(false);
                 let outcome = object.apply_delta(&delta, definition.action_library());
                 if let Some(change) = outcome.action_change {
-                    object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                    if !callbacks_dispatched {
+                        object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                    }
                 }
                 state_snapshot = object.script_state_snapshot();
             }
@@ -18650,14 +18673,23 @@ impl Engine {
                         let previous_crew_member = object.state.crew_member;
                         let previous_position = object.state.position;
                         let preserves_position = update.position.is_none();
+                        let callbacks_dispatched = update
+                            .action
+                            .as_ref()
+                            .map(|action| action.callbacks_dispatched)
+                            .unwrap_or(false);
                         let delta: ObjectDelta = update.into();
                         let apply_outcome = object.apply_delta(&delta, action_library);
                         if preserves_position {
                             object.state.position = previous_position;
                         }
                         if let Some(change) = apply_outcome.action_change {
-                            object
-                                .record_action_event(change.previous, ActionTransitionKind::Forced);
+                            if !callbacks_dispatched {
+                                object.record_action_event(
+                                    change.previous,
+                                    ActionTransitionKind::Forced,
+                                );
+                            }
                         }
                         if let Some((previous, new)) = apply_outcome.container_change {
                             contact_container_changes.push((object.id, previous, new));
@@ -27021,6 +27053,10 @@ impl Engine {
                 destroy_requested = true;
             }
             let outcome = object.apply_delta(&delta, &action_library);
+            // The object is not in self.objects yet, so creation-scope
+            // SetAction cannot run its nested callbacks through the world
+            // lookup. Keep this deferred stand-in even when the staged
+            // ActionUpdate carries callbacks_dispatched=true.
             if let Some(change) = outcome.action_change {
                 object.record_action_event(change.previous, ActionTransitionKind::Forced);
             }
@@ -27158,6 +27194,8 @@ impl Engine {
                 destroy_requested = true;
             }
             let outcome = object.apply_delta(&delta, &action_library);
+            // See the Construction fold above: this pre-insertion scope still
+            // owes the Start/Abort pair despite callbacks_dispatched.
             if let Some(change) = outcome.action_change {
                 object.record_action_event(change.previous, ActionTransitionKind::Forced);
             }
@@ -32245,6 +32283,67 @@ global func MenuCommand(state, kind, selection)
             assert_eq!(idle_end, 1);
             assert_eq!(walk_start, 1);
         }
+    }
+
+    #[test]
+    fn initialize_set_action_runs_one_start_then_abort_pair() {
+        let script = r#"#strict
+protected func Initialize()
+{
+    SetAction("New");
+    return 1;
+}
+
+protected func OnNewStart()
+{
+    return 1;
+}
+
+protected func OnOldAbort()
+{
+    return 1;
+}
+"#;
+        let call_log = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                if name == "OnNewStart" || name == "OnOldAbort" {
+                    call_log.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+        let mut definition =
+            Definition::from_script("ACBI", "Action callback init", script).expect("compiles");
+        definition.set_debugger_hooks(hooks);
+        definition.set_c4_callback_convention(true);
+        definition.configure_actions(
+            Some("Old".to_string()),
+            HashMap::from([
+                (
+                    "Old".to_string(),
+                    ActionSpec::default().with_abort_call("OnOldAbort"),
+                ),
+                (
+                    "New".to_string(),
+                    ActionSpec::default().with_start_call("OnNewStart"),
+                ),
+            ]),
+        );
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("ACBI"))
+            .expect("object spawns");
+
+        assert_eq!(
+            call_log.lock().unwrap().as_slice(),
+            ["OnNewStart", "OnOldAbort"],
+            "C4Object::SetAction runs one StartCall/AbortCall pair during Initialize"
+        );
     }
 
     #[test]
@@ -40398,11 +40497,14 @@ protected func Activity() { SetActionTargets(); return(1); }
             .expect("command applies");
 
         let log = call_log.lock().unwrap().clone();
+        // C4Object::SetAction executes StartCall before AbortCall
+        // (C4Object.cpp:4172-4208), preserving crew-selection order outside
+        // each object's callback pair.
         let expected = vec![
-            ("OnIdleAbort".to_string(), 200),
             ("OnWalkStart".to_string(), 200),
-            ("OnIdleAbort".to_string(), 100),
+            ("OnIdleAbort".to_string(), 200),
             ("OnWalkStart".to_string(), 100),
+            ("OnIdleAbort".to_string(), 100),
         ];
         assert_eq!(log, expected);
     }
@@ -48957,9 +49059,11 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert_eq!(object.velocity, Vector2::ZERO);
 
         let calls = call_log.lock().unwrap().clone();
+        // SetActionByName("Jump") fires the new StartCall before the old
+        // AbortCall (C4Object.cpp:4172-4208).
         assert_eq!(
             calls,
-            vec!["OnSlideAbort".to_string(), "OnJumpStart".to_string()]
+            vec!["OnJumpStart".to_string(), "OnSlideAbort".to_string()]
         );
     }
 
