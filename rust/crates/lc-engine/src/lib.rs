@@ -6206,6 +6206,26 @@ impl Definition {
                 }
             }
         }
+        // OCF_LineConstruct: FullCon + any LineConnect bit besides
+        // C4D_EnergyHolder (SetOCF, C4Object.cpp:611-614)
+        if ocf & crate::ocf::FULL_CON != 0 && self.line_connect & !LINE_CONNECT_ENERGY_HOLDER != 0
+        {
+            ocf |= crate::ocf::LINE_CONSTRUCT;
+        }
+        // OCF_PowerConsumer (SetOCF, C4Object.cpp:649-652)
+        if self.line_connect & LINE_CONNECT_POWER_CONSUMER != 0
+            && ocf & crate::ocf::FULL_CON != 0
+        {
+            ocf |= crate::ocf::POWER_CONSUMER;
+        }
+        // OCF_PowerSupply: a generator, or an energized power output
+        // (SetOCF, C4Object.cpp:653-657)
+        if (self.line_connect & LINE_CONNECT_POWER_GENERATOR != 0
+            || (self.line_connect & LINE_CONNECT_POWER_OUTPUT != 0 && state.energy > 0))
+            && ocf & crate::ocf::FULL_CON != 0
+        {
+            ocf |= crate::ocf::POWER_SUPPLY;
+        }
         // OCF_Container: Grab_Put, Grab_Get or an open entrance (SetOCF,
         // C4Object.cpp:658-660)
         if self.grab_put_get & (GRAB_PUT_GET_PUT | GRAB_PUT_GET_GET) != 0
@@ -47630,6 +47650,114 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         let idx = engine.find_object_index(id).expect("object exists");
         assert_ne!(engine.object_ocf_at_index(idx) & ocf::CONTAINER, 0);
         assert_eq!(engine.object_ocf_at_index(idx) & ocf::ENTRANCE, 0);
+    }
+
+    #[test]
+    fn ocf_line_construct_requires_non_energy_holder_line_connect() {
+        // OCF_LineConstruct: FullCon && LineConnect & ~C4D_EnergyHolder
+        // (SetOCF, C4Object.cpp:611-614).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Plant");
+        definition.set_line_connect(LINE_CONNECT_POWER_INPUT);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let mut holder_only = simple_definition("Lorry");
+        holder_only.set_line_connect(LINE_CONNECT_ENERGY_HOLDER);
+        engine
+            .register_definition(holder_only)
+            .expect("definition registers");
+
+        let plant = engine
+            .spawn_object(SpawnConfig::new("Plant").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(plant).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT, 0);
+
+        engine.objects[idx].state.construction = FULL_CON - 1;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT,
+            0,
+            "line construction needs OCF_FullCon (C4Object.cpp:612)"
+        );
+
+        let lorry = engine
+            .spawn_object(SpawnConfig::new("Lorry").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(lorry).expect("object exists");
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::LINE_CONSTRUCT,
+            0,
+            "a pure C4D_EnergyHolder is no line target (C4Object.cpp:613)"
+        );
+    }
+
+    #[test]
+    fn ocf_power_consumer_requires_line_connect_bit_and_full_con() {
+        // OCF_PowerConsumer: LineConnect & C4D_Power_Consumer at FullCon
+        // (SetOCF, C4Object.cpp:649-652).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Elevator");
+        definition.set_line_connect(LINE_CONNECT_POWER_CONSUMER);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Elevator").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::POWER_CONSUMER, 0);
+
+        engine.objects[idx].state.construction = FULL_CON - 1;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(engine.object_ocf_at_index(idx) & ocf::POWER_CONSUMER, 0);
+    }
+
+    #[test]
+    fn ocf_power_supply_from_generator_or_energized_output() {
+        // OCF_PowerSupply: (LineConnect & C4D_Power_Generator) OR
+        // (LineConnect & C4D_Power_Output && Energy > 0), at FullCon
+        // (SetOCF, C4Object.cpp:653-657).
+        let mut engine = Engine::with_seed(4);
+        let mut generator = simple_definition("Windbag");
+        generator.set_line_connect(LINE_CONNECT_POWER_GENERATOR);
+        engine
+            .register_definition(generator)
+            .expect("definition registers");
+        let mut output = simple_definition("Battery");
+        output.set_line_connect(LINE_CONNECT_POWER_OUTPUT);
+        engine
+            .register_definition(output)
+            .expect("definition registers");
+
+        let windbag = engine
+            .spawn_object(SpawnConfig::new("Windbag").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(windbag).expect("object exists");
+        engine.objects[idx].state.energy = 0;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY,
+            0,
+            "generators supply power regardless of stored energy"
+        );
+
+        let battery = engine
+            .spawn_object(SpawnConfig::new("Battery").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(battery).expect("object exists");
+        engine.objects[idx].state.energy = 0;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY,
+            0,
+            "an empty power output supplies nothing (Energy > 0 fails)"
+        );
+        engine.objects[idx].state.energy = 50;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY, 0);
     }
 
     #[test]
