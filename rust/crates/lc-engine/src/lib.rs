@@ -4070,19 +4070,23 @@ impl Object {
         // initial split — the fixed coords travel separately below.
         let position = self.state.position;
         let velocity = self.velocity_pixels();
-        // Persist the exact `rdir`/`fix_r` only while actively rotating; a static
-        // object's orientation is fully captured by the whole-degree `rotation`.
-        let rotation_state = if self.rotation_velocity.is_nonzero() {
-            (Some(self.rotation_velocity), Some(self.fixed_rotation))
-        } else {
-            (None, None)
-        };
+        let rotation_velocity = self
+            .rotation_velocity
+            .is_nonzero()
+            .then_some(self.rotation_velocity);
+        // C++ always persists fix_r. Omit it only when reconstruction from
+        // raw `r` is lossless; a stopped object may still retain a fractional
+        // accumulator from its last rotation step.
+        let fixed_rotation =
+            (self.fixed_rotation != itofix(self.state.rotation)).then_some(self.fixed_rotation);
         ObjectSnapshot {
             id: self.id,
             definition_id: self.definition_id.clone(),
             position,
             velocity,
-            rotation: self.state.rotation.rem_euclid(360),
+            // C++ persists `r` verbatim; DoMovement keeps active rotation in
+            // (-180, 180], so a left lean remains negative across a save.
+            rotation: self.state.rotation,
             energy: self.state.energy,
             damage: self.state.damage,
             magic_energy: self.state.magic_energy,
@@ -4125,8 +4129,8 @@ impl Object {
             last_energy_loss_cause: self.last_energy_loss_cause,
             fixed_position: subpixel_or_none(self.fixed_position, position),
             fixed_velocity: subpixel_or_none(self.fixed_velocity, velocity),
-            rotation_velocity: rotation_state.0,
-            fixed_rotation: rotation_state.1,
+            rotation_velocity,
+            fixed_rotation,
         }
     }
 
@@ -4929,13 +4933,13 @@ pub struct ObjectSnapshot {
     /// detail beyond the whole-pixel `velocity`. `None` ⇒ `itofix(velocity)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed_velocity: Option<FixedVec2>,
-    /// Raw 16.16 fixed-point angular velocity (`rdir`) and rotation accumulator
-    /// (`fix_r`), recorded together only while the object is actively rotating
-    /// (`rdir != 0`). `None` ⇒ a static object whose orientation is fully
-    /// captured by `rotation`. Preserves rotation across save/restore so a
-    /// reloaded spinning object stays in lockstep (C++ persists `fix_r`/`rdir`).
+    /// Raw 16.16 fixed-point angular velocity (`rdir`), present when nonzero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation_velocity: Option<C4Fixed>,
+    /// Raw rotation accumulator (`fix_r`), omitted only when it equals
+    /// `itofix(rotation)` and can be reconstructed exactly. C++ persists raw
+    /// signed `r`, `fix_r`, and `rdir` independently (C4Object.cpp:2769,
+    /// 2789,2792).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed_rotation: Option<C4Fixed>,
 }
@@ -8295,6 +8299,7 @@ struct ScenarioScript {
     /// clones to host functions so GameCall/GameCallEx can run scenario
     /// functions mid-VM-call.
     script: Arc<ScriptEngine>,
+    append_script: Option<lc_script::Script>,
     has_initialize: bool,
     has_step: bool,
 }
@@ -8303,13 +8308,15 @@ impl ScenarioScript {
     fn from_source(name: impl Into<String>, source: &str) -> Result<Self, EngineError> {
         let name = name.into();
         let mut script = ScriptEngine::new();
-        script
-            .load_script(source)
-            .map_err(|source| EngineError::Script {
+        let compiled =
+            lc_script::Script::compile(source).map_err(|source| EngineError::Script {
                 definition: name.clone(),
                 function: "load".to_string(),
-                source,
+                source: ScriptError::from(source),
             })?;
+        let append_script = (!compiled.appends().is_empty())
+            .then(|| compiled.clone().without_static_declarations());
+        script.add_script(compiled);
         compat::register_host_functions(&mut script);
         let has_initialize = script.has_function("Initialize");
         let has_step = script.has_function("Step");
@@ -8318,6 +8325,7 @@ impl ScenarioScript {
             name,
             c4_args: false,
             script: Arc::new(script),
+            append_script,
             has_initialize,
             has_step,
         })
@@ -8588,14 +8596,15 @@ impl ScenarioScript {
         Ok((batch, audio_state, rng, script_error))
     }
 
-    /// Raw-value scenario call for engine-internal callbacks (mrfScript):
-    /// returns the script's return VALUE instead of parsing it as a command
-    /// proplist. `fPassErrors=false` semantics (C4Material.cpp:818): script
-    /// errors are logged and yield `None` (C4VNull), while host side effects
-    /// made before the error still fold into the batch.
+    /// Raw-value, no-object-context call used by definition initialization
+    /// and mrfScript. `fPassErrors=false` semantics: errors yield `None`
+    /// while host side effects made before the error still fold into the
+    /// returned batch.
     #[allow(clippy::too_many_arguments)]
-    fn call_value(
-        &self,
+    fn call_value_for_script(
+        script_name: &str,
+        script: &ScriptEngine,
+        definition_context: Option<DefinitionId>,
         function: &str,
         args: &[Value],
         world: HostWorldContext,
@@ -8620,14 +8629,25 @@ impl ScenarioScript {
         let audio_guard = enter_audio_context(audio);
         // Arguments go in as reference cells (the C4AulParSet GetRef pattern,
         // C4Material.cpp:814-815) so callee `&` params can write back.
-        let (result, host_effects) = compat::with_effect_context_with_state(
-            None,
-            global_effects,
-            world,
-            next_object_id,
-            game_over_triggered,
-            || self.script.call_with_ref_args(function, args),
-        );
+        let call = || script.call_with_ref_args(function, args);
+        let (result, host_effects) = match definition_context {
+            Some(definition) => compat::with_definition_effect_context_with_state(
+                definition,
+                global_effects,
+                world,
+                next_object_id,
+                game_over_triggered,
+                call,
+            ),
+            None => compat::with_effect_context_with_state(
+                None,
+                global_effects,
+                world,
+                next_object_id,
+                game_over_triggered,
+                call,
+            ),
+        };
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
@@ -8635,10 +8655,10 @@ impl ScenarioScript {
             Ok((value, finals)) => (Some(value), finals),
             Err(error) => {
                 tracing::warn!(
-                    script = %self.name,
+                    script = %script_name,
                     function,
                     %error,
-                    "material reaction script error (continuing like C++ fail-safe exec)"
+                    "script callback error (continuing like C++ fail-safe exec)"
                 );
                 // The unwound call loses the cells; C++ would keep par
                 // mutations made before the error — narrow documented
@@ -8768,6 +8788,12 @@ struct ScenarioBatch {
     script_go: Option<bool>,
 }
 
+#[derive(Clone)]
+enum AppendScriptSource {
+    Script(lc_script::Script),
+    Definition(DefinitionId),
+}
+
 pub struct Engine {
     definitions: HashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
@@ -8785,11 +8811,10 @@ pub struct Engine {
     /// resolve constants declared by OTHER scripts (MagiClonk's
     /// `MCLK_ComboExtraDataName()` running in the MAGE host).
     pub(crate) script_global_consts: lc_script::GlobalVariables,
-    /// Global (System.c4g) scripts that carry `#appendto` directives:
-    /// retained at install, resolved with the definition appends (system
-    /// hosts register before definitions in C++, so their appends apply
-    /// first).
-    system_append_scripts: Vec<lc_script::Script>,
+    /// Every live script host carrying `#appendto`, in C4AulScriptEngine child
+    /// order. Definition-pack System hosts are interleaved with definitions;
+    /// scenario Script.c and its System.c4g hosts follow all definitions.
+    append_script_sources: Vec<AppendScriptSource>,
     /// Bumped whenever `objects` changes SHAPE (push/retain/clear) so the
     /// id->index cache below can trust its entries; indices are stable
     /// between bumps (destruction only flags, removal happens in the
@@ -9496,9 +9521,8 @@ pub(crate) fn path_free_exact(
     x2: i32,
     y2: i32,
 ) -> bool {
-    let solid = |x: i32, y: i32| {
-        movement_density_at(landscape, materials, solid_masks, None, x, y) >= 50
-    };
+    let solid =
+        |x: i32, y: i32| movement_density_at(landscape, materials, solid_masks, None, x, y) >= 50;
     let (mut x1, mut y1, mut x2, mut y2) = (x1, y1, x2, y2);
     if (x2 - x1).abs() < (y2 - y1).abs() {
         if y1 > y2 {
@@ -9913,6 +9937,70 @@ fn apply_walk_physical_movement(
                 velocity.x = C4Fixed::ZERO;
             }
         }
+    }
+}
+
+/// C4Object::AdjustWalkRotation (C4Object.cpp:6031-6097): derive the
+/// angular velocity that steers an attached walker toward the floor slope.
+/// The caller owns the Rotateable/AttachMat/xdir gate because the script
+/// wrapper and DFA_WALK use different guards.
+#[allow(clippy::too_many_arguments)]
+fn calculate_walk_rotation_velocity(
+    rotation: i32,
+    attach: ShapeAttachRecord,
+    def_attach_vtx_x: i32,
+    live_attach_vtx_x: i32,
+    range_x: i32,
+    range_y: i32,
+    speed: i32,
+    mut solid: impl FnMut(i32, i32) -> bool,
+) -> C4Fixed {
+    let dest_angle = if attach.vtx < 0 || def_attach_vtx_x == 0 {
+        let mut probe = |x_check: i32| -> i32 {
+            let mut offset = 0i32;
+            if solid(x_check, attach.y) {
+                loop {
+                    offset -= 1;
+                    if offset <= -range_y {
+                        break;
+                    }
+                    if solid(x_check, attach.y + offset) {
+                        offset += 1;
+                        break;
+                    }
+                }
+            } else {
+                loop {
+                    offset += 1;
+                    if offset >= range_y {
+                        break;
+                    }
+                    if solid(x_check, attach.y + offset) {
+                        offset -= 1;
+                        break;
+                    }
+                }
+            }
+            offset
+        };
+        let solid_left = probe(attach.x - range_x);
+        let solid_right = probe(attach.x + range_x);
+        (solid_right - solid_left) * (35 / range_x.max(1))
+    } else if live_attach_vtx_x > 0 {
+        -50
+    } else {
+        50
+    };
+
+    if (dest_angle - rotation).abs() <= 2 {
+        return C4Fixed::ZERO;
+    }
+    let bounded = itofix((dest_angle - rotation).clamp(-15, 15));
+    let divisor = if speed != 0 { 10000 / speed } else { 0 };
+    if divisor != 0 {
+        bounded / divisor
+    } else {
+        C4Fixed::ZERO
     }
 }
 
@@ -10396,7 +10484,7 @@ impl Engine {
             definition_load_order: Vec::new(),
             script_globals: lc_script::new_global_variables(),
             script_global_consts: lc_script::new_global_variables(),
-            system_append_scripts: Vec::new(),
+            append_script_sources: Vec::new(),
             objects_generation: std::cell::Cell::new(1),
             object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
             definition_metadata_cache: std::cell::RefCell::new(None),
@@ -12048,7 +12136,6 @@ impl Engine {
                 .unwrap_or(0),
             self.idle_crew_counts(),
         )
-    
     }
 
     /// The shared definition-script table host contexts carry (nested
@@ -12081,35 +12168,151 @@ impl Engine {
         source: &str,
         c4_args: bool,
     ) -> Result<Vec<ObjectId>, EngineError> {
+        self.load_scenario_script_with_convention(name, source, c4_args)?;
+        self.initialize_scenario_script()
+    }
+
+    /// Loads and registers a scenario script without calling Initialize.
+    /// C++ performs this before loading the scenario-local System.c4g and
+    /// linking, while Initialize runs later from InitGame.
+    pub fn load_scenario_script_with_convention(
+        &mut self,
+        name: impl Into<String>,
+        source: &str,
+        c4_args: bool,
+    ) -> Result<(), EngineError> {
         let name = name.into();
         let mut script = ScenarioScript::from_source(name, source)?;
         script.c4_args = c4_args;
-        script.set_global_functions(self.global_script_functions.clone());
         {
             let host = Arc::make_mut(&mut script.script);
             host.set_global_variables(self.script_globals.clone());
             host.set_global_constants(self.script_global_consts.clone());
             host.adopt_statics_into_globals();
         }
+        let scenario_globals: Vec<(String, lc_script::Function)> = script
+            .script
+            .global_access_functions()
+            .map(|(name, function)| (name.clone(), function.clone()))
+            .collect();
+        let append_script = script.append_script.clone();
+        if let Some(append_script) = append_script {
+            self.append_script_sources
+                .push(AppendScriptSource::Script(append_script));
+        }
+        // The scenario script's `global func`s are engine-global like any
+        // other script's (C4AulScriptEngine owns AA_GLOBAL functions from
+        // EVERY linked script): GoldRush's FxStayThere*/DoInitialize live
+        // there and must resolve from def scripts and effect callbacks.
+        let mut functions: HashMap<String, lc_script::Function> = self
+            .global_script_functions
+            .as_deref()
+            .cloned()
+            .unwrap_or_default();
+        let mut changed = false;
+        for (name, mut function) in scenario_globals {
+            if let Some(previous) = functions.remove(&name) {
+                function.push_overload(previous);
+            }
+            Arc::make_mut(&mut script.script)
+                .link_global_access_function(&name, function.clone());
+            functions.insert(name, function);
+            changed = true;
+        }
+        if changed {
+            let table = Some(Arc::new(functions));
+            self.global_script_functions = table.clone();
+            for definition in self.definitions.values_mut() {
+                definition.set_global_functions(table.clone());
+            }
+            self.definition_metadata_cache.borrow_mut().take();
+        }
+        script.set_global_functions(self.global_script_functions.clone());
+        self.scenario_script = Some(script);
+        Ok(())
+    }
+
+    /// C4Game::InitGame's per-definition `~InitializeDef` pass. Definitions
+    /// run in numeric C4ID order after Objects.txt has been denumerated and
+    /// before environment placement (C4Game.cpp:112, 2505-2520). Calls are
+    /// fail-safe, but host side effects made before an error still commit.
+    pub(crate) fn initialize_definition_scripts(
+        &mut self,
+    ) -> Result<Vec<ObjectId>, EngineError> {
+        let mut definition_ids = self.definition_load_order.clone();
+        definition_ids.sort_by_key(|id| {
+            definition_id_to_c4id(id.as_str())
+                .map(|id| id as u32)
+                .unwrap_or_default()
+        });
+        let mut created = Vec::new();
+        for definition_id in definition_ids {
+            let Some((script_name, script)) = self
+                .definitions
+                .get(&definition_id)
+                .filter(|definition| definition.script.has_function("InitializeDef"))
+                .map(|definition| (definition.id.clone(), definition.script_arc()))
+            else {
+                continue;
+            };
+
+            let world = self.host_world_context();
+            let (_value, _args, batch, audio_state, rng) =
+                ScenarioScript::call_value_for_script(
+                    &script_name,
+                    &script,
+                    Some(definition_id.clone()),
+                    "InitializeDef",
+                    &[Value::Nil],
+                    world,
+                    self.rng.clone(),
+                    self.frame,
+                    &self.global_effects.clone(),
+                    self.physics,
+                    self.environment,
+                    self.audio_registry.clone(),
+                    self.game_over_triggered,
+                );
+            self.rng = rng;
+            self.audio_registry = audio_state;
+            created.extend(self.apply_scenario_batch(batch)?);
+        }
+        Ok(created)
+    }
+
+    pub fn initialize_scenario_script(&mut self) -> Result<Vec<ObjectId>, EngineError> {
+        let Some(c4_args) = self.scenario_script.as_ref().map(|script| script.c4_args) else {
+            return Ok(Vec::new());
+        };
         let snapshot = self.snapshot();
         // The `random` Initialize argument is the command-DSL fixture
         // convention — real content (c4_args) burns no synced draw
         // (C++ passes no such argument).
         let random = if c4_args { 0 } else { self.next_random_i32() };
         let rng_state = self.rng.clone();
+        let global_effects = self.global_effects.clone();
+        let physics = self.physics;
+        let environment = self.environment;
+        let audio_registry = self.audio_registry.clone();
+        let particle_defs = self.particle_system.def_names();
+        let definition_scripts = self.definition_script_table();
         let definition_metadata_table = self.definition_metadata_table();
+        let next_object_id = self.next_object_id;
+        let Some(script) = self.scenario_script.as_mut() else {
+            return Ok(Vec::new());
+        };
         let initialize = script.initialize(
             &snapshot,
             rng_state,
             random,
-            &self.global_effects,
-            self.physics,
-            self.environment,
-            self.audio_registry.clone(),
-            self.particle_system.def_names(),
-            self.definition_script_table(),
+            &global_effects,
+            physics,
+            environment,
+            audio_registry,
+            particle_defs,
+            definition_scripts,
             definition_metadata_table,
-            self.next_object_id,
+            next_object_id,
         );
         // Initialize is a game call: a script error logs and the scenario
         // still runs WITH its script installed (C++ fail-safe exec,
@@ -12123,40 +12326,6 @@ impl Engine {
             None => Vec::new(),
         };
         self.game_over_triggered = false;
-        self.scenario_script = Some(script);
-        // The scenario script's `global func`s are engine-global like any
-        // other script's (C4AulScriptEngine owns AA_GLOBAL functions from
-        // EVERY linked script): GoldRush's FxStayThere*/DoInitialize live
-        // there and must resolve from def scripts and effect callbacks.
-        {
-            let mut functions: HashMap<String, lc_script::Function> = self
-                .global_script_functions
-                .as_deref()
-                .cloned()
-                .unwrap_or_default();
-            let mut changed = false;
-            if let Some(scenario) = self.scenario_script.as_ref() {
-                for (name, function) in scenario.script.global_access_functions() {
-                    let mut function = function.clone();
-                    if let Some(previous) = functions.remove(name) {
-                        function.push_overload(previous);
-                    }
-                    functions.insert(name.clone(), function);
-                    changed = true;
-                }
-            }
-            if changed {
-                let table = Some(Arc::new(functions));
-                self.global_script_functions = table.clone();
-                for definition in self.definitions.values_mut() {
-                    definition.set_global_functions(table.clone());
-                }
-                if let Some(script) = self.scenario_script.as_mut() {
-                    script.set_global_functions(table.clone());
-                }
-                self.definition_metadata_cache.borrow_mut().take();
-            }
-        }
         Ok(created)
     }
 
@@ -13290,12 +13459,27 @@ impl Engine {
     }
 
     pub fn register_definition(&mut self, definition: Definition) -> Result<(), EngineError> {
+        let id = definition.id().to_string();
+        if self.definitions.contains_key(&id) {
+            return Err(EngineError::DefinitionAlreadyExists(id));
+        }
+
+        let mut definition = definition;
+        {
+            // One GlobalNamed table for every script host: `static`
+            // declarations compiled into the definition move to it.
+            let script = Arc::make_mut(&mut definition.script);
+            script.set_global_variables(self.script_globals.clone());
+            script.set_global_constants(self.script_global_consts.clone());
+            script.adopt_statics_into_globals();
+        }
 
         // A def script's `global func`s land on the ENGINE scope like any
         // System.c4g global (C4AulParse "global" storage — the GoldRush
-        // Talker's StartMovie is called from the scenario script). They
-        // join the global table with the same overload chaining as
-        // install_additional_global_scripts.
+        // Talker's StartMovie is called from the scenario script). C4Aul
+        // also leaves a FnLink in the declaring definition; repoint the
+        // local copy at the engine-chained function so inherited() follows
+        // OwnerOverloaded without later definitions stealing this link.
         let def_globals: Vec<(String, lc_script::Function)> = definition
             .script
             .global_access_functions()
@@ -13311,6 +13495,8 @@ impl Engine {
                 if let Some(previous) = functions.remove(&function_name) {
                     function.push_overload(previous);
                 }
+                Arc::make_mut(&mut definition.script)
+                    .link_global_access_function(&function_name, function.clone());
                 functions.insert(function_name, function);
             }
             let table = Some(Arc::new(functions));
@@ -13322,22 +13508,13 @@ impl Engine {
                 script.set_global_functions(table.clone());
             }
         }
-        let id = definition.id().to_string();
-        if self.definitions.contains_key(&id) {
-            return Err(EngineError::DefinitionAlreadyExists(id));
-        }
-        let mut definition = definition;
         definition.set_global_functions(self.global_script_functions.clone());
-        {
-            // One GlobalNamed table for every script host: `static`
-            // declarations compiled into the definition move to it.
-            let script = Arc::make_mut(&mut definition.script);
-            script.set_global_variables(self.script_globals.clone());
-            script.set_global_constants(self.script_global_consts.clone());
-            script.adopt_statics_into_globals();
+        let definition_id = DefinitionId::from(id.as_str());
+        if !definition.appends.is_empty() {
+            self.append_script_sources
+                .push(AppendScriptSource::Definition(definition_id.clone()));
         }
-        self.definition_load_order
-            .push(DefinitionId::from(id.as_str()));
+        self.definition_load_order.push(definition_id);
         self.definitions.insert(id, definition);
         self.definition_metadata_cache.borrow_mut().take();
         Ok(())
@@ -13351,7 +13528,7 @@ impl Engine {
     /// (and future) script host.
     pub fn install_global_scripts(&mut self, sources: &[(String, String)]) -> usize {
         self.global_script_functions = None;
-        self.system_append_scripts.clear();
+        self.append_script_sources.clear();
         self.install_additional_global_scripts(sources)
     }
 
@@ -13359,6 +13536,16 @@ impl Engine {
     /// overload earlier ones and `inherited` reaches them (C++ link order —
     /// the scenario's System.c4g joins the engine's, C4Game.cpp:3317-3343).
     pub fn install_additional_global_scripts(&mut self, sources: &[(String, String)]) -> usize {
+        self.install_global_scripts_at(sources)
+    }
+
+    /// Installs scenario-local System.c4g after all definitions, matching the
+    /// explicit C++ overload-priority phase (C4Game.cpp:2606-2617).
+    pub fn install_scenario_global_scripts(&mut self, sources: &[(String, String)]) -> usize {
+        self.install_global_scripts_at(sources)
+    }
+
+    fn install_global_scripts_at(&mut self, sources: &[(String, String)]) -> usize {
         let mut functions: HashMap<String, lc_script::Function> = self
             .global_script_functions
             .as_deref()
@@ -13368,23 +13555,25 @@ impl Engine {
         for (name, source) in sources {
             match lc_script::Script::compile(source) {
                 Ok(script) => {
+                    // System/scenario System.c4g declarations participate in
+                    // the same engine-global GlobalNamed/GlobalConsts tables
+                    // as definition scripts (C4Aul preparser and
+                    // RegisterGlobalConstant, C4Aul.cpp:484-492).
+                    lc_script::register_global_declarations(
+                        script.var_decls(),
+                        &self.script_globals,
+                        Some(&self.script_global_consts),
+                    );
                     // Scripts with #appendto also append their functions to
                     // the named definitions at link time (C4AulLink.cpp:
-                    // 29-64; system hosts register before defs in C++).
+                    // 29-64). Statics were registered above and AppendTo
+                    // copies LocalNamed only (:145-157).
                     if !script.appends().is_empty() {
-                        self.system_append_scripts.push(script.clone());
+                        let append_script = script.clone().without_static_declarations();
+                        self.append_script_sources
+                            .push(AppendScriptSource::Script(append_script));
                     }
-                    // `static` declarations register engine-globally
-                    // (GlobalNamed) regardless of which host declared them.
-                    for var_decl in script.var_decls() {
-                        if var_decl.kind == lc_script::VarDeclKind::Static {
-                            self.script_globals
-                                .borrow_mut()
-                                .entry(var_decl.name.clone())
-                                .or_insert_with(|| lc_script::value_cell(lc_script::Value::Nil));
-                        }
-                    }
-                    for (function_name, function) in script.functions() {
+                    for (function_name, function) in script.global_access_functions() {
                         let mut function = function.clone();
                         if let Some(previous) = functions.remove(function_name) {
                             function.push_overload(previous);
@@ -13417,51 +13606,36 @@ impl Engine {
     /// `#appendto` targets receive a COPY of its non-global functions as
     /// overrides (AppendTo with bHighPrio, :114-141). MUST run before
     /// include resolution (":27-28 ResolveAppends has to be called
-    /// first!"). System hosts register before definitions in C++, so
-    /// their appends apply first; definitions follow in registration
-    /// order — that order decides the overload chain when several appends
-    /// hit the same target function. Unknown targets warn and skip
+    /// first!"). Sources follow the single script-host registration order:
+    /// definition-pack System hosts stay interleaved with definitions, then
+    /// scenario Script.c and scenario System.c4g follow (C4Def.cpp:927-968;
+    /// C4Game.cpp:2606-2617). That order decides the overload chain when
+    /// several appends hit the same target function. Unknown targets warn and skip
     /// (:42-49); `#appendto *` reaches every definition except the source
     /// (:53-60).
     pub fn resolve_appends(&mut self) {
-        enum AppendSource {
-            System(usize),
-            Definition(DefinitionId),
-        }
-        let mut work: Vec<(AppendSource, Vec<lc_script::AppendTo>)> = self
-            .system_append_scripts
-            .iter()
-            .enumerate()
-            .map(|(index, script)| (AppendSource::System(index), script.appends().to_vec()))
-            .collect();
-        for id in &self.definition_load_order {
-            if let Some(definition) = self.definitions.get(id) {
-                if !definition.appends.is_empty() {
-                    work.push((
-                        AppendSource::Definition(id.clone()),
-                        definition.appends.clone(),
-                    ));
-                }
-            }
-        }
-        if work.is_empty() {
+        if self.append_script_sources.is_empty() {
             return;
         }
 
         let ordered_ids = self.definition_load_order.clone();
-        for (source, targets) in work {
-            let (source_script, source_id) = match &source {
-                AppendSource::System(index) => {
+        for source in self.append_script_sources.clone() {
+            let (source_script, source_id, targets) = match source {
+                AppendScriptSource::Script(script) => {
                     let mut engine = ScriptEngine::new();
-                    // Statics in append scripts are engine-global, never
-                    // object locals of the append target.
                     engine.set_global_variables(self.script_globals.clone());
-                    engine.add_script(self.system_append_scripts[*index].clone());
+                    engine.set_global_constants(self.script_global_consts.clone());
+                    let targets = script.appends().to_vec();
+                    engine.add_script(script);
                     #[allow(clippy::arc_with_non_send_sync)] // single-threaded sharing
-                    (Arc::new(engine), None)
+                    (Arc::new(engine), None, targets)
                 }
-                AppendSource::Definition(id) => match self.definitions.get(id) {
-                    Some(definition) => (definition.script.clone(), Some(id.clone())),
+                AppendScriptSource::Definition(id) => match self.definitions.get(&id) {
+                    Some(definition) => (
+                        definition.script.clone(),
+                        Some(id),
+                        definition.appends.clone(),
+                    ),
                     None => continue,
                 },
             };
@@ -14498,7 +14672,6 @@ impl Engine {
                 continue;
             }
 
-
             // DFA_CONNECT line tracking (C4Object.cpp:5341-5420) runs in
             // ExecAction; broken targets fire LineBreak and remove the
             // line, skipping the rest of this object's exec.
@@ -14517,8 +14690,6 @@ impl Engine {
             // An early `return` inside ExecAction (the free-fall swim
             // exit) skips it entirely; movement below still runs.
             if !exec_action_returned_early {
-
-
                 let physical_for_advance = self.object_physical(idx);
                 let advance_outcome = {
                     let object = &mut self.objects[idx];
@@ -16638,7 +16809,9 @@ impl Engine {
                     script_fixed_velocity: None,
                     position: snapshot.position,
                     velocity: snapshot.velocity,
-                    rotation: snapshot.rotation.rem_euclid(360),
+                    // Objects.txt `Rotation` loads verbatim (C4Object.cpp:
+                    // 2769); only the SetR host function normalizes.
+                    rotation: snapshot.rotation,
                     shape_attach: ShapeAttachRecord::default(),
                     t_attach: 0,
                     energy: snapshot.energy,
@@ -16703,7 +16876,6 @@ impl Engine {
             }
             if let Some(fixed_rotation) = snapshot.fixed_rotation {
                 object.fixed_rotation = fixed_rotation;
-                object.state.rotation = fixtoi(fixed_rotation);
             }
             object.last_energy_loss_cause = snapshot.last_energy_loss_cause;
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
@@ -18153,6 +18325,14 @@ impl Engine {
                     probe(state.position.y + offset - 2),
                 )
             };
+            let walk_rotation = if matches!(procedure, ActionProcedure::Walk) {
+                self.definitions
+                    .get(&definition_id)
+                    .map(|definition| definition.walk_rotation_seed(&self.objects[idx].state))
+            } else {
+                None
+            };
+            let walk_landscape = self.landscape.as_ref();
             let object = &mut self.objects[idx];
             // DFA_SWIM and DFA_FLOAT never apply gravity (no DoGravity call,
             // C4Object.cpp:4920-4970/:5268-5287); the legacy halved-gravity
@@ -18329,6 +18509,38 @@ impl Engine {
                             command_direction,
                             movement_profile,
                         );
+                    }
+                    if let Some(seed) = walk_rotation {
+                        let live_attach_vtx_x = usize::try_from(seed.attach.vtx)
+                            .ok()
+                            .and_then(|vtx| object.state.vertices.get(vtx))
+                            .map(|vertex| vertex.x)
+                            .unwrap_or(0);
+                        // Internal DFA_WALK gate (C4Object.cpp:4817-4821):
+                        // unlike FnAdjustWalkRotation, this does not inspect
+                        // t_attach. Its false branch always stops rotation.
+                        object.rotation_velocity = if seed.rotateable != 0
+                            && seed.attach.mat_valid
+                            && (object.fixed_velocity.x != C4Fixed::ZERO
+                                || seed.def_attach_vtx_x != 0)
+                        {
+                            calculate_walk_rotation_velocity(
+                                object.state.rotation,
+                                seed.attach,
+                                seed.def_attach_vtx_x,
+                                live_attach_vtx_x,
+                                20,
+                                20,
+                                100,
+                                |x, y| {
+                                    walk_landscape
+                                        .map(|landscape| landscape.is_solid_at(x, y))
+                                        .unwrap_or(false)
+                                },
+                            )
+                        } else {
+                            C4Fixed::ZERO
+                        };
                     }
                 }
                 ActionProcedure::Scale => {
@@ -19237,20 +19449,18 @@ impl Engine {
                     self.object_action_stand(idx, definition_id);
                     return;
                 }
-                ActionProcedure::Dig => {
-                    match com_dir {
-                        CommandDirection::DownLeft => {
-                            self.objects[idx].state.command_direction = CommandDirection::Left;
-                        }
-                        CommandDirection::DownRight => {
-                            self.objects[idx].state.command_direction = CommandDirection::Right;
-                        }
-                        _ => {
-                            self.object_com_stop_dig(idx, definition_id);
-                            return;
-                        }
+                ActionProcedure::Dig => match com_dir {
+                    CommandDirection::DownLeft => {
+                        self.objects[idx].state.command_direction = CommandDirection::Left;
                     }
-                }
+                    CommandDirection::DownRight => {
+                        self.objects[idx].state.command_direction = CommandDirection::Right;
+                    }
+                    _ => {
+                        self.object_com_stop_dig(idx, definition_id);
+                        return;
+                    }
+                },
                 ActionProcedure::Swim => {
                     let above_liquid = {
                         let position = self.objects[idx].state.position;
@@ -24747,7 +24957,11 @@ impl Engine {
         }
         let world = self.host_world_context();
         let rng = self.rng.clone();
-        let (value, finals, batch, audio_state, rng) = self.scenario_script.as_ref()?.call_value(
+        let scenario_script = self.scenario_script.as_ref()?;
+        let (value, finals, batch, audio_state, rng) = ScenarioScript::call_value_for_script(
+            &scenario_script.name,
+            &scenario_script.script,
+            None,
             function,
             args,
             world,
@@ -25332,7 +25546,9 @@ impl Engine {
                 script_fixed_velocity: None,
                 position,
                 velocity,
-                rotation: rotation.rem_euclid(360),
+                // C4Object::Init stores its nr argument verbatim; script-level
+                // SetRotation is the separate path that normalizes to 0..359.
+                rotation,
                 shape_attach: ShapeAttachRecord::default(),
                 t_attach: 0,
                 // C4Object::Init: `if (Alive) Energy = GetPhysical()->Energy`
@@ -25395,6 +25611,12 @@ impl Engine {
             shape_template,
             own_shape_vertices,
         );
+        // C4Object::Clear initializes fix_r to zero. Objects.txt compiles
+        // Rotation and FixR independently, so an absent FixR must not inherit
+        // the serialized integer Rotation until SyncClearance synchronizes it.
+        if loaded && fixed_rotation.is_none() {
+            object.fixed_rotation = C4Fixed::ZERO;
+        }
         // Saved XDir/YDir are C4Fixed, not whole pixels
         // (C4Object.cpp:2765-2766): restore the exact sub-pixel velocity
         // and let the int mirror follow fixtoi.
@@ -26103,10 +26325,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
     );
     map.insert("position".into(), snapshot.position.to_value());
     map.insert("velocity".into(), snapshot.velocity.to_value());
-    map.insert(
-        "rotation".into(),
-        Value::Int(snapshot.rotation.rem_euclid(360)),
-    );
+    map.insert("rotation".into(), Value::Int(snapshot.rotation));
     map.insert("energy".into(), Value::Int(snapshot.energy));
     map.insert("construction".into(), Value::Int(snapshot.construction));
     map.insert("damage".into(), Value::Int(snapshot.damage));
@@ -26188,7 +26407,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         script_fixed_velocity: None,
         position: snapshot.position,
         velocity: snapshot.velocity,
-        rotation: snapshot.rotation.rem_euclid(360),
+        rotation: snapshot.rotation,
         shape_attach: ShapeAttachRecord::default(),
         t_attach: 0,
         energy: snapshot.energy,
@@ -34316,6 +34535,121 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn declaring_host_global_link_inherits_engine_overload() {
+        let mut engine = Engine::with_seed(7);
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/Base.c".to_string(),
+                "global func Override() { return 3; }".to_string(),
+            )]),
+            1
+        );
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "TSTD",
+                    "Test",
+                    "global func Override() { return inherited() * 10 + 4; }\n\
+                     func Probe() { return Override(); }",
+                )
+                .expect("script compiles"),
+            )
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("TSTD"))
+            .expect("object spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Probe", Vec::new())
+                .expect("Probe runs"),
+            Value::Int(34),
+            "the declaration-site FnLink carries the engine overload chain"
+        );
+    }
+
+    #[test]
+    fn rejected_duplicate_definition_does_not_leak_globals() {
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("TSTD", "First", "func Probe() { return 1; }")
+                    .expect("first script compiles"),
+            )
+            .expect("first definition registers");
+
+        let duplicate = Definition::from_script(
+            "TSTD",
+            "Duplicate",
+            "global func LeakedFromRejectedDefinition() { return 99; }",
+        )
+        .expect("duplicate script compiles");
+        assert!(matches!(
+            engine.register_definition(duplicate),
+            Err(EngineError::DefinitionAlreadyExists(id)) if id == "TSTD"
+        ));
+        assert!(
+            !engine
+                .global_script_functions
+                .as_deref()
+                .is_some_and(|functions| functions.contains_key("LeakedFromRejectedDefinition"))
+        );
+    }
+
+    #[test]
+    fn system_static_consts_register_globally_and_later_scripts_overwrite() {
+        // System.c4g scripts are children of Game.ScriptEngine and their
+        // static const declarations go through RegisterGlobalConstant just
+        // like definition scripts (C4Aul.cpp:484-492). A later declaration
+        // overwrites the shared value, including for already-linked hosts.
+        let definition = Definition::from_script(
+            "TSTD",
+            "Test",
+            "#strict\nstatic const SYSTEM_VALUE = 23;\n\
+             func Probe() { return(SYSTEM_VALUE()); }\n",
+        )
+        .expect("definition compiles");
+        let mut engine = Engine::with_seed(7);
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/First.c".to_string(),
+                "#strict\nstatic const SYSTEM_VALUE = 17;\n".to_string(),
+            )]),
+            1
+        );
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("TSTD"))
+            .expect("object spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Probe", Vec::new())
+                .expect("definition constant resolves"),
+            Value::Int(23)
+        );
+
+        assert_eq!(
+            engine.install_scenario_global_scripts(&[(
+                "Scenario/System.c4g/Override.c".to_string(),
+                "#strict\nstatic const SYSTEM_VALUE = 42;\n".to_string(),
+            )]),
+            1
+        );
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Probe", Vec::new())
+                .expect("overridden constant resolves"),
+            Value::Int(42)
+        );
+    }
+
+    #[test]
     fn definition_call_falls_back_to_global_functions() {
         // `id->Func(...)` (AB_CALL) resolves via FindSameNameFunc: the
         // def's own function first, else a GLOBAL script function running
@@ -35804,6 +36138,134 @@ func Trigger() {
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 32768);
         engine.tick().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 64225);
+    }
+
+    #[test]
+    fn walk_procedure_automatically_steers_rotation_to_floor_slope() {
+        // DFA_WALK calls AdjustWalkRotation(20,20,100) after xdir steering
+        // when the rotateable shape retained a material attachment
+        // (C4Object.cpp:4817-4821). This is the same hand-derived slope
+        // oracle as the script-host test: left offset +9, right 0 => -9 deg.
+        let mut definition = Definition::from_script("Walker", "Walker", "").unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        definition.configure_actions(Some("Walk".to_string()), actions);
+        definition.set_rotateable(45);
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
+        definition.set_physical(PhysicalInfo {
+            walk: 100_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(5);
+        engine.register_definition(definition).unwrap();
+        let mut surface = vec![25; 32];
+        surface.extend(vec![5; 32]);
+        engine.set_landscape(Landscape::new(64, surface).unwrap());
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Walker")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .unwrap();
+        let idx = engine.find_object_index(id).unwrap();
+        engine.objects[idx].state.shape_attach = ShapeAttachRecord {
+            mat_valid: true,
+            x: 30,
+            y: 15,
+            vtx: 0,
+        };
+
+        engine.apply_physics_at_index(idx);
+
+        assert_eq!(
+            engine.objects[idx].rotation_velocity,
+            C4Fixed::from_raw(-9 * 65536 / 100)
+        );
+    }
+
+    #[test]
+    fn stationary_walk_on_offset_vertex_still_adjusts_rotation() {
+        // The internal WALK gate uses the DEFINITION vertex x, so a walker
+        // attached away from its center rotates even with xdir == 0. The live
+        // positive vertex selects the -50 target, clamped to -15 degrees.
+        let mut definition = Definition::from_script("Walker", "Walker", "").unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        definition.configure_actions(Some("Walk".to_string()), actions);
+        definition.set_rotateable(45);
+        definition.set_shape_vertices(vec![ObjectVertex::new(5, 0).with_cnat(CNAT_BOTTOM)]);
+        definition.set_physical(PhysicalInfo {
+            walk: 100_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(5);
+        engine.register_definition(definition).unwrap();
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        let id = engine
+            .spawn_object(SpawnConfig::new("Walker").with_category(CATEGORY_OBJECT))
+            .unwrap();
+        let idx = engine.find_object_index(id).unwrap();
+        engine.objects[idx].state.shape_attach = ShapeAttachRecord {
+            mat_valid: true,
+            x: 0,
+            y: 0,
+            vtx: 0,
+        };
+
+        engine.apply_physics_at_index(idx);
+
+        assert_eq!(
+            engine.objects[idx].rotation_velocity,
+            C4Fixed::from_raw(-15 * 65536 / 100)
+        );
+    }
+
+    #[test]
+    fn walk_rotation_fallback_stops_existing_spin() {
+        // C++'s `else rdir = 0` is unconditional: a centered stationary
+        // walker does not retain angular velocity from its previous action.
+        let mut definition = Definition::from_script("Walker", "Walker", "").unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        definition.configure_actions(Some("Walk".to_string()), actions);
+        definition.set_rotateable(45);
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
+        definition.set_physical(PhysicalInfo {
+            walk: 100_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(5);
+        engine.register_definition(definition).unwrap();
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        let id = engine
+            .spawn_object(SpawnConfig::new("Walker").with_category(CATEGORY_OBJECT))
+            .unwrap();
+        let idx = engine.find_object_index(id).unwrap();
+        engine.objects[idx].state.shape_attach = ShapeAttachRecord {
+            mat_valid: true,
+            x: 0,
+            y: 0,
+            vtx: 0,
+        };
+        engine.objects[idx].rotation_velocity = itofix(3);
+
+        engine.apply_physics_at_index(idx);
+
+        assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
     }
 
     #[test]
@@ -37814,6 +38276,56 @@ protected func Activity() { SetActionTargets(); return(1); }
             .expect("restored object exists");
         assert_eq!(restored.objects[ridx].fixed_velocity.x.val(), 300);
         assert_eq!(restored.objects[ridx].fixed_velocity.y.val(), 70000);
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_raw_signed_and_fractional_rotation() {
+        // C++ saves Rotation and FixR verbatim (C4Object.cpp:2769,2789).
+        // DoMovement keeps a left lean as a negative angle, and stopping
+        // rdir does not discard a remaining sub-degree fix_r fraction.
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test").with_position(Vector2::new(5, 5)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].state.rotation = -9;
+        let independent_fix_r = C4Fixed::from_raw(itofix(-10).val() + 300);
+        assert_ne!(
+            fixtoi(independent_fix_r),
+            -9,
+            "test must detect deriving r from fix_r"
+        );
+        engine.objects[idx].fixed_rotation = independent_fix_r;
+        engine.objects[idx].rotation_velocity = C4Fixed::ZERO;
+
+        let snapshot = engine.snapshot();
+        let saved = snapshot.object(id).expect("snapshot object exists");
+        assert_eq!(saved.rotation, -9, "raw signed r is not normalized");
+        assert_eq!(
+            saved
+                .fixed_rotation
+                .expect("fractional fix_r is retained")
+                .val(),
+            independent_fix_r.val()
+        );
+        assert_eq!(saved.rotation_velocity, None);
+
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(build_definition())
+            .expect("definition registers");
+        restored
+            .restore_snapshot(&snapshot)
+            .expect("snapshot restores");
+        let ridx = restored.find_object_index(id).expect("object restores");
+        assert_eq!(restored.objects[ridx].state.rotation, -9);
+        assert_eq!(
+            restored.objects[ridx].fixed_rotation.val(),
+            independent_fix_r.val()
+        );
     }
 
     #[test]
@@ -45274,6 +45786,30 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             "#,
         )
         .expect("script compiles")
+    }
+
+    #[test]
+    fn loaded_rotation_without_fix_r_stays_independent_until_sync_clearance() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(simple_definition("Rock"))
+            .expect("rock registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Rock")
+                    .with_rotation(-9)
+                    .with_loaded(true),
+            )
+            .expect("loaded object spawns");
+
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].state.rotation, -9);
+        assert_eq!(engine.objects[idx].fixed_rotation, C4Fixed::ZERO);
+
+        engine.game_start_synchronize();
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].state.rotation, -9);
+        assert_eq!(engine.objects[idx].fixed_rotation, itofix(-9));
     }
 
     // Mirrors C4Object::Init (C4Object.cpp:183-185): a freshly created

@@ -9612,13 +9612,23 @@ impl GameApp {
         let mut engine = Engine::new();
         self.apply_material_library_to(&mut engine);
 
-        if let Err(err) = scenario_data.apply(&mut engine) {
+        if let Err(err) = scenario_data.apply_before_players(&mut engine) {
             tracing::error!(
                 scenario = %scenario.title,
                 path = %path.display(),
                 error = %err,
                 error_debug = ?err,
                 "failed to apply scenario"
+            );
+            return Err(format!("Failed to start {}: {err}", scenario.title));
+        }
+
+        if let Err(err) = engine.initialize_scenario_script() {
+            tracing::error!(
+                scenario = %scenario.title,
+                path = %path.display(),
+                error = %err,
+                "failed to initialize scenario script"
             );
             return Err(format!("Failed to start {}: {err}", scenario.title));
         }
@@ -9810,13 +9820,18 @@ impl GameApp {
                     audio.register_definition_sounds(id, group);
                 });
             }
-            scenario_data.apply(&mut self.engine).with_context(|| {
-                format!(
-                    "failed to apply scenario `{}` from {}",
-                    scenario_info.title,
-                    path.display()
-                )
-            })?;
+            // Restoring a save reloads definitions and world resources, but
+            // C++ skips Script.Initialize for savegames. The captured engine
+            // state below supplies the already-initialized world.
+            scenario_data
+                .apply_before_players(&mut self.engine)
+                .with_context(|| {
+                    format!(
+                        "failed to apply scenario `{}` from {}",
+                        scenario_info.title,
+                        path.display()
+                    )
+                })?;
         }
 
         self.rebuild_definition_sprites();
