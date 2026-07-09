@@ -7713,6 +7713,51 @@ impl Definition {
         }
 
         let arg_values: Vec<Value> = args.to_vec();
+        self.exec_in_object_context(
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            function,
+            |script, local_vars, this| {
+                script.call_with_locals_and_this(function, &arg_values, local_vars, this)
+            },
+        )
+    }
+
+    /// The shared object-context execution seam: installs the physics/
+    /// environment/random/audio guards and the HostObjectContext, runs
+    /// `invoke` on the definition script, and folds the outcome — the body
+    /// every `call_object_function`-style entry shares.
+    #[allow(clippy::too_many_arguments)]
+    fn exec_in_object_context<F>(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        label: &str,
+        invoke: F,
+    ) -> Result<(Value, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError>
+    where
+        F: FnOnce(
+            &lc_script::Engine,
+            &HashMap<String, Value>,
+            Value,
+        ) -> Result<(Value, HashMap<String, Value>), lc_script::ScriptError>,
+    {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
@@ -7771,9 +7816,8 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
-                self.script.call_with_locals_and_this(
-                    function,
-                    &arg_values,
+                invoke(
+                    &self.script,
                     &state.local_vars,
                     compat::object_reference_value(object_id),
                 )
@@ -7782,13 +7826,10 @@ impl Definition {
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let (value, updated_local_vars) = result.map_err(|source| {
-            let function_label: &'static str = Box::leak(function.to_string().into_boxed_str());
-            EngineError::Script {
-                definition: self.id.clone(),
-                function: function_label.to_string(),
-                source,
-            }
+        let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
+            definition: self.id.clone(),
+            function: label.to_string(),
+            source,
         })?;
         // Store updated local variables
         if let Some(object_update) = &mut host_effects.object_update {
