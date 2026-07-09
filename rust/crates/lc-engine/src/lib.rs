@@ -16910,6 +16910,7 @@ impl Engine {
                 resolve_effect_dispatch_definition(&event.effect, &world, definitions, definition);
             let mut timer_kill = false;
             let mut start_denied = false;
+            let mut stop_denied = false;
             // C++ runs Fx* callbacks with fPassErrors=false: a script
             // error logs and the game continues (the erroring callback
             // yields nil). RNG/audio are restored from the pre-call
@@ -16987,7 +16988,14 @@ impl Engine {
                         game_over_triggered,
                         current_audio,
                     )
-                    .map(|(outcome, audio_state, new_rng, _stop_result)| {
+                    .map(|(outcome, audio_state, new_rng, stop_result)| {
+                        // C4Fx_Stop_Deny (-1, C4Effects.h:42): the effect
+                        // refuses its removal and recovers
+                        // (C4Effect.cpp:389-396). Clear/destroy-driven
+                        // removals delete regardless — C++ ClearAll runs on
+                        // objects that are going away (C4Object.cpp:262).
+                        stop_denied = matches!(reason, EffectStopReason::Removed)
+                            && matches!(stop_result, Some(Value::Int(-1)));
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Check { ref pending } => dispatch_definition
@@ -17058,6 +17066,13 @@ impl Engine {
             }
             if start_denied {
                 object.remove_effect_by_number(event.effect.number);
+                state_snapshot.effects = object.state.effects.clone();
+            }
+            if stop_denied {
+                // Recover the refused effect at its priority position. C++
+                // restores the exact list node; the sorted reinsert may
+                // reorder equal-priority peers (documented divergence).
+                object.insert_effect(event.effect.clone());
                 state_snapshot.effects = object.state.effects.clone();
             }
 
@@ -42312,6 +42327,75 @@ func FxProbeTimer(pThis, iNumber) {
         assert!(
             !calls.iter().any(|name| name == "FxDeniedStop"),
             "dead effects are deleted without the Stop callback"
+        );
+    }
+
+    #[test]
+    fn effect_stop_deny_recovers_the_effect() {
+        // C4Fx_Stop_Deny (-1, C4Effects.h:42): an Fx*Stop answering it on
+        // C4Effect::Kill refuses the removal — the effect's priority is
+        // restored and it stays alive (C4Effect.cpp:389-396).
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Sticky", priority = 100, interval = 0 } ] };
+        }
+
+        global func FxStickyStop(state, effect, reason) {
+            return -1;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "remove", name = "Sticky" } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Sticky"],
+            "the denied removal recovers the effect (C4Effect.cpp:393-396)"
+        );
+
+        let calls = call_log.lock().unwrap().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|name| *name == "FxStickyStop")
+                .count(),
+            1,
+            "the Stop callback ran exactly once for the refused removal"
         );
     }
 
