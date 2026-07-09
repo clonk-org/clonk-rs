@@ -1034,6 +1034,8 @@ unsafe fn make_snapshot(
             vertices,
             own_vertices: None,
             container,
+            // The bridge ABI does not expose C4Object::pLayer yet.
+            layer: None,
             contents,
             components: HashMap::new(),
             status: ObjectStatus::Normal,

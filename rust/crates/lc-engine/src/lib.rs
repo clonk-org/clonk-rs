@@ -2244,6 +2244,9 @@ impl ObjectState {
         if let Some(custom_name) = &delta.custom_name {
             self.custom_name = custom_name.clone();
         }
+        if let Some(layer) = delta.layer {
+            self.layer = layer;
+        }
         let mut energy_died = false;
         if let Some(energy) = delta.energy {
             energy_died = self.alive && self.energy != 0 && energy == 0;
@@ -2373,6 +2376,8 @@ impl ObjectState {
 struct ObjectDelta {
     /// Some(Some(name)) sets C4Object::CustomName; Some(None) clears it.
     custom_name: Option<Option<String>>,
+    /// Some(Some(object)) sets C4Object::pLayer; Some(None) clears it.
+    layer: Option<Option<ObjectId>>,
     portrait_source: Option<String>,
     solid_mask_override: Option<DefinitionTargetRect>,
     /// Script menu write-through (FnCreateMenu/FnCloseMenu et al.):
@@ -2432,6 +2437,9 @@ impl ObjectDelta {
     fn merge_update(&mut self, update: ObjectUpdate) {
         if let Some(custom_name) = update.custom_name {
             self.custom_name = Some(custom_name);
+        }
+        if let Some(layer) = update.layer {
+            self.layer = Some(layer);
         }
         if let Some(position) = update.position {
             self.position = Some(position);
@@ -2549,6 +2557,7 @@ impl From<ObjectUpdate> for ObjectDelta {
     fn from(update: ObjectUpdate) -> Self {
         Self {
             custom_name: update.custom_name,
+            layer: update.layer,
             fixed_velocity_x: update.fixed_velocity_x,
             fixed_velocity_y: update.fixed_velocity_y,
             position: update.position,
@@ -2589,11 +2598,29 @@ impl From<ObjectUpdate> for ObjectDelta {
     }
 }
 
+/// Serde's default nested-Option handling collapses an explicit JSON `null`
+/// into the same outer `None` as a missing field. Update fields need all three
+/// states, so a present value always wraps the decoded inner option.
+fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ObjectUpdate {
     /// C4Object::CustomName write: Some(Some(name)) sets; Some(None) clears.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_name: Option<Option<String>>,
+    /// C4Object::pLayer write: Some(Some(object)) sets; Some(None) clears.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_double_option"
+    )]
+    pub layer: Option<Option<ObjectId>>,
     /// SetPortrait's source-definition update (Some = set).
     #[serde(default)]
     pub portrait_source: Option<String>,
@@ -2822,6 +2849,16 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_layer(mut self, layer: ObjectId) -> Self {
+        self.layer = Some(Some(layer));
+        self
+    }
+
+    pub fn clear_layer(mut self) -> Self {
+        self.layer = Some(None);
+        self
+    }
+
     pub fn clear_container(mut self) -> Self {
         self.container = Some(None);
         self
@@ -2839,6 +2876,7 @@ impl ObjectUpdate {
 
     pub fn is_empty(&self) -> bool {
         self.custom_name.is_none()
+            && self.layer.is_none()
             && self.position.is_none()
             && self.velocity.is_none()
             && self.fixed_velocity.is_none()
@@ -4119,6 +4157,7 @@ impl Object {
             vertices: self.state.vertices.clone(),
             own_vertices: self.own_shape_vertices.clone(),
             container: self.state.container,
+            layer: self.state.layer,
             contents: self.state.contents.clone(),
             components: self.state.components.clone(),
             status: self.state.status,
@@ -4879,6 +4918,9 @@ pub struct ObjectSnapshot {
     pub own_vertices: Option<Vec<ObjectVertex>>,
     #[serde(default)]
     pub container: Option<ObjectId>,
+    /// C4Object::pLayer (Objects.txt `Layer=` / SetObjectLayer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<ObjectId>,
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
@@ -15477,6 +15519,7 @@ impl Engine {
 
         let ObjectUpdate {
             custom_name,
+            layer,
             position,
             velocity,
             fixed_velocity,
@@ -15547,6 +15590,9 @@ impl Engine {
 
             if let Some(custom_name) = custom_name {
                 object.state.custom_name = custom_name;
+            }
+            if let Some(layer) = layer {
+                object.state.layer = layer;
             }
             if let Some(position) = position {
                 object.set_position(position);
@@ -16935,7 +16981,7 @@ impl Engine {
                     effects: snapshot.effects.clone(),
                     vertices: snapshot.vertices.clone(),
                     container: None,
-                    layer: None,
+                    layer: snapshot.layer,
                     contents: Vec::new(),
                     components: snapshot.components.clone(),
                     status: snapshot.status,
@@ -26622,7 +26668,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         effects: snapshot.effects.clone(),
         vertices: snapshot.vertices.clone(),
         container: snapshot.container,
-        layer: None,
+        layer: snapshot.layer,
         contents: snapshot.contents.clone(),
         components: snapshot.components.clone(),
         status: snapshot.status,
@@ -43165,6 +43211,25 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         let snapshot = engine.object_snapshot(id).expect("object snapshot");
         assert_eq!(snapshot.velocity, Vector2::new(5, -3));
         assert_eq!(snapshot.owner, 7);
+    }
+
+    #[test]
+    fn object_update_layer_serde_preserves_clear_vs_unchanged() {
+        // Queued/recorded updates must distinguish a missing layer field from
+        // an explicit null that clears pLayer.
+        let unchanged: ObjectUpdate = serde_json::from_str("{}").expect("unchanged decodes");
+        assert_eq!(unchanged.layer, None);
+
+        let clear_json = serde_json::to_string(&ObjectUpdate::new().clear_layer())
+            .expect("layer clear encodes");
+        let clear: ObjectUpdate = serde_json::from_str(&clear_json).expect("layer clear decodes");
+        assert_eq!(clear.layer, Some(None));
+
+        let layer = ObjectId::new(17);
+        let set_json =
+            serde_json::to_string(&ObjectUpdate::new().with_layer(layer)).expect("layer set encodes");
+        let set: ObjectUpdate = serde_json::from_str(&set_json).expect("layer set decodes");
+        assert_eq!(set.layer, Some(Some(layer)));
     }
 
     #[test]
