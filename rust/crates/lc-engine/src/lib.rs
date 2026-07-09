@@ -8053,43 +8053,6 @@ impl Definition {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn dispatch_effect_callback_3(
-        &self,
-        state: &ObjectState,
-        object_id: ObjectId,
-        effect: &EffectState,
-        event: &'static str,
-        function_label: &'static str,
-        extras: Vec<Value>,
-        rng: LcgRng,
-        global_effects: &[EffectState],
-        physics: PhysicsSettings,
-        environment: EnvironmentSettings,
-        frame: u64,
-        world: HostWorldContext,
-        game_over_triggered: bool,
-        audio: AudioRegistry,
-    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
-        self.dispatch_effect_callback(
-            state,
-            object_id,
-            effect,
-            event,
-            function_label,
-            extras,
-            rng,
-            global_effects,
-            physics,
-            environment,
-            frame,
-            world,
-            game_over_triggered,
-            audio,
-        )
-        .map(|(outcome, audio, rng, _)| (outcome, audio, rng))
-    }
-
     fn call_effect_stop(
         &self,
         state: &ObjectState,
@@ -8104,8 +8067,8 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
-        self.dispatch_effect_callback_3(
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        self.dispatch_effect_callback(
             state,
             object_id,
             effect,
@@ -16918,7 +16881,7 @@ impl Engine {
                         .cloned()
                         .collect();
                     if !checkers.is_empty() {
-                        let pending = event.effect.name.clone();
+                        let pending = event.effect.clone();
                         queue.push_front(event);
                         for checker in checkers.into_iter().rev() {
                             queue.push_front(EffectEvent::check(checker, pending.clone()));
@@ -16928,17 +16891,8 @@ impl Engine {
                 }
             }
             let snapshot_for_call = state_snapshot.clone();
-            // C4Effect::GetCallbackScript: the command target object's def
-            // script, else the idCommandTarget def script, else the host
-            // object's script (the C++ global script engine is unmodeled).
-            let dispatch_definition = event
-                .effect
-                .command_target
-                .and_then(|target| world.get(ObjectId::new(target as u64)))
-                .map(|target| target.definition_id().to_string())
-                .or_else(|| event.effect.command_id.clone())
-                .and_then(|def_id| definitions.get(&def_id))
-                .unwrap_or(definition);
+            let dispatch_definition =
+                resolve_effect_dispatch_definition(&event.effect, &world, definitions, definition);
             let mut timer_kill = false;
             let mut start_denied = false;
             // C++ runs Fx* callbacks with fPassErrors=false: a script
@@ -17003,26 +16957,30 @@ impl Engine {
                         };
                         (outcome, audio_state, new_rng)
                     }),
-                EffectEventKind::Stopped(reason) => dispatch_definition.call_effect_stop(
-                    &snapshot_for_call,
-                    object_id,
-                    &event.effect,
-                    reason,
-                    rng,
-                    &global_view,
-                    current_physics,
-                    current_environment,
-                    frame,
-                    world.clone(),
-                    game_over_triggered,
-                    current_audio,
-                ),
+                EffectEventKind::Stopped(reason) => dispatch_definition
+                    .call_effect_stop(
+                        &snapshot_for_call,
+                        object_id,
+                        &event.effect,
+                        reason,
+                        rng,
+                        &global_view,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, _stop_result)| {
+                        (outcome, audio_state, new_rng)
+                    }),
                 EffectEventKind::Check { ref pending } => dispatch_definition
                     .call_effect_effect(
                         &snapshot_for_call,
                         object_id,
                         &event.effect,
-                        pending,
+                        &pending.name,
                         rng,
                         &global_view,
                         current_physics,
@@ -17038,8 +16996,8 @@ impl Engine {
                         // the add-to-other-effect FxAdd path — are still
                         // open and currently let the effect proceed.
                         if matches!(check_result, Some(Value::Int(-1))) {
-                            denied_started.insert(pending.clone());
-                            object.remove_effect(pending);
+                            denied_started.insert(pending.name.clone());
+                            object.remove_effect(&pending.name);
                             state_snapshot.effects = object.state.effects.clone();
                         }
                         (outcome, audio_state, new_rng)
@@ -26499,6 +26457,25 @@ fn parse_scenario_command(
         }
         _ => Ok(ScenarioBatch::default()),
     }
+}
+
+/// C4Effect::GetCallbackScript (C4Effect.cpp:42-57): Fx* callbacks resolve
+/// against the command target object's def script, else the idCommandTarget
+/// def script, else the host object's script (the C++ global script engine
+/// is unmodeled).
+fn resolve_effect_dispatch_definition<'a>(
+    effect: &EffectState,
+    world: &HostWorldContext,
+    definitions: &'a HashMap<DefinitionId, Definition>,
+    fallback: &'a Definition,
+) -> &'a Definition {
+    effect
+        .command_target
+        .and_then(|target| world.get(ObjectId::new(target as u64)))
+        .map(|target| target.definition_id().to_string())
+        .or_else(|| effect.command_id.clone())
+        .and_then(|def_id| definitions.get(&def_id))
+        .unwrap_or(fallback)
 }
 
 fn effect_stop_reason_value(reason: EffectStopReason) -> Value {
