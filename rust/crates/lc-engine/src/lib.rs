@@ -2161,6 +2161,13 @@ pub struct ObjectState {
     /// reads it, C4Script.cpp:5444).
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub t_attach: u32,
+    /// `C4Object::NoCollectDelay` (C4Object.h:134): armed to 2 by
+    /// ObjectComDrop (C4ObjectCom.cpp:668-669), counted down by DirectCom
+    /// (C4Object.cpp:3371-3374) and SetCommand (C4Object.cpp:3939-3940);
+    /// while nonzero it vetoes OCF_Collection (SetOCF, C4Object.cpp:598).
+    /// Objects.txt "NoCollectDelay" (default 0, C4Object.cpp:2773).
+    #[serde(default)]
+    pub no_collect_delay: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -2205,6 +2212,7 @@ pub(crate) fn preview_spawn_state(
         rotation: 0,
         shape_attach: ShapeAttachRecord::default(),
         t_attach: 0,
+        no_collect_delay: 0,
         energy: 0,
         damage: 0,
         magic_energy: 0,
@@ -5590,6 +5598,9 @@ pub struct Definition {
     /// `RotatedEntrance` (C4Def.cpp:377): 0 = upright only, 1 = any
     /// rotation, N = rotations up to N degrees (SetOCF, C4Object.cpp:586).
     rotated_entrance: i32,
+    /// `NoFight` DefCore flag (C4Def.cpp:413): suppresses OCF_FightReady
+    /// (SetOCF, C4Object.cpp:606-610).
+    no_fight: bool,
     /// The [Physical] DefCore section (C4Def::Physical).
     physical: PhysicalInfo,
     /// Real C4Script content gets the C++ callback arguments — no parameters
@@ -5737,6 +5748,7 @@ impl Definition {
             attract_lightning: false,
             entrance_rect: None,
             rotated_entrance: 0,
+            no_fight: false,
             physical: PhysicalInfo::default(),
             c4_callback_args: false,
             solid_mask_pixels: SolidMaskPixels::default(),
@@ -5910,6 +5922,7 @@ impl Definition {
         definition.set_attract_lightning(resource.core.attract_lightning);
         definition.set_entrance_rect(resource.core.entrance.map(DefinitionRect::from));
         definition.set_rotated_entrance(resource.core.rotated_entrance);
+        definition.set_no_fight(resource.core.no_fight);
         Ok(definition)
     }
 
@@ -5946,6 +5959,9 @@ impl Definition {
         }
         if action.no_other_action {
             spec = spec.with_no_other_action(true);
+        }
+        if action.disabled {
+            spec = spec.with_disabled(true);
         }
         if let Some(dig_free) = action.dig_free {
             spec = spec.with_dig_free(dig_free);
@@ -6137,10 +6153,12 @@ impl Definition {
         if self.edible {
             ocf |= crate::ocf::EDIBLE;
         }
-        // OCF_FightReady seeds from the OCF_Alive BIT (SetOCF,
-        // C4Object.cpp:606-610); the NoFight/ActMap-Disabled gates join
-        // with their def fields.
-        if ocf & crate::ocf::ALIVE != 0 {
+        // OCF_FightReady: the OCF_Alive BIT, an action without
+        // ObjectDisabled, and !Def->NoFight (SetOCF, C4Object.cpp:606-610).
+        if ocf & crate::ocf::ALIVE != 0
+            && !self.action_library.disables_object(&state.action.name)
+            && !self.no_fight
+        {
             ocf |= crate::ocf::FIGHT_READY;
         }
         // OCF_Construct: can be built outside (SetOCF, C4Object.cpp:549-552)
@@ -6195,14 +6213,23 @@ impl Definition {
         {
             ocf |= crate::ocf::INFLAMMABLE;
         }
-        if let Some(rect) = self.collection_rect {
-            if rect.is_positive() {
-                let below_limit = self
-                    .collection_limit
-                    .map(|limit| state.contents.len() < limit as usize)
-                    .unwrap_or(true);
-                if below_limit {
-                    ocf |= crate::ocf::COLLECTION;
+        // OCF_Collection (SetOCF, C4Object.cpp:593-599): FullCon or
+        // IncompleteActivity, a positive Collection area, a free
+        // CollectionLimit slot, no ObjectDisabled action, and
+        // NoCollectDelay == 0.
+        if ocf & crate::ocf::FULL_CON != 0 || self.incomplete_activity {
+            if let Some(rect) = self.collection_rect {
+                if rect.is_positive() {
+                    let below_limit = self
+                        .collection_limit
+                        .map(|limit| state.contents.len() < limit as usize)
+                        .unwrap_or(true);
+                    if below_limit
+                        && !self.action_library.disables_object(&state.action.name)
+                        && state.no_collect_delay == 0
+                    {
+                        ocf |= crate::ocf::COLLECTION;
+                    }
                 }
             }
         }
@@ -6657,6 +6684,10 @@ impl Definition {
 
     pub fn set_rotated_entrance(&mut self, rotated_entrance: i32) {
         self.rotated_entrance = rotated_entrance;
+    }
+
+    pub fn set_no_fight(&mut self, no_fight: bool) {
+        self.no_fight = no_fight;
     }
 
     pub fn physical(&self) -> &PhysicalInfo {
@@ -17171,6 +17202,7 @@ impl Engine {
                     rotation: snapshot.rotation,
                     shape_attach: ShapeAttachRecord::default(),
                     t_attach: 0,
+                    no_collect_delay: 0,
                     energy: snapshot.energy,
                     construction: snapshot.construction,
                     damage: snapshot.damage,
@@ -26165,6 +26197,7 @@ impl Engine {
                 rotation,
                 shape_attach: ShapeAttachRecord::default(),
                 t_attach: 0,
+                no_collect_delay: 0,
                 // C4Object::Init: `if (Alive) Energy = GetPhysical()->Energy`
                 // (C4Object.cpp:192, raw C4MaxPhysical scale); at creation
                 // no info/temporary physical exists yet, so the def's
@@ -27024,6 +27057,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         rotation: snapshot.rotation,
         shape_attach: ShapeAttachRecord::default(),
         t_attach: 0,
+        no_collect_delay: 0,
         energy: snapshot.energy,
         construction: snapshot.construction,
         damage: snapshot.damage,
@@ -47758,6 +47792,141 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         engine.objects[idx].state.energy = 50;
         engine.refresh_object_ocf(idx);
         assert_ne!(engine.object_ocf_at_index(idx) & ocf::POWER_SUPPLY, 0);
+    }
+
+    #[test]
+    fn ocf_collection_gates_on_con_action_and_collect_delay() {
+        // OCF_Collection (SetOCF, C4Object.cpp:593-599): needs OCF_FullCon
+        // or IncompleteActivity, a positive Collection area, a free
+        // CollectionLimit slot, an action without ObjectDisabled, and
+        // NoCollectDelay == 0.
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Kiln");
+        definition.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Build".to_string(),
+            ActionSpec::default().with_disabled(true),
+        );
+        definition.configure_actions(None, specs);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Kiln").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION, 0);
+
+        // Below FullCon without IncompleteActivity: no collection.
+        engine.objects[idx].state.construction = FULL_CON - 1;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::COLLECTION,
+            0,
+            "incomplete objects without IncompleteActivity collect nothing (C4Object.cpp:594)"
+        );
+        engine.objects[idx].state.construction = FULL_CON;
+
+        // An ObjectDisabled action suspends collection.
+        engine.objects[idx].state.action.name = "Build".to_string();
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::COLLECTION,
+            0,
+            "ObjectDisabled actions veto collection (C4Object.cpp:597)"
+        );
+        engine.objects[idx].state.action.name = "Idle".to_string();
+
+        // A fresh drop delay suspends collection.
+        engine.objects[idx].state.no_collect_delay = 2;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::COLLECTION,
+            0,
+            "NoCollectDelay != 0 vetoes collection (C4Object.cpp:598)"
+        );
+        engine.objects[idx].state.no_collect_delay = 0;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION, 0);
+    }
+
+    #[test]
+    fn ocf_collection_incomplete_activity_overrides_full_con_gate() {
+        // IncompleteActivity keeps collection alive below FullCon
+        // (SetOCF, C4Object.cpp:594).
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Hive");
+        definition.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        definition.set_incomplete_activity(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Hive").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].state.construction = FULL_CON / 2;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::COLLECTION, 0);
+    }
+
+    #[test]
+    fn ocf_fight_ready_respects_no_fight_and_disabled_actions() {
+        // OCF_FightReady (SetOCF, C4Object.cpp:606-610): the OCF_Alive bit
+        // plus an action without ObjectDisabled plus !Def->NoFight.
+        let mut engine = Engine::with_seed(4);
+        let mut pacifist = simple_definition("Monk");
+        pacifist.set_category(CATEGORY_LIVING);
+        pacifist.set_no_fight(true);
+        engine
+            .register_definition(pacifist)
+            .expect("definition registers");
+        let mut fighter = simple_definition("Knight");
+        fighter.set_category(CATEGORY_LIVING);
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Build".to_string(),
+            ActionSpec::default().with_disabled(true),
+        );
+        fighter.configure_actions(None, specs);
+        engine
+            .register_definition(fighter)
+            .expect("definition registers");
+
+        let monk = engine
+            .spawn_object(
+                SpawnConfig::new("Monk")
+                    .with_alive(true)
+                    .with_position(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(monk).expect("object exists");
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::FIGHT_READY,
+            0,
+            "NoFight defs never become fight-ready (C4Object.cpp:609)"
+        );
+
+        let knight = engine
+            .spawn_object(
+                SpawnConfig::new("Knight")
+                    .with_alive(true)
+                    .with_position(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(knight).expect("object exists");
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::FIGHT_READY, 0);
+
+        engine.objects[idx].state.action.name = "Build".to_string();
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::FIGHT_READY,
+            0,
+            "ObjectDisabled actions veto fight readiness (C4Object.cpp:608)"
+        );
     }
 
     #[test]

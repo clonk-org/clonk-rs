@@ -411,6 +411,10 @@ pub struct ActionDefinition {
     pub end_call: Option<String>,
     pub abort_call: Option<String>,
     pub no_other_action: bool,
+    /// `ObjectDisabled=` (C4ActionDef::Disabled, C4Def.cpp:106): the
+    /// action suspends the object — vetoes OCF_Collection/OCF_FightReady
+    /// (SetOCF, C4Object.cpp:597,608).
+    pub disabled: bool,
     pub dig_free: Option<i32>,
     pub attach: u32,
     pub directions: Option<u32>,
@@ -443,6 +447,7 @@ impl Default for ActionDefinition {
             end_call: None,
             abort_call: None,
             no_other_action: false,
+            disabled: false,
             dig_free: None,
             attach: 0,
             turn_action: None,
@@ -1155,6 +1160,9 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
             }
             "nootheraction" => {
                 current_definition.no_other_action = parse_bool(value);
+            }
+            "objectdisabled" => {
+                current_definition.disabled = parse_bool(value);
             }
             "digfree" => {
                 current_definition.dig_free = parse_i32(value);
@@ -2312,6 +2320,26 @@ NextAction=Dup
         assert!(!parsed.chopable);
         assert!(!parsed.attract_lightning);
         assert!(!parsed.no_fight);
+    }
+
+    #[test]
+    fn parse_act_map_records_object_disabled() {
+        // ObjectDisabled= (C4ActionDef::Disabled, C4Def.cpp:106): actions
+        // that suspend the object — they veto OCF_Collection and
+        // OCF_FightReady (SetOCF, C4Object.cpp:597,608).
+        let data = br#"
+[Action]
+Name=Build
+Procedure=Build
+ObjectDisabled=1
+
+[Action]
+Name=Walk
+Procedure=Walk
+"#;
+        let map = parse_act_map(data).expect("act map parsed");
+        assert!(map.get("Build").expect("build action").disabled);
+        assert!(!map.get("Walk").expect("walk action").disabled);
     }
 
     #[test]
