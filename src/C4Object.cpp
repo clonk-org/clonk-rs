@@ -17,6 +17,7 @@
 /* That which fills the world with life */
 
 #include <C4Include.h>
+#include <C4ActionDirection.h>
 #include <C4Object.h>
 #include <C4Version.h>
 
@@ -4253,8 +4254,7 @@ void C4Object::SetDir(int32_t iDir)
 	if (!Inside<int32_t>(iDir, 0, Def->ActMap[Action.Act].Directions - 1)) return;
 	// Execute turn action
 	C4ActionDef *pAction = &(Def->ActMap[Action.Act]);
-	if (iDir != Action.Dir)
-		if (pAction->TurnAction[0])
+	if (C4ActionDirection::RunsTurnAction(Action.Dir, iDir, pAction->TurnAction[0]))
 		{
 			SetActionByName(pAction->TurnAction);
 		}
@@ -4794,6 +4794,7 @@ void C4Object::ExecAction()
 	switch (pAction->Procedure)
 	{
 	case DFA_WALK:
+	{
 		lLimit = ValByPhysical(280, pPhysical->Walk);
 		switch (Action.ComDir)
 		{
@@ -4809,9 +4810,14 @@ void C4Object::ExecAction()
 			if ((xdir > -WalkAccel) && (xdir < +WalkAccel)) xdir = 0;
 			break;
 		}
-		iPhaseAdvance = 0;
-		if (xdir < 0) { iPhaseAdvance = -fixtoi(xdir * 10); SetDir(DIR_Left); }
-		if (xdir > 0) { iPhaseAdvance = +fixtoi(xdir * 10); SetDir(DIR_Right); }
+		const auto horizontalUpdate = C4ActionDirection::FromHorizontalVelocity(xdir, 10);
+		iPhaseAdvance = horizontalUpdate.PhaseAdvance;
+		switch (horizontalUpdate.Direction)
+		{
+		case C4ActionDirection::Horizontal::Left: SetDir(DIR_Left); break;
+		case C4ActionDirection::Horizontal::Right: SetDir(DIR_Right); break;
+		case C4ActionDirection::Horizontal::None: break;
+		}
 		Action.t_attach |= CNAT_Bottom;
 		Mobile = 1;
 		// object is rotateable? adjust to ground, if in horizontal movement or not attached to the center vertex
@@ -4820,6 +4826,7 @@ void C4Object::ExecAction()
 		else
 			rdir = 0;
 		break;
+	}
 
 	case DFA_KNEEL:
 		ydir = 0;

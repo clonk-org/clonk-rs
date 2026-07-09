@@ -7,22 +7,25 @@
 
 ## Current status
 
-- **Live parity through frame 19 (2026-07-03, pinned seed).** Frames
-  1-16 fell in the first arc (see git log); frames 17-19 fell with:
-  the exact script PathFree (ForLine Bresenham + GBackSolid), the
-  C4SolidMask BAKE-IN (masks live as MCVehic pixels in the plane —
-  plane diff 0.34%→0.05%), SetDir gates + TurnAction + foreign
-  SetDir, the synchronous FnJump (ObjectComJump), the per-ExecAction
-  t_attach latch (phase wraps cannot retro-attach), component-only
-  SetXDir/SetYDir fixed writes, and the comparator now checking
-  DIRECTION. Current wall: **frame 21** — the
-  coach-rider contact-friction class (the horse's DFA_PULL pushes the
-  coach identically both sides; C++'s next coach move applies contact
-  friction 1.667→0.30 and the riders read the damped value). Ledgers
-  are DRAW-EXACT through frame 20 (frame-marked traces; the waterfall
-  WTFL InsertMaterial routing was the f18-20 fork). Menu subsystem,
-  persistent mass movers, PXS blast/border fidelity, rotated masks,
-  the C++-order tick phases, live in-flight locals, crew join with
+- **Pinned live shadow matches through frame 183 (2026-07-09, seed 424242).**
+  The frame-170 WIPF #566 wall was `DFA_WALK`/`SetDir` ordering, not contact:
+  Right steering changes raw xdir `-52430 -> -19662`, which still has a
+  negative C4Fixed sign even though `fixtoi` rounds it to zero. C++ therefore
+  calls `SetDir(Left)`, fires Walk's `TurnAction=Turn`, snaps fix_x to pixel
+  541, then retains the old Walk `pAction` for phase advance; Rust tested its
+  rounded velocity and assigned direction directly. Rust now uses the raw
+  sign, full SetDir/TurnAction + fixed-resync semantics, and the pre-transition
+  phase source. The production `C4ActionDirection.h` oracle freezes the exact
+  result (Turn/Left, phase 1, time 0, fix_x 35435314). The current live wall is
+  **frame 184**, object 571: Rust Walk/Left and moving versus C++ Turn/Right and
+  resting, not yet localized.
+  The preceding frame-157 animal mismatch was a downstream RNG symptom from
+  frame 143: C++ saw the authoritative Water pixel at coarse cell `(52,24)`
+  and consumed Water's `Random(10)`, while Rust consulted only its lossy column
+  model. Grid-first occupancy is frozen by `C4LandscapePath.h` with one
+  density-25 edge pixel in a 17x15 cell.
+  Menu subsystem, persistent mass movers, PXS blast/border fidelity, rotated
+  masks, the C++-order tick phases, live in-flight locals, crew join with
   fair-crew physicals and the C4-style HUD are all merged.
   Debug: pin runs with `LC_PIN_SEED=424242` (C4GameParameters.cpp,
   env-gated) so C++ runs are reproducible; get the map seed from

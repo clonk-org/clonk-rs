@@ -5,8 +5,10 @@
 //! byte-for-byte identical to the C++ golden oracle in
 //! `parity/golden/parity_golden.json`. That golden is produced from the REAL
 //! engine code (`src/Fixed.h`, `src/Fixed.cpp`'s `SineTable`, `src/C4Random.h`,
-//! and `src/C4ScriptKiller.h`) by `parity/oracle/gen_golden.sh` — so this is a
-//! genuine differential against the C++ oracle, not a Rust-vs-Rust regression.
+//! `src/C4ScriptKiller.h`, `src/C4LandscapePath.h`, and
+//! `src/C4ActionDirection.h`) by
+//! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
+//! the C++ oracle, not a Rust-vs-Rust regression.
 //!
 //! This gates Theme C (wiring fixed precision through physics): the gravity /
 //! velocity sub-pixel accumulation the harness exercises is exactly the
@@ -19,10 +21,18 @@
 use lc_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue};
 use serde_json::Value;
 
+use crate::landscape::{Landscape, PixelGrid};
 use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion};
-use crate::math::{fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed};
+use crate::math::{
+    fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed,
+    FixedVec2,
+};
 use crate::rng::LcgRng;
-use crate::{Definition, Engine, PlayerConfig, SpawnConfig, CATEGORY_OBJECT, OWNER_NONE};
+use crate::{
+    ActionSpec, ActionState, CommandDirection, Definition, Direction, Engine, PhysicalInfo,
+    PhysicsSettings, PlayerConfig, SpawnConfig, CATEGORY_OBJECT, OWNER_NONE,
+};
+use std::collections::HashMap;
 
 const GOLDEN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -86,6 +96,66 @@ fn convert_case_value(name: &str) -> ScriptValue {
         "map" => ScriptValue::Proplist(std::collections::HashMap::new()),
         other => panic!("unknown script_value_convert case `{other}`"),
     }
+}
+
+fn action_direction_engine() -> (Engine, crate::ObjectId) {
+    let mut definition =
+        Definition::from_script("WIPF", "Wipf", "#strict\n").expect("oracle fixture compiles");
+    definition.configure_actions(
+        Some("Walk".to_string()),
+        HashMap::from([
+            (
+                "Walk".to_string(),
+                ActionSpec::default()
+                    .with_procedure("WALK")
+                    .with_directions(2)
+                    .with_length(18)
+                    .with_delay(2)
+                    .with_next("Walk")
+                    .with_turn_action("Turn"),
+            ),
+            (
+                "Turn".to_string(),
+                ActionSpec::default()
+                    .with_procedure("NONE")
+                    .with_directions(2)
+                    .with_length(6)
+                    .with_delay(2)
+                    .with_next("Walk"),
+            ),
+        ]),
+    );
+    definition.set_physical(PhysicalInfo {
+        walk: 80_000,
+        ..PhysicalInfo::default()
+    });
+
+    let mut engine = Engine::with_seed(0);
+    engine.set_physics(PhysicsSettings::new(0, 20, -20));
+    engine
+        .register_definition(definition)
+        .expect("oracle fixture registers");
+    let id = engine
+        .spawn_object(
+            SpawnConfig::new("WIPF")
+                .with_position(crate::Vector2::new(541, 629))
+                .with_fixed_position(FixedVec2::new(
+                    C4Fixed::from_raw(35_468_082),
+                    C4Fixed::from_raw(41_222_142),
+                ))
+                .with_fixed_velocity(FixedVec2::new(
+                    C4Fixed::from_raw(-52_430),
+                    C4Fixed::from_raw(65_534),
+                ))
+                .with_action(ActionState::new("Walk"))
+                .with_direction(Direction::Right)
+                .with_command_direction(CommandDirection::Right)
+                .with_category(CATEGORY_OBJECT)
+                .with_mobile(true)
+                .with_loaded(true),
+        )
+        .expect("oracle fixture spawns");
+    (engine, id)
 }
 
 #[test]
@@ -618,7 +688,121 @@ func Trigger(object pOther) {
         );
     }
 
-    // 11. Movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 11. C4Landscape::_PathFree (C4Landscape.cpp:890-915): PixCnt scans the
+    //     authoritative Surface8 bytes. The second case is the minimized
+    //     Goldrush frame-143 divergence: one water pixel at the right edge of
+    //     a 17x15 cell must make the whole coarse cell occupied.
+    for (idx, case) in golden["landscape_path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let mut bytes = vec![0; 17 * 15];
+        let pixel_x = i(case, "pixel_x") as i32;
+        let pixel_y = i(case, "pixel_y") as i32;
+        if pixel_x >= 0 && pixel_y >= 0 {
+            bytes[pixel_y as usize * 17 + pixel_x as usize] = 1;
+        }
+        let mut densities = vec![0; 2];
+        densities[1] = i(case, "density") as i32;
+        let grid = PixelGrid::new(17, 15, bytes, densities, vec![None; 2], vec![None; 2]);
+        let mut landscape = Landscape::flat(17, 15);
+        landscape.set_pixel_grid(grid);
+        expect_eq(
+            "landscape_path",
+            idx,
+            "free",
+            i(case, "free"),
+            i64::from(landscape.path_free(0, 0, 16, 14, &crate::MaterialSet::new())),
+        );
+    }
+
+    // 12. C4Object::ExecAction DFA_WALK + SetDir ordering
+    //     (C4Object.cpp:4796-4826, 4249-4265, 4100-4187). This is the
+    //     minimized Goldrush frame-170 WIPF case: Right ComDir accelerates a
+    //     negative residual xdir to raw -19662, which rounds to zero but must
+    //     still request Left, fire TurnAction and snap fix_x before movement.
+    {
+        let section = &golden["action_direction"];
+
+        let (mut exec_action, id) = action_direction_engine();
+        let idx = exec_action
+            .find_object_index(id)
+            .expect("oracle object exists");
+        expect_eq(
+            "action_direction",
+            0,
+            "returned_early",
+            0,
+            i64::from(exec_action.apply_physics_at_index(idx)),
+        );
+        let object = &exec_action.objects[idx];
+        expect_eq(
+            "action_direction",
+            0,
+            "steered_xdir",
+            i(section, "steered_xdir"),
+            i64::from(object.fixed_velocity.x.val()),
+        );
+        expect_eq(
+            "action_direction",
+            0,
+            "action_is_turn",
+            i(section, "action_is_turn"),
+            i64::from(object.state.action.name == "Turn"),
+        );
+        expect_eq(
+            "action_direction",
+            0,
+            "direction",
+            i(section, "direction"),
+            i64::from(object.state.direction.to_script_value()),
+        );
+        expect_eq(
+            "action_direction",
+            0,
+            "command_direction",
+            i(section, "command_direction"),
+            i64::from(object.state.command_direction.to_script_value()),
+        );
+        expect_eq(
+            "action_direction",
+            0,
+            "fix_x_after_set_dir",
+            i(section, "fix_x_after_set_dir"),
+            i64::from(object.fixed_position.x.val()),
+        );
+
+        let (mut full_frame, id) = action_direction_engine();
+        full_frame.tick().expect("oracle frame executes");
+        let object = &full_frame.objects[full_frame
+            .find_object_index(id)
+            .expect("oracle object survives")];
+        expect_eq(
+            "action_direction",
+            0,
+            "action_phase",
+            i(section, "action_phase"),
+            i64::from(object.state.action.phase),
+        );
+        expect_eq(
+            "action_direction",
+            0,
+            "action_time",
+            i(section, "action_time"),
+            i64::from(object.state.action.time),
+        );
+        expect_eq(
+            "action_direction",
+            0,
+            "fix_x_after_move",
+            i(section, "fix_x_after_move"),
+            i64::from(object.fixed_position.x.val()),
+        );
+    }
+
+    // 13. Movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    fix_x += xdir; fix_y += (ydir += gravity); matching C4Movement.cpp.
     for scn in golden["movement"].as_array().unwrap() {
         let name = scn["name"].as_str().unwrap_or("?");

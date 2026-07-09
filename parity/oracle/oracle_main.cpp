@@ -16,6 +16,10 @@
 //     is `#ifdef DEBUGREC` and we do not define DEBUGREC).
 //   * `C4ScriptKiller.h` is the production GetKiller/SetKiller decision helper
 //     called by `C4Script.cpp`; the oracle exercises that exact code.
+//   * `C4LandscapePath.h` is the production coarse-cell traversal used by
+//     `C4Landscape::_PathFree`; the oracle feeds it real PixCnt-style inputs.
+//   * `C4ActionDirection.h` is the production raw-xdir direction decision used
+//     by `C4Object::ExecAction` and `C4Object::SetDir`.
 //   * `Randomize3`/`Rnd3` are reproduced verbatim from `src/C4Random.cpp`
 //     (10 trivial lines around the real `Random()`); kept in sync via the
 //     provenance comment below.
@@ -31,6 +35,8 @@
 
 #include "oracle_fixed.h" // generated from src/Fixed.h by gen_golden.sh
 #include <C4Random.h>     // real engine header (no DEBUGREC)
+#include <C4ActionDirection.h> // real production ExecAction/SetDir decisions
+#include <C4LandscapePath.h> // real production coarse-path traversal
 #include <C4ScriptKiller.h> // real production script-host helper
 
 extern long SineTable[9001]; // defined by the generated sine_table.cpp
@@ -97,6 +103,90 @@ static void printScriptKillerCases()
            clearSelf ? 1 : 0, readCleared, setForeign ? 1 : 0, readForeign,
            arrowClear ? 1 : 0, arrowRead, self.LastEnergyLossCausePlayer,
            other.LastEnergyLossCausePlayer, getNoContext, setNoContext ? 1 : 0);
+}
+
+static void printLandscapePathCases()
+{
+    struct PathCase { const char *name; int32_t pixelX, pixelY, density; };
+    const PathCase cases[] = {
+        {"empty", -1, -1, 0},
+        {"right_edge_water", 16, 9, 25},
+    };
+    printf("\"landscape_path\":[");
+    bool first = true;
+    for (const auto &pathCase : cases)
+    {
+        int32_t densities[17 * 15]{};
+        if (pathCase.pixelX >= 0 && pathCase.pixelY >= 0)
+            densities[pathCase.pixelY * 17 + pathCase.pixelX] = pathCase.density;
+        const bool free = C4LandscapePath::IsFree(0, 0, 16, 14, [&densities](int32_t cellX, int32_t cellY)
+        {
+            if (cellX != 0 || cellY != 0) return false;
+            for (const int32_t density : densities)
+                if (density != 0) return true;
+            return false;
+        });
+        if (!first) printf(",");
+        first = false;
+        printf("{\"name\":\"%s\",\"pixel_x\":%d,\"pixel_y\":%d,\"density\":%d,\"free\":%d}",
+               pathCase.name, pathCase.pixelX, pathCase.pixelY, pathCase.density, free ? 1 : 0);
+    }
+    printf("]");
+}
+
+static void printActionDirectionCase()
+{
+    // Minimized from Goldrush frame 170, WIPF #566. WALK steers Right, but
+    // residual raw xdir remains negative after WalkAccel. C++ tests that raw
+    // sign, calls SetDir(Left), fires Walk.TurnAction and SetAction snaps the
+    // fixed accumulator before movement. The old WALK pAction remains the
+    // phase source for the rest of ExecAction.
+    C4Fixed xdir;
+    xdir.val = -52430;
+    xdir += itofix(50, 100); // WalkAccel = FIXED100(50)
+    const auto update = C4ActionDirection::FromHorizontalVelocity(xdir, 10);
+    const int32_t requestedDirection = update.Direction == C4ActionDirection::Horizontal::Left
+        ? 0
+        : update.Direction == C4ActionDirection::Horizontal::Right ? 1 : -1;
+    const int32_t currentDirection = 1;
+    const bool runsTurnAction = requestedDirection >= 0
+        && C4ActionDirection::RunsTurnAction(currentDirection, requestedDirection, true);
+
+    C4Fixed fixX;
+    fixX.val = 35468082;
+    int32_t actionTime = 0;
+    int32_t actionPhase = 0;
+    int32_t actionPhaseDelay = 0;
+    bool actionIsTurn = false;
+
+    // Action.Time++ occurs before WALK. SetAction(Turn) then resets time,
+    // phase, phase delay and fixed position (C4Object.cpp:4745, 4118-4167).
+    actionTime++;
+    if (runsTurnAction)
+    {
+        actionIsTurn = true;
+        actionTime = actionPhase = actionPhaseDelay = 0;
+        fixX = itofix(541);
+    }
+
+    const int32_t fixXAfterSetDir = fixX.val;
+    // ExecAction keeps the pre-transition WALK pAction: Delay=2, Step=1.
+    actionPhaseDelay += update.PhaseAdvance;
+    if (actionPhaseDelay >= 2)
+    {
+        actionPhaseDelay = 0;
+        actionPhase += 1;
+    }
+    fixX += xdir;
+
+    printf("\"action_direction\":{\"initial_xdir\":-52430,\"steered_xdir\":%d,"
+           "\"requested_dir\":%d,\"phase_advance\":%d,\"runs_turn_action\":%d,"
+           "\"action_is_turn\":%d,\"direction\":%d,\"command_direction\":3,"
+           "\"action_time\":%d,\"action_phase\":%d,\"action_phase_delay\":%d,"
+           "\"fix_x_after_set_dir\":%d,\"fix_x_after_move\":%d}",
+           xdir.val, requestedDirection, update.PhaseAdvance, runsTurnAction ? 1 : 0,
+           actionIsTurn ? 1 : 0, requestedDirection, actionTime, actionPhase,
+           actionPhaseDelay, fixXAfterSetDir, fixX.val);
 }
 
 // --- C4Value hash: mirrors src/C4Value.cpp:923-1029 --------------------------
@@ -546,7 +636,17 @@ int main()
     printScriptKillerCases();
     printf(",\n");
 
-    // 11. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 11. C4Landscape::_PathFree coarse-cell occupancy. The edge-water case
+    //     is the minimized Goldrush frame-143 PXS divergence.
+    printLandscapePathCases();
+    printf(",\n");
+
+    // 12. DFA_WALK raw-xdir SetDir/TurnAction ordering. The input is the
+    //     minimized Goldrush frame-170 WIPF divergence.
+    printActionDirectionCase();
+    printf(",\n");
+
+    // 13. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");

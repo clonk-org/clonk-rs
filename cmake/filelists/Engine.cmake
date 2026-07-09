@@ -2,6 +2,7 @@ set(FILE_LIST
 src/Bitmap256.cpp
 src/Bitmap256.h
 src/C4Action.cpp
+src/C4ActionDirection.h
 src/C4Application.cpp
 src/C4Application.h
 src/C4AudioSystem.cpp
@@ -138,6 +139,7 @@ src/C4KeyboardInput.cpp
 src/C4KeyboardInput.h
 src/C4Landscape.cpp
 src/C4Landscape.h
+src/C4LandscapePath.h
 src/C4LangStringTable.cpp
 src/C4LangStringTable.h
 src/C4Language.cpp
