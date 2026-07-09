@@ -12200,6 +12200,7 @@ mod tests {
         ObjectSnapshot {
             id: ObjectId::new(id),
             definition_id: definition.to_string(),
+            custom_name: None,
             position,
             velocity: Vector2::new(0, 0),
             rotation: 0,
@@ -12563,6 +12564,7 @@ mod tests {
             ObjectSnapshot {
                 id: focus,
                 definition_id: "Clonk".into(),
+                custom_name: None,
                 position: Vector2::new(0, 0),
                 velocity: Vector2::ZERO,
                 rotation: 0,
@@ -12614,6 +12616,7 @@ mod tests {
             ObjectSnapshot {
                 id: teammate,
                 definition_id: "Balloon".into(),
+                custom_name: None,
                 position: Vector2::new(10, 0),
                 velocity: Vector2::ZERO,
                 rotation: 0,

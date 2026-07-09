@@ -1964,6 +1964,10 @@ fn u32_is_zero(value: &u32) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectState {
+    /// C4Object::CustomName: Some overrides the crew-info/definition name;
+    /// None uses the fallback chain (C4Object.cpp:2103-2116).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
     pub position: Vector2,
     pub velocity: Vector2,
     /// Transient script-call mirror of the object's TRUE sub-pixel dirs:
@@ -2170,6 +2174,7 @@ pub(crate) fn preview_spawn_state(
     vertices: Vec<ObjectVertex>,
 ) -> ObjectState {
     ObjectState {
+        custom_name: None,
         script_fixed_velocity: None,
         position,
         velocity: Vector2::ZERO,
@@ -2235,6 +2240,9 @@ impl ObjectState {
         }
         if let Some(rotation) = delta.rotation {
             self.rotation = rotation.rem_euclid(360);
+        }
+        if let Some(custom_name) = &delta.custom_name {
+            self.custom_name = custom_name.clone();
         }
         let mut energy_died = false;
         if let Some(energy) = delta.energy {
@@ -2363,6 +2371,8 @@ impl ObjectState {
 
 #[derive(Debug, Default, Clone, PartialEq)]
 struct ObjectDelta {
+    /// Some(Some(name)) sets C4Object::CustomName; Some(None) clears it.
+    custom_name: Option<Option<String>>,
     portrait_source: Option<String>,
     solid_mask_override: Option<DefinitionTargetRect>,
     /// Script menu write-through (FnCreateMenu/FnCloseMenu et al.):
@@ -2420,6 +2430,9 @@ struct ObjectDelta {
 
 impl ObjectDelta {
     fn merge_update(&mut self, update: ObjectUpdate) {
+        if let Some(custom_name) = update.custom_name {
+            self.custom_name = Some(custom_name);
+        }
         if let Some(position) = update.position {
             self.position = Some(position);
         }
@@ -2535,6 +2548,7 @@ impl ObjectDelta {
 impl From<ObjectUpdate> for ObjectDelta {
     fn from(update: ObjectUpdate) -> Self {
         Self {
+            custom_name: update.custom_name,
             fixed_velocity_x: update.fixed_velocity_x,
             fixed_velocity_y: update.fixed_velocity_y,
             position: update.position,
@@ -2577,6 +2591,9 @@ impl From<ObjectUpdate> for ObjectDelta {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ObjectUpdate {
+    /// C4Object::CustomName write: Some(Some(name)) sets; Some(None) clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<Option<String>>,
     /// SetPortrait's source-definition update (Some = set).
     #[serde(default)]
     pub portrait_source: Option<String>,
@@ -2821,7 +2838,8 @@ impl ObjectUpdate {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.position.is_none()
+        self.custom_name.is_none()
+            && self.position.is_none()
             && self.velocity.is_none()
             && self.fixed_velocity.is_none()
             && self.fixed_velocity_x.is_none()
@@ -4082,6 +4100,7 @@ impl Object {
         ObjectSnapshot {
             id: self.id,
             definition_id: self.definition_id.clone(),
+            custom_name: self.state.custom_name.clone(),
             position,
             velocity,
             // C++ persists `r` verbatim; DoMovement keeps active rotation in
@@ -4518,6 +4537,9 @@ pub struct SpawnConfig {
     #[serde(default)]
     pub id: Option<ObjectId>,
     pub definition_id: DefinitionId,
+    /// Saved or explicitly assigned C4Object::CustomName.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
     pub position: Vector2,
     pub velocity: Vector2,
     /// Exact sub-pixel velocity: savegame `XDir`/`YDir` are serialized
@@ -4620,6 +4642,7 @@ impl SpawnConfig {
         Self {
             id: None,
             definition_id: definition_id.into(),
+            custom_name: None,
             position: Vector2::ZERO,
             velocity: Vector2::ZERO,
             fixed_velocity: None,
@@ -4656,6 +4679,11 @@ impl SpawnConfig {
 
     pub fn with_in_liquid(mut self, in_liquid: bool) -> Self {
         self.in_liquid = Some(in_liquid);
+        self
+    }
+
+    pub fn with_custom_name(mut self, name: impl Into<String>) -> Self {
+        self.custom_name = Some(name.into());
         self
     }
 
@@ -4819,6 +4847,9 @@ impl SpawnConfig {
 pub struct ObjectSnapshot {
     pub id: ObjectId,
     pub definition_id: DefinitionId,
+    /// C4Object::CustomName; None falls back to crew-info/definition name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
     pub position: Vector2,
     pub velocity: Vector2,
     #[serde(default)]
@@ -15445,6 +15476,7 @@ impl Engine {
             .ok_or(EngineError::UnknownObject(id))?;
 
         let ObjectUpdate {
+            custom_name,
             position,
             velocity,
             fixed_velocity,
@@ -15513,6 +15545,9 @@ impl Engine {
             let previous_container = object.state.container;
             let mut container_change = None;
 
+            if let Some(custom_name) = custom_name {
+                object.state.custom_name = custom_name;
+            }
             if let Some(position) = position {
                 object.set_position(position);
             }
@@ -16880,6 +16915,7 @@ impl Engine {
                 snapshot.id,
                 snapshot.definition_id.clone(),
                 ObjectState {
+                    custom_name: snapshot.custom_name.clone(),
                     script_fixed_velocity: None,
                     position: snapshot.position,
                     velocity: snapshot.velocity,
@@ -25540,6 +25576,7 @@ impl Engine {
         let SpawnConfig {
             id: explicit_id,
             definition_id,
+            custom_name,
             position,
             velocity,
             fixed_velocity,
@@ -25699,6 +25736,7 @@ impl Engine {
             id,
             definition_id.clone(),
             ObjectState {
+                custom_name,
                 script_fixed_velocity: None,
                 position,
                 velocity,
@@ -26566,6 +26604,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
 /// denumeration is needed for a read-mostly scope seed).
 fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
     ObjectState {
+        custom_name: snapshot.custom_name.clone(),
         script_fixed_velocity: None,
         position: snapshot.position,
         velocity: snapshot.velocity,

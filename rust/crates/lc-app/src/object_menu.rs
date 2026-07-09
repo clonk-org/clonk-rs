@@ -1128,6 +1128,7 @@ mod tests {
         ObjectSnapshot {
             id: ObjectId::new(id),
             definition_id: definition.to_string(),
+            custom_name: None,
             position: Vector2::new(0, 0),
             velocity: Vector2::new(0, 0),
             rotation: 0,

@@ -1015,6 +1015,7 @@ unsafe fn make_snapshot(
         snapshots.push(ObjectSnapshot {
             id: ObjectId::new(entry.id),
             definition_id,
+            custom_name: None,
             position: Vector2::new(entry.position_x, entry.position_y),
             velocity: Vector2::new(entry.velocity_x, entry.velocity_y),
             // The bridge exports C4Object::r verbatim. Negative rotations are
