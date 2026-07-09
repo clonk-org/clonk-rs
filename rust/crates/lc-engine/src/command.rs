@@ -542,6 +542,46 @@ mod tests {
         );
     }
 
+    // C4Command::MoveTo DFA_FLIGHT arm (C4Command.cpp:414-417): no ComDir
+    // steering at all — only FlightControl, which re-arms the Fly action
+    // for a CanFly crew member with the target in the ±60° top sector.
+    #[test]
+    fn move_to_flight_runs_flight_control_without_steering() {
+        let landscape = crate::Landscape::flat(300, 110);
+        let mut flyer = snapshot_with_id(1);
+        flyer.position = Vector2::new(100, 100);
+        flyer.action_procedure = ActionProcedure::Flight;
+        flyer.crew_member = true;
+        flyer.ocf |= ocf::CREW_MEMBER;
+        flyer.physical.can_fly = 1;
+        flyer.shape_top = -10;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut ctx = move_to_ctx_at_frame(&flyer, &objects, &players, &definitions, 1);
+        ctx.landscape = Some(&landscape);
+
+        // Target up and slightly right (angle 9, distance 70, sky above):
+        // FlightControl takes off; the flight arm never assigns ComDir.
+        let mut state = MoveToState::from_request(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(110))
+                .with_ty(Some(30)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result.update.expect("fly update");
+        assert_eq!(
+            update.command_direction, None,
+            "DFA_FLIGHT never steers ComDir (C4Command.cpp:414-417)"
+        );
+        assert_eq!(
+            update.action.and_then(|action| action.name),
+            Some("Fly".into()),
+            "FlightControl takes off (C4Command.cpp:1843)"
+        );
+    }
+
     #[test]
     fn move_to_diagonal_free_jump_like_cpp() {
         let landscape = crate::Landscape::flat(300, 110);
@@ -7427,6 +7467,9 @@ impl MoveToState {
                     self.last_direction
                 }
             }
+            // DFA_FLIGHT (C4Command.cpp:414-417): no ComDir steering —
+            // only FlightControl runs (below).
+            ActionProcedure::Flight => self.last_direction,
             // DFA_HANGLE (C4Command.cpp:384-387): horizontal steering
             // only; the angle-based drop follows below.
             ActionProcedure::Hang => {
@@ -7482,12 +7525,15 @@ impl MoveToState {
         // (C4Command::Execute MoveTo, C4Command.cpp:316-326):
         // FlightControl never short-circuits (it returns false even after
         // taking off, :1816-1849); JumpControl returning true ends the
-        // Execute for this tick.
+        // Execute for this tick. DFA_FLIGHT runs FlightControl alone
+        // (:414-417).
         let mut fly_update: Option<ActionUpdate> = None;
         let mut jump_operations: Option<Vec<CommandOperation>> = None;
         if ctx.object.action_procedure == ActionProcedure::Walk {
             fly_update = self.flight_control(ctx, target);
             jump_operations = self.jump_control(ctx, target);
+        } else if ctx.object.action_procedure == ActionProcedure::Flight {
+            fly_update = self.flight_control(ctx, target);
         }
 
         if fly_update.is_some() || jump_operations.is_some() {
