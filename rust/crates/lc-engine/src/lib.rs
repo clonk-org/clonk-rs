@@ -42427,6 +42427,68 @@ func Eject() {
         }
     }
 
+    // C4Object::Enter adds the object to the container's Contents list
+    // IMMEDIATELY (`Contents.Add(this, C4ObjectList::stContents)`,
+    // C4Object.cpp:1601-1605) — the mirror of the same-call Exit shrink
+    // above: a Collect/Enter loop must see the list GROW within the call
+    // (FnContents/FnContentsCount read the live list).
+    #[test]
+    fn same_call_enter_appends_to_contents() {
+        let script = r#"#strict
+local iDuring, pFirst;
+public func Take(pItem) {
+    Enter(this(), pItem);
+    iDuring = ContentsCount();
+    pFirst = Contents(0);
+    return(iDuring);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CONT", "Container", script).expect("container compiles"),
+            )
+            .expect("container registers");
+        engine
+            .register_definition(simple_definition("ITEM"))
+            .expect("item registers");
+        let container = engine
+            .spawn_object(
+                SpawnConfig::new("CONT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(40, 40)),
+            )
+            .expect("container spawns");
+        let item = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10)),
+            )
+            .expect("item spawns");
+
+        let idx = engine.find_object_index(container).expect("container exists");
+        let result = engine
+            .call_object_function(idx, "Take", vec![Value::Object(item.as_u64())])
+            .expect("take runs");
+        assert_eq!(
+            result,
+            Value::Int(1),
+            "the same-call Enter is visible to ContentsCount (C4Object.cpp:1601-1605)"
+        );
+        let idx = engine.find_object_index(container).expect("container exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("pFirst"),
+            Some(&Value::Object(item.as_u64())),
+            "Contents(0) returns the just-entered item mid-call"
+        );
+        assert_eq!(
+            engine.objects[idx].state.contents,
+            vec![item],
+            "the Enter committed to the world"
+        );
+    }
+
     // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure
     // MARKER effect: `AddEffect("Divinity", o, 200, 1)` on FOREIGN
     // targets found via the FindObject find-next iteration

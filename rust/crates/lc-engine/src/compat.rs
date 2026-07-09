@@ -18657,7 +18657,105 @@ impl EffectHostContext {
                     .unwrap_or(true)
             });
         }
+        // ...and it GROWS for same-call Enters: C4Object::Enter adds to the
+        // container's Contents immediately (`Contents.Add(this,
+        // C4ObjectList::stContents)`, C4Object.cpp:1601-1605), sorting into
+        // the matching category/id cluster (C4ObjectList::Add).
+        let entered: Vec<ObjectId> = self
+            .scopes_in_call_order()
+            .filter(|scope| {
+                scope.current_container == Some(id)
+                    && !scope.destroy
+                    && scope.status.is_active()
+                    && !object.contents.contains(&scope.id)
+            })
+            .map(|scope| scope.id)
+            .collect();
+        for child in entered {
+            let position = self.contents_insert_position(&object.contents, child);
+            object.contents.insert(position, child);
+        }
         Some(object)
+    }
+
+    /// Every scope this call holds pending writes for, in a deterministic
+    /// order: the active scope, suspended outer calls, completed nested
+    /// calls (first-call order).
+    fn scopes_in_call_order(&self) -> impl Iterator<Item = &ObjectScopeContext> {
+        self.object
+            .iter()
+            .chain(self.dormant_scopes.iter().flatten())
+            .chain(
+                self.nested_order
+                    .iter()
+                    .filter_map(|id| self.nested_objects.get(id).map(|state| &state.scope)),
+            )
+    }
+
+    /// A contents entry's sort inputs — the live scope first, then the
+    /// same-call previews and the world snapshot.
+    fn contents_sort_key(&self, id: ObjectId) -> Option<(i32, String)> {
+        let snapshot = self
+            .pending_objects
+            .get(&id)
+            .map(|object| (object.category, object.definition_id().to_string()))
+            .or_else(|| {
+                self.world
+                    .get(id)
+                    .map(|object| (object.category, object.definition_id().to_string()))
+            });
+        match self.object_scope(id) {
+            Some(scope) => {
+                let definition_id = scope
+                    .definition_id
+                    .clone()
+                    .or_else(|| snapshot.as_ref().map(|(_, def)| def.clone()))?;
+                Some((scope.current_category, definition_id))
+            }
+            None => snapshot,
+        }
+    }
+
+    /// C4ObjectList::Add stContents sort-in (C4ObjectList.cpp:104-152):
+    /// cluster with the first same-(SortLimit-category, id) entry, else
+    /// before the first entry of lower-or-equal sort category; lines (and
+    /// StaticBack children, which skip the cluster pass) fall through to
+    /// the relative-category walk, lines append at the end. The
+    /// engine-side twin is `Engine::contents_insert_position`.
+    fn contents_insert_position(&self, contents: &[ObjectId], child: ObjectId) -> usize {
+        let Some((category, definition_id)) = self.contents_sort_key(child) else {
+            return contents.len();
+        };
+        let is_line = self
+            .world
+            .definition_metadata(&definition_id)
+            .map(|metadata| metadata.line != 0)
+            .unwrap_or(false);
+        if is_line {
+            return contents.len();
+        }
+        let sort_category = category & crate::CATEGORY_SORT_LIMIT;
+        if category & crate::CATEGORY_STATIC_BACK == 0 {
+            let cluster_position = contents.iter().position(|other| {
+                self.contents_sort_key(*other)
+                    .is_some_and(|(other_category, other_definition)| {
+                        other_category & crate::CATEGORY_SORT_LIMIT == sort_category
+                            && other_definition == definition_id
+                    })
+            });
+            if let Some(position) = cluster_position {
+                return position;
+            }
+        }
+        contents
+            .iter()
+            .position(|other| {
+                self.contents_sort_key(*other)
+                    .is_some_and(|(other_category, _)| {
+                        other_category & crate::CATEGORY_SORT_LIMIT <= sort_category
+                    })
+            })
+            .unwrap_or(contents.len())
     }
 
     /// Drops a spawn queued in THIS call before it materializes. The id
