@@ -80,9 +80,8 @@ shadow, recording the new first mismatch.
   not append contents, nested Exit drops relative args, and velocity/owner/OCF
   are not fully overlaid.
 - **Weather / config / resources:** SetSeasonGamma and season wrap details; sky
-  parallax arithmetic; player control preferences/forced style; name/promotion
-  data and locale defaults; group create/write/gzip/CRC and directory-order
-  fidelity.
+  parallax arithmetic; forced control style; name/promotion data and locale
+  defaults; group create/write/gzip/CRC and directory-order fidelity.
 - **Host functions / menus:** AddEffect missing-priority behavior, Fx*Damage on
   host paths, nil/global AddEffect Start/Timer dispatch, exact
   `CanConcatPictureWith`, complete GrabObjectInfo identity/rank payloads,
