@@ -13998,6 +13998,12 @@ impl Engine {
             .with_position(drop_position)
             .with_velocity(Vector2::ZERO);
         self.apply_object_update(item_id, update)?;
+        // ObjectComDrop arms the dropper's NoCollectDelay and refreshes its
+        // OCF after the exit (C4ObjectCom.cpp:668-671).
+        if let Some(crew_index) = self.find_object_index(crew_id) {
+            self.objects[crew_index].state.no_collect_delay = 2;
+            self.refresh_object_ocf(crew_index);
+        }
         Ok(true)
     }
 
@@ -52814,6 +52820,11 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
             item_snapshot.position, crew_before_drop.position,
             "item should be positioned away from crew after drop"
         );
+        // Every ObjectComDrop-shaped drop arms the dropper's NoCollectDelay
+        // (C4ObjectCom.cpp:668-669) — the helper must not leave the crew
+        // instantly recollecting what it just dropped.
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        assert_eq!(engine.objects[crew_index].state.no_collect_delay, 2);
         Ok(())
     }
 
