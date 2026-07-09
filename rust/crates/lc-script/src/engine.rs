@@ -540,6 +540,44 @@ impl Engine {
             .map_err(ScriptError::from)
     }
 
+    /// C4AulScript::DirectExec in an object context (the C4Object::
+    /// MenuCommand seam, C4Object.cpp:3756-3760): runs `source` as ONE
+    /// expression with the object's locals and `this`, at the script's own
+    /// strict level (DirectExec's Strict parameter). Parse errors yield
+    /// nil; runtime errors surface for the caller's fPassErrors handling.
+    pub fn direct_exec_with_locals_and_this(
+        &self,
+        source: &str,
+        local_vars: &std::collections::HashMap<String, Value>,
+        this: Value,
+    ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        )
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_global_variables(self.globals_named.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_this(this);
+        vm.direct_exec_with_locals(source, local_vars, self.script_strict_level())
+            .map_err(ScriptError::from)
+    }
+
+    /// The host script's strict level — the max over its own functions
+    /// (C4AulScript::Strict is per script; every parsed function carries
+    /// it).
+    fn script_strict_level(&self) -> Option<u8> {
+        self.functions
+            .values()
+            .filter_map(|function| function.strict_level)
+            .max()
+    }
+
     pub fn has_function(&self, name: &str) -> bool {
         self.functions.contains_key(name)
     }

@@ -2076,21 +2076,35 @@ fn c4id_text_of(value: &Value) -> String {
     }
 }
 
+thread_local! {
+    /// C4ObjectMenu::CloseQuerying (C4ObjectMenu.h:64): the per-menu
+    /// recursion check for the MenuQueryCancel callback — shared between
+    /// the host-fn close path and the engine-side close hooks.
+    static CLOSE_QUERYING: RefCell<std::collections::HashSet<ObjectId>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Marks `menu_object`'s menu as close-querying; false when a query is
+/// already running (the C4ObjectMenu::CloseQuerying recursion check).
+pub(crate) fn begin_menu_close_query(menu_object: ObjectId) -> bool {
+    CLOSE_QUERYING.with(|cell| cell.borrow_mut().insert(menu_object))
+}
+
+pub(crate) fn end_menu_close_query(menu_object: ObjectId) {
+    CLOSE_QUERYING.with(|cell| {
+        cell.borrow_mut().remove(&menu_object);
+    });
+}
+
 /// C4ObjectMenu::IsCloseDenied (C4ObjectMenu.cpp:56-75): a USER menu asks
 /// MenuQueryCancel(Selection, ParentObject) on the command object
 /// (CB_Object) or the scenario script (CB_Scenario); a truthy answer keeps
 /// the menu open. The CloseQuerying flag stops recursive queries.
 fn menu_close_denied(menu_object: ObjectId, menu: &crate::ObjectMenuState) -> bool {
-    thread_local! {
-        static CLOSE_QUERYING: RefCell<std::collections::HashSet<ObjectId>> =
-            RefCell::new(std::collections::HashSet::new());
-    }
     if !menu.user_menu {
         return false;
     }
-    let already_querying =
-        CLOSE_QUERYING.with(|cell| !cell.borrow_mut().insert(menu_object));
-    if already_querying {
+    if !begin_menu_close_query(menu_object) {
         return false;
     }
     let pars = [
@@ -2114,9 +2128,7 @@ fn menu_close_denied(menu_object: ObjectId, menu: &crate::ObjectMenuState) -> bo
     }
     .map(|result| result.map(|value| value.as_bool()).unwrap_or(false))
     .unwrap_or(false);
-    CLOSE_QUERYING.with(|cell| {
-        cell.borrow_mut().remove(&menu_object);
-    });
+    end_menu_close_query(menu_object);
     denied
 }
 
@@ -2200,6 +2212,12 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         user_menu: true,
         command_object,
         items: Vec::new(),
+        // Columns = Lines = 0, fTextProgressing off (C4Menu::Default,
+        // C4Menu.cpp:299,303), no frame deco.
+        columns: 0,
+        lines: 0,
+        text_progress: None,
+        decoration: None,
     };
     let stored = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
@@ -2229,6 +2247,26 @@ fn get_menu(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(menu
         .map(|menu| menu.identification)
         .unwrap_or(Value::Int(0)))
+}
+
+/// FnGetMenuSelection (C4Script.cpp:4310-4316): -1 without an object or an
+/// active menu, else C4Menu::GetSelection() — the raw Selection index
+/// (C4Menu.cpp:612-615; -1 while nothing is selected).
+fn get_menu_selection(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GetMenuSelection",
+        "obj",
+    )?;
+    let Some(target) = target.or(active_object_id()) else {
+        return Ok(Value::Int(-1));
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    Ok(Value::Int(menu.map(|menu| menu.selection).unwrap_or(-1)))
 }
 
 /// FnPunch (C4Script.cpp:328-332) → ObjectComPunch (C4ObjectCom.cpp:
@@ -2661,6 +2699,123 @@ fn close_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
     Ok(Value::Bool(close_object_menu(target, true)))
+}
+
+/// FnSetMenuSize (C4Script.cpp:4483-4492): false without an active menu;
+/// cols/rows clamp through BoundBy(0..50) into C4Menu::SetSize
+/// (C4Menu.cpp:635-640), where a ZERO axis keeps the previous value. The
+/// stored Columns/Lines drive the menu layout (presentation) — the
+/// sim-observable pieces are this state and the bool return.
+fn set_menu_size(args: &[Value]) -> Result<Value, RuntimeError> {
+    let cols = parse_optional_i32(args.first(), "SetMenuSize", "cols")?.unwrap_or(0);
+    let rows = parse_optional_i32(args.get(1), "SetMenuSize", "rows")?.unwrap_or(0);
+    let target = parse_object_reference_argument(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetMenuSize",
+        "obj",
+    )?;
+    let Some(target) = target.or(active_object_id()) else {
+        return Ok(Value::Bool(false)); // !pObj (C4Script.cpp:4486)
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false)); // !pMnu || !IsActive (C4Script.cpp:4489)
+    };
+    let cols = cols.clamp(0, 50);
+    let rows = rows.clamp(0, 50);
+    if cols != 0 {
+        menu.columns = cols;
+    }
+    if rows != 0 {
+        menu.lines = rows;
+    }
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu)))
+    });
+    Ok(Value::Bool(true))
+}
+
+/// FnSetMenuDecoration (C4Script.cpp:1737-1748): NO cthr->Obj fallback —
+/// a nil menu object fails even with a scope object. The deco def must be
+/// known (FrameDecoration::SetByDef fails on C4Id2Def null,
+/// C4GuiDialogs.cpp:113-114); its FrameDeco* border/facet queries are
+/// app-side presentation — only the source def id is sim state.
+fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError> {
+    let deco_id = args.first().cloned().unwrap_or(Value::Nil);
+    let target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetMenuDecoration",
+        "menu object",
+    )?;
+    let Some(target) = target else {
+        return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1739)
+    };
+    let (menu, known_def) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return (None, None);
+        };
+        let known_def = match &deco_id {
+            Value::C4Id(id) | Value::String(id) if !id.is_empty() => context
+                .definition_metadata(id)
+                .map(|_| id.clone()),
+            _ => None,
+        };
+        (context.object_menu(target), known_def)
+    });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1739)
+    };
+    let Some(known_def) = known_def else {
+        return Ok(Value::Bool(false)); // SetByDef failed (C4Script.cpp:1741-1745)
+    };
+    menu.decoration = Some(known_def);
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu)))
+    });
+    Ok(Value::Bool(true))
+}
+
+/// FnSetMenuTextProgress (C4Script.cpp:1750-1754): NO cthr->Obj fallback —
+/// a nil menu object fails even with a scope object. With an active menu
+/// C4Menu::SetTextProgress(n, fAdd=false) (C4Menu.cpp:1079-1111) arms the
+/// progressive text display for n >= 0 (per-item distribution is
+/// presentation) or disables it for negative n, and returns true.
+fn set_menu_text_progress(args: &[Value]) -> Result<Value, RuntimeError> {
+    let progress =
+        parse_optional_i32(args.first(), "SetMenuTextProgress", "progress")?.unwrap_or(0);
+    let target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetMenuTextProgress",
+        "menu object",
+    )?;
+    let Some(target) = target else {
+        return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1752)
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false)); // !pMenuObj->Menu / !IsActive
+    };
+    // fTextProgressing = (iToProgress >= 0) (C4Menu.cpp:1084).
+    menu.text_progress = (progress >= 0).then_some(progress);
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu)))
+    });
+    Ok(Value::Bool(true))
 }
 
 /// FnSetPlrView (C4Script.cpp:2545-2550): the player's view target —
@@ -4587,7 +4742,11 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CloseMenu", close_menu);
     script.register_host_function("CreateMenu", create_menu);
     script.register_host_function("GetMenu", get_menu);
+    script.register_host_function("GetMenuSelection", get_menu_selection);
     script.register_host_function("SelectMenuItem", select_menu_item);
+    script.register_host_function("SetMenuDecoration", set_menu_decoration);
+    script.register_host_function("SetMenuSize", set_menu_size);
+    script.register_host_function("SetMenuTextProgress", set_menu_text_progress);
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("LandscapeWidth", landscape_width);
@@ -19644,6 +19803,10 @@ impl ObjectScopeContext {
         }
         self.current_container = container;
         self.pending_update.container = Some(container);
+        // C4Object::Enter/Exit force-close the moving object's menu
+        // synchronously (CloseMenu(true), C4Object.cpp:1555 and :1594) —
+        // staged here so a later same-call CreateMenu can still reopen one.
+        self.pending_update.menu = Some(None);
     }
 
     fn mark_destroy(&mut self) {
@@ -20238,6 +20401,7 @@ mod tests {
         "GetMaterial",
         "GetMaterialVal",
         "GetMenu",
+        "GetMenuSelection",
         "GetName",
         "GetOCF",
         "GetObjectLayer",
@@ -20341,6 +20505,9 @@ mod tests {
         "SetGravity",
         "SetKiller",
         "SetMass",
+        "SetMenuDecoration",
+        "SetMenuSize",
+        "SetMenuTextProgress",
         "SetObjDrawTransform",
         "SetObjDrawTransform2",
         "SetObjectStatus",

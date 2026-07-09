@@ -1303,14 +1303,14 @@ impl Engine {
                     continue;
                 }
             }
-            self.object_command_to_obj(index, command, target, tx, ty, ranged);
+            self.object_command_to_obj(index, command, target, tx, ty, ranged)?;
         }
         // Always apply to cursor, even if it's not selected (:1436-1439).
         if let Some(cursor_id) = cursor {
             if !cursor_processed && Some(cursor_id) != target {
                 if let Some(index) = self.find_object_index(cursor_id) {
                     if self.objects[index].state.status.is_active() {
-                        self.object_command_to_obj(index, command, target, tx, ty, ranged);
+                        self.object_command_to_obj(index, command, target, tx, ty, ranged)?;
                     }
                 }
             }
@@ -1321,8 +1321,8 @@ impl Engine {
     /// `C4Player::ObjectCommand2Obj` (C4Player.cpp:1445-1451): Add-mode
     /// commands push in front of the stack, Set-mode commands replace it.
     /// The Set path is `C4Object::SetCommand` with fControl
-    /// (C4Object.cpp:3923-3981): clear, then the `ControlCommand` script
-    /// overload before the hardcoded push.
+    /// (C4Object.cpp:3923-3981): clear, then the soft menu close, then the
+    /// `ControlCommand` script overload before the hardcoded push.
     fn object_command_to_obj(
         &mut self,
         index: usize,
@@ -1331,7 +1331,7 @@ impl Engine {
         tx: i32,
         ty: i32,
         add_mode: bool,
-    ) {
+    ) -> Result<(), EngineError> {
         let request = CommandRequest::new(command)
             .with_target(target)
             .with_tx((tx != 0).then_some(tx))
@@ -1341,10 +1341,21 @@ impl Engine {
             // C4P_Command_Add → AddCommand(..., fAppend=false): push front
             // without clearing (C4Command.cpp AddCommand semantics).
             self.objects[index].apply_command_operations([CommandOperation::PushFront(request)]);
-            return;
+            return Ok(());
         }
         // SetCommand: clear stack (:3928-3930).
         self.objects[index].apply_command_operations([CommandOperation::Clear]);
+        // Close menu — soft: `if (!CloseMenu(false)) return;`
+        // (C4Object.cpp:3944-3946). A MenuQueryCancel denial aborts the
+        // SetCommand with the stack already cleared. The query may run
+        // script, so re-resolve the index afterwards.
+        let object_id = self.objects[index].id;
+        if !self.close_object_menu(object_id, false)? {
+            return Ok(());
+        }
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
         // Script overload (:3935-3942): `ControlCommand(name, target, tx,
         // ty, target2, data)`.
         let args = [
@@ -1362,11 +1373,12 @@ impl Engine {
             .map(|value| compat::value_raw_truthy(&value))
             .unwrap_or(false);
         if overloaded {
-            return;
+            return Ok(());
         }
-        // Inside vehicle control (:3944-3957) needs the def VehicleControl
+        // Inside vehicle control (:3948-3961) needs the def VehicleControl
         // flags, which are not parsed yet (see PORT_STATUS).
         self.objects[index].apply_command_operations([CommandOperation::PushFront(request)]);
+        Ok(())
     }
 }
 

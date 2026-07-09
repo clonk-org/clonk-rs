@@ -1953,6 +1953,24 @@ pub struct ObjectMenuState {
     /// CB_Scenario (C4ObjectMenu::LocalInit, C4ObjectMenu.cpp:78-84).
     pub command_object: Option<ObjectId>,
     pub items: Vec<ObjectMenuItem>,
+    /// C4Menu::Columns — 0 = auto layout (C4Menu::Default, C4Menu.cpp:299);
+    /// script-set via SetMenuSize (C4Menu::SetSize, C4Menu.cpp:635-640).
+    #[serde(default)]
+    pub columns: i32,
+    /// C4Menu::Lines — 0 = auto layout; see `columns`.
+    #[serde(default)]
+    pub lines: i32,
+    /// SetMenuTextProgress state: Some(n) = progressive text display armed
+    /// starting at n characters, None = off (C4Menu::SetTextProgress,
+    /// C4Menu.cpp:1079-1111). The per-item TextDisplayProgress
+    /// distribution across captions is app-side presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_progress: Option<i32>,
+    /// SetMenuDecoration frame-deco source def (FrameDecoration::SetByDef,
+    /// C4GuiDialogs.cpp:110-142). The FrameDeco* border/facet queries on
+    /// that def are app-side presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoration: Option<String>,
 }
 
 /// C4Shape attach bookkeeping (`AttachMat`/`iAttachX`/`iAttachY`/
@@ -2362,6 +2380,15 @@ impl ObjectState {
             if self.container != container {
                 self.container = container;
                 container_change = Some((previous_container, self.container));
+                // C4Object::Enter/Exit force-close the moving object's menu
+                // (CloseMenu(true), C4Object.cpp:1555/:1594). A delta that
+                // carries its OWN menu write already folded the correct
+                // post-Enter/Exit state above (script scopes stage the close
+                // at Enter/Exit call time) — only menu-less deltas (the
+                // engine-internal collect/grab/enter movers) close here.
+                if delta.menu.is_none() {
+                    self.menu = None;
+                }
             }
             if let Some(components) = &delta.components {
                 self.components = components.clone();
@@ -7686,6 +7713,51 @@ impl Definition {
         }
 
         let arg_values: Vec<Value> = args.to_vec();
+        self.exec_in_object_context(
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            function,
+            |script, local_vars, this| {
+                script.call_with_locals_and_this(function, &arg_values, local_vars, this)
+            },
+        )
+    }
+
+    /// The shared object-context execution seam: installs the physics/
+    /// environment/random/audio guards and the HostObjectContext, runs
+    /// `invoke` on the definition script, and folds the outcome — the body
+    /// every `call_object_function`-style entry shares.
+    #[allow(clippy::too_many_arguments)]
+    fn exec_in_object_context<F>(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        label: &str,
+        invoke: F,
+    ) -> Result<(Value, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError>
+    where
+        F: FnOnce(
+            &lc_script::Engine,
+            &HashMap<String, Value>,
+            Value,
+        ) -> Result<(Value, HashMap<String, Value>), lc_script::ScriptError>,
+    {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
@@ -7744,9 +7816,8 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
-                self.script.call_with_locals_and_this(
-                    function,
-                    &arg_values,
+                invoke(
+                    &self.script,
                     &state.local_vars,
                     compat::object_reference_value(object_id),
                 )
@@ -7755,13 +7826,10 @@ impl Definition {
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let (value, updated_local_vars) = result.map_err(|source| {
-            let function_label: &'static str = Box::leak(function.to_string().into_boxed_str());
-            EngineError::Script {
-                definition: self.id.clone(),
-                function: function_label.to_string(),
-                source,
-            }
+        let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
+            definition: self.id.clone(),
+            function: label.to_string(),
+            source,
         })?;
         // Store updated local variables
         if let Some(object_update) = &mut host_effects.object_update {
@@ -7781,6 +7849,43 @@ impl Definition {
 
         let audio_state = audio_guard.finish();
         Ok((value, host_effects, audio_state, rng))
+    }
+
+    /// C4AulScript::DirectExec in this definition's object context — the
+    /// C4Object::MenuCommand seam (C4Object.cpp:3756-3760): `source` runs
+    /// as ONE expression with the object's locals and `this`.
+    #[allow(clippy::too_many_arguments)]
+    fn direct_exec_object_expression(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        source: &str,
+        label: &str,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<(Value, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
+        self.exec_in_object_context(
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            label,
+            |script, local_vars, this| {
+                script.direct_exec_with_locals_and_this(source, local_vars, this)
+            },
+        )
     }
 
     fn call_menu_callback(
@@ -13237,6 +13342,133 @@ impl Engine {
         Ok(value)
     }
 
+    /// C4Object::MenuCommand (C4Object.cpp:3756-3760): DirectExec `source`
+    /// in the object's own script context and fold the outcome like any
+    /// object call. Error handling (fPassErrors=false — log and continue)
+    /// is the caller's via `tolerate_script_error`.
+    fn direct_exec_on_object(
+        &mut self,
+        index: usize,
+        source: &str,
+        label: &str,
+    ) -> Result<Value, EngineError> {
+        let (object_id, definition_id, state_snapshot) = {
+            let object = self
+                .objects
+                .get(index)
+                .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?;
+            (
+                object.id,
+                object.definition_id.clone(),
+                object.script_state_snapshot(),
+            )
+        };
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let action_library = definition.action_library().clone();
+        let rng_state = self.rng.clone();
+        let global_view = self.global_effects.clone();
+        let world = self.host_world_context();
+        let (value, outcome, audio_state, new_rng) = definition.direct_exec_object_expression(
+            &state_snapshot,
+            object_id,
+            source,
+            label,
+            rng_state,
+            &global_view,
+            self.physics,
+            self.environment,
+            self.frame,
+            world,
+            self.game_over_triggered,
+            self.audio_registry.clone(),
+        )?;
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.apply_action_callback_outcome(
+            index,
+            outcome,
+            &action_library,
+            object_id,
+            &definition_id,
+        )?;
+        Ok(value)
+    }
+
+    /// The sim-observable core of a user Enter on the object's SCRIPT menu
+    /// — C4Menu::Enter (C4Menu.cpp:498-523), reached in C++ via the queued
+    /// COM_MenuEnter/COM_MenuEnterAll control (C4ObjectMenu::OnUserEnter,
+    /// C4ObjectMenu.cpp:467-471; C4Object::Control -> Menu->Control,
+    /// C4Object.cpp:3365-3367): the selected item's command string executes
+    /// on the menu's command object (C4ObjectMenu::MenuCommand ->
+    /// C4Object::MenuCommand DirectExec, C4ObjectMenu.cpp:505-527 /
+    /// C4Object.cpp:3756-3760). The app-side menu UI must route its Enter
+    /// here; see the PORT_STATUS `object menus` row for what remains.
+    pub fn menu_user_enter(
+        &mut self,
+        object_id: ObjectId,
+        right: bool,
+    ) -> Result<bool, EngineError> {
+        const STYLE_INFO: i32 = 2; // C4MN_Style_Info (C4Menu.h:41)
+        const STYLE_DIALOG: i32 = 3; // C4MN_Style_Dialog (C4Menu.h:42)
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let Some(menu) = self.objects[index].state.menu.clone() else {
+            return Ok(false); // !IsActive (C4Menu.cpp:501)
+        };
+        if menu.style == STYLE_INFO {
+            return Ok(false); // C4Menu.cpp:502
+        }
+        let item = usize::try_from(menu.selection)
+            .ok()
+            .and_then(|selection| menu.items.get(selection));
+        let Some(item) = item else {
+            // No selected item: dialogs try a soft close (TryClose(false,
+            // true), C4Menu.cpp:508); every style reports true (:509).
+            if menu.style == STYLE_DIALOG {
+                self.close_object_menu(object_id, false)?;
+            }
+            return Ok(true);
+        };
+        // Copy the command to a buffer (the menu may clear); right enter
+        // takes Command2 when set (C4Menu.cpp:512-514).
+        let command = if right && !item.command2.is_empty() {
+            item.command2.clone()
+        } else {
+            item.command.clone()
+        };
+        // Close if not permanent BEFORE the exec — Close(true) skips the
+        // MenuQueryCancel query (C4Menu.cpp:517).
+        if !menu.permanent {
+            self.objects[index].state.menu = None;
+        }
+        // C4ObjectMenu::MenuCommand CB_Object (C4ObjectMenu.cpp:519-521):
+        // DirectExec on the command object, fail-safe (fPassErrors=false).
+        // CB_Scenario (Game.Script.DirectExec, :523-526) is unported —
+        // see PORT_STATUS. The AutoContextMenu tail (:528) needs
+        // Def->AutoContextMenu + the player pref, also unported.
+        match menu.command_object.and_then(|id| self.find_object_index(id)) {
+            Some(command_index) => {
+                tolerate_script_error(self.direct_exec_on_object(
+                    command_index,
+                    &command,
+                    "MenuCommand",
+                ))?;
+            }
+            None => {
+                tracing::warn!(
+                    id = object_id.as_u64(),
+                    command,
+                    "menu Enter without a command object (CB_Scenario MenuCommand unported)"
+                );
+            }
+        }
+        Ok(true)
+    }
+
     fn call_movement_object_function(
         &mut self,
         index: usize,
@@ -15799,6 +16031,7 @@ impl Engine {
             if let Some(entrance_status) = update_entrance_status {
                 object.state.entrance_status = entrance_status;
             }
+            let menu_written = update_menu.is_some();
             if let Some(menu) = update_menu {
                 object.state.menu = menu;
             }
@@ -15815,6 +16048,13 @@ impl Engine {
                 if object.state.container != container_update {
                     object.state.container = container_update;
                     container_change = Some((previous_container, object.state.container));
+                    // C4Object::Enter/Exit force-close the moving object's
+                    // menu (CloseMenu(true), C4Object.cpp:1555/:1594) —
+                    // unless this update carries its own (already correctly
+                    // ordered) menu write.
+                    if !menu_written {
+                        object.state.menu = None;
+                    }
                 }
             }
             if let Some(vertices) = vertices {
@@ -22830,6 +23070,9 @@ impl Engine {
             // C++ resets (C4Object.cpp:3805-3807) have no persistent
             // counterpart here. OCF refreshes on the next tick's compute.
             object.upright_t_attach = 0;
+            // Menus never survive a Synchronize (CloseMenu(true),
+            // C4Object.cpp:3842).
+            object.state.menu = None;
         }
         self.rng = LcgRng::seed_from_u64(self.random_seed);
         self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
@@ -23102,6 +23345,67 @@ impl Engine {
                     .solid_mask_override
                     .map(|rect| (rect.x, rect.y, rect.width, rect.height))
             })
+    }
+
+    /// C4Object::CloseMenu (C4Object.cpp:2033-2041) for the engine-side
+    /// control paths that run outside a script scope (the host-fn twin is
+    /// compat::close_object_menu). Force skips the MenuQueryCancel query
+    /// (C4Menu::TryClose, C4Menu.cpp:317-320); a soft close of a USER menu
+    /// asks MenuQueryCancel(Selection, ParentObject) on the command object
+    /// first (C4ObjectMenu::IsCloseDenied, C4ObjectMenu.cpp:57-76) — a
+    /// truthy answer keeps the menu and fails the close. CB_Scenario menus
+    /// (no command object) skip the query here — see the PORT_STATUS
+    /// `object menus` row.
+    pub(crate) fn close_object_menu(
+        &mut self,
+        object_id: ObjectId,
+        force: bool,
+    ) -> Result<bool, EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(true);
+        };
+        let Some(menu) = self.objects[index].state.menu.clone() else {
+            return Ok(true); // no menu -> close OK (C4Object.cpp:2035)
+        };
+        if !force && menu.user_menu && compat::begin_menu_close_query(object_id) {
+            // Missing handler = silent miss (the "~" in PSF_MenuQueryCancel,
+            // C4GameScript.h); callee errors fall back to close-OK like the
+            // C++ fail-safe Call.
+            let command_index = menu
+                .command_object
+                .and_then(|command_object| self.find_object_index(command_object))
+                .filter(|&command_index| {
+                    self.definitions
+                        .get(&self.objects[command_index].definition_id)
+                        .is_some_and(|definition| definition.has_function("MenuQueryCancel"))
+                });
+            let denied = match command_index {
+                Some(command_index) => {
+                    let pars = vec![
+                        Value::Int(menu.selection),
+                        object_reference_value(object_id),
+                    ];
+                    tolerate_script_error(self.call_object_function(
+                        command_index,
+                        "MenuQueryCancel",
+                        pars,
+                    ))?
+                    .map(|value| value.as_bool())
+                    .unwrap_or(false)
+                }
+                None => false,
+            };
+            compat::end_menu_close_query(object_id);
+            if denied {
+                return Ok(false);
+            }
+        }
+        // delete Menu (C4Object.cpp:2038) — dropping the state is the
+        // close in this model.
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects[index].state.menu = None;
+        }
+        Ok(true)
     }
 
     /// Debug/test helper: the object's script menu state (outer None =
@@ -36225,6 +36529,712 @@ func Trigger() {
             .expect("clonk exists")
             .expect("menu is open");
         assert_eq!(menu.selection, 1);
+    }
+
+    #[test]
+    fn exit_closes_the_object_menu_like_cpp() {
+        // C4Object::Exit (C4Object.cpp:1530-1562) force-closes the exiting
+        // object's menu among its "Misc updates" (CloseMenu(true),
+        // C4Object.cpp:1555) — synchronously, so a GetMenu later in the
+        // same script call already sees it gone.
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func LeaveAndRead() { Exit(); return GetMenu(this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", "").expect("script compiles"),
+            )
+            .expect("hut registers");
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("hut spawns");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK").with_container(hut))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "OpenMenu", Vec::new())
+                .expect("OpenMenu succeeds"),
+            Value::Bool(true)
+        );
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "LeaveAndRead", Vec::new())
+                .expect("LeaveAndRead succeeds"),
+            Value::Int(0),
+            "Exit closes the menu before the same-call GetMenu (C4Object.cpp:1555)"
+        );
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(engine.objects[idx].state.container, None, "exit folded");
+        assert_eq!(
+            engine.debug_object_menu(clonk.as_u64()),
+            Some(None),
+            "the menu stays closed after the fold"
+        );
+    }
+
+    #[test]
+    fn enter_closes_the_object_menu_and_a_later_create_menu_survives_like_cpp() {
+        // C4Object::Enter (C4Object.cpp:1565-1614) force-closes the entering
+        // object's menu among its "Failsafe updates" (CloseMenu(true),
+        // C4Object.cpp:1594). The close happens AT the Enter — a CreateMenu
+        // later in the same call opens a fresh menu that stays.
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func BoardAndRead(hut) { Enter(hut); return GetMenu(this()); }
+        func BoardThenReopen(hut) { Enter(hut); Exit(); Enter(hut); CreateMenu(MENU, this(), this(), 0, "After"); return GetMenu(this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", "").expect("script compiles"),
+            )
+            .expect("hut registers");
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("hut spawns");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "OpenMenu", Vec::new())
+                .expect("OpenMenu succeeds"),
+            Value::Bool(true)
+        );
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "BoardAndRead", vec![object_reference_value(hut)])
+                .expect("BoardAndRead succeeds"),
+            Value::Int(0),
+            "Enter closes the menu before the same-call GetMenu (C4Object.cpp:1594)"
+        );
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(engine.objects[idx].state.container, Some(hut));
+        assert_eq!(engine.debug_object_menu(clonk.as_u64()), Some(None));
+
+        // Exit+Enter then CreateMenu in ONE call: the new menu must survive
+        // the container-change fold (C++ closed at Enter time, then the
+        // script reopened — the reopened menu stays).
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "BoardThenReopen", vec![object_reference_value(hut)])
+                .expect("BoardThenReopen succeeds"),
+            Value::C4Id("MENU".into())
+        );
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu reopened after Enter survives the fold");
+        assert_eq!(menu.identification, Value::C4Id("MENU".into()));
+    }
+
+    #[test]
+    fn engine_internal_container_moves_close_the_object_menu_like_cpp() {
+        // Engine-internal container moves (collection cross-check
+        // lib.rs `with_container` update, grab/enter DirectCom arms) are
+        // C4Object::Enter/Exit too — both force-close the MOVING object's
+        // menu (CloseMenu(true), C4Object.cpp:1555/:1594).
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", "").expect("script compiles"),
+            )
+            .expect("hut registers");
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("hut spawns");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        engine
+            .call_object_function(idx, "OpenMenu", Vec::new())
+            .expect("OpenMenu succeeds");
+        assert!(engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .is_some());
+
+        // Host-driven Enter, like the collection cross-check
+        // (C4Object::Collect -> Enter, C4Object.cpp:5698 -> :1552).
+        engine
+            .apply_object_update(clonk, ObjectUpdate::new().with_container(hut))
+            .expect("enter applies");
+        assert_eq!(
+            engine.debug_object_menu(clonk.as_u64()),
+            Some(None),
+            "the entering object's menu closes (C4Object.cpp:1594)"
+        );
+
+        // Reopen, then a host-driven Exit (e.g. drop) closes it again.
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        engine
+            .call_object_function(idx, "OpenMenu", Vec::new())
+            .expect("OpenMenu succeeds");
+        assert!(engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .is_some());
+        engine
+            .apply_object_update(clonk, ObjectUpdate::new().clear_container())
+            .expect("exit applies");
+        assert_eq!(
+            engine.debug_object_menu(clonk.as_u64()),
+            Some(None),
+            "the exiting object's menu closes (C4Object.cpp:1555)"
+        );
+    }
+
+    #[test]
+    fn sync_clearance_closes_the_object_menu_like_cpp() {
+        // C4Object::SyncClearance (C4Object.cpp:3829-3850) force-closes any
+        // open menu among its no-save safeties (CloseMenu(true),
+        // C4Object.cpp:3842) — menus never survive a Synchronize.
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        engine
+            .call_object_function(idx, "OpenMenu", Vec::new())
+            .expect("OpenMenu succeeds");
+        assert!(engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .is_some());
+
+        engine.game_start_synchronize();
+        assert_eq!(
+            engine.debug_object_menu(clonk.as_u64()),
+            Some(None),
+            "SyncClearance closes menus (C4Object.cpp:3842)"
+        );
+    }
+
+    #[test]
+    fn control_set_command_soft_closes_the_menu_and_a_denial_aborts_like_cpp() {
+        // C4Object::SetCommand with fControl (C4Object.cpp:3938-3981):
+        // ClearCommands runs first (:3941), then the menu must agree to a
+        // SOFT close — `if (!CloseMenu(false)) return;` (:3944-3946). A
+        // MenuQueryCancel denial (C4ObjectMenu::IsCloseDenied,
+        // C4ObjectMenu.cpp:57-76) keeps the menu open and aborts the whole
+        // SetCommand: no ControlCommand overload, no command push — but the
+        // stack stays cleared.
+        let script = r#"
+        local deny;
+        local queried;
+        func SetDeny(flag) { deny = flag; }
+        func MenuQueryCancel(sel, menuObj) { queried = queried + 1; return deny; }
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        "#;
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player registers");
+        let clonk = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_action(ActionState::new("Idle")),
+            )
+            .expect("clonk spawns");
+        engine.set_crew_cursor(1, Some(clonk)).expect("cursor set");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+        let queried = |engine: &Engine| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine.objects[idx]
+                .state
+                .local_vars
+                .get("queried")
+                .cloned()
+                .unwrap_or(Value::Nil)
+        };
+
+        // Undenied menu: the control command closes it and pushes.
+        call(&mut engine, "OpenMenu", Vec::new());
+        engine
+            .player_object_command(1, CommandId::Dig, None, 10, 20)
+            .expect("command routes");
+        assert_eq!(
+            engine.debug_object_menu(clonk.as_u64()),
+            Some(None),
+            "SetCommand(fControl) closed the undenied menu (C4Object.cpp:3945)"
+        );
+        assert_eq!(queried(&engine), Value::Int(1), "the soft close queried");
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine.objects[idx].commands.snapshot().command_names(),
+            vec!["Dig".to_string()],
+            "the command was set after the close"
+        );
+
+        // Denied menu: it survives, and the SetCommand aborts AFTER the
+        // ClearCommands — the old Dig is gone, nothing new is pushed.
+        // (Throw/Drop route as C4P_Command_Add and never touch the menu,
+        // C4ObjectCom.cpp:1020-1036 — use another Set-mode command.)
+        call(&mut engine, "OpenMenu", Vec::new());
+        call(&mut engine, "SetDeny", vec![Value::Int(1)]);
+        engine
+            .player_object_command(1, CommandId::Dig, None, 30, 40)
+            .expect("command routes");
+        assert!(
+            engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .is_some(),
+            "the denied menu stays open (C4Object.cpp:3946)"
+        );
+        assert_eq!(queried(&engine), Value::Int(2));
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert!(
+            engine.objects[idx].commands.snapshot().is_empty(),
+            "the abort still cleared the stack (ClearCommands ran first, :3941)"
+        );
+    }
+
+    #[test]
+    fn get_menu_selection_reads_the_selection_or_minus_one_like_cpp() {
+        // FnGetMenuSelection (C4Script.cpp:4310-4316): no object, no menu or
+        // inactive menu -> -1; otherwise C4Menu::GetSelection() — the raw
+        // Selection index (C4Menu.cpp:612-615), which itself is -1 while
+        // nothing is selected (C4Menu::Default, C4Menu.cpp:284).
+        let script = r#"
+        func Read() { return GetMenuSelection(this()); }
+        func ReadSelf() { return GetMenuSelection(); }
+        func OpenEmpty() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func Fill() {
+            AddMenuItem("Info", "", WIPF, this());
+            AddMenuItem("A", "CmdA", WIPF, this());
+            AddMenuItem("B", "CmdB", WIPF, this());
+            return SelectMenuItem(2, this());
+        }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, Vec::new())
+                .expect("call succeeds")
+        };
+
+        assert_eq!(
+            call(&mut engine, "Read"),
+            Value::Int(-1),
+            "no menu -> -1 (C4Script.cpp:4314)"
+        );
+        assert_eq!(call(&mut engine, "OpenEmpty"), Value::Bool(true));
+        assert_eq!(
+            call(&mut engine, "ReadSelf"),
+            Value::Int(-1),
+            "open menu without a selection reports its raw -1"
+        );
+        assert_eq!(call(&mut engine, "Fill"), Value::Bool(true));
+        assert_eq!(
+            call(&mut engine, "Read"),
+            Value::Int(2),
+            "the selected index is reported (C4Script.cpp:4315)"
+        );
+    }
+
+    #[test]
+    fn set_menu_size_clamps_and_keeps_zero_axes_like_cpp() {
+        // FnSetMenuSize (C4Script.cpp:4483-4492): false without an active
+        // menu; cols/rows clamp through BoundBy(0..50) and feed
+        // C4Menu::SetSize (C4Menu.cpp:635-640), where a ZERO axis keeps the
+        // previous value (`if (iToWdt) Columns = iToWdt;`). Menus start at
+        // Columns = Lines = 0 (C4Menu::Default, C4Menu.cpp:299).
+        let script = r#"
+        func Resize(c, r) { return SetMenuSize(c, r, this()); }
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+        let size = |engine: &Engine| {
+            let menu = engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .expect("menu is open");
+            (menu.columns, menu.lines)
+        };
+
+        assert_eq!(
+            call(&mut engine, "Resize", vec![Value::Int(3), Value::Int(4)]),
+            Value::Bool(false),
+            "no menu -> false (C4Script.cpp:4489)"
+        );
+        call(&mut engine, "OpenMenu", Vec::new());
+        assert_eq!(size(&engine), (0, 0), "C4Menu::Default Columns/Lines");
+        assert_eq!(
+            call(&mut engine, "Resize", vec![Value::Int(3), Value::Int(4)]),
+            Value::Bool(true)
+        );
+        assert_eq!(size(&engine), (3, 4));
+        // Zero keeps the previous axis (C4Menu.cpp:637-638); a negative
+        // clamps to 0 and thus also keeps; oversize clamps to 50.
+        assert_eq!(
+            call(&mut engine, "Resize", vec![Value::Int(0), Value::Int(7)]),
+            Value::Bool(true)
+        );
+        assert_eq!(size(&engine), (3, 7));
+        assert_eq!(
+            call(&mut engine, "Resize", vec![Value::Int(99), Value::Int(-5)]),
+            Value::Bool(true)
+        );
+        assert_eq!(size(&engine), (50, 7));
+    }
+
+    #[test]
+    fn set_menu_text_progress_requires_an_explicit_menu_object_like_cpp() {
+        // FnSetMenuTextProgress (C4Script.cpp:1750-1754): unlike most menu
+        // fns there is NO cthr->Obj fallback — `if (!pMenuObj ||
+        // !pMenuObj->Menu) return false;`. With an active menu it returns
+        // C4Menu::SetTextProgress(n, false) (C4Menu.cpp:1079-1111), which
+        // is true whenever the menu is active: n >= 0 arms the progressive
+        // text display, negative n turns it off.
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func NoObj() { return SetMenuTextProgress(0); }
+        func Prog(n) { return SetMenuTextProgress(n, this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+        let progress = |engine: &Engine| {
+            engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .expect("menu is open")
+                .text_progress
+        };
+
+        assert_eq!(
+            call(&mut engine, "Prog", vec![Value::Int(0)]),
+            Value::Bool(false),
+            "no menu -> false (C4Script.cpp:1752)"
+        );
+        call(&mut engine, "OpenMenu", Vec::new());
+        assert_eq!(
+            call(&mut engine, "NoObj", Vec::new()),
+            Value::Bool(false),
+            "nil menu object -> false even with a scope object (C4Script.cpp:1752)"
+        );
+        assert_eq!(
+            call(&mut engine, "Prog", vec![Value::Int(5)]),
+            Value::Bool(true)
+        );
+        assert_eq!(progress(&engine), Some(5), "n >= 0 arms text progress");
+        assert_eq!(
+            call(&mut engine, "Prog", vec![Value::Int(-1)]),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            progress(&engine),
+            None,
+            "negative n disables text progress (fTextProgressing = false)"
+        );
+    }
+
+    #[test]
+    fn set_menu_decoration_requires_a_known_def_and_a_menu_like_cpp() {
+        // FnSetMenuDecoration (C4Script.cpp:1737-1748): no cthr->Obj
+        // fallback — `if (!pMenuObj || !pMenuObj->Menu) return false;`.
+        // FrameDecoration::SetByDef (C4GuiDialogs.cpp:110-142) fails on an
+        // unknown def (C4Id2Def null, :113-114); with a known def it stores
+        // the deco and returns true (the FrameDeco* facet/border queries
+        // are presentation).
+        let script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        func NoObj() { return SetMenuDecoration(DECO); }
+        func Deco(id) { return SetMenuDecoration(id, this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("DECO", "Deco", "").expect("script compiles"),
+            )
+            .expect("deco registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+
+        assert_eq!(
+            call(&mut engine, "Deco", vec![Value::C4Id("DECO".into())]),
+            Value::Bool(false),
+            "no menu -> false (C4Script.cpp:1739)"
+        );
+        call(&mut engine, "OpenMenu", Vec::new());
+        assert_eq!(
+            call(&mut engine, "NoObj", Vec::new()),
+            Value::Bool(false),
+            "nil menu object -> false even with a scope object (C4Script.cpp:1739)"
+        );
+        assert_eq!(
+            call(&mut engine, "Deco", vec![Value::C4Id("GOLD".into())]),
+            Value::Bool(false),
+            "unknown deco def -> SetByDef fails (C4GuiDialogs.cpp:113-114)"
+        );
+        assert_eq!(
+            engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .expect("menu is open")
+                .decoration,
+            None
+        );
+        assert_eq!(
+            call(&mut engine, "Deco", vec![Value::C4Id("DECO".into())]),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .expect("menu is open")
+                .decoration,
+            Some("DECO".to_string())
+        );
+    }
+
+    #[test]
+    fn menu_user_enter_executes_the_item_command_and_closes_like_cpp() {
+        // C4Menu::Enter (C4Menu.cpp:498-523): no active menu -> false;
+        // Style_Info refuses (:502); without a selected item non-dialogs
+        // keep the menu and report true (:504-510); otherwise the selected
+        // item's command (Command2 on right enter with one set, :514) is
+        // copied, a non-permanent menu closes BEFORE the exec (:517), and
+        // the string runs as script on the menu's command object
+        // (C4ObjectMenu::MenuCommand -> C4Object::MenuCommand DirectExec,
+        // C4ObjectMenu.cpp:505-527 / C4Object.cpp:3756-3760).
+        let script = r#"
+        local hit;
+        func Mark(a, b) { hit = a + b; return 7; }
+        func OpenWith(cmd, par, style, perm) {
+            CreateMenu(WIPF, this(), this(), 0, "Choose", 0, style, perm);
+            AddMenuItem("A", cmd, WIPF, this(), 0, par);
+            return SelectMenuItem(0, this());
+        }
+        func OpenEmpty() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+        let hit = |engine: &Engine| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine.objects[idx]
+                .state
+                .local_vars
+                .get("hit")
+                .cloned()
+                .unwrap_or(Value::Nil)
+        };
+
+        // No menu -> false (C4Menu::Enter !IsActive, C4Menu.cpp:501).
+        assert!(!engine.menu_user_enter(clonk, false).expect("enter runs"));
+
+        // Left enter: command with %d — the second %d gets 0 for left
+        // (C4Script.cpp:1563-1570). The non-permanent menu closes.
+        call(
+            &mut engine,
+            "OpenWith",
+            vec![
+                Value::String("Mark(%d,%d)".into()),
+                Value::Int(40),
+                Value::Int(0),
+                Value::Int(0),
+            ],
+        );
+        assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
+        assert_eq!(hit(&engine), Value::Int(40), "Mark(40,0) ran");
+        assert_eq!(
+            engine.debug_object_menu(clonk.as_u64()),
+            Some(None),
+            "non-permanent menu closed before the exec (C4Menu.cpp:517)"
+        );
+
+        // Right enter takes Command2 (:514): the second %d gets 1.
+        call(
+            &mut engine,
+            "OpenWith",
+            vec![
+                Value::String("Mark(%d,%d)".into()),
+                Value::Int(40),
+                Value::Int(0),
+                Value::Int(0),
+            ],
+        );
+        assert!(engine.menu_user_enter(clonk, true).expect("enter runs"));
+        assert_eq!(hit(&engine), Value::Int(41), "Mark(40,1) ran");
+
+        // A PERMANENT menu survives its own execution (C4Menu.cpp:517).
+        call(
+            &mut engine,
+            "OpenWith",
+            vec![
+                Value::String("Mark(%d,%d)".into()),
+                Value::Int(50),
+                Value::Int(0),
+                Value::Int(1),
+            ],
+        );
+        assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
+        assert_eq!(hit(&engine), Value::Int(50));
+        assert!(
+            engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .is_some(),
+            "permanent menu stays open"
+        );
+
+        // Style_Info menus refuse Enter outright (C4Menu.cpp:502).
+        call(
+            &mut engine,
+            "OpenWith",
+            vec![
+                Value::String("Mark(%d,%d)".into()),
+                Value::Int(60),
+                Value::Int(2),
+                Value::Int(0),
+            ],
+        );
+        assert!(!engine.menu_user_enter(clonk, false).expect("enter runs"));
+        assert_eq!(hit(&engine), Value::Int(50), "info menu ran nothing");
+
+        // No selected item in a non-dialog menu: true, menu stays, nothing
+        // runs (C4Menu.cpp:504-510).
+        call(&mut engine, "OpenEmpty", Vec::new());
+        assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
+        assert_eq!(hit(&engine), Value::Int(50));
+        assert!(engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .is_some());
     }
 
     #[test]
