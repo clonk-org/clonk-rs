@@ -6075,14 +6075,23 @@ impl Definition {
         if state.construction >= FULL_CON {
             ocf |= crate::ocf::FULL_CON;
         }
-        if self.crew_member {
+        // OCF_Living/OCF_Alive (SetOCF, C4Object.cpp:600-605)
+        if state.category & CATEGORY_LIVING != 0 {
             ocf |= crate::ocf::LIVING;
-        }
-        if state.alive {
-            ocf |= crate::ocf::ALIVE;
-            if self.crew_member {
-                ocf |= crate::ocf::CREW_MEMBER | crate::ocf::FIGHT_READY;
+            if state.alive {
+                ocf |= crate::ocf::ALIVE;
             }
+        }
+        // OCF_CrewMember: Def->CrewMember && the RAW Alive flag
+        // (SetOCF, C4Object.cpp:619-622)
+        if self.crew_member && state.alive {
+            ocf |= crate::ocf::CREW_MEMBER;
+        }
+        // OCF_FightReady seeds from the OCF_Alive BIT (SetOCF,
+        // C4Object.cpp:606-610); the NoFight/ActMap-Disabled gates join
+        // with their def fields.
+        if ocf & crate::ocf::ALIVE != 0 {
+            ocf |= crate::ocf::FIGHT_READY;
         }
         // OCF_Construct: can be built outside (SetOCF, C4Object.cpp:549-552)
         if self.constructable
@@ -28866,6 +28875,9 @@ mod tests {
         let mut engine = Engine::with_seed(40);
         let mut victim_def = simple_definition("Clonk");
         victim_def.set_mass(100);
+        // Hit victims are livings: the Hit branch needs OCF_Alive, which
+        // needs Category & C4D_Living (SetOCF, C4Object.cpp:600-605).
+        victim_def.set_category(CATEGORY_LIVING);
         engine.register_definition(victim_def)?;
         let mut rock_def = simple_definition("Rock");
         rock_def.set_category(CATEGORY_OBJECT);
@@ -29326,6 +29338,9 @@ mod tests {
         fn fighter_def(id: &str, script: &str) -> Result<Definition, EngineError> {
             let mut definition = Definition::from_script(id, id, script)?;
             definition.set_crew_member(true);
+            // Fighters are livings: OCF_FightReady needs OCF_Alive, which
+            // needs Category & C4D_Living (SetOCF, C4Object.cpp:600-610).
+            definition.set_category(CATEGORY_LIVING);
             definition.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 16)));
             let mut specs = HashMap::new();
             specs.insert("Idle".to_string(), ActionSpec::default());
@@ -29444,6 +29459,9 @@ mod tests {
                 "#,
             )?;
             definition.set_crew_member(true);
+            // Fighters are livings: OCF_FightReady needs OCF_Alive, which
+            // needs Category & C4D_Living (SetOCF, C4Object.cpp:600-610).
+            definition.set_category(CATEGORY_LIVING);
             definition.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 16)));
             let mut specs = HashMap::new();
             specs.insert("Idle".to_string(), ActionSpec::default());
@@ -39955,7 +39973,9 @@ protected func Script1() { StartTheMovie(); }
             .register_definition(talker)
             .expect("talker registers");
         let mut animal_def = simple_definition("ANML");
-        animal_def.set_category(CATEGORY_OBJECT);
+        // Alive targets are livings: OCF_Alive needs Category & C4D_Living
+        // (SetOCF, C4Object.cpp:600-605).
+        animal_def.set_category(CATEGORY_LIVING);
         engine
             .register_definition(animal_def)
             .expect("animal registers");
@@ -40429,7 +40449,9 @@ func Bless() {
             .register_definition(talker)
             .expect("talker registers");
         let mut animal_def = simple_definition("ANML");
-        animal_def.set_category(CATEGORY_OBJECT);
+        // Alive targets are livings: OCF_Alive needs Category & C4D_Living
+        // (SetOCF, C4Object.cpp:600-605).
+        animal_def.set_category(CATEGORY_LIVING);
         engine
             .register_definition(animal_def)
             .expect("animal registers");
@@ -47105,6 +47127,9 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         let mut engine = Engine::with_seed(4);
         let mut definition = simple_definition("Crew");
         definition.set_crew_member(true);
+        // Crew are livings: OCF_Alive needs Category & C4D_Living
+        // (SetOCF, C4Object.cpp:600-605).
+        definition.set_category(CATEGORY_LIVING);
         engine
             .register_definition(definition)
             .expect("definition registers");
@@ -47265,6 +47290,53 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             0,
             "burning objects cannot be built (!OnFire fails)"
         );
+    }
+
+    #[test]
+    fn ocf_living_and_alive_require_living_category() {
+        // OCF_Living: Category & C4D_Living; OCF_Alive additionally needs
+        // the Alive flag (SetOCF, C4Object.cpp:600-605). Neither derives
+        // from Def->CrewMember.
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Beast");
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        // Default StaticBack category: alive or not, no Living/Alive bits.
+        let static_back = engine
+            .spawn_object(SpawnConfig::new("Beast").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(static_back).expect("object exists");
+        engine.objects[idx].state.alive = true;
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & (ocf::LIVING | ocf::ALIVE),
+            0,
+            "non-Living categories never get OCF_Living/OCF_Alive"
+        );
+
+        let living = engine
+            .spawn_object(
+                SpawnConfig::new("Beast")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(living).expect("object exists");
+        engine.objects[idx].state.alive = false;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::LIVING, 0);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::ALIVE,
+            0,
+            "dead livings keep OCF_Living but lose OCF_Alive"
+        );
+
+        engine.objects[idx].state.alive = true;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::ALIVE, 0);
     }
 
     #[test]
