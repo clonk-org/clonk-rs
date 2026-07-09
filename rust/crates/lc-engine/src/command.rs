@@ -17,6 +17,7 @@ const LINEKIT_DEFINITION: &str = "LNKT";
 const CONKIT_DEFINITION: &str = "CNKT";
 const ACQUIRE_REQUEST_INTERVAL: u32 = 50;
 const COMMAND_FLAG_ENTER_PUSH_TARGET: i32 = 0b10;
+const COMMAND_FLAG_MOVE_TO_NO_POS_ADJUST: i32 = 0b1;
 const COMMAND_FLAG_MOVE_TO_PUSH_TARGET: i32 = 0b10;
 const DIG_MOVE_TO_RANGE_DEFAULT: i32 = 5;
 const DIG_DIRECTION_RANGE: i32 = 1;
@@ -298,9 +299,15 @@ mod tests {
         }
     }
 
-    // C4Command::JumpControl trigger 1 (C4Command.cpp:1861-1872): target
-    // in the ±(35±10)° diagonal, path free, farther than 30, 15px head
-    // room -> a C4CMD_Jump goes on TOP of the MoveTo.
+    /// A MoveTo state past its InitEvaluation Execute with the raw Tx/Ty
+    /// (the C++ equivalent of an Evaluated command): the movement-control
+    /// geometry pins below run against these coordinates directly.
+    fn evaluated_move_to(request: &CommandRequest) -> MoveToState {
+        let mut state = MoveToState::from_request(request);
+        state.evaluated = true;
+        state
+    }
+
     fn move_to_ctx_at_frame<'a>(
         object: &'a CommandObjectSnapshot,
         objects: &'a HashMap<ObjectId, CommandObjectSnapshot>,
@@ -347,7 +354,7 @@ mod tests {
 
         // Odd frame (iTick2 == 1): horizontal arm -> COMD_Right.
         let ctx = move_to_ctx_at_frame(&swimmer, &objects, &players, &definitions, 1);
-        let mut state = MoveToState::from_request(&request);
+        let mut state = evaluated_move_to(&request);
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(
@@ -358,7 +365,7 @@ mod tests {
 
         // Even frame (iTick2 == 0): vertical arm -> COMD_Down (cy < Ty).
         let ctx = move_to_ctx_at_frame(&swimmer, &objects, &players, &definitions, 2);
-        let mut state = MoveToState::from_request(&request);
+        let mut state = evaluated_move_to(&request);
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(
@@ -386,7 +393,7 @@ mod tests {
         // Target above and well to the right: DFA_SCALE ignores Tx for
         // steering (no horizontal branch in the arm) and heads Up. The
         // Dir_Left let-go stays quiet: |cy - Ty| = 60 > LetGoRange2 30.
-        let mut state = MoveToState::from_request(
+        let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(140))
                 .with_ty(Some(40)),
@@ -417,7 +424,7 @@ mod tests {
         let definitions = HashMap::new();
         let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
 
-        let mut state = MoveToState::from_request(
+        let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(140))
                 .with_ty(Some(110)),
@@ -460,7 +467,7 @@ mod tests {
         // Action.Time == 2: too fresh, keep scaling.
         scaler.action_time = 2;
         let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
-        let mut state = MoveToState::from_request(&request);
+        let mut state = evaluated_move_to(&request);
         let result = state.step(&ctx);
         assert!(
             result
@@ -474,7 +481,7 @@ mod tests {
         // Action.Time == 3 with contact: let go against the facing (-1).
         scaler.action_time = 3;
         let ctx = move_to_ctx_at_frame(&scaler, &objects, &players, &definitions, 1);
-        let mut state = MoveToState::from_request(&request);
+        let mut state = evaluated_move_to(&request);
         let result = state.step(&ctx);
         let update = result.update.expect("let-go update");
         assert_eq!(
@@ -508,7 +515,7 @@ mod tests {
         // Target right, slightly below: Angle = 99 <= 110 keeps hangling;
         // steer Right. No vertical branch in the arm.
         let ctx = move_to_ctx_at_frame(&hangler, &objects, &players, &definitions, 1);
-        let mut state = MoveToState::from_request(
+        let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(160))
                 .with_ty(Some(110)),
@@ -520,7 +527,7 @@ mod tests {
 
         // Target straight below: Angle = 180 > 110 -> ObjectComLetGo(0).
         let ctx = move_to_ctx_at_frame(&hangler, &objects, &players, &definitions, 1);
-        let mut state = MoveToState::from_request(
+        let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(100))
                 .with_ty(Some(160)),
@@ -563,7 +570,7 @@ mod tests {
 
         // Target up and slightly right (angle 9, distance 70, sky above):
         // FlightControl takes off; the flight arm never assigns ComDir.
-        let mut state = MoveToState::from_request(
+        let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(110))
                 .with_ty(Some(30)),
@@ -582,6 +589,102 @@ mod tests {
         );
     }
 
+    // C4CMD_MoveTo InitEvaluation (C4Command.cpp:1634-1643): the first
+    // Execute only evaluates (returns true — no movement that frame);
+    // AdjustMoveToTarget grounds a mid-air target unless Data carries
+    // C4CMD_MoveTo_NoPosAdjust (C4Command.h:68).
+    #[test]
+    fn move_to_init_evaluation_adjusts_target_unless_no_pos_adjust() {
+        let landscape = crate::Landscape::flat(300, 110);
+        // Standing walker: center y 100, feet on the 110 surface.
+        let walker = walking_jumper(Vector2::new(100, 100));
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        ctx.landscape = Some(&landscape);
+
+        // Mid-air target straight up: AdjustMoveToTarget drops it to the
+        // bottom of free space (109) then lifts it Shape.Hgt/2 -> y 99,
+        // one pixel off the walker's center — no vertical steer.
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(100))
+            .with_ty(Some(50))
+            .with_update_interval(1);
+        let mut state = MoveToState::from_request(&request); // unevaluated
+        let first = state.step(&ctx);
+        assert_eq!(first.status, CommandStatus::Running);
+        assert!(
+            first.update.is_none() && first.operations.is_empty(),
+            "the evaluation Execute does nothing else (C4Command.cpp:1555)"
+        );
+        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
+        ctx.landscape = Some(&landscape);
+        let second = state.step(&ctx);
+        assert_eq!(
+            second.update.and_then(|update| update.command_direction),
+            None,
+            "adjusted target sits at the walker's level (C4Command.cpp:1640)"
+        );
+
+        // NoPosAdjust keeps the raw (100,50): the walker steers Up.
+        let request = request.with_data(CommandData::Integer(1));
+        let mut state = MoveToState::from_request(&request); // unevaluated
+        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        ctx.landscape = Some(&landscape);
+        let _ = state.step(&ctx);
+        let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
+        ctx.landscape = Some(&landscape);
+        let second = state.step(&ctx);
+        assert_eq!(
+            second.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Up),
+            "NoPosAdjust leaves the mid-air target (C4Command.h:68)"
+        );
+    }
+
+    // C4CMD_MoveTo InitEvaluation target absorption (C4Command.cpp:1637):
+    // Tx/Ty become Target->x/y ONCE and Target clears — the destination
+    // does not follow the target afterwards.
+    #[test]
+    fn move_to_absorbs_target_position_once() {
+        let walker = walking_jumper(Vector2::new(100, 100));
+        let target_id = ObjectId::new(9);
+        let mut target = snapshot_with_id(9);
+        target.position = Vector2::new(200, 100);
+        let mut objects = HashMap::new();
+        objects.insert(target_id, target);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_target(Some(target_id))
+            .with_update_interval(1);
+        let mut state = MoveToState::from_request(&request); // unevaluated
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let _ = state.step(&ctx); // evaluation frame
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
+        let result = state.step(&ctx);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Right),
+            "steers toward the absorbed (200,100)"
+        );
+
+        // Target teleports left; the command keeps heading for 200.
+        objects.get_mut(&target_id).expect("target").position = Vector2::new(0, 100);
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 3);
+        let result = state.step(&ctx);
+        assert_ne!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Left),
+            "Tx/Ty were absorbed once — no live following (C4Command.cpp:1637)"
+        );
+    }
+
+    // C4Command::JumpControl trigger 1 (C4Command.cpp:1861-1872): target
+    // in the ±(35±10)° diagonal, path free, farther than 30, 15px head
+    // room -> a C4CMD_Jump goes on TOP of the MoveTo.
     #[test]
     fn move_to_diagonal_free_jump_like_cpp() {
         let landscape = crate::Landscape::flat(300, 110);
@@ -593,7 +696,7 @@ mod tests {
 
         // Angle(100,100 -> 140,43) = 90 - trunc(atan2(57,40)) = 36 — inside
         // 35±10; distance 70 > 30; sky above.
-        let mut state = MoveToState::from_request(
+        let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(140))
                 .with_ty(Some(43)),
@@ -624,7 +727,7 @@ mod tests {
 
         // Angle(100,100 -> 140,93) = 90 - trunc(atan2(7,40)) = 81; 81-80=1
         // inside ±50.
-        let mut state = MoveToState::from_request(
+        let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(140))
                 .with_ty(Some(93)),
@@ -666,7 +769,7 @@ mod tests {
         // solid at x>=150 -> +1 -> side point x = 140 - 23 = 117 (clear
         // ground), adjust drops it to the 110 surface (|dy|<=20 from 100
         // fails?) — pick ty=75 edge instead for a shallower drop.
-        let mut state = MoveToState::from_request(
+        let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(148))
                 .with_ty(Some(72)),
@@ -7372,6 +7475,14 @@ struct MoveToState {
     target: Option<ObjectId>,
     tx: Option<i32>,
     ty: Option<i32>,
+    /// C4CMD_MoveTo Data flags (C4CMD_MoveTo_NoPosAdjust/PushTarget,
+    /// C4Command.h:68-69).
+    #[serde(default)]
+    data: i32,
+    /// C4Command::Evaluated — false until the InitEvaluation Execute
+    /// (C4Command.cpp:1625-1643) has absorbed Target and adjusted Tx/Ty.
+    #[serde(default)]
+    evaluated: bool,
     update_interval: u32,
     last_evaluated: Option<u64>,
     tolerance: i32,
@@ -7385,6 +7496,11 @@ impl MoveToState {
             target: request.target,
             tx: request.tx,
             ty: request.ty,
+            data: match request.data {
+                CommandData::Integer(value) => value,
+                _ => 0,
+            },
+            evaluated: false,
             update_interval: request.update_interval.max(1),
             last_evaluated: None,
             tolerance: 5,
@@ -7403,12 +7519,44 @@ impl MoveToState {
         }
     }
 
+    /// C4CMD_MoveTo InitEvaluation (C4Command.cpp:1634-1643): absorb the
+    /// Target position into Tx/Ty once (Target clears, :1637) and ground
+    /// the destination via AdjustMoveToTarget unless Data carries
+    /// C4CMD_MoveTo_NoPosAdjust (:1640, C4Command.h:68). FreeMoveTo
+    /// accepts any spot for floaters and CanFly physicals (:116-124).
+    fn init_evaluation(&mut self, ctx: &CommandRuntimeContext<'_>) {
+        if let Some(target) = self.target.take() {
+            if let Some(position) = ctx.resolve_position(target) {
+                self.tx = Some(self.tx.unwrap_or(0) + position.x);
+                self.ty = Some(self.ty.unwrap_or(0) + position.y);
+            }
+        }
+        if self.data & COMMAND_FLAG_MOVE_TO_NO_POS_ADJUST == 0 {
+            if let (Some(landscape), Some(tx), Some(ty)) = (ctx.landscape, self.tx, self.ty) {
+                let free_move = ctx.object.action_procedure == ActionProcedure::Float
+                    || ctx.object.physical.can_fly != 0;
+                let (mut x, mut y) = (tx, ty);
+                adjust_move_to_target(landscape, &mut x, &mut y, free_move, ctx.object.shape.height);
+                self.tx = Some(x);
+                self.ty = Some(y);
+            }
+        }
+    }
+
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         let interval = self.update_interval as u64;
         if let Some(last) = self.last_evaluated {
             if ctx.frame.saturating_sub(last) < interval {
                 return CommandStepResult::running(None);
             }
+        }
+
+        // The initial-evaluation Execute consumes the frame without
+        // moving (`if (InitEvaluation()) return;`, C4Command.cpp:1555).
+        if !self.evaluated {
+            self.evaluated = true;
+            self.init_evaluation(ctx);
+            return CommandStepResult::running(None);
         }
         self.last_evaluated = Some(ctx.frame);
 
