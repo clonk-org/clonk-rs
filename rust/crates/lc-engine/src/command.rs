@@ -491,6 +491,57 @@ mod tests {
         );
     }
 
+    // C4Command::MoveTo DFA_HANGLE arm (C4Command.cpp:384-391):
+    // horizontal steering; |Angle(cx,cy,Tx,Ty)| > LetGoHangleAngle 110
+    // drops off the ceiling (ObjectComLetGo(0) — Jump with zero xdir).
+    #[test]
+    fn move_to_hangle_steers_horizontal_and_drops_past_angle() {
+        let mut hangler = snapshot_with_id(1);
+        hangler.position = Vector2::new(100, 100);
+        hangler.action_procedure = ActionProcedure::Hang;
+        hangler.crew_member = true;
+        hangler.ocf |= ocf::CREW_MEMBER;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        // Target right, slightly below: Angle = 99 <= 110 keeps hangling;
+        // steer Right. No vertical branch in the arm.
+        let ctx = move_to_ctx_at_frame(&hangler, &objects, &players, &definitions, 1);
+        let mut state = MoveToState::from_request(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(160))
+                .with_ty(Some(110)),
+        );
+        let result = state.step(&ctx);
+        let update = result.update.expect("steer update");
+        assert_eq!(update.command_direction, Some(CommandDirection::Right));
+        assert!(update.action.is_none(), "within LetGoHangleAngle: no drop");
+
+        // Target straight below: Angle = 180 > 110 -> ObjectComLetGo(0).
+        let ctx = move_to_ctx_at_frame(&hangler, &objects, &players, &definitions, 1);
+        let mut state = MoveToState::from_request(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(100))
+                .with_ty(Some(160)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result.update.expect("drop update");
+        assert_eq!(
+            update.action.and_then(|action| action.name),
+            Some("Jump".into())
+        );
+        assert_eq!(
+            update.fixed_velocity,
+            Some(FixedVec2::new(
+                math::itofix(0),
+                crate::C4Fixed::from_raw(0)
+            )),
+            "hangle drop has zero launch velocity (C4Command.cpp:390)"
+        );
+    }
+
     #[test]
     fn move_to_diagonal_free_jump_like_cpp() {
         let landscape = crate::Landscape::flat(300, 110);
@@ -7155,6 +7206,7 @@ impl CommandStack {
 // C4Command.cpp:31-36 movement-control constants.
 const LET_GO_RANGE1: i32 = 7;
 const LET_GO_RANGE2: i32 = 30;
+const LET_GO_HANGLE_ANGLE: i32 = 110;
 const JUMP_ANGLE: i32 = 35;
 const JUMP_LOW_ANGLE: i32 = 80;
 const JUMP_ANGLE_RANGE: i32 = 10;
@@ -7375,6 +7427,17 @@ impl MoveToState {
                     self.last_direction
                 }
             }
+            // DFA_HANGLE (C4Command.cpp:384-387): horizontal steering
+            // only; the angle-based drop follows below.
+            ActionProcedure::Hang => {
+                if dx > self.tolerance {
+                    CommandDirection::Right
+                } else if dx < -self.tolerance {
+                    CommandDirection::Left
+                } else {
+                    self.last_direction
+                }
+            }
             _ => {
                 if dx > self.tolerance {
                     CommandDirection::Right
@@ -7404,6 +7467,15 @@ impl MoveToState {
             if let Some(xdirf) = self.scale_let_go(ctx, target) {
                 return CommandStepResult::running(Some(let_go_update(steer, xdirf)));
             }
+        }
+
+        // DFA_HANGLE let-go control (C4Command.cpp:388-390): drop off the
+        // ceiling once the target angle leaves the hangling sector.
+        if ctx.object.action_procedure == ActionProcedure::Hang
+            && c4_angle(ctx.position.x, ctx.position.y, target.x, target.y).abs()
+                > LET_GO_HANGLE_ANGLE
+        {
+            return CommandStepResult::running(Some(let_go_update(steer, 0)));
         }
 
         // DFA_WALK movement controls, after the ComDir steering
