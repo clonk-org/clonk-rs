@@ -686,6 +686,120 @@ mod tests {
         );
     }
 
+    // C4Command::MoveTo pushing (C4Command.cpp:257-265): without the
+    // C4CMD_MoveTo_PushTarget Data flag (C4Command.h:69) — or against a
+    // Grab=2 grab-only target — a pushing mover lets go (UnGrab sub-
+    // command) and marks itself for re-evaluation.
+    #[test]
+    fn move_to_push_without_push_target_flag_ungrabs() {
+        let vehicle_id = ObjectId::new(7);
+        let mut vehicle = snapshot_with_id(7);
+        vehicle.position = Vector2::new(95, 100);
+        let mut pusher = walking_jumper(Vector2::new(100, 100));
+        pusher.action_procedure = ActionProcedure::Push;
+        pusher.action_target = Some(vehicle_id);
+        let mut objects = HashMap::new();
+        objects.insert(vehicle_id, vehicle);
+        let players = HashMap::new();
+        let mut definitions = HashMap::new();
+        definitions.insert(
+            "DEF7".to_string(),
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: false,
+                chop_action: None,
+                constructable: false,
+                grab: 1,
+            },
+        );
+
+        // Data 0: pushing not desired -> UnGrab, still running.
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(200))
+                .with_ty(Some(100))
+                .with_update_interval(1),
+        );
+        let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        match result.operations.first() {
+            Some(CommandOperation::PushFront(request)) => {
+                assert_eq!(request.id, CommandId::UnGrab);
+                assert_eq!(request.update_interval, 50);
+            }
+            other => panic!("expected UnGrab, got {other:?}"),
+        }
+        assert!(
+            !state.evaluated,
+            "vehicle control may have blocked evaluation — re-evaluate (C4Command.cpp:263)"
+        );
+    }
+
+    // With the PushTarget flag the mover keeps pushing: cx/cy come from
+    // the pushed vehicle (C4Command.cpp:271-277) and the DFA_PUSH arm
+    // steers horizontally only (:329-333).
+    #[test]
+    fn move_to_push_with_flag_steers_from_vehicle_position() {
+        let vehicle_id = ObjectId::new(7);
+        let mut vehicle = snapshot_with_id(7);
+        vehicle.position = Vector2::new(95, 100);
+        let mut pusher = walking_jumper(Vector2::new(100, 100));
+        pusher.action_procedure = ActionProcedure::Push;
+        pusher.action_target = Some(vehicle_id);
+        let mut objects = HashMap::new();
+        objects.insert(vehicle_id, vehicle);
+        let players = HashMap::new();
+        let mut definitions = HashMap::new();
+        definitions.insert(
+            "DEF7".to_string(),
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: false,
+                chop_action: None,
+                constructable: false,
+                grab: 1,
+            },
+        );
+
+        // Target far below the vehicle's column: the vehicle position
+        // override yields dx 0 and the push arm ignores dy entirely.
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(95))
+                .with_ty(Some(160))
+                .with_data(CommandData::Integer(2))
+                .with_update_interval(1),
+        );
+        let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.is_empty(), "no UnGrab with PushTarget");
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            None,
+            "DFA_PUSH steers horizontally from the vehicle position only"
+        );
+
+        // Grab-only target (Grab=2) lets go even with the flag.
+        definitions.get_mut("DEF7").expect("def").grab = 2;
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(200))
+                .with_ty(Some(100))
+                .with_data(CommandData::Integer(2))
+                .with_update_interval(1),
+        );
+        let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
+        let result = state.step(&ctx);
+        match result.operations.first() {
+            Some(CommandOperation::PushFront(request)) => {
+                assert_eq!(request.id, CommandId::UnGrab, "Grab=2 (C4Command.cpp:260)");
+            }
+            other => panic!("expected UnGrab, got {other:?}"),
+        }
+    }
+
     // C4Command::JumpControl trigger 1 (C4Command.cpp:1861-1872): target
     // in the ±(35±10)° diagonal, path free, farther than 30, 15px head
     // room -> a C4CMD_Jump goes on TOP of the MoveTo.
@@ -7585,8 +7699,46 @@ impl MoveToState {
             }
         };
 
-        let dx = target.x - ctx.position.x;
-        let dy = target.y - ctx.position.y;
+        // Pushing grab-only or pushing not desired: let go
+        // (C4Command.cpp:257-265) — UnGrab sub-command, and the command
+        // re-evaluates because vehicle control might have blocked the
+        // evaluation (:263).
+        if ctx.object.action_procedure == ActionProcedure::Push {
+            if let Some(action_target) = ctx.object.action_target {
+                let grab_only = ctx
+                    .resolve(action_target)
+                    .and_then(|snapshot| ctx.definition(snapshot.definition_id.as_str()))
+                    .is_some_and(|definition| definition.grab == 2);
+                if grab_only || self.data & COMMAND_FLAG_MOVE_TO_PUSH_TARGET == 0 {
+                    self.evaluated = false;
+                    let request = CommandRequest::new(CommandId::UnGrab)
+                        .with_update_interval(50)
+                        .with_mode(CommandMode::SilentSub);
+                    return CommandStepResult::running(None)
+                        .with_operations(vec![CommandOperation::PushFront(request)]);
+                }
+            }
+        }
+
+        // Push/pull movers measure from the pushed vehicle's position
+        // (C4Command.cpp:271-277; the fWaypoint skip needs the pathfinder
+        // waypoint stack, which is not ported yet).
+        let mut position = ctx.position;
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Push | ActionProcedure::Pull
+        ) {
+            if let Some(vehicle) = ctx
+                .object
+                .action_target
+                .and_then(|id| ctx.resolve_position(id))
+            {
+                position = vehicle;
+            }
+        }
+
+        let dx = target.x - position.x;
+        let dy = target.y - position.y;
         if dx.abs() <= self.tolerance && dy.abs() <= self.tolerance {
             self.arrived_frames += 1;
         } else {
@@ -7635,6 +7787,17 @@ impl MoveToState {
             // DFA_FLIGHT (C4Command.cpp:414-417): no ComDir steering —
             // only FlightControl runs (below).
             ActionProcedure::Flight => self.last_direction,
+            // DFA_PUSH/DFA_PULL (C4Command.cpp:329-333): horizontal
+            // steering only, measured from the vehicle position above.
+            ActionProcedure::Push | ActionProcedure::Pull => {
+                if dx > self.tolerance {
+                    CommandDirection::Right
+                } else if dx < -self.tolerance {
+                    CommandDirection::Left
+                } else {
+                    self.last_direction
+                }
+            }
             // DFA_HANGLE (C4Command.cpp:384-387): horizontal steering
             // only; the angle-based drop follows below.
             ActionProcedure::Hang => {
