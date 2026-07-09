@@ -7060,9 +7060,13 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4Effect's ctor runs Fx*Start synchronously inside FnAddEffect
     // (C4Effect.cpp:96-152). Priority-1 effects skip the check chain
     // entirely (:170), so their Start can run right here through the
-    // nested-call seam; other priorities keep the deferred event path
-    // (their check chain still runs there first).
-    let synchronous_start = priority == 1 && command_target.is_some();
+    // nested-call seam; other OBJECT priorities keep the deferred event
+    // path (their check chain still runs there first). GLOBAL effects
+    // have no deferred Started path at all — their Start always runs
+    // here, resolved DoCall-style (the global check chain is a
+    // documented residual).
+    let global_scope = matches!(scope, EffectScope::Global);
+    let synchronous_start = global_scope || (priority == 1 && command_target.is_some());
     let effect_name = name.clone();
     let call_vars: Vec<Value> = vars.iter().take(4).map(effect_var_to_value).collect();
     let for_object = match args.get(1) {
@@ -7070,6 +7074,7 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         _ => Value::Nil,
     };
 
+    let command_id_for_start = command_target_id.clone();
     let identifier = with_context_mut(scope, move |ctx| {
         let mut effect = EffectState::new(name)
             .with_priority(priority)
@@ -7087,27 +7092,42 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     })?;
 
     if synchronous_start && identifier > 0 {
-        if let Some(target) = command_target {
-            let callback = format!("Fx{effect_name}Start");
-            let mut call_args = vec![for_object, Value::Int(identifier), Value::Int(0)];
-            call_args.extend(call_vars);
-            call_args.resize(7, Value::Nil);
-            if let Some(result) = call_world_object_script_function(
-                ObjectId::new(target as u64),
+        let callback = format!("Fx{effect_name}Start");
+        let mut call_args = vec![for_object, Value::Int(identifier), Value::Int(0)];
+        call_args.extend(call_vars);
+        call_args.resize(7, Value::Nil);
+        // pFnStart->Exec(pCommandTarget, {C4VObj(pForObj), C4VInt(iNumber),
+        // C4VInt(0), rVal1..rVal4}, ...) (C4Effect.cpp:128-129); GLOBAL
+        // effects resolve like C4Effect::DoCall — command target script,
+        // command-id def script, else the engine-global function table
+        // (C4Effect.cpp:439-456 via AssignCallbackFunctions :42-57).
+        let start_result = if global_scope {
+            dispatch_effect_fx_callback(
+                command_target,
+                command_id_for_start.as_deref(),
                 &callback,
                 &call_args,
-            ) {
-                // fPassErrors=true (C4Script.cpp:5451): errors abort the
-                // calling script like C++.
-                let outcome = result?;
-                if matches!(outcome, Value::Int(-1)) {
-                    // C4Fx_Start_Deny: the effect dies without a Stop
-                    // callback (C4Effect.cpp:128-131).
-                    with_context_mut(scope, |ctx| {
-                        ctx.remove_effect(None, identifier as usize, true);
-                        0
-                    })?;
-                }
+            )
+        } else {
+            command_target.and_then(|target| {
+                call_world_object_script_function(
+                    ObjectId::new(target as u64),
+                    &callback,
+                    &call_args,
+                )
+            })
+        };
+        if let Some(result) = start_result {
+            // fPassErrors=true (C4Script.cpp:5451): errors abort the
+            // calling script like C++.
+            let outcome = result?;
+            if matches!(outcome, Value::Int(-1)) {
+                // C4Fx_Start_Deny: the effect dies without a Stop
+                // callback (C4Effect.cpp:128-131).
+                with_context_mut(scope, |ctx| {
+                    ctx.remove_effect(None, identifier as usize, true);
+                    0
+                })?;
             }
         }
     }
