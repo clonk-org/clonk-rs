@@ -5064,6 +5064,10 @@ pub struct EngineState {
     /// C4MassMover.cpp:181-217).
     #[serde(default)]
     pub mass_movers: MassMoverSet,
+    /// The C4Sky scroll state a savegame persists (C4Sky::CompileFunc,
+    /// C4Sky.cpp:248-251).
+    #[serde(default)]
+    pub sky: Option<SkyFrame>,
     pub rng: LcgRng,
 }
 
@@ -5152,6 +5156,7 @@ impl EngineState {
             // SimulationSnapshot carries no mover slots (the C++ snapshot
             // boundary is object-level); the set restores empty.
             mass_movers: MassMoverSet::new(),
+            sky: snapshot.sky.clone(),
             rng: snapshot.rng.clone(),
         }
     }
@@ -16525,6 +16530,7 @@ impl Engine {
             game_over: self.game_over_triggered,
             landscape_insert_thrust: self.landscape_insert_thrust,
             mass_movers: self.mass_movers.clone(),
+            sky: self.sky.as_ref().map(SkyState::snapshot),
             rng: self.rng.clone(),
         }
     }
@@ -16553,6 +16559,13 @@ impl Engine {
         self.mass_movers = state.mass_movers.clone();
         if self.landscape.is_none() {
             self.mass_movers.clear();
+        }
+        // C4Sky::CompileFunc's load half (C4Sky.cpp:248-251); the savegame
+        // Init keeps the loaded scroll state (`if (!fSavegame)` reset
+        // gate, C4Sky.cpp:77-80). Legacy states without a sky keep the
+        // scenario-provided one.
+        if let Some(frame) = &state.sky {
+            self.sky = Some(SkyState::from_frame(frame));
         }
         self.rng = state.rng.clone();
         self.objects.clear();
@@ -46978,6 +46991,34 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
 
         assert_eq!(engine.tick()?, restored.tick()?);
 
+        Ok(())
+    }
+
+    #[test]
+    fn engine_state_round_trips_the_sky_scroll_state() -> Result<(), EngineError> {
+        // C4Sky::CompileFunc persists x/y/xdir/ydir (C4Sky.cpp:248-251)
+        // and the savegame Init keeps the loaded values (`if (!fSavegame)`
+        // reset gate, C4Sky.cpp:77-80) — save/load must resume the exact
+        // fixed scroll state.
+        let mut engine = Engine::with_seed(3);
+        engine.set_environment(EnvironmentSettings::new(41));
+        let mut settings = SkySettings::default().with_surface(128, 128);
+        settings.parallax_mode = SkyParallaxMode::Wind;
+        engine.set_sky(settings);
+        for _ in 0..3 {
+            engine.tick()?;
+        }
+        let expected = engine.snapshot().sky;
+        let moved = expected
+            .as_ref()
+            .and_then(|frame| frame.fixed)
+            .is_some_and(|fixed| fixed[0] != 0);
+        assert!(moved, "wind-mode sky must have scrolled before the save");
+
+        let state = engine.capture_state();
+        let mut restored = Engine::with_seed(9);
+        restored.restore_state(&state)?;
+        assert_eq!(restored.snapshot().sky, expected);
         Ok(())
     }
 
