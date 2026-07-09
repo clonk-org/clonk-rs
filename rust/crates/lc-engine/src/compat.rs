@@ -2212,6 +2212,9 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         user_menu: true,
         command_object,
         items: Vec::new(),
+        // Columns = Lines = 0 (C4Menu::Default, C4Menu.cpp:299).
+        columns: 0,
+        lines: 0,
     };
     let stored = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
@@ -2693,6 +2696,46 @@ fn close_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
     Ok(Value::Bool(close_object_menu(target, true)))
+}
+
+/// FnSetMenuSize (C4Script.cpp:4483-4492): false without an active menu;
+/// cols/rows clamp through BoundBy(0..50) into C4Menu::SetSize
+/// (C4Menu.cpp:635-640), where a ZERO axis keeps the previous value. The
+/// stored Columns/Lines drive the menu layout (presentation) — the
+/// sim-observable pieces are this state and the bool return.
+fn set_menu_size(args: &[Value]) -> Result<Value, RuntimeError> {
+    let cols = parse_optional_i32(args.first(), "SetMenuSize", "cols")?.unwrap_or(0);
+    let rows = parse_optional_i32(args.get(1), "SetMenuSize", "rows")?.unwrap_or(0);
+    let target = parse_object_reference_argument(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetMenuSize",
+        "obj",
+    )?;
+    let Some(target) = target.or(active_object_id()) else {
+        return Ok(Value::Bool(false)); // !pObj (C4Script.cpp:4486)
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false)); // !pMnu || !IsActive (C4Script.cpp:4489)
+    };
+    let cols = cols.clamp(0, 50);
+    let rows = rows.clamp(0, 50);
+    if cols != 0 {
+        menu.columns = cols;
+    }
+    if rows != 0 {
+        menu.lines = rows;
+    }
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu)))
+    });
+    Ok(Value::Bool(true))
 }
 
 /// FnSetPlrView (C4Script.cpp:2545-2550): the player's view target —
@@ -4621,6 +4664,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetMenu", get_menu);
     script.register_host_function("GetMenuSelection", get_menu_selection);
     script.register_host_function("SelectMenuItem", select_menu_item);
+    script.register_host_function("SetMenuSize", set_menu_size);
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("LandscapeWidth", landscape_width);
@@ -20188,6 +20232,7 @@ mod tests {
         "SetGravity",
         "SetKiller",
         "SetMass",
+        "SetMenuSize",
         "SetObjDrawTransform",
         "SetObjDrawTransform2",
         "SetObjectStatus",

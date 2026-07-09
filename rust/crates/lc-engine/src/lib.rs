@@ -1953,6 +1953,13 @@ pub struct ObjectMenuState {
     /// CB_Scenario (C4ObjectMenu::LocalInit, C4ObjectMenu.cpp:78-84).
     pub command_object: Option<ObjectId>,
     pub items: Vec<ObjectMenuItem>,
+    /// C4Menu::Columns — 0 = auto layout (C4Menu::Default, C4Menu.cpp:299);
+    /// script-set via SetMenuSize (C4Menu::SetSize, C4Menu.cpp:635-640).
+    #[serde(default)]
+    pub columns: i32,
+    /// C4Menu::Lines — 0 = auto layout; see `columns`.
+    #[serde(default)]
+    pub lines: i32,
 }
 
 /// C4Shape attach bookkeeping (`AttachMat`/`iAttachX`/`iAttachY`/
@@ -36613,6 +36620,68 @@ func Trigger() {
             Value::Int(2),
             "the selected index is reported (C4Script.cpp:4315)"
         );
+    }
+
+    #[test]
+    fn set_menu_size_clamps_and_keeps_zero_axes_like_cpp() {
+        // FnSetMenuSize (C4Script.cpp:4483-4492): false without an active
+        // menu; cols/rows clamp through BoundBy(0..50) and feed
+        // C4Menu::SetSize (C4Menu.cpp:635-640), where a ZERO axis keeps the
+        // previous value (`if (iToWdt) Columns = iToWdt;`). Menus start at
+        // Columns = Lines = 0 (C4Menu::Default, C4Menu.cpp:299).
+        let script = r#"
+        func Resize(c, r) { return SetMenuSize(c, r, this()); }
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+        let size = |engine: &Engine| {
+            let menu = engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .expect("menu is open");
+            (menu.columns, menu.lines)
+        };
+
+        assert_eq!(
+            call(&mut engine, "Resize", vec![Value::Int(3), Value::Int(4)]),
+            Value::Bool(false),
+            "no menu -> false (C4Script.cpp:4489)"
+        );
+        call(&mut engine, "OpenMenu", Vec::new());
+        assert_eq!(size(&engine), (0, 0), "C4Menu::Default Columns/Lines");
+        assert_eq!(
+            call(&mut engine, "Resize", vec![Value::Int(3), Value::Int(4)]),
+            Value::Bool(true)
+        );
+        assert_eq!(size(&engine), (3, 4));
+        // Zero keeps the previous axis (C4Menu.cpp:637-638); a negative
+        // clamps to 0 and thus also keeps; oversize clamps to 50.
+        assert_eq!(
+            call(&mut engine, "Resize", vec![Value::Int(0), Value::Int(7)]),
+            Value::Bool(true)
+        );
+        assert_eq!(size(&engine), (3, 7));
+        assert_eq!(
+            call(&mut engine, "Resize", vec![Value::Int(99), Value::Int(-5)]),
+            Value::Bool(true)
+        );
+        assert_eq!(size(&engine), (50, 7));
     }
 
     #[test]
