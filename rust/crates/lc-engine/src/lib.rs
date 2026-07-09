@@ -4273,6 +4273,15 @@ impl Object {
             .map(|index| self.state.effects.remove(index))
     }
 
+    /// Remove THE effect (by its C++ identity, iNumber — names may repeat).
+    fn remove_effect_by_number(&mut self, number: i32) -> Option<EffectState> {
+        self.state
+            .effects
+            .iter()
+            .position(|existing| existing.number == number)
+            .map(|index| self.state.effects.remove(index))
+    }
+
     fn drain_effects_with_reason(&mut self, reason: EffectStopReason) -> Vec<EffectEvent> {
         self.state
             .effects
@@ -16851,8 +16860,10 @@ impl Engine {
         let mut pending_other_objects = Vec::new();
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
-        let mut checked_started: HashSet<String> = HashSet::new();
-        let mut denied_started: HashSet<String> = HashSet::new();
+        // Pending-effect bookkeeping is keyed by the effect NUMBER — the
+        // C++ identity (C4Effect.cpp:76-78); names may repeat.
+        let mut checked_started: HashSet<i32> = HashSet::new();
+        let mut denied_started: HashSet<i32> = HashSet::new();
 
         while let Some(event) = queue.pop_front() {
             // C4Effect::Check (C4Effect.cpp:97-116): before a new effect
@@ -16866,16 +16877,20 @@ impl Engine {
                 if event.effect.start_dispatched {
                     continue;
                 }
-                if denied_started.remove(&event.effect.name) {
+                if denied_started.remove(&event.effect.number) {
                     continue;
                 }
-                if event.effect.priority != 1 && !checked_started.contains(&event.effect.name) {
-                    checked_started.insert(event.effect.name.clone());
+                if event.effect.priority != 1 && !checked_started.contains(&event.effect.number) {
+                    checked_started.insert(event.effect.number);
+                    // C4Effect::Check (C4Effect.cpp:278-282): every OTHER
+                    // effect with iPriority >= the new priority is asked —
+                    // the walk starts at the new effect's pNext, so only
+                    // the effect itself is excluded, never same-name peers.
                     let checkers: Vec<EffectState> = state_snapshot
                         .effects
                         .iter()
                         .filter(|existing| {
-                            existing.name != event.effect.name
+                            existing.number != event.effect.number
                                 && existing.priority >= event.effect.priority
                         })
                         .cloned()
@@ -16996,8 +17011,8 @@ impl Engine {
                         // the add-to-other-effect FxAdd path — are still
                         // open and currently let the effect proceed.
                         if matches!(check_result, Some(Value::Int(-1))) {
-                            denied_started.insert(pending.name.clone());
-                            object.remove_effect(&pending.name);
+                            denied_started.insert(pending.number);
+                            object.remove_effect_by_number(pending.number);
                             state_snapshot.effects = object.state.effects.clone();
                         }
                         (outcome, audio_state, new_rng)
@@ -17025,13 +17040,15 @@ impl Engine {
             rng = new_rng;
             current_audio = audio_state;
             if timer_kill {
-                if let Some(removed) = object.remove_effect(&event.effect.name) {
+                // C4Effect::Execute kills THE elapsed effect (pEffect
+                // itself, C4Effect.cpp:342-357), not a same-name peer.
+                if let Some(removed) = object.remove_effect_by_number(event.effect.number) {
                     queue.push_back(EffectEvent::stopped(removed, EffectStopReason::Removed));
                 }
                 state_snapshot.effects = object.state.effects.clone();
             }
             if start_denied {
-                object.remove_effect(&event.effect.name);
+                object.remove_effect_by_number(event.effect.number);
                 state_snapshot.effects = object.state.effects.clone();
             }
 
@@ -42075,6 +42092,73 @@ func FxProbeTimer(pThis, iNumber) {
         assert!(
             object.effects.iter().any(|effect| effect.name == "Fire"),
             "priority-1 effects skip the check chain (C4Effect.cpp:170)"
+        );
+    }
+
+    #[test]
+    fn effect_check_chain_asks_same_name_effects() {
+        // C4Effect::Check (C4Effect.cpp:278-282) has NO name filter: the
+        // new effect is inserted BEFORE existing effects of equal priority
+        // (new-before-equal, C4Effect.cpp:80-94), so an already-present
+        // same-name effect sits in the pNext chain and its Fx<Name>Effect
+        // callback IS asked about the new addition.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Guard", priority = 100, interval = 0 } ] };
+        }
+
+        global func FxGuardEffect(state, effect, new_name) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "add", name = "Guard", priority = 100, interval = 0 } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        let second = engine.tick().expect("tick succeeds");
+        let object = second.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Guard", "Guard"], "same-name effects coexist");
+
+        let calls = call_log.lock().unwrap().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|name| *name == "FxGuardEffect")
+                .count(),
+            1,
+            "the pre-existing Guard is asked about the new same-name Guard \
+             (C4Effect.cpp:278-282 filters by priority only, not name)"
         );
     }
 
