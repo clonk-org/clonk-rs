@@ -2244,6 +2244,12 @@ impl ObjectState {
         if let Some(damage) = delta.damage {
             self.damage = damage.max(0);
         }
+        if let Some((fire_caused_by, fire_phase)) = delta.fire {
+            // Staged incinerate outcome — see ObjectUpdate::fire.
+            self.on_fire = true;
+            self.fire_caused_by = fire_caused_by;
+            self.fire_phase = fire_phase;
+        }
         if let Some(magic_energy) = delta.magic_energy {
             self.magic_energy = magic_energy.max(0);
         }
@@ -2388,6 +2394,9 @@ struct ObjectDelta {
     energy: Option<i32>,
     /// Kill-trace mark riding an energy write (C4Object.cpp:1351-1353).
     energy_loss_cause: Option<i32>,
+    /// Staged incinerate outcome `(caused_by, fire_phase)` — see
+    /// `ObjectUpdate::fire`.
+    fire: Option<(i32, i32)>,
     damage: Option<i32>,
     magic_energy: Option<i32>,
     magic_capacity: Option<i32>,
@@ -2545,6 +2554,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             rotation_velocity: update.rotation_velocity,
             energy: update.energy,
             energy_loss_cause: update.energy_loss_cause,
+            fire: update.fire,
             construction: update.construction,
             damage: update.damage,
             magic_energy: update.magic_energy,
@@ -2609,6 +2619,12 @@ pub struct ObjectUpdate {
     /// (Punch's post-fling write is unguarded too, C4ObjectCom.cpp:755,762).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub energy_loss_cause: Option<i32>,
+    /// Staged C4Object::Incinerate outcome `(caused_by, fire_phase)` from
+    /// the host seam — the RNG draw and the Incineration callback already
+    /// ran mid-call; the fold only writes the fire state bits
+    /// (fxFireStart core, C4Effect.cpp:632-634).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire: Option<(i32, i32)>,
     #[serde(default)]
     pub damage: Option<i32>,
     #[serde(default)]
@@ -11964,6 +11980,12 @@ impl Engine {
                             clonk_name_newlines: definition
                                 .clonk_names()
                                 .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32),
+                            fire: compat::DefinitionFireMetadata {
+                                blast_incinerate: definition.blast_incinerate(),
+                                burn_turn_to: definition.burn_turn_to().map(str::to_string),
+                                incomplete_activity: definition.incomplete_activity(),
+                                no_burn_decay: definition.no_burn_decay(),
+                            },
                         },
                     )
                 })
@@ -15262,6 +15284,7 @@ impl Engine {
             rotation_velocity,
             energy,
             energy_loss_cause,
+            fire,
             construction,
             damage,
             magic_energy,
@@ -15379,6 +15402,15 @@ impl Engine {
             }
             if let Some(damage) = damage {
                 object.state.damage = damage.max(0);
+            }
+            if let Some((fire_caused_by, fire_phase)) = fire {
+                // Staged incinerate outcome — draw + Incineration callback
+                // already ran mid-call (fxFireStart core,
+                // C4Effect.cpp:632-638); OnFire is a SetOCF-owned bit,
+                // refreshed with the rest of the fold below.
+                object.state.on_fire = true;
+                object.state.fire_caused_by = fire_caused_by;
+                object.state.fire_phase = fire_phase;
             }
             if let Some(magic_energy) = magic_energy {
                 object.state.magic_energy = magic_energy.max(0);
@@ -26284,6 +26316,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     stretch_growth: false,
                     line: 0,
                     vertices: Vec::new(),
+                    fire: compat::DefinitionFireMetadata::default(),
                 },
             )
         })
@@ -41042,6 +41075,305 @@ func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
             !engine.objects[victim_idx].state.alive,
             "a nonzero energy reaching 0 assigns death (C4Object.cpp:1363)"
         );
+    }
+
+    // FnBlastObject (C4Script.cpp:2281-2289) -> C4Object::Blast
+    // (C4Object.cpp:1414-1419): Damage rises by the blast level and an
+    // alive target additionally loses level/3 energy percent points
+    // (DoEnergy fExact=false, C4FxCall_EngBlast).
+    #[test]
+    fn blast_object_damages_and_drains_an_alive_target_like_cpp() {
+        let script = r#"#strict
+func Zap() { return BlastObject(12, FindObject(VCTM)); }
+"#;
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("VCTM"))
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("victim spawns");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.energy = 10_000;
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        let result = engine
+            .call_object_function(actor_idx, "Zap", Vec::new())
+            .expect("zap runs");
+        assert_eq!(result, Value::Bool(true), "FnBlastObject returns true");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.damage, 12,
+            "DoDamage(level) raises Damage (C4Object.cpp:1416)"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].state.energy,
+            10_000 - 4 * (C4_MAX_PHYSICAL / 100),
+            "alive targets lose level/3 percent points (C4Object.cpp:1418)"
+        );
+        assert!(engine.objects[victim_idx].state.alive);
+    }
+
+    // C4Object::Blast's incinerate arm (C4Object.cpp:1420-1423): once the
+    // ACCUMULATED Damage reaches Def->BlastIncinerate the target ignites
+    // like C4Object::Incinerate(iCausedBy, fBlasted=true) — one synced
+    // FirePhase = Random(15) draw and the Incineration engine callback
+    // (fxFireStart core, C4Effect.cpp:632-638).
+    #[test]
+    fn blast_object_incinerates_past_the_blast_incinerate_threshold() {
+        let victim_script = r#"#strict
+local iIncinerated;
+func Incineration(int iCausedBy) { iIncinerated = iCausedBy + 100; return(1); }
+"#;
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "ACTR",
+                    "Actor",
+                    "#strict\nfunc Zap(pVictim, iLevel) { return BlastObject(iLevel, pVictim); }\n",
+                )
+                .expect("actor compiles"),
+            )
+            .expect("actor registers");
+        let mut victim_def =
+            Definition::from_script("VCTM", "Victim", victim_script).expect("victim compiles");
+        victim_def.set_blast_incinerate(10);
+        engine
+            .register_definition(victim_def)
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(SpawnConfig::new("VCTM").with_category(CATEGORY_OBJECT))
+            .expect("victim spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_idx].state.controller = 3;
+        let victim_value = Value::Object(victim.as_u64());
+
+        // Below the threshold: damage accumulates, no fire, no draw.
+        let count_before = engine.rng.count;
+        engine
+            .call_object_function(actor_idx, "Zap", vec![victim_value.clone(), Value::Int(5)])
+            .expect("zap runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(engine.objects[victim_idx].state.damage, 5);
+        assert!(!engine.objects[victim_idx].state.on_fire);
+        assert_eq!(engine.rng.count, count_before, "no FirePhase draw yet");
+
+        // Crossing the threshold (5 + 6 = 11 >= 10) ignites.
+        let mut expected_rng = engine.rng.clone();
+        let expected_phase = expected_rng.random(15);
+        let count_before = engine.rng.count;
+        engine
+            .call_object_function(actor_idx, "Zap", vec![victim_value, Value::Int(6)])
+            .expect("zap runs");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(engine.objects[victim_idx].state.damage, 11);
+        assert!(
+            engine.objects[victim_idx].state.on_fire,
+            "Damage >= BlastIncinerate incinerates (C4Object.cpp:1421-1423)"
+        );
+        assert_eq!(engine.objects[victim_idx].state.fire_caused_by, 3);
+        assert_eq!(
+            engine.objects[victim_idx].state.fire_phase, expected_phase,
+            "FirePhase = Random(15) on the shared ledger"
+        );
+        assert_eq!(engine.rng.count, count_before + 1, "exactly one draw");
+        assert_eq!(
+            engine.objects[victim_idx].state.local_vars.get("iIncinerated"),
+            Some(&Value::Int(103)),
+            "Incineration callback got the causing player (C4Effect.cpp:638)"
+        );
+    }
+
+    // The host-path incinerate must match the engine-side
+    // incinerate_object semantics (C4Object::Incinerate,
+    // C4Object.cpp:1255-1266 + fxFireStart core, C4Effect.cpp:560-641):
+    // already-burning and dead-living refusals draw nothing, extinguisher
+    // material fires IncinerationEx instead of igniting, BurnTurnTo
+    // changedefs, and burning containers eject their contents.
+    #[test]
+    fn blast_object_incinerate_matches_the_engine_incinerate_semantics(
+    ) -> Result<(), EngineError> {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+            Extinguisher=1
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let recorder_script = r#"#strict
+local iIncinerated, iIncineratedEx;
+func Incineration(int iCausedBy) { iIncinerated = iCausedBy + 100; return(1); }
+func IncinerationEx(int iCausedBy) { iIncineratedEx = iCausedBy + 100; return(1); }
+"#;
+        let mut engine = Engine::with_seed(70);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(40, 30, Some(earth)));
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "ACTR",
+                    "Actor",
+                    "#strict\nfunc Zap(pVictim, iLevel) { return BlastObject(iLevel, pVictim); }\n",
+                )
+                .expect("actor compiles"),
+            )
+            .expect("actor registers");
+        let mut tree_def =
+            Definition::from_script("TREE", "Tree", recorder_script).expect("tree compiles");
+        tree_def.set_blast_incinerate(10);
+        engine.register_definition(tree_def).expect("tree registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+
+        // Already burning: no draw, no callback, cause kept (C4Object.cpp:1258).
+        let burning = engine
+            .spawn_object(SpawnConfig::new("TREE").with_position(Vector2::new(10, 10)))
+            .expect("tree spawns");
+        let burning_idx = engine.find_object_index(burning).expect("tree exists");
+        engine.objects[burning_idx].state.on_fire = true;
+        let mirror = engine.rng.clone();
+        engine
+            .call_object_function(
+                actor_idx,
+                "Zap",
+                vec![Value::Object(burning.as_u64()), Value::Int(12)],
+            )
+            .expect("zap runs");
+        let burning_idx = engine.find_object_index(burning).expect("tree exists");
+        assert_eq!(engine.objects[burning_idx].state.damage, 12);
+        assert_eq!(engine.rng, mirror, "no FirePhase draw for a burning target");
+        assert_eq!(
+            engine.objects[burning_idx].state.fire_caused_by, OWNER_NONE,
+            "the original fire cause is kept (C4Object.cpp:1258)"
+        );
+        assert_eq!(
+            engine.objects[burning_idx].state.local_vars.get("iIncinerated"),
+            None,
+            "no Incineration callback for a burning target"
+        );
+
+        // Dead living: never ignites (C4Object.cpp:1260).
+        let mut corpse_def =
+            Definition::from_script("CRPS", "Corpse", recorder_script).expect("corpse compiles");
+        corpse_def.set_blast_incinerate(10);
+        corpse_def.set_category(CATEGORY_LIVING);
+        engine
+            .register_definition(corpse_def)
+            .expect("corpse registers");
+        let corpse = engine
+            .spawn_object(
+                SpawnConfig::new("CRPS")
+                    .with_position(Vector2::new(20, 10))
+                    .with_alive(false),
+            )
+            .expect("corpse spawns");
+        engine
+            .call_object_function(
+                actor_idx,
+                "Zap",
+                vec![Value::Object(corpse.as_u64()), Value::Int(12)],
+            )
+            .expect("zap runs");
+        let corpse_idx = engine.find_object_index(corpse).expect("corpse exists");
+        assert!(!engine.objects[corpse_idx].state.on_fire);
+
+        // Submerged in extinguisher material: IncinerationEx instead of
+        // fire, and NO draw (C4Effect.cpp:574-583, 602-607).
+        if let Some(landscape) = engine.landscape.as_mut() {
+            landscape.set_liquid_column(30, vec![LiquidSegment::with_material(5, 12, Some(water))]);
+        }
+        let soaked = engine
+            .spawn_object(SpawnConfig::new("TREE").with_position(Vector2::new(30, 8)))
+            .expect("soaked tree spawns");
+        let mirror = engine.rng.clone();
+        engine
+            .call_object_function(
+                actor_idx,
+                "Zap",
+                vec![Value::Object(soaked.as_u64()), Value::Int(12)],
+            )
+            .expect("zap runs");
+        let soaked_idx = engine.find_object_index(soaked).expect("soaked exists");
+        assert!(!engine.objects[soaked_idx].state.on_fire);
+        assert_eq!(engine.rng, mirror, "no draw when extinguished at start");
+        assert_eq!(
+            engine.objects[soaked_idx].state.local_vars.get("iIncineratedEx"),
+            Some(&Value::Int(99)),
+            "blasted-in-extinguisher fires IncinerationEx (caused_by NO_OWNER + 100)"
+        );
+
+        // BurnTurnTo changedef + contents ejection at the burn position
+        // (C4Effect.cpp:579-594).
+        let mut chest_def =
+            Definition::from_script("CHST", "Chest", recorder_script).expect("chest compiles");
+        chest_def.set_blast_incinerate(10);
+        chest_def.set_burn_turn_to(Some("ASH1".to_string()));
+        engine.register_definition(chest_def).expect("chest registers");
+        engine
+            .register_definition(simple_definition("ASH1"))
+            .expect("ash registers");
+        engine
+            .register_definition(simple_definition("GEMM"))
+            .expect("gem registers");
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHST").with_position(Vector2::new(12, 12)))
+            .expect("chest spawns");
+        let gem = engine
+            .spawn_object(
+                SpawnConfig::new("GEMM")
+                    .with_position(Vector2::new(12, 12))
+                    .with_container(chest),
+            )
+            .expect("gem spawns");
+        engine
+            .call_object_function(
+                actor_idx,
+                "Zap",
+                vec![Value::Object(chest.as_u64()), Value::Int(12)],
+            )
+            .expect("zap runs");
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert!(engine.objects[chest_idx].state.on_fire);
+        assert_eq!(
+            engine.objects[chest_idx].definition_id.as_str(),
+            "ASH1",
+            "BurnTurnTo changedefs even when blasted (C4Effect.cpp:579-585)"
+        );
+        assert!(engine.objects[chest_idx].state.contents.is_empty());
+        let gem_idx = engine.find_object_index(gem).expect("gem exists");
+        assert_eq!(engine.objects[gem_idx].state.container, None, "ejected");
+        assert_eq!(engine.objects[gem_idx].state.position, Vector2::new(12, 12));
+        Ok(())
     }
 
     // FnDoEnergy's caused-by (C4Script.cpp:496-497): iCausedByPlusOne - 1,

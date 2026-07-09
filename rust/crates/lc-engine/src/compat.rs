@@ -114,6 +114,21 @@ pub(crate) struct HostWorldObject {
     pub last_energy_loss_cause: i32,
 }
 
+/// The DefCore fire fields the host-path incinerate consults
+/// (C4Object::Blast, C4Object.cpp:1420-1423 + the fxFireStart core,
+/// C4Effect.cpp:560-641).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DefinitionFireMetadata {
+    /// BlastIncinerate threshold (0 = off).
+    pub blast_incinerate: i32,
+    /// BurnTurnTo changedef target (C4Effect.cpp:579-585).
+    pub burn_turn_to: Option<String>,
+    /// IncompleteActivity/NoBurnDecay gate the burning contents ejection
+    /// (C4Effect.cpp:586-594).
+    pub incomplete_activity: bool,
+    pub no_burn_decay: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DefinitionMetadata {
     /// DefCore `Name` (FnGetName's def form, C4Script.cpp:992-1005).
@@ -153,6 +168,8 @@ pub(crate) struct DefinitionMetadata {
     /// scopes seed from these so creation callbacks (AdjustSeatVertex,
     /// CHBM Connect) mutate the REAL vertex list, not an empty one.
     pub vertices: Vec<ObjectVertex>,
+    /// Fire fields for the host-path incinerate (C4Object::Blast).
+    pub fire: DefinitionFireMetadata,
 }
 
 /// `SetPhysical`/`GetPhysical` modes (C4Script.cpp:552-555).
@@ -4606,6 +4623,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("FreeRect", free_rect);
     script.register_host_function("ScriptGo", script_go);
     script.register_host_function("BlastFree", blast_free);
+    script.register_host_function("BlastObject", blast_object);
     script.register_host_function("ShakeFree", shake_free);
     script.register_host_function("GBackSolid", g_back_solid);
     script.register_host_function("GBackSemiSolid", g_back_semi_solid);
@@ -9286,6 +9304,258 @@ fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(true))
 }
 
+/// FnBlastObject (C4Script.cpp:2281-2289) -> C4Object::Blast
+/// (C4Object.cpp:1414-1424): DoDamage(level, ..., C4FxCall_DmgBlast) with
+/// its synchronous ~Damage callback, then alive targets lose level/3
+/// energy percent points (DoEnergy fExact=false, C4FxCall_EngBlast).
+fn blast_object(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "BlastObject expects at most 3 arguments: level, target, caused by",
+        ));
+    }
+    let level = parse_optional_i32(args.first(), "BlastObject", "level")?.unwrap_or(0);
+    let target_id = args
+        .get(1)
+        .map(|arg| parse_object_reference_argument(arg, "BlastObject", "target"))
+        .transpose()?
+        .flatten();
+    let caused_by_plus_one =
+        parse_optional_i32(args.get(2), "BlastObject", "caused by")?.unwrap_or(0);
+
+    let staged = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("BlastObject requires an active engine context"))?;
+        // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
+        // (C4Script.cpp:2283) — resolved in the caller's scope.
+        let caused_by = if caused_by_plus_one != 0 {
+            caused_by_plus_one - 1
+        } else {
+            context
+                .object_context()
+                .map(|object| object.controller())
+                .unwrap_or(OWNER_NONE)
+        };
+        // `if (!pObj) if (!(pObj = cthr->Obj)) return false` (C4Script.cpp:2284).
+        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
+            return Ok(None);
+        };
+        // `if (!pObj->Status) return false` (C4Script.cpp:2285).
+        let deleted = context
+            .get_world_object(target)
+            .map(|object| object.status() == ObjectStatus::Deleted)
+            .unwrap_or(true);
+        if deleted || !context.ensure_object_scope(target) {
+            return Ok(None);
+        }
+        let Some(scope) = context.object_scope_mut(target) else {
+            return Ok(None);
+        };
+        // Damage = max(Damage + iChange, 0) (C4Object.cpp:1288, via Blast's
+        // DoDamage at :1416).
+        scope.adjust_damage(level);
+        Ok(Some((target, caused_by)))
+    })?;
+    let Some((target, caused_by)) = staged else {
+        return Ok(Value::Bool(false));
+    };
+    // The ~Damage engine call runs INSIDE DoDamage, before the energy leg
+    // (C4Object.cpp:1290 — fail-safe exec, errors log and continue).
+    if let Some(Err(error)) = call_world_object_own_function(
+        target,
+        "Damage",
+        &[Value::Int(level), Value::Int(caused_by)],
+    ) {
+        tracing::warn!(
+            %error,
+            "script error in Damage; continuing like the C++ fail-safe exec"
+        );
+    }
+    // Energy leg (C4Object.cpp:1417-1418): only alive targets, reading
+    // Alive AFTER the ~Damage callback like the live C4Object would.
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        let alive = context
+            .object_scope(target)
+            .map(|scope| scope.alive())
+            .unwrap_or(false);
+        if alive {
+            stage_energy_loss_cause(
+                context,
+                target,
+                -level / 3,
+                crate::C4FX_CALL_ENG_BLAST,
+                caused_by,
+            );
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.adjust_energy(-level / 3, false);
+            }
+        }
+    });
+    // Incinerate arm (C4Object.cpp:1420-1423): the LIVE Damage — staged
+    // writes plus whatever the ~Damage callback changed — against
+    // Def->BlastIncinerate (truthy in C++, so any nonzero value arms it).
+    let incinerate = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        let blast_incinerate = effective_definition_id(context, target)
+            .and_then(|id| context.world.definition_metadata(&id))
+            .map(|metadata| metadata.fire.blast_incinerate)
+            .unwrap_or(0);
+        blast_incinerate != 0
+            && context
+                .object_scope(target)
+                .map(|scope| scope.damage())
+                .unwrap_or(0)
+                >= blast_incinerate
+    });
+    if incinerate {
+        incinerate_target_blasted(target, caused_by)?;
+    }
+    Ok(Value::Bool(true))
+}
+
+/// The definition the world currently sees for `target`, honoring a
+/// same-call staged ChangeDef (C++ reads the live C4Object::Def).
+fn effective_definition_id(context: &EffectHostContext, target: ObjectId) -> Option<String> {
+    context
+        .object_scope(target)
+        .and_then(|scope| scope.pending_update.change_def.clone())
+        .or_else(|| {
+            context
+                .get_world_object(target)
+                .map(|object| object.definition_id().to_string())
+        })
+}
+
+/// `C4Object::Incinerate(iCausedBy, fBlasted=true)` on the host seam —
+/// the staged mirror of the engine-side `incinerate_object_inner`
+/// (fxFireStart deterministic core, C4Effect.cpp:560-641): same refusal
+/// checks, BurnTurnTo changedef, burning contents ejection, extinguisher
+/// gate, ONE FirePhase = Random(15) draw on the shared ledger, and the
+/// Incineration/IncinerationEx callback — with the fire state bits riding
+/// `ObjectUpdate::fire` to the fold.
+fn incinerate_target_blasted(target: ObjectId, caused_by: i32) -> Result<(), RuntimeError> {
+    enum FireCall {
+        Incineration,
+        IncinerationEx,
+    }
+    let call = HOST_CONTEXT.with(|cell| -> Result<Option<FireCall>, RuntimeError> {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(None);
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(None);
+        }
+        // Already on fire (C4Object.cpp:1258) — a same-call incinerate
+        // shows through the staged fire channel.
+        let already_burning = context
+            .object_scope(target)
+            .is_some_and(|scope| scope.pending_update.fire.is_some())
+            || context
+                .get_world_object(target)
+                .and_then(|object| object.full_state().map(|state| state.on_fire))
+                .unwrap_or(false);
+        if already_burning {
+            return Ok(None);
+        }
+        // Dead living don't burn (C4Object.cpp:1260).
+        let (category, alive) = context
+            .object_scope(target)
+            .map(|scope| (scope.current_category, scope.alive()))
+            .unwrap_or((0, false));
+        if category & crate::CATEGORY_LIVING != 0 && !alive {
+            return Ok(None);
+        }
+        // In extinguishing material: no fire caused, checked BEFORE the
+        // FirePhase draw (C4Effect.cpp:574-583).
+        let position = context
+            .object_scope(target)
+            .map(|scope| scope.effective_position())
+            .unwrap_or(Vector2::ZERO);
+        let in_extinguisher = context
+            .landscape_ref()
+            .and_then(|landscape| landscape.material_at(position.x, position.y))
+            .zip(context.world.materials())
+            .and_then(|(material_id, materials)| materials.get_by_id(material_id))
+            .map(|material| material.extinguisher() > 0)
+            .unwrap_or(false);
+        let fire_caused = !in_extinguisher;
+        let fire_meta = effective_definition_id(context, target)
+            .and_then(|id| context.world.definition_metadata(&id))
+            .map(|metadata| metadata.fire.clone())
+            .unwrap_or_default();
+        // BurnTurnTo: blasts changedef in water too (C4Effect.cpp:579-585).
+        if let Some(turn_to) = fire_meta.burn_turn_to.as_ref() {
+            if context.world.definition_metadata(turn_to).is_some() {
+                if let Some(scope) = context.object_scope_mut(target) {
+                    scope.pending_update.change_def = Some(turn_to.clone());
+                }
+            }
+        }
+        // Eject contents (C4Effect.cpp:586-594): into the burning object's
+        // container when contained, else exit at the object's position —
+        // raw container moves like the engine-side ejection (no Departure
+        // callbacks).
+        if !fire_meta.incomplete_activity && !fire_meta.no_burn_decay {
+            let parent = context
+                .object_scope(target)
+                .map(|scope| scope.container())
+                .unwrap_or(None);
+            let contents: Vec<ObjectId> = context
+                .get_world_object(target)
+                .map(|object| object.contents().to_vec())
+                .unwrap_or_default();
+            for content in contents {
+                if !context.ensure_object_scope(content) {
+                    continue;
+                }
+                if let Some(scope) = context.object_scope_mut(content) {
+                    scope.set_container(parent);
+                    if parent.is_none() {
+                        scope.set_position(position);
+                    }
+                }
+            }
+        }
+        if !fire_caused {
+            // Blasted but not incinerated: IncinerationEx
+            // (C4Effect.cpp:602-607).
+            return Ok(Some(FireCall::IncinerationEx));
+        }
+        // Set values + FirePhase = Random(15), one synced draw
+        // (C4Effect.cpp:632-634).
+        let phase = draw_context_random(15)?;
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.pending_update.fire = Some((caused_by, phase));
+        }
+        Ok(Some(FireCall::Incineration))
+    })?;
+    // Engine script call (C4Effect.cpp:638 / :605) — fail-safe exec.
+    let name = match call {
+        Some(FireCall::Incineration) => "Incineration",
+        Some(FireCall::IncinerationEx) => "IncinerationEx",
+        None => return Ok(()),
+    };
+    if let Some(Err(error)) =
+        call_world_object_own_function(target, name, &[Value::Int(caused_by)])
+    {
+        tracing::warn!(
+            %error,
+            "script error in {name}; continuing like the C++ fail-safe exec"
+        );
+    }
+    Ok(())
+}
+
 fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     if std::env::var("LC_DEBUG_CHBM").is_ok() {
         tracing::warn!(?args, "OSA SetAction");
@@ -13835,6 +14105,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 stretch_growth: false,
                 line: 0,
                 vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
             });
         let definition_category = metadata.category;
 
@@ -14087,6 +14358,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 stretch_growth: false,
                 line: 0,
                 vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
             });
         let definition_category = metadata.category;
 
@@ -15577,6 +15849,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 stretch_growth: false,
                 line: 0,
                 vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
             });
 
         // "controller will automatically be set upon entrance"
@@ -19379,6 +19652,7 @@ mod tests {
         "AnyContainer",
         "AppendCommand",
         "BlastFree",
+        "BlastObject",
         "BoundBy",
         "C4Id",
         "Call",
@@ -21034,6 +21308,7 @@ func ProbeBadIndex(id) {
                 stretch_growth: false,
                 line: 0,
                 vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21079,6 +21354,7 @@ func ProbeBadIndex(id) {
                     stretch_growth: false,
                     line: 0,
                     vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
                 },
             ),
             (
@@ -21102,6 +21378,7 @@ func ProbeBadIndex(id) {
                     stretch_growth: false,
                     line: 0,
                     vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
                 },
             ),
         ]);
@@ -21149,6 +21426,7 @@ func ProbeBadIndex(id) {
                 stretch_growth: false,
                 line: 0,
                 vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21209,6 +21487,7 @@ func ProbeBadIndex(id) {
                 stretch_growth: false,
                 line: 0,
                 vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21278,6 +21557,7 @@ func ProbeBadIndex(id) {
             stretch_growth: false,
             line: 0,
             vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
         };
         metadata.components = vec![("WOOD".to_string(), 3), ("METL".to_string(), 1)];
         let world = HostWorldContext::with_landscape(
@@ -21701,6 +21981,7 @@ func ProbeBadIndex(id) {
                 stretch_growth: false,
                 line: 0,
                 vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21745,6 +22026,7 @@ func ProbeBadIndex(id) {
                 stretch_growth: false,
                 line: 0,
                 vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -21805,6 +22087,7 @@ func ProbeBadIndex(id) {
                 stretch_growth: false,
                 line: 0,
                 vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -25911,6 +26194,7 @@ func ProbeBadIndex(id) {
                 stretch_growth: false,
                 line: 0,
                 vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -25968,6 +26252,7 @@ func ProbeBadIndex(id) {
             stretch_growth: false,
             line: 0,
             vertices: Vec::new(),
+                fire: DefinitionFireMetadata::default(),
         };
         let definitions = HashMap::from([
             ("Workshop".to_string(), workshop_metadata.clone()),
