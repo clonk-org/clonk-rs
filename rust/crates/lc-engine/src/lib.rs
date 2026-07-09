@@ -42702,6 +42702,90 @@ func Probe() {
         assert_eq!(locals.get("iContact"), Some(&Value::Int(10)));
     }
 
+    // C4SortObject::CompareGetValue returns int32_t (C4FindObject.h:430):
+    // C4SortObjectDistance computes dx*dx+dy*dy in i32 and WRAPS on big
+    // coordinates (C4FindObject.cpp:908-911); C4SortObjectSpeed's C4Fixed
+    // sum reaches int32_t through the IMPLICIT `operator bool`
+    // (Fixed.h:117 — the only conversion C4Fixed offers), so the key is
+    // 0/1 "moving at all"; C4SortObjectMass reads the LIVE UpdateMass
+    // field ((Def->Mass+OwnMass)*Con/FullCon max 1, C4Object.cpp:497-500).
+    #[test]
+    fn sort_object_keys_use_the_cpp_i32_semantics() {
+        let caller_script = r#"#strict
+local iFarFirst, iFastFirst, iHalfMass;
+func Probe() {
+    var aDist = FindObjects([C4FO_Category, 16], [C4SO_Distance, 0, 0]);
+    iFarFirst = GetX(aDist[0]);
+    var aSpeed = FindObjects([C4FO_Category, 16], [C4SO_Speed]);
+    iFastFirst = GetX(aSpeed[0]);
+    var aMass = FindObjects([C4FO_Category, 16], [C4SO_Mass]);
+    iHalfMass = GetX(aMass[0]);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let mut heavy = simple_definition("HEVY");
+        heavy.set_mass(100);
+        engine.register_definition(heavy).expect("heavy registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(9000, 0)))
+            .expect("caller spawns");
+
+        // Distance wrap: dx=50000 → 2.5e9 wraps negative in i32 and sorts
+        // FIRST; dx=1000 stays 1e6.
+        let far = engine
+            .spawn_object(
+                SpawnConfig::new("HEVY")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50_000, 0)),
+            )
+            .expect("far spawns");
+        engine
+            .spawn_object(
+                SpawnConfig::new("HEVY")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(1_000, 0)),
+            )
+            .expect("near spawns");
+        // Speed keys are 0/1: both movers key 1, so the STABLE sort keeps
+        // the faster-but-first object ahead.
+        let fast_idx = engine.find_object_index(far).expect("far exists");
+        engine.objects[fast_idx].fixed_velocity = FixedVec2::from_ints(5, 0);
+        let near_idx = engine
+            .find_object_index(engine.objects[fast_idx + 1].id)
+            .expect("near exists");
+        engine.objects[near_idx].fixed_velocity = FixedVec2::from_ints(1, 0);
+        // Mass: HALF-Con object keys 50 vs 100 and sorts first even though
+        // it spawned second.
+        engine.objects[near_idx].state.construction = FULL_CON / 2;
+
+        let caller_idx = engine.find_object_index(caller).expect("caller exists");
+        engine
+            .call_object_function(caller_idx, "Probe", Vec::new())
+            .expect("probe runs");
+        let locals = &engine.objects[caller_idx].state.local_vars;
+        assert_eq!(
+            locals.get("iFarFirst"),
+            Some(&Value::Int(50_000)),
+            "the wrapped-negative distance key sorts first (i32 overflow)"
+        );
+        assert_eq!(
+            locals.get("iFastFirst"),
+            Some(&Value::Int(50_000)),
+            "0/1 speed keys tie; stable sort keeps collection order"
+        );
+        assert_eq!(
+            locals.get("iHalfMass"),
+            Some(&Value::Int(1_000)),
+            "live con-scaled mass sorts the half-built object first"
+        );
+    }
+
     // C4FindObjectLayer::Check is `pObj->pLayer == pLayer`
     // (C4FindObject.cpp:671-674): Find_Layer(nil) matches every UNLAYERED
     // object and Find_Layer(pLayer) exactly the layer's members —

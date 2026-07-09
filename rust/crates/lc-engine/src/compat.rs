@@ -12736,9 +12736,11 @@ impl SortCriterion {
         Ok(match self {
             SortCriterion::Distance { x, y } => {
                 let position = object.position();
-                let dx = i64::from(position.x - x);
-                let dy = i64::from(position.y - y);
-                dx * dx + dy * dy
+                let dx = position.x.wrapping_sub(*x);
+                let dy = position.y.wrapping_sub(*y);
+                // int32 wrap like C4SortObjectDistance
+                // (C4FindObject.cpp:908-911, CompareGetValue is int32_t).
+                i64::from(dx.wrapping_mul(dx).wrapping_add(dy.wrapping_mul(dy)))
             }
             SortCriterion::Random => RANDOM_CONTEXT.with(|cell| {
                 cell.borrow()
@@ -12747,17 +12749,48 @@ impl SortCriterion {
                     .unwrap_or(0)
             }),
             SortCriterion::Speed => {
-                let velocity = object.velocity();
-                let dx = i64::from(velocity.x);
-                let dy = i64::from(velocity.y);
-                dx * dx + dy * dy
+                // C4SortObjectSpeed's C4Fixed sum reaches int32_t through
+                // the IMPLICIT `operator bool` (Fixed.h:117, the only
+                // conversion C4Fixed offers): the key is 0/1 "moving at
+                // all". The fixed squares truncate (val²/65536), so raw
+                // |dir| < 256 keys 0 too. Live fixed dirs come from the
+                // script-call snapshot; the int-mirror fallback only
+                // misses sub-1/256-px movers.
+                let (vx, vy) = object
+                    .full_state()
+                    .and_then(|state| state.script_fixed_velocity)
+                    .map(|fixed| (fixed.x.val(), fixed.y.val()))
+                    .unwrap_or_else(|| {
+                        let velocity = object.velocity();
+                        (
+                            velocity.x.wrapping_mul(1 << 16),
+                            velocity.y.wrapping_mul(1 << 16),
+                        )
+                    });
+                let square = |v: i32| ((i64::from(v) * i64::from(v)) / (1 << 16)) as i32;
+                i64::from(square(vx).wrapping_add(square(vy)) != 0)
             }
-            SortCriterion::Mass => i64::from(
-                world
+            SortCriterion::Mass => {
+                // pFor->Mass is the LIVE UpdateMass field:
+                // (Def->Mass + OwnMass) * Con / FullCon, min 1
+                // (C4Object.cpp:497-500) — not the definition mass.
+                let definition_mass = world
                     .definition_metadata(object.definition_id())
                     .map(|metadata| metadata.mass)
-                    .unwrap_or(0),
-            ),
+                    .unwrap_or(0);
+                let state = object.full_state();
+                let construction = state
+                    .map(|state| state.construction)
+                    .unwrap_or(crate::FULL_CON);
+                let own_mass = state.map(|state| state.own_mass).unwrap_or(0);
+                i64::from(
+                    (definition_mass
+                        .saturating_add(own_mass)
+                        .saturating_mul(construction)
+                        / crate::FULL_CON)
+                        .max(1),
+                )
+            }
             SortCriterion::Value => i64::from(
                 world
                     .definition_metadata(object.definition_id())

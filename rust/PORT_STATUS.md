@@ -92,8 +92,13 @@ shadow, recording the new first mismatch.
   residuals: SetOCF's InMat update (InMat/ClosedContainer unmodeled),
   NoCollectDelay is never armed (ObjectComDrop=2 and the SetCommand decrement
   live with the command layer), mid-call creation previews stay preview-grade,
-  C4Object::At lacks addtop. Still open: permanent object info training;
-  DFA_CONNECT line walking; sector traversal and i32 sort-key wrap.
+  C4Object::At lacks addtop. Sort keys now use the C++ int32 semantics
+  (2026-07-09: Distance wraps in i32, Speed is the 0/1 `operator bool` quirk
+  of the C4Fixed sum with truncating fixed squares, Mass reads the live
+  UpdateMass value; Sort_Value still reads the definition value where C++
+  calls C4Object::GetValue — see the definitions bullet's CalcDefValue gap).
+  Still open: permanent object info training; DFA_CONNECT line walking;
+  sector-bounds FindMany traversal order.
   The engine explosion fallback trio FnExplode/Explosion/Game::BlastObjects +
   FnShakeObjects stays unported (System.c4g overrides make it unreachable for
   shipped content); the host-path incinerate does not add the "Fire" C4Effect
