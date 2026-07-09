@@ -6129,9 +6129,11 @@ impl Definition {
     pub fn compute_ocf(&self, state: &ObjectState) -> u32 {
         // OCF_Normal: the OCF is never zero (SetOCF, C4Object.cpp:547-548)
         let mut ocf = self.ocf_base | OCF_NORMAL;
-        // OCF_NotContained (SetOCF, C4Object.cpp:627-629)
+        // OCF_NotContained (SetOCF, C4Object.cpp:627-629); OCF_Available
+        // joins in Engine::compute_object_ocf with its container and
+        // landscape clauses (C4Object.cpp:645-648).
         if state.container.is_none() {
-            ocf |= crate::ocf::NOT_CONTAINED | crate::ocf::AVAILABLE;
+            ocf |= crate::ocf::NOT_CONTAINED;
         }
         // OCF_FullCon (SetOCF, C4Object.cpp:567-569)
         if state.construction >= FULL_CON {
@@ -23905,24 +23907,50 @@ impl Engine {
         // The landscape probes GBackSolid/GBackSemiSolid see baked
         // C4SolidMask MCVehic pixels; rect-model fixture worlds join the
         // mask overlay here (grid worlds bake, and the overlay is empty).
+        // Without a landscape everything is air, like C++ sky borders.
+        let landscape = self.landscape.as_ref();
+        let solid_masks = landscape
+            .map(|_| self.ocf_solid_mask_overlay())
+            .unwrap_or_default();
+        let masked = |x: i32, y: i32| solid_masks.iter().any(|mask| mask.contains(x, y));
+        let solid =
+            |x: i32, y: i32| landscape.is_some_and(|l| l.is_solid_at(x, y)) || masked(x, y);
+        let semi_solid =
+            |x: i32, y: i32| landscape.is_some_and(|l| l.is_semi_solid_at(x, y)) || masked(x, y);
+        let x = object.state.position.x;
+        let y = object.state.position.y;
         if object.state.container.is_none() {
-            if let Some(landscape) = self.landscape.as_ref() {
-                let solid_masks = self.ocf_solid_mask_overlay();
-                let masked = |x: i32, y: i32| solid_masks.iter().any(|mask| mask.contains(x, y));
-                let x = object.state.position.x;
-                let y = object.state.position.y;
-                // OCF_InSolid (SetOCF, C4Object.cpp:637-640)
-                if landscape.is_solid_at(x, y) || masked(x, y) {
-                    ocf |= crate::ocf::IN_SOLID;
-                }
-                // OCF_InFree (SetOCF, C4Object.cpp:641-644)
-                if !landscape.is_semi_solid_at(x, y - 1) && !masked(x, y - 1) {
-                    ocf |= crate::ocf::IN_FREE;
-                }
-            } else {
-                // No landscape: all air, like C++ over sky-open borders.
+            // OCF_InSolid (SetOCF, C4Object.cpp:637-640)
+            if solid(x, y) {
+                ocf |= crate::ocf::IN_SOLID;
+            }
+            // OCF_InFree (SetOCF, C4Object.cpp:641-644)
+            if !semi_solid(x, y - 1) {
                 ocf |= crate::ocf::IN_FREE;
             }
+        }
+        // OCF_Available (SetOCF, C4Object.cpp:645-648): reachable through
+        // the container (Grab_Get or the container's cached OCF_Entrance),
+        // and not buried — free above, or a thin non-solid cover with
+        // clearance eight pixels up.
+        let container_open = match object.state.container {
+            None => true,
+            Some(container_id) => {
+                self.find_object_index(container_id)
+                    .is_some_and(|container_idx| {
+                        let container = &self.objects[container_idx];
+                        self.definitions
+                            .get(&container.definition_id)
+                            .is_some_and(|definition| {
+                                definition.grab_put_get() & GRAB_PUT_GET_GET != 0
+                            })
+                            || container.state.ocf & crate::ocf::ENTRANCE != 0
+                    })
+            }
+        };
+        if container_open && (!semi_solid(x, y - 1) || (!solid(x, y - 1) && !semi_solid(x, y - 8)))
+        {
+            ocf |= crate::ocf::AVAILABLE;
         }
         ocf
     }
@@ -48069,6 +48097,124 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         engine.refresh_object_ocf(idx);
         assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_SOLID, 0);
         assert_ne!(engine.object_ocf_at_index(idx) & ocf::IN_FREE, 0);
+    }
+
+    #[test]
+    fn ocf_available_follows_the_burial_probe() {
+        // OCF_Available landscape clause (SetOCF, C4Object.cpp:646-648):
+        // !GBackSemiSolid(x, y-1) || (!GBackSolid(x, y-1) &&
+        // !GBackSemiSolid(x, y-8)) — free above, or under a thin
+        // non-solid cover with clearance eight pixels up.
+        let mut engine = Engine::with_seed(4);
+        let mut landscape = Landscape::flat(120, 60);
+        // Shallow water 55..60 at x=80 (5 px deep), deep water 40..60 at
+        // x=100 (20 px deep).
+        landscape.set_liquid_column(
+            80,
+            vec![LiquidSegment {
+                top: 55,
+                bottom: 60,
+                material: None,
+            }],
+        );
+        landscape.set_liquid_column(
+            100,
+            vec![LiquidSegment {
+                top: 40,
+                bottom: 60,
+                material: None,
+            }],
+        );
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(simple_definition("Rock"))
+            .expect("definition registers");
+
+        let rock = engine
+            .spawn_object(SpawnConfig::new("Rock").with_position(Vector2::new(40, 20)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(rock).expect("object exists");
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "free air above: available"
+        );
+
+        // Buried: y-1 is solid ground and y-8 is still underground.
+        engine.objects[idx].state.position = Vector2::new(40, 80);
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "buried objects are not available (C4Object.cpp:647)"
+        );
+
+        // Under 2 px of shallow water (y = 57): y-1 = 56 is water
+        // (semi-solid) but not solid, and y-8 = 49 is above the surface.
+        engine.objects[idx].state.position = Vector2::new(80, 57);
+        engine.refresh_object_ocf(idx);
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "thin liquid cover keeps the object available"
+        );
+
+        // Deep under water (y = 55 at the 40..60 column): y-8 = 47 is
+        // still water.
+        engine.objects[idx].state.position = Vector2::new(100, 55);
+        engine.refresh_object_ocf(idx);
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "deep-sunk objects are not available (C4Object.cpp:647)"
+        );
+    }
+
+    #[test]
+    fn ocf_available_inside_containers_needs_get_access_or_entrance() {
+        // OCF_Available container clause (SetOCF, C4Object.cpp:646):
+        // !Contained || (Contained->Def->GrabPutGet & C4D_Grab_Get) ||
+        // (Contained->OCF & OCF_Entrance).
+        let mut engine = Engine::with_seed(4);
+        let mut chest = simple_definition("Chest");
+        chest.set_grab_put_get(2); // C4D_Grab_Get
+        engine.register_definition(chest).expect("chest registers");
+        let mut safe = simple_definition("Safe");
+        safe.set_grab_put_get(1); // C4D_Grab_Put only
+        engine.register_definition(safe).expect("safe registers");
+        engine
+            .register_definition(simple_definition("Rock"))
+            .expect("rock registers");
+
+        let chest_id = engine
+            .spawn_object(SpawnConfig::new("Chest").with_position(Vector2::new(40, 20)))
+            .expect("chest spawns");
+        let safe_id = engine
+            .spawn_object(SpawnConfig::new("Safe").with_position(Vector2::new(80, 20)))
+            .expect("safe spawns");
+        let rock = engine
+            .spawn_object(
+                SpawnConfig::new("Rock")
+                    .with_position(Vector2::new(40, 20))
+                    .with_container(chest_id),
+            )
+            .expect("rock spawns");
+        let idx = engine.find_object_index(rock).expect("rock exists");
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "contents of a Grab_Get container stay available"
+        );
+
+        engine
+            .apply_object_update(rock, ObjectUpdate::new().with_container(safe_id))
+            .expect("move to safe");
+        let idx = engine.find_object_index(rock).expect("rock exists");
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::AVAILABLE,
+            0,
+            "a put-only container without entrance hides its contents"
+        );
     }
 
     #[test]
