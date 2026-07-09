@@ -14365,6 +14365,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             ObjectStatus::Normal,
             false,
             FULL_CON,
+            metadata.category,
         );
         let preview = HostWorldObject::with_category(
             id,
@@ -14601,6 +14602,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             ObjectStatus::Normal,
             false,
             construction_value,
+            metadata.category,
         );
         let preview = HostWorldObject::with_category(
             id,
@@ -16077,6 +16079,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 ObjectStatus::Normal,
                 false,
                 FULL_CON,
+                metadata.category,
             );
             let preview = HostWorldObject::with_category(
                 id,
@@ -16986,6 +16989,7 @@ fn incinerate_landscape(args: &[Value]) -> Result<Value, RuntimeError> {
             ObjectStatus::Normal,
             false,
             FULL_CON,
+            metadata.category,
         );
         let preview = HostWorldObject::with_category(
             id,
@@ -19448,6 +19452,7 @@ impl ObjectScopeContext {
                 status,
                 is_contained,
                 self.construction(),
+                self.current_category,
             )
         })
     }

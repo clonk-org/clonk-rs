@@ -23910,6 +23910,7 @@ impl Engine {
                     object.state.status,
                     object.state.container.is_some(),
                     object.state.construction,
+                    object.state.category,
                 )
             });
         // HitSpeeds from the fixed speed |xdir| + |ydir| (SetOCF,

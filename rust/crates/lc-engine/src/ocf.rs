@@ -41,8 +41,11 @@ pub const POWER_SUPPLY: u32 = 1 << 29;
 pub const CONTAINER: u32 = 1 << 30;
 pub const ALIVE: u32 = 1 << 31;
 
-/// Compute a runtime OCF mask using the static definition baseline and the
-/// current object state.
+/// Compute a PREVIEW-grade OCF mask from the fixture baseline and the
+/// def-independent object state — used where the engine's cached mask is
+/// not available yet (creation previews, bare fixture scopes). The full
+/// C4Object::SetOCF port lives in `Definition::compute_ocf` +
+/// `Engine::compute_object_ocf`.
 pub fn compute(
     base: u32,
     crew_member: bool,
@@ -50,6 +53,7 @@ pub fn compute(
     _status: ObjectStatus,
     is_contained: bool,
     construction: i32,
+    category: i32,
 ) -> u32 {
     let mut ocf = base | NORMAL;
 
@@ -61,15 +65,24 @@ pub fn compute(
         ocf |= FULL_CON;
     }
 
-    if crew_member {
+    // OCF_Living/OCF_Alive gate on C4D_Living (SetOCF, C4Object.cpp:600-605)
+    if category & crate::CATEGORY_LIVING != 0 {
         ocf |= LIVING;
+        if alive {
+            ocf |= ALIVE;
+        }
     }
 
-    if alive {
-        ocf |= ALIVE;
-        if crew_member {
-            ocf |= CREW_MEMBER | FIGHT_READY;
-        }
+    // OCF_CrewMember: Def->CrewMember && the RAW Alive flag (SetOCF,
+    // C4Object.cpp:619-622)
+    if crew_member && alive {
+        ocf |= CREW_MEMBER;
+    }
+
+    // OCF_FightReady from the OCF_Alive BIT (SetOCF, C4Object.cpp:606-610);
+    // the NoFight/ActMap gates need the def and stay preview-approximated.
+    if ocf & ALIVE != 0 {
+        ocf |= FIGHT_READY;
     }
 
     ocf
@@ -89,6 +102,7 @@ mod tests {
             ObjectStatus::Normal,
             false,
             OBJECT_FULL_CON,
+            crate::CATEGORY_LIVING,
         );
         assert!(ocf & NOT_CONTAINED != 0);
         assert!(ocf & AVAILABLE != 0);
@@ -100,8 +114,37 @@ mod tests {
     }
 
     #[test]
+    fn compute_gates_living_and_alive_on_category() {
+        // SetOCF C4Object.cpp:600-605: OCF_Living/OCF_Alive need
+        // C4D_Living; a crew def flag alone grants neither.
+        let ocf = compute(
+            NORMAL,
+            true,
+            true,
+            ObjectStatus::Normal,
+            false,
+            OBJECT_FULL_CON,
+            crate::CATEGORY_OBJECT,
+        );
+        assert_eq!(ocf & LIVING, 0);
+        assert_eq!(ocf & ALIVE, 0);
+        assert_eq!(ocf & FIGHT_READY, 0);
+        // OCF_CrewMember only needs Def->CrewMember && Alive
+        // (C4Object.cpp:619-622).
+        assert_ne!(ocf & CREW_MEMBER, 0);
+    }
+
+    #[test]
     fn compute_handles_contained_objects() {
-        let ocf = compute(NORMAL, false, false, ObjectStatus::Inactive, true, 0);
+        let ocf = compute(
+            NORMAL,
+            false,
+            false,
+            ObjectStatus::Inactive,
+            true,
+            0,
+            crate::CATEGORY_STATIC_BACK,
+        );
         assert_eq!(ocf & NOT_CONTAINED, 0);
         assert_eq!(ocf & AVAILABLE, 0);
         assert_eq!(ocf & FULL_CON, 0);
