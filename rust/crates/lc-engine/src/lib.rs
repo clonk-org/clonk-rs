@@ -17019,7 +17019,7 @@ impl Engine {
                         continue;
                     }
                 }
-                if let Some((acceptor_number, _do_temp_calls)) =
+                if let Some((acceptor_number, do_temp_calls)) =
                     annulled_started.remove(&event.effect.number)
                 {
                     // Add-to-other-effect (C4Effect.cpp:295-313): the new
@@ -17034,7 +17034,24 @@ impl Engine {
                         .find(|existing| existing.number == acceptor_number)
                         .cloned()
                     {
-                        queue.push_front(EffectEvent::add_to(acceptor, event.effect.clone()));
+                        // AnnulCalls (C4Fx_Effect_AnnulCalls,
+                        // C4Effects.h:38): the Add runs inside a temp
+                        // remove/readd bracket of the effects above the
+                        // ACCEPTOR (C4Effect.cpp:297-304).
+                        let uppers = do_temp_calls
+                            .then(|| upper_effects_of(&object.state.effects, &acceptor))
+                            .unwrap_or_default();
+                        let mut sequence: Vec<EffectEvent> = uppers
+                            .iter()
+                            .rev()
+                            .cloned()
+                            .map(EffectEvent::temp_removed)
+                            .collect();
+                        sequence.push(EffectEvent::add_to(acceptor, event.effect.clone()));
+                        sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
+                        for queued in sequence.into_iter().rev() {
+                            queue.push_front(queued);
+                        }
                     }
                     continue;
                 }
@@ -43024,6 +43041,110 @@ func FxProbeTimer(pThis, iNumber) {
             vec!["Frost", "Shield"],
             "the checker saw strength 42 on Fire (denied) and 5 on Frost \
              (passed) — C4Effect.cpp:282 forwards rVal1-4"
+        );
+    }
+
+    #[test]
+    fn effect_annul_calls_temp_brackets_the_add_call() {
+        // C4Fx_Effect_AnnulCalls (-3, C4Effects.h:38): like Annul, but the
+        // acceptor's Fx*Add runs inside a temp remove/readd bracket of the
+        // effects ABOVE the acceptor (C4Effect.cpp:297-304). Plain Annul
+        // (-2) must not fire the bracket.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxShieldEffect(state, effect, new_name) {
+            if (new_name == "Fire") {
+                return -3;
+            }
+            return nil;
+        }
+
+        global func FxShieldAdd(state, effect, new_name, new_interval) {
+            return nil;
+        }
+
+        global func FxUpperStart(state, effect, temp) {
+            return nil;
+        }
+
+        global func FxUpperStop(state, effect, reason, temp) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "add", name = "Upper", priority = 300, interval = 0 } ] };
+            }
+            if (frame == 3) {
+                AddEffect("Fire", state, 100, 0);
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                call_log
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.to_vec()));
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        call_log.lock().unwrap().clear();
+
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Shield", "Upper"],
+            "Fire merges into Shield; Upper is only temp-cycled"
+        );
+
+        let calls: Vec<(String, Vec<Value>)> = call_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name.starts_with("FxUpper") || name.starts_with("FxShieldAdd"))
+            .cloned()
+            .collect();
+        let call_names: Vec<&str> = calls.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            call_names,
+            vec!["FxUpperStop", "FxShieldAdd", "FxUpperStart"],
+            "AnnulCalls brackets the Add with the acceptor's upper effects \
+             (C4Effect.cpp:297-304)"
+        );
+        let (_, temp_stop_args) = &calls[0];
+        assert_eq!(
+            temp_stop_args.get(3),
+            Some(&Value::Bool(true)),
+            "the bracket stop is temporary (fTemp, C4Effect.cpp:489)"
         );
     }
 
