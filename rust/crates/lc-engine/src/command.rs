@@ -4826,6 +4826,42 @@ mod tests {
             }
             other => panic!("expected get request, got {:?}", other),
         }
+
+        // C4CMD_Acquire InitEvaluation (C4Command.cpp:1666-1670) only
+        // replaces a ZERO Tx/Ty with 500/250 — a negative range stays
+        // negative and the Inside(cx-px, -Tx, +Tx) test (:2115-2116)
+        // then matches nothing: the nearby item is NOT found and the
+        // command falls through to Buy (:2136).
+        assert_eq!(
+            (state.range_x, state.range_y),
+            (500, 250),
+            "zero ranges default (C4Command.cpp:1668-1669)"
+        );
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire)
+                .with_data(CommandData::Text("WOOD".into()))
+                .with_tx(Some(-50))
+                .with_ty(Some(-50)),
+        )
+        .expect("state created");
+        assert_eq!(
+            (state.range_x, state.range_y),
+            (-50, -50),
+            "negative ranges keep their sign (C4Command.cpp:1668 replaces only 0)"
+        );
+        let _ = state.step(&ctx);
+        state.script_result = Some(AcquireScriptResult::Continue);
+        let result = state.step(&ctx);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(
+                    request.id,
+                    CommandId::Buy,
+                    "empty signed range finds no material -> Buy (C4Command.cpp:2136)"
+                );
+            }
+            other => panic!("expected buy request, got {:?}", other),
+        }
     }
 
     #[test]
@@ -11372,18 +11408,14 @@ impl AcquireState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
         let definition_id =
             command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
+        // C4CMD_Acquire InitEvaluation Tx/Ty defaults (C4Command.cpp:
+        // 1666-1670): only a ZERO range becomes 500/250 — the sign of a
+        // nonzero range survives into the Inside(cx-px, -Tx, +Tx) match
+        // (:2115-2116), where a negative range matches nothing.
         let raw_range_x = request.tx.unwrap_or(0);
         let raw_range_y = request.ty.unwrap_or(0);
-        let range_x = if raw_range_x == 0 {
-            500
-        } else {
-            raw_range_x.abs()
-        };
-        let range_y = if raw_range_y == 0 {
-            250
-        } else {
-            raw_range_y.abs()
-        };
+        let range_x = if raw_range_x == 0 { 500 } else { raw_range_x };
+        let range_y = if raw_range_y == 0 { 250 } else { raw_range_y };
         Ok(Self {
             target: request.target,
             definition_id,
