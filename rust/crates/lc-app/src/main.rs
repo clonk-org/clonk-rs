@@ -9883,7 +9883,9 @@ impl GameApp {
             }
             match load_scenario_music_bytes(path) {
                 Ok(Some(bytes)) => {
-                    if let Err(err) = audio.play_music(bytes.as_slice(), true) {
+                    // C4MusicSystem::PlayScenarioMusic calls Play() with its
+                    // non-looping default. Do not repeat one asset forever.
+                    if let Err(err) = audio.play_music(bytes.as_slice(), false) {
                         tracing::warn!(
                             path = %path.display(),
                             error = %err,
@@ -11483,62 +11485,88 @@ fn scenario_root_key(path: &Path) -> String {
 }
 
 fn load_scenario_music_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
-    let group = Group::open(path)
+    let scenario = Group::open(path)
         .with_context(|| format!("failed to open scenario group at {}", path.display()))?;
-    find_music_asset(&group)
-        .with_context(|| format!("failed to inspect {} for music", path.display()))
-}
-
-fn find_music_asset(group: &Group) -> Result<Option<Vec<u8>>, lc_resources::GroupError> {
-    let entries = group.entries()?;
-    let mut best: Option<(PathBuf, (u8, u8, String))> = None;
-
-    for entry in &entries {
-        if entry.is_directory || !is_audio_path(&entry.relative_path) {
-            continue;
-        }
-        let key = music_sort_key(&entry.relative_path);
-        if best
-            .as_ref()
-            .map(|(_, current)| key < *current)
-            .unwrap_or(true)
-        {
-            best = Some((entry.relative_path.clone(), key));
-        }
+    if let Some(data) = find_music_asset(&scenario)
+        .with_context(|| format!("failed to inspect {} for music", path.display()))?
+    {
+        return Ok(Some(data));
     }
-
-    if let Some((path, _)) = best {
-        let data = group.read_file(&path)?;
+    if let Some(data) = find_music_group_asset(&scenario)
+        .with_context(|| format!("failed to inspect {} for Music.c4g", path.display()))?
+    {
         return Ok(Some(data));
     }
 
-    for entry in entries.into_iter().filter(|entry| entry.is_directory) {
-        let child = group.open_child(&entry.relative_path)?;
-        if let Some(data) = find_music_asset(&child)? {
+    // C4Game::OpenScenario registers the contiguous .c4f parent chain in the
+    // group set. C4MusicSystem then loads each registered group's direct
+    // Music.c4g child (C4Game.cpp:141-161; C4MusicSystem.cpp:152-163).
+    let mut parent = path.parent();
+    while let Some(folder_path) = parent.filter(|parent| has_extension(parent, "c4f")) {
+        let folder = Group::open(folder_path).with_context(|| {
+            format!(
+                "failed to open scenario parent group at {}",
+                folder_path.display()
+            )
+        })?;
+        if let Some(data) = find_music_group_asset(&folder).with_context(|| {
+            format!("failed to inspect {} for Music.c4g", folder_path.display())
+        })? {
             return Ok(Some(data));
         }
+        parent = folder_path.parent();
     }
 
     Ok(None)
 }
 
-fn music_sort_key(path: &Path) -> (u8, u8, String) {
-    let in_music_dir = path
-        .components()
-        .any(|component| matches!(component.as_os_str().to_str(), Some(name) if name.eq_ignore_ascii_case("music")));
-    let extension_rank = match path
+fn find_music_asset(group: &Group) -> Result<Option<Vec<u8>>, lc_resources::GroupError> {
+    // C4MusicSystem's FindEntry/LoadDir searches one group level only. Never
+    // descend into definitions: their WAV files are sound effects.
+    let mut candidates: Vec<_> = group
+        .entries()?
+        .into_iter()
+        .filter(|entry| !entry.is_directory && is_music_path(&entry.relative_path))
+        .map(|entry| entry.relative_path)
+        .collect();
+    candidates.sort_by_cached_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    candidates
+        .first()
+        .map(|path| group.read_file(path))
+        .transpose()
+}
+
+fn find_music_group_asset(group: &Group) -> Result<Option<Vec<u8>>, lc_resources::GroupError> {
+    let music_group = group.entries()?.into_iter().find(|entry| {
+        entry
+            .relative_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("Music.c4g"))
+    });
+    let Some(music_group) = music_group else {
+        return Ok(None);
+    };
+    find_music_asset(&group.open_child(music_group.relative_path)?)
+}
+
+fn has_extension(path: &Path, expected: &str) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+}
+
+fn is_music_path(path: &Path) -> bool {
+    match path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
         .as_deref()
     {
-        Some("ogg") => 0,
-        Some("mp3") => 1,
-        Some("wav") => 2,
-        _ => 3,
-    };
-    let name = path.to_string_lossy().to_string();
-    (if in_music_dir { 0 } else { 1 }, extension_rank, name)
+        // C4MusicSystem.cpp:31-32. WAV belongs to the sound-effect resolver.
+        Some("it" | "mid" | "mod" | "mp3" | "ogg" | "s3m" | "xm") => true,
+        _ => false,
+    }
 }
 
 fn is_audio_path(path: &Path) -> bool {
@@ -12723,6 +12751,125 @@ mod tests {
         let decoded = decode_audio(audio).expect("sandbox music decodes");
         assert_eq!(decoded.sample_rate, 44_100);
         assert!(decoded.frames.len() > 2_000);
+    }
+
+    #[test]
+    fn scenario_music_does_not_promote_nested_wav_effects() {
+        // C4MusicSystem::PlayScenarioMusic only scans supported music files at
+        // the scenario root and Music.c4g groups (C4MusicSystem.cpp:139-163).
+        // In particular, Drachenfels' Princess.c4d/PrincessScream.wav is an
+        // object sound effect, never scenario music.
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Drachenfels.c4s");
+        let princess = scenario.join("Princess.c4d");
+        fs::create_dir_all(&princess).expect("create definition directory");
+        fs::write(princess.join("PrincessScream.wav"), b"scream")
+            .expect("write nested effect");
+
+        assert_eq!(
+            load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
+            None
+        );
+    }
+
+    #[test]
+    fn scenario_music_excludes_root_wav_effects() {
+        // WAV is deliberately absent from C++ MusicFileExtensions
+        // (C4MusicSystem.cpp:31-32), even when it sits at scenario root.
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Effects.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario directory");
+        fs::write(scenario.join("Ambient.wav"), b"effect")
+            .expect("write root effect");
+
+        assert_eq!(
+            load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
+            None
+        );
+    }
+
+    #[test]
+    fn scenario_music_accepts_supported_root_track_case_insensitively() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Scenario.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario directory");
+        fs::write(scenario.join("Local.OGG"), b"scenario track")
+            .expect("write local track");
+
+        assert_eq!(
+            load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
+            Some(b"scenario track".to_vec())
+        );
+    }
+
+    #[test]
+    fn scenario_music_uses_parent_music_group_when_root_has_none() {
+        let dir = tempdir().expect("tempdir");
+        let folder = dir.path().join("Fantasy.c4f");
+        let scenario = folder.join("Drachenfels.c4s");
+        let music = folder.join("Music.c4g");
+        fs::create_dir_all(&scenario).expect("create scenario directory");
+        fs::create_dir_all(&music).expect("create music group");
+        fs::write(music.join("Knightly Wonders.mid"), b"shared track")
+            .expect("write shared track");
+
+        assert_eq!(
+            load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
+            Some(b"shared track".to_vec())
+        );
+    }
+
+    #[test]
+    fn scenario_music_uses_direct_music_group_without_scanning_definitions() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Scenario.c4s");
+        let music = scenario.join("Music.c4g");
+        let definition = scenario.join("Actor.c4d");
+        fs::create_dir_all(&music).expect("create music group");
+        fs::create_dir_all(&definition).expect("create definition directory");
+        fs::write(music.join("Theme.mp3"), b"scenario music").expect("write music");
+        fs::write(definition.join("Scream.wav"), b"effect").expect("write effect");
+
+        assert_eq!(
+            load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
+            Some(b"scenario music".to_vec())
+        );
+    }
+
+    #[test]
+    fn dragon_rock_selects_fantasy_music_never_princess_scream() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root")
+            .to_path_buf();
+        let fantasy = repository.join("content/Fantasy.c4f");
+        let scenario = fantasy.join("Drachenfels.c4s");
+        if !scenario.exists() {
+            return;
+        }
+
+        let selected = load_scenario_music_bytes(&scenario)
+            .expect("inspect Dragon Rock music")
+            .expect("Fantasy music track");
+        let scream = fs::read(scenario.join("Princess.c4d/PrincessScream.wav"))
+            .expect("read Princess scream");
+        let music_group = fantasy.join("Music.c4g");
+        let expected_tracks: Vec<_> = [
+            "Knightly Wonders.mid",
+            "Medieval Waltz.mid",
+            "Morning Dawn.mid",
+        ]
+        .into_iter()
+        .map(|name| fs::read(music_group.join(name)).expect("read Fantasy music"))
+        .collect();
+
+        assert_ne!(selected, scream, "sound effect was promoted to music");
+        assert!(
+            expected_tracks.contains(&selected),
+            "Dragon Rock did not select from Fantasy.c4f/Music.c4g"
+        );
     }
 
     #[test]
