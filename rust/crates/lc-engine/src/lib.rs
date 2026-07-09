@@ -17014,6 +17014,15 @@ impl Engine {
                             denied_started.insert(pending.number);
                             object.remove_effect_by_number(pending.number);
                             state_snapshot.effects = object.state.effects.clone();
+                            // The deny returns immediately from the checker
+                            // walk (C4Effect.cpp:283-285) — checkers later
+                            // in the chain are never asked.
+                            queue.retain(|queued| match &queued.kind {
+                                EffectEventKind::Check { pending: queued_pending } => {
+                                    queued_pending.number != pending.number
+                                }
+                                _ => true,
+                            });
                         }
                         (outcome, audio_state, new_rng)
                     }),
@@ -42092,6 +42101,83 @@ func FxProbeTimer(pThis, iNumber) {
         assert!(
             object.effects.iter().any(|effect| effect.name == "Fire"),
             "priority-1 effects skip the check chain (C4Effect.cpp:170)"
+        );
+    }
+
+    #[test]
+    fn effect_check_deny_short_circuits_remaining_checkers() {
+        // C4Effect::Check (C4Effect.cpp:283-285): the FIRST Fx<Name>Effect
+        // answering C4Fx_Effect_Deny returns immediately — checkers later
+        // in the chain (higher priority, asked in ascending list order) are
+        // never called for the denied effect.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Armor", priority = 100, interval = 0 } ] };
+        }
+
+        global func FxArmorEffect(state, effect, new_name) {
+            if (new_name == "Fire") {
+                return -1;
+            }
+            return nil;
+        }
+
+        global func FxWatcherEffect(state, effect, new_name) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "add", name = "Watcher", priority = 200, interval = 0 } ] };
+            }
+            if (frame == 3) {
+                return { effects = [ { op = "add", name = "Fire", priority = 50, interval = 0 } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        assert!(
+            !object.effects.iter().any(|effect| effect.name == "Fire"),
+            "Armor denies Fire"
+        );
+
+        let calls = call_log.lock().unwrap().clone();
+        // Adding Fire asks Armor (100) first in ascending list order; its
+        // deny must stop the chain before Watcher (200) is reached.
+        assert!(
+            calls.iter().any(|name| name == "FxArmorEffect"),
+            "Armor is asked about Fire"
+        );
+        assert!(
+            !calls.iter().any(|name| name == "FxWatcherEffect"),
+            "the deny returns immediately (C4Effect.cpp:283-285) — Watcher \
+             is never asked about the already-denied Fire"
         );
     }
 
