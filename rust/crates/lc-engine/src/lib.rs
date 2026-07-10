@@ -39389,6 +39389,110 @@ func Trigger() {
     }
 
     #[test]
+    fn get_definition_uses_cpp_runtime_id_order_and_parameter_conversion() {
+        // C4Game sorts Game.Defs by raw C4ID before runtime (C4Game.cpp:112;
+        // C4Def.cpp:1394-1405), then FnGetDefinition/C4DefList::GetDef index
+        // that order (C4Script.cpp:2668-2677; C4Def.cpp:1141-1158). Zero
+        // category means C4D_All; filtering preserves that order. Negative
+        // indices become out-of-range size_t, and C4Aul nil-fills/converts
+        // the two C4ValueInt ABI slots while ignoring surplus call arguments
+        // (C4AulExec.cpp:1364-1396).
+        let mut engine = Engine::with_seed(7);
+        for (id, category) in [
+            ("AAAZ", CATEGORY_STRUCTURE),
+            ("MIDM", CATEGORY_OBJECT),
+            ("ZZZA", CATEGORY_OBJECT),
+        ] {
+            let mut definition =
+                Definition::from_script(id, id, "").expect("definition compiles");
+            definition.set_category(category);
+            engine
+                .register_definition(definition)
+                .expect("definition registers");
+        }
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "CALL",
+                    "Caller",
+                    r#"
+                    func Probe() {
+                        return [
+                            GetDefinition(),
+                            GetDefinition(1),
+                            GetDefinition(0, C4D_Structure),
+                            GetDefinition(1, C4D_Object),
+                            GetDefinition(true, C4D_Object, 123),
+                            GetDefinition(-1),
+                            GetDefinition(99)
+                        ];
+                    }
+                    "#,
+                )
+                .expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let result = engine
+            .call_object_function(caller_index, "Probe", Vec::new())
+            .expect("Probe runs");
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::C4Id("ZZZA".into()),
+                Value::C4Id("CALL".into()),
+                Value::C4Id("AAAZ".into()),
+                Value::C4Id("MIDM".into()),
+                Value::C4Id("MIDM".into()),
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+    }
+
+    #[test]
+    fn scenario_get_definition_uses_the_same_engine_catalog() {
+        // Scenario functions call the same global FnGetDefinition over
+        // Game.Defs as definition/object functions (C4Script.cpp:2668-2677),
+        // so the snapshot callback bridge must retain the runtime raw-C4ID
+        // order established by C4DefList::SortByID (C4Game.cpp:112).
+        let mut engine = Engine::with_seed(7);
+        for (id, category) in [
+            ("AAAZ", CATEGORY_STRUCTURE),
+            ("MIDM", CATEGORY_OBJECT),
+            ("ZZZA", CATEGORY_OBJECT),
+        ] {
+            let mut definition =
+                Definition::from_script(id, id, "").expect("definition compiles");
+            definition.set_category(category);
+            engine
+                .register_definition(definition)
+                .expect("definition registers");
+        }
+
+        let created = engine
+            .install_scenario_script_with_convention(
+                "Scenario",
+                r#"
+                func Initialize() {
+                    CreateObject(GetDefinition(0, C4D_Object), 0, 0, -1);
+                }
+                "#,
+                true,
+            )
+            .expect("scenario initializes");
+        assert_eq!(created.len(), 1);
+        let index = engine
+            .find_object_index(created[0])
+            .expect("scenario-created object exists");
+        assert_eq!(engine.objects[index].definition_id.as_str(), "ZZZA");
+    }
+
+    #[test]
     fn game_call_ex_broadcasts_to_goal_rule_environment_objects_like_cpp() {
         // FnGameCallEx (C4Script.cpp:3486-3500) → GRBroadcast
         // (C4ScriptHost.cpp:234-248): every LIVE object whose Category has

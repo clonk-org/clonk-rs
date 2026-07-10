@@ -973,6 +973,22 @@ impl HostWorldContext {
         self.definitions.get(id).map(|meta| meta.category)
     }
 
+    fn definition_id_by_index(&self, index: i32, category: i32) -> Option<&DefinitionId> {
+        let index = usize::try_from(index).ok()?;
+        let category = if category == 0 { -1 } else { category };
+        if category == -1 {
+            return self.definition_order.get(index);
+        }
+        self.definition_order
+            .iter()
+            .filter(|id| {
+                self.definitions
+                    .get(*id)
+                    .is_some_and(|metadata| metadata.category & category != 0)
+            })
+            .nth(index)
+    }
+
     pub(crate) fn definition_metadata(&self, id: &str) -> Option<&DefinitionMetadata> {
         self.definitions.get(id)
     }
@@ -4166,6 +4182,30 @@ fn set_component(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetDefinition (C4Script.cpp:2668-2677) indexes runtime `Game.Defs` order;
+/// C4DefList::GetDef optionally filters by overlapping category bits without
+/// reordering the surviving definitions (C4Def.cpp:1141-1158).
+fn get_definition(args: &[Value]) -> Result<Value, RuntimeError> {
+    let index = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetDefinition",
+        "index",
+    )?;
+    let category = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetDefinition",
+        "category",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        Ok(borrow
+            .as_ref()
+            .and_then(|context| context.world.definition_id_by_index(index, category))
+            .map(|id| Value::C4Id(id.as_str().to_string()))
+            .unwrap_or(Value::Nil))
+    })
+}
+
 /// FnGetDefCoreVal (C4Script.cpp:4170-4180): DefCore reflection. The hot
 /// entries real content reads resolve from the definition metadata
 /// (Width/Height/Offset from the Shape rect, Value, Mass); anything else
@@ -5806,6 +5846,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetCrew", get_crew);
     script.register_host_function("GetHiRank", get_hi_rank);
     script.register_host_function("SetComponent", set_component);
+    script.register_host_function("GetDefinition", get_definition);
     script.register_host_function("GetDefCoreVal", get_def_core_val);
     script.register_host_function("Enter", enter);
     script.register_host_function("Exit", exit_container);
@@ -24896,6 +24937,7 @@ mod tests {
         "GetCursor",
         "GetDamage",
         "GetDefCoreVal",
+        "GetDefinition",
         "GetDir",
         "GetEffect",
         "GetEffectCount",
