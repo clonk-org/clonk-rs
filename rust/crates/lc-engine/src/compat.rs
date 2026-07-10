@@ -25940,7 +25940,9 @@ impl ObjectScopeContext {
     }
 
     fn vertices(&self) -> &[ObjectVertex] {
-        if let Some(vertices) = self.pending_update.vertices.as_ref() {
+        if let Some(vertices) = self.pending_update.live_vertices.as_ref() {
+            vertices
+        } else if let Some(vertices) = self.pending_update.vertices.as_ref() {
             vertices
         } else {
             &self.vertices

@@ -2608,6 +2608,11 @@ struct ObjectDelta {
     crew_disabled: Option<bool>,
     alive: Option<bool>,
     container: Option<Option<ObjectId>>,
+    /// Direct overwrite of the current `C4Object::Shape` vertex list. Unlike
+    /// `vertices`, this does not enable `fOwnVertices` or replace the
+    /// untransformed shape base.
+    live_vertices: Option<Vec<ObjectVertex>>,
+    /// Permanent own-vertex base used by SetVertex's own-vertex modes.
     vertices: Option<Vec<ObjectVertex>>,
     graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
     draw_transform: Option<Option<DrawTransform>>,
@@ -2719,6 +2724,9 @@ impl ObjectDelta {
         if let Some(status) = update.status {
             self.status = Some(status);
         }
+        if let Some(vertices) = update.live_vertices {
+            self.live_vertices = Some(vertices);
+        }
         if let Some(vertices) = update.vertices {
             self.vertices = Some(vertices);
         }
@@ -2787,6 +2795,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             menu: update.menu,
             alive: update.alive,
             container: update.container,
+            live_vertices: update.live_vertices,
             vertices: update.vertices,
             graphics_overlays: update.graphics_overlays,
             draw_transform: update.draw_transform,
@@ -2908,6 +2917,11 @@ pub struct ObjectUpdate {
     pub alive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<Option<ObjectId>>,
+    /// Direct current-shape vertex overwrite. This deliberately leaves the
+    /// object's own-vertex mode unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_vertices: Option<Vec<ObjectVertex>>,
+    /// Permanent own-vertex base overwrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertices: Option<Vec<ObjectVertex>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3596,6 +3610,10 @@ impl Object {
         self.refresh_shape_after_state_change(previous_construction, previous_rect, false);
     }
 
+    fn set_live_shape_vertices(&mut self, vertices: Vec<ObjectVertex>) {
+        self.state.vertices = vertices;
+    }
+
     fn set_construction(&mut self, construction: i32) {
         let previous_rect = self.current_shape_rect();
         let previous_construction = self.state.construction;
@@ -3703,6 +3721,9 @@ impl Object {
                 previous_rect,
                 delta.construction.is_some(),
             );
+        }
+        if let Some(vertices) = &delta.live_vertices {
+            self.set_live_shape_vertices(vertices.clone());
         }
         outcome
     }
@@ -17160,6 +17181,7 @@ impl Engine {
             change_def,
             alive,
             container,
+            live_vertices,
             vertices,
             graphics_overlays,
             base_graphics: update_base_graphics,
@@ -17374,6 +17396,9 @@ impl Engine {
             }
             if let Some(construction) = construction {
                 object.set_construction(construction);
+            }
+            if let Some(vertices) = live_vertices {
+                object.set_live_shape_vertices(vertices);
             }
             if let Some(overlays) = graphics_overlays {
                 object.state.graphics_overlays = overlays;
