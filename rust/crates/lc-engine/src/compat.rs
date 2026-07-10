@@ -3280,6 +3280,214 @@ fn enter(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGrabContents (C4Script.cpp:320-327) and C4Object::GrabContents
+/// (C4Object.cpp:6162-6171): pTo defaults to the calling object, the source
+/// list is copied before any moves, and every still-live entry attempts a
+/// regular Enter(pTo). Individual failures do not change the true return.
+fn grab_contents(args: &[Value]) -> Result<Value, RuntimeError> {
+    let from = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GrabContents",
+        "from",
+    )?;
+    let Some(from) = from else {
+        return Ok(Value::Bool(false));
+    };
+    let explicit_to = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GrabContents",
+        "to",
+    )?;
+    let active = active_object_id();
+    let Some(to) = explicit_to.or(active) else {
+        return Ok(Value::Bool(false));
+    };
+    if to == from {
+        return Ok(Value::Bool(false));
+    }
+
+    // An explicit foreign destination becomes the call context just like
+    // FnGrabContents' pTo default would have been that object. This also
+    // lets object-arrow calls operate on freshly created pending objects.
+    if Some(to) != active {
+        return match call_world_object_function(
+            to,
+            "GrabContents",
+            &[object_reference_value(from)],
+        ) {
+            Some(result) => result,
+            None => Ok(Value::Bool(false)),
+        };
+    }
+
+    let contents = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return None;
+        };
+        // A C4Value object reference can only supply live engine objects.
+        context.get_world_object(to)?;
+        context
+            .get_world_object(from)
+            .map(|source| source.contents().to_vec())
+    });
+    let Some(contents) = contents else {
+        return Ok(Value::Bool(false));
+    };
+
+    let call_fail_safe = |target, function: &str, pars: &[Value]| {
+        if let Some(Err(error)) = call_world_object_own_function(target, function, pars) {
+            tracing::warn!(
+                %error,
+                object = target.as_u64(),
+                callback = function,
+                "script error in container callback; continuing like C++ fail-safe Call"
+            );
+        }
+    };
+
+    for child in contents {
+        let live = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.get_world_object(child))
+                .is_some_and(|object| object.is_present())
+        });
+        if !live {
+            continue;
+        }
+
+        // C4Object::Enter's first gate is the entering object's
+        // ~RejectEntrance(pTarget). GrabContents deliberately does not ask
+        // the target's ~RejectCollect because it passes no pfRejectCollect.
+        let rejected = match call_world_object_own_function(
+            child,
+            "RejectEntrance",
+            &[object_reference_value(to)],
+        ) {
+            Some(Ok(value)) => value.as_bool(),
+            Some(Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    object = child.as_u64(),
+                    "script error in RejectEntrance; continuing like C++ fail-safe Call"
+                );
+                false
+            }
+            None => false,
+        };
+        if rejected {
+            continue;
+        }
+
+        // Reject endless containment before Exit mutates anything
+        // (C4Object.cpp:1566-1568).
+        let would_cycle = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let Some(context) = borrow.as_ref() else {
+                return true;
+            };
+            let mut cursor = Some(to);
+            let mut seen = HashSet::new();
+            while let Some(container) = cursor {
+                if container == child {
+                    return true;
+                }
+                if !seen.insert(container) {
+                    return true;
+                }
+                cursor = context
+                    .get_world_object(container)
+                    .and_then(|object| object.container());
+            }
+            false
+        });
+        if would_cycle {
+            continue;
+        }
+
+        // Enter transfers by exiting first. Stage that synchronously so the
+        // fail-safe Ejection/Departure callbacks observe the live relation.
+        let previous = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return None;
+            };
+            if !context.ensure_object_scope(child) {
+                return None;
+            }
+            let scope = context.object_scope_mut(child)?;
+            let previous = scope.container();
+            if previous.is_some() {
+                scope.set_container(None);
+            }
+            Some(previous)
+        });
+        let Some(previous) = previous else {
+            continue;
+        };
+        if let Some(previous) = previous {
+            call_fail_safe(
+                previous,
+                "Ejection",
+                &[object_reference_value(child)],
+            );
+            call_fail_safe(
+                child,
+                "Departure",
+                &[object_reference_value(previous)],
+            );
+        }
+
+        let entered = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return false;
+            };
+            let child_ready = context
+                .get_world_object(child)
+                .is_some_and(|object| object.is_present() && object.container().is_none());
+            let target_ready = context
+                .get_world_object(to)
+                .is_some_and(|object| object.is_present());
+            if !child_ready || !target_ready || !context.ensure_object_scope(child) {
+                return false;
+            }
+            context
+                .object_scope_mut(child)
+                .map(|scope| scope.set_container(Some(to)))
+                .is_some()
+        });
+        if !entered {
+            continue;
+        }
+
+        call_fail_safe(to, "Collection2", &[object_reference_value(child)]);
+        let entrance_target = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            let child = context.get_world_object(child)?;
+            let current = child.container()?;
+            let current_live = context
+                .get_world_object(current)
+                .is_some_and(|object| object.is_present());
+            let original_target_live = context
+                .get_world_object(to)
+                .is_some_and(|object| object.is_present());
+            (current_live && original_target_live).then_some(current)
+        });
+        if let Some(container) = entrance_target {
+            call_fail_safe(
+                child,
+                "Entrance",
+                &[object_reference_value(container)],
+            );
+        }
+    }
+
+    Ok(Value::Bool(true))
+}
+
 /// FnExit (C4Script.cpp:372-388): pObj (or the scope object) leaves its
 /// container via C4Object::Exit. The optional tx/ty are CALLER-relative
 /// (`tx += cthr->Obj->x`, :377-381), tr == -1 draws Random(360) (:382),
@@ -5057,6 +5265,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Enter", enter);
     script.register_host_function("Exit", exit_container);
     script.register_host_function("GetComponent", get_component);
+    script.register_host_function("GrabContents", grab_contents);
     script.register_host_function("InLiquid", in_liquid);
     script.register_host_function("Material", material);
     script.register_host_function("GetMaterialVal", get_material_val);
@@ -22627,6 +22836,7 @@ mod tests {
         "GetXDir",
         "GetY",
         "GetYDir",
+        "GrabContents",
         "GrabObjectInfo",
         "InLiquid",
         "Incinerate",

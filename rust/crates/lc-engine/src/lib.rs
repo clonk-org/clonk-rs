@@ -44340,6 +44340,156 @@ public func Take(pItem) {
         );
     }
 
+    // Dragon Rock's Redefine3 creates the replacement Clonk and immediately
+    // calls `pNew->GrabContents(this())` (Drachenfels.c4s/Script.c:153-159).
+    // FnGrabContents defaults pTo to the receiver and C4Object::GrabContents
+    // snapshots the source list, then Enter()s each still-live child into the
+    // receiver (C4Script.cpp:320-327; C4Object.cpp:6162-6171). Enter leaves
+    // Owner untouched and stContents insertion reverses this equal-id pair.
+    #[test]
+    fn grab_contents_on_fresh_receiver_transfers_inventory_like_cpp() {
+        let old_script = r#"#strict
+public func Replace() {
+    var pNew = CreateObject(NEWK, 0, 0, GetOwner());
+    return(pNew->GrabContents(this()));
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("OLDK", "Old Knight", old_script)
+                    .expect("old knight compiles"),
+            )
+            .expect("old knight registers");
+        engine
+            .register_definition(simple_definition("NEWK"))
+            .expect("new knight registers");
+        engine
+            .register_definition(simple_definition("ITEM"))
+            .expect("item registers");
+
+        let old = engine
+            .spawn_object(
+                SpawnConfig::new("OLDK")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                    .with_alive(true)
+                    .with_owner(7),
+            )
+            .expect("old knight spawns");
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(3)
+                    .with_container(old),
+            )
+            .expect("first item spawns");
+        let second = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(4)
+                    .with_container(old),
+            )
+            .expect("second item spawns");
+        let old_idx = engine.find_object_index(old).expect("old knight exists");
+        assert_eq!(engine.objects[old_idx].state.contents, vec![second, first]);
+
+        let result = engine
+            .call_object_function(old_idx, "Replace", Vec::new())
+            .expect("replacement call runs");
+        assert_eq!(result, Value::Bool(true));
+
+        let new_idx = engine
+            .objects
+            .iter()
+            .position(|object| object.definition_id == "NEWK")
+            .expect("replacement exists");
+        let new = engine.objects[new_idx].id;
+        let old_idx = engine.find_object_index(old).expect("old knight remains");
+        assert!(engine.objects[old_idx].state.contents.is_empty());
+        assert_eq!(
+            engine.objects[new_idx].state.contents,
+            vec![first, second],
+            "the copied source order is fed through runtime stContents insertion"
+        );
+        let first_idx = engine.find_object_index(first).expect("first item exists");
+        let second_idx = engine.find_object_index(second).expect("second item exists");
+        assert_eq!(engine.objects[first_idx].state.container, Some(new));
+        assert_eq!(engine.objects[second_idx].state.container, Some(new));
+        assert_eq!(engine.objects[first_idx].state.owner, 3, "Owner is unchanged");
+        assert_eq!(engine.objects[second_idx].state.owner, 4, "Owner is unchanged");
+    }
+
+    // GrabContents reports whether the bulk operation itself was valid, not
+    // whether every Enter succeeded (FnGrabContents returns true after the
+    // void C4Object::GrabContents call, C4Script.cpp:320-327). Enter still
+    // runs each child's RejectEntrance gate (C4Object.cpp:1564).
+    #[test]
+    fn grab_contents_keeps_rejected_children_but_still_reports_true_like_cpp() {
+        let source_script = r#"#strict
+public func MoveTo(pDestination) { return(pDestination->GrabContents(this())); }
+public func MoveToSelf() { return(GrabContents(this())); }
+"#;
+        let rejected_script = r#"#strict
+protected func RejectEntrance(pContainer) { return(1); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("SRCE", "Source", source_script)
+                    .expect("source compiles"),
+            )
+            .expect("source registers");
+        engine
+            .register_definition(simple_definition("DEST"))
+            .expect("destination registers");
+        let mut rejected =
+            Definition::from_script("NOPE", "Rejected", rejected_script)
+                .expect("rejected item compiles");
+        rejected.set_c4_callback_convention(true);
+        engine
+            .register_definition(rejected)
+            .expect("rejected item registers");
+
+        let source = engine
+            .spawn_object(SpawnConfig::new("SRCE").with_category(CATEGORY_OBJECT))
+            .expect("source spawns");
+        let destination = engine
+            .spawn_object(SpawnConfig::new("DEST").with_category(CATEGORY_OBJECT))
+            .expect("destination spawns");
+        let rejected = engine
+            .spawn_object(
+                SpawnConfig::new("NOPE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(source),
+            )
+            .expect("rejected item spawns");
+
+        let source_idx = engine.find_object_index(source).expect("source exists");
+        let result = engine
+            .call_object_function(
+                source_idx,
+                "MoveTo",
+                vec![object_reference_value(destination)],
+            )
+            .expect("bulk move runs");
+        assert_eq!(result, Value::Bool(true), "an individual veto is ignored");
+        let rejected_idx = engine
+            .find_object_index(rejected)
+            .expect("rejected item exists");
+        assert_eq!(engine.objects[rejected_idx].state.container, Some(source));
+
+        let source_idx = engine.find_object_index(source).expect("source exists");
+        assert_eq!(
+            engine
+                .call_object_function(source_idx, "MoveToSelf", Vec::new())
+                .expect("self move runs"),
+            Value::Bool(false),
+            "pTo == from is rejected before the bulk operation"
+        );
+    }
+
     // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure
     // MARKER effect: `AddEffect("Divinity", o, 200, 1)` on FOREIGN
     // targets found via the FindObject find-next iteration
