@@ -495,6 +495,7 @@ impl Scenario {
         let (physics, gravity) = derive_legacy_physics(&manifest)?;
         let environment = derive_legacy_environment(&manifest)?;
         let weather_init = derive_legacy_weather_init(&manifest)?;
+        let teams = load_legacy_teams(group, languages)?;
         // C4Sky always initializes for a running game (C4Sky::Init,
         // C4Sky.cpp:71-152): bitmap sky or fade gradient.
         let sky = derive_legacy_sky(group, &manifest);
@@ -522,7 +523,7 @@ impl Scenario {
             definition_load_steps,
             scenario_system_scripts: load_scenario_system_scripts(group)?,
             player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
-            teams: Vec::new(),
+            teams,
             standard_names: group
                 .read_file("Names.txt")
                 .ok()
@@ -2779,6 +2780,59 @@ fn load_legacy_scenario_script<S: AsRef<str>>(
         }));
     }
     Ok(None)
+}
+
+fn load_legacy_teams<S: AsRef<str>>(
+    group: &Group,
+    languages: &[S],
+) -> Result<Vec<TeamInfo>, ScenarioError> {
+    if !group.exists("Teams.txt") {
+        return Ok(Vec::new());
+    }
+    let source = decode_legacy_script_text(&group.read_file("Teams.txt")?);
+    let source = localize_script_source(group, &source, languages)?;
+    Ok(parse_legacy_teams_source(&source))
+}
+
+fn parse_legacy_teams_source(source: &str) -> Vec<TeamInfo> {
+    let mut teams = Vec::new();
+    let mut current = None;
+    for line in source.lines().map(str::trim) {
+        if line.starts_with('[') && line.ends_with(']') {
+            if let Some(team) = current.take() {
+                teams.push(team);
+            }
+            let section = line[1..line.len() - 1].trim();
+            current = section
+                .eq_ignore_ascii_case("Team")
+                .then(|| TeamInfo::new(0, "", 0));
+            continue;
+        }
+        let Some(team) = current.as_mut() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim().to_ascii_lowercase().as_str() {
+            "id" => {
+                if let Ok(id) = value.trim().parse() {
+                    team.id = id;
+                }
+            }
+            "name" => team.name = value.trim().to_string(),
+            "color" => {
+                if let Ok(color) = value.trim().parse() {
+                    team.color = color;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(team) = current {
+        teams.push(team);
+    }
+    teams
 }
 
 /// Collects the scripts of a System.c4g group in the group's existing entry
@@ -6195,6 +6249,23 @@ global func Step(state, frame, random)
     return nil;
 }
 "#;
+
+    #[test]
+    fn legacy_team_sections_keep_cpp_list_order_and_fields() {
+        // C4TeamList::CompileFunc reads the repeated Team sections into its
+        // array in file order (C4Teams.cpp:556-613).
+        let teams = parse_legacy_teams_source(
+            "[Teams]\nActive=1\n\n[Team]\nid=2\nName=Right\nColor=16053492\n\n\
+             [Team]\nid=1\nName=Left\nColor=14699548\n",
+        );
+        assert_eq!(
+            teams,
+            vec![
+                TeamInfo::new(2, "Right", 16_053_492),
+                TeamInfo::new(1, "Left", 14_699_548),
+            ]
+        );
+    }
 
     #[test]
     fn legacy_c4sval_evaluate_draws_via_the_game_rng_like_cpp() {

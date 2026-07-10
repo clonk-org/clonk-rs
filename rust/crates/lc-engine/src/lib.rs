@@ -57280,6 +57280,47 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
     }
 
     #[test]
+    fn team_query_hosts_follow_cpp_list_order_and_missing_value_rules() {
+        // FnGetTeamName/Color/ByIndex/Count query Game.Teams directly
+        // (C4Script.cpp:5803-5824); GetTeamByIndex is list-order and rejects
+        // out-of-range indices (C4Teams.cpp:423-430).
+        let script = r#"#strict
+func Probe() {
+  return [GetTeamCount(), GetTeamByIndex(0), GetTeamByIndex(1), GetTeamByIndex(2),
+          GetTeamColor(2), GetTeamColor(99), GetTeamName(1), GetTeamName(99)];
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.set_teams(vec![
+            TeamInfo::new(2, "Right", 0x00f4_faf4),
+            TeamInfo::new(1, "Left", 0x00e0_4a9c),
+        ]);
+        engine
+            .register_definition(Definition::from_script("TEAM", "Teams", script).unwrap())
+            .unwrap();
+        let object = engine
+            .spawn_object(SpawnConfig::new("TEAM"))
+            .expect("team probe spawns");
+        let index = engine.find_object_index(object).expect("team probe exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Probe", Vec::new())
+                .expect("team queries run"),
+            Value::Array(vec![
+                Value::Int(2),
+                Value::Int(2),
+                Value::Int(1),
+                Value::Nil,
+                Value::Int(0x00f4_faf4),
+                Value::Nil,
+                Value::String("Left".to_string()),
+                Value::Nil,
+            ])
+        );
+    }
+
+    #[test]
     fn scenario_scoreboard_sort_is_stable_and_keeps_the_caption_row() -> Result<(), EngineError> {
         // C4Scoreboard::SortBy leaves row zero fixed and cocktail-sorts data
         // rows by iVal; strict comparisons preserve equal-key insertion

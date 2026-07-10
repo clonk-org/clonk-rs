@@ -1903,6 +1903,75 @@ fn get_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn get_team_count(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        Ok(Value::Int(
+            cell.borrow()
+                .as_ref()
+                .map(|context| truncate_to_i32(context.world.teams().len() as u64))
+                .unwrap_or(0),
+        ))
+    })
+}
+
+fn get_team_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
+    let index = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetTeamByIndex",
+        "index",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        Ok(usize::try_from(index)
+            .ok()
+            .and_then(|index| context.world.teams().get(index))
+            .map_or(Value::Nil, |team| Value::Int(team.id)))
+    })
+}
+
+fn get_team_color(args: &[Value]) -> Result<Value, RuntimeError> {
+    let id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetTeamColor",
+        "team",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        Ok(context
+            .world
+            .teams()
+            .iter()
+            .find(|team| team.id == id)
+            .map_or(Value::Nil, |team| Value::Int(team.color as i32)))
+    })
+}
+
+fn get_team_name(args: &[Value]) -> Result<Value, RuntimeError> {
+    let id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetTeamName",
+        "team",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        Ok(context
+            .world
+            .teams()
+            .iter()
+            .find(|team| team.id == id)
+            .map_or(Value::Nil, |team| Value::String(team.name.clone())))
+    })
+}
+
 fn get_player_type(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -6136,6 +6205,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerName", get_player_name);
     script.register_host_function("GetPlayerVal", get_player_val);
     script.register_host_function("GetPlayerTeam", get_player_team);
+    script.register_host_function("GetTeamCount", get_team_count);
+    script.register_host_function("GetTeamByIndex", get_team_by_index);
+    script.register_host_function("GetTeamColor", get_team_color);
+    script.register_host_function("GetTeamName", get_team_name);
     script.register_host_function("GetPlayerType", get_player_type);
     script.register_host_function("GetPlayerID", get_player_id);
     script.register_host_function("GetWealth", get_wealth);
@@ -25505,6 +25578,10 @@ mod tests {
         "GetSeason",
         "GetSelectCount",
         "GetSkyAdjust",
+        "GetTeamByIndex",
+        "GetTeamColor",
+        "GetTeamCount",
+        "GetTeamName",
         "GetTemperature",
         "GetType",
         "GetValues",
