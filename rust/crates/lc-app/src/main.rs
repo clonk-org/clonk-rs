@@ -20,6 +20,7 @@ mod network;
 mod object_menu;
 mod save_browser;
 mod settings;
+mod startup_player_files;
 
 use std::cmp::Ordering;
 use std::collections::{
@@ -30,7 +31,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::ptr::NonNull;
@@ -69,11 +70,11 @@ use lc_engine::{
     FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
-    default_owner_color, draw_image, AboutAction, ColorByOwnerMask, CrewOverlay, CursorAtlas,
+    default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas,
     DefinitionSprite, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData,
     InputDispatcher, KeyCode, MainMenuAction, MainMenuItem, PlayerOverlay, ScenarioEntry,
-    ScenarioKind, SkyRenderState, StartupAboutDialog, StartupMainMenu, StartupMenu,
-    StartupMenuAction, ViewportInput, ViewportPointer,
+    ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput,
+    ViewportPointer,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::{ButtonTextures, Rect as GuiRect};
@@ -93,6 +94,7 @@ use object_menu::{
 use pixels::{Pixels, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
+use startup_player_files::{discover_player_files, persist_activations, StartupPlayerFile};
 use serde::{
     de::{self, Unexpected, Visitor},
     ser::Serializer,
@@ -193,7 +195,7 @@ struct Cli {
         long = "menu-view",
         value_name = "VIEW",
         default_value = "main",
-        help = "Startup view for --dump-menu-frame: main, scenarios, options, or about."
+        help = "Startup view for --dump-menu-frame: main, scenarios, net, plrsel, options, or about."
     )]
     menu_view: String,
 }
@@ -624,6 +626,8 @@ impl FrontendAssets {
             background: self.dialog_image("StartupPlrSelBG.png")?,
             checkbox: self.dialog_image("GUICheckbox.png")?,
             button: self.dialog_image("GUIButton.png")?,
+            button_down: self.dialog_image("GUIButtonDown.png")?,
+            button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             player: self.dialog_image("Player.png")?,
         })
     }
@@ -900,6 +904,31 @@ fn parse_socket_addr(input: &str, kind: &str) -> Result<SocketAddr> {
     input
         .parse::<SocketAddr>()
         .with_context(|| format!("invalid {kind} address `{input}`"))
+}
+
+fn resolve_join_socket(input: &str, default_port: u16) -> Result<SocketAddr> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(anyhow!("address is empty"));
+    }
+    if let Ok(address) = input.parse::<SocketAddr>() {
+        return Ok(address);
+    }
+    if let Ok(ip) = input.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, default_port));
+    }
+    let address = if input.rsplit_once(':').is_some_and(|(_, port)| {
+        !port.is_empty() && port.chars().all(|character| character.is_ascii_digit())
+    }) {
+        input.to_string()
+    } else {
+        format!("{input}:{default_port}")
+    };
+    address
+        .to_socket_addrs()
+        .with_context(|| format!("could not resolve `{input}`"))?
+        .next()
+        .ok_or_else(|| anyhow!("`{input}` resolved to no socket addresses"))
 }
 
 fn test_scenario_load(path: &std::path::Path, app_paths: Option<&Arc<AppPaths>>) -> Result<()> {
@@ -1493,6 +1522,10 @@ fn main() -> Result<()> {
                     control_flow.set_exit();
                     return;
                 }
+                if app.take_exit_request() {
+                    control_flow.set_exit();
+                    return;
+                }
                 let now = Instant::now();
                 let frame_time = now.saturating_duration_since(previous_instant);
                 previous_instant = now;
@@ -1610,6 +1643,10 @@ fn handle_window_event(
             app.handle_key(keycode, state)
                 .context("failed to process key input")?;
         }
+        WindowEvent::ReceivedCharacter(character) => {
+            app.handle_text_input(character)
+                .context("failed to process text input")?;
+        }
         WindowEvent::Moved(position) => {
             if display_options.mode == DisplayMode::Window && !window.is_maximized() {
                 display_options.record_position(position.x, position.y);
@@ -1617,7 +1654,8 @@ fn handle_window_event(
             display_options.record_maximized(window.is_maximized());
         }
         WindowEvent::Touch(touch) => {
-            let position = GuiPoint::new(touch.location.x as f32, touch.location.y as f32);
+            let (x, y) = presenter.position_to_gui(touch.location.x, touch.location.y);
+            let position = GuiPoint::new(x as f32, y as f32);
             app.handle_touch(touch.phase, position)
                 .context("failed to process touch input")?;
         }
@@ -2789,8 +2827,13 @@ struct GameApp {
     fallback_ground: i32,
     menu_state: MenuState,
     main_menu_state: MainMenuState,
+    startup_network_dialog: Option<lc_frontend::startup_netdlg::NetDlgController>,
+    startup_player_dialog: Option<lc_frontend::startup_plrsel::PlrSelController>,
+    startup_player_files: Vec<StartupPlayerFile>,
+    startup_player_models: Vec<lc_frontend::startup_plrsel::PlrSelPlayer>,
+    startup_options_dialog: Option<lc_frontend::startup_options_dlg::OptionsDlgState>,
     control_options: Option<ControlOptionsState>,
-    about_dialog: Option<AboutDialogState>,
+    startup_about_dialog: Option<lc_frontend::startup_about_dlg::AboutDlgState>,
     startup_view: StartupView,
     startup_view_flags: StartupViewFlags,
     object_menu: Option<ObjectMenuState>,
@@ -2813,10 +2856,12 @@ struct GameApp {
     active_scenario: Option<FrontendScenario>,
     audio: Option<AudioContext>,
     assets: Arc<FrontendAssets>,
+    app_paths: Option<AppPaths>,
     material_library: Option<Arc<MaterialSet>>,
     network: Option<NetworkManager>,
     network_mode: Option<NetworkMode>,
     network_lobby: Option<NetworkLobbyState>,
+    startup_network_connection: Option<StartupNetworkConnection>,
     sync_checks: SyncCheckState,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
@@ -2847,6 +2892,9 @@ struct GameApp {
     /// Last scenario-list row click (index, time) for double-click detection
     /// (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
     scensel_last_click: Option<(usize, Instant)>,
+    /// Last player-list row click (index, time) for forwarding the list box's
+    /// double-click event (C4StartupPlrSelDlg.cpp:574-575).
+    plrsel_last_click: Option<(usize, Instant)>,
     /// Wall clock of the scenario start; `Game.Time` counts real seconds
     /// while the game runs (C4Game::Sec1Timer, src/C4Game.cpp:1737-1741).
     run_started: Option<Instant>,
@@ -2920,6 +2968,10 @@ struct RecordingSession {
     started_at: SystemTime,
 }
 
+struct StartupNetworkConnection {
+    receiver: Receiver<std::result::Result<(NetworkMode, NetworkManager), String>>,
+}
+
 impl RecordingSession {
     fn new(
         recorder: Recorder,
@@ -2987,10 +3039,6 @@ struct MenuLayer {
 struct MainMenuState {
     menu: StartupMainMenu,
     participants_label: String,
-}
-
-struct AboutDialogState {
-    dialog: lc_frontend::StartupAboutDialog,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5202,6 +5250,41 @@ fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
         .unwrap_or(false)
 }
 
+fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let masterserver_signup = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("Network"), "MasterServerSignUp"))
+        .map(parse_config_bool)
+        .unwrap_or(true);
+    let port = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("Network"), "PortTCP"))
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .unwrap_or(11112);
+    (masterserver_signup, port)
+}
+
+fn persist_config_value(
+    paths: &AppPaths,
+    section: &str,
+    key: &str,
+    value: impl Into<String>,
+) -> io::Result<()> {
+    let path = paths.config_file();
+    let mut config = match Config::load(&path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+        Err(error) => return Err(error),
+    };
+    config.set_in(Some(section), key, value);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    config.save(path)
+}
+
 fn load_participants_label(paths: Option<&AppPaths>) -> String {
     // C++ C4StartupMainDlg::UpdateParticipants (C4StartupMainDlg.cpp:174-200):
     // IDS_DESC_PLRS ("Players: ") + comma-separated player file basenames
@@ -5352,6 +5435,17 @@ impl GameApp {
         };
         let player_name = runtime.player_name.clone();
         let selected_player_file = load_selected_player_file(paths);
+        let startup_player_files = match paths.map(discover_player_files).transpose() {
+            Ok(players) => players.unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(%error, "failed to discover startup player files");
+                Vec::new()
+            }
+        };
+        let startup_player_models = startup_player_files
+            .iter()
+            .map(|entry| entry.render_model.clone())
+            .collect();
         let network_lobby = match (&network_mode, &network) {
             (Some(mode), Some(manager)) => Some(NetworkLobbyState::new(
                 manager.local_client_id(),
@@ -5448,8 +5542,13 @@ impl GameApp {
             fallback_ground: DEFAULT_GROUND_HEIGHT,
             menu_state,
             main_menu_state,
+            startup_network_dialog: None,
+            startup_player_dialog: None,
+            startup_player_files,
+            startup_player_models,
+            startup_options_dialog: None,
             control_options: None,
-            about_dialog: None,
+            startup_about_dialog: None,
             startup_view: StartupView::MainMenu,
             startup_view_flags: StartupViewFlags {
                 fair_crew: load_fair_crew_flag(paths),
@@ -5468,10 +5567,12 @@ impl GameApp {
             active_scenario: None,
             audio,
             assets: assets.clone(),
+            app_paths: paths.cloned(),
             material_library: None,
             network,
             network_mode,
             network_lobby,
+            startup_network_connection: None,
             sync_checks: SyncCheckState::new(),
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(|p| p.recordings_dir()),
@@ -5494,6 +5595,7 @@ impl GameApp {
             menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
             scensel_last_click: None,
+            plrsel_last_click: None,
             run_started: None,
             board_line: None,
             show_startup_hint: false,
@@ -5535,13 +5637,29 @@ impl GameApp {
             self.menu_state.set_pointer_position(None);
             self.main_menu_state.resize(width_f, height_f);
             self.main_menu_state.set_pointer_position(None);
+            if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                dialog.resize(width as i32, height as i32);
+                dialog.pointer_left();
+            }
+            if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                dialog.resize(width as i32, height as i32);
+                dialog.pointer_left();
+            }
+            if let (Some(dialog), Some(fonts), Some(book)) = (
+                self.startup_options_dialog.as_mut(),
+                self.assets.clonk_fonts.as_deref(),
+                self.assets.options_book_fonts.as_deref(),
+            ) {
+                dialog.resize(width as i32, height as i32, fonts, book);
+                dialog.pointer_left();
+            }
             if let Some(options) = self.control_options.as_mut() {
                 options.resize(width_f, height_f);
                 options.set_pointer_position(None);
             }
-            if let Some(about) = self.about_dialog.as_mut() {
-                about.dialog.resize(width_f, height_f);
-                about.dialog.set_pointer_position(None);
+            if let Some(dialog) = self.startup_about_dialog.as_mut() {
+                dialog.resize(width as i32, height as i32);
+                dialog.pointer_left();
             }
             if let Some(lobby) = self.network_lobby.as_mut() {
                 lobby.update_layout(width_f, height_f);
@@ -5809,17 +5927,113 @@ impl GameApp {
         }
     }
 
+    fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::NetworkGame
+            || character.is_control()
+        {
+            return Ok(());
+        }
+        self.mark_menu_dirty();
+        let mut encoded = [0_u8; 4];
+        let text = character.encode_utf8(&mut encoded);
+        let actions = self
+            .startup_network_dialog
+            .as_mut()
+            .map(|dialog| dialog.handle_text_input(text))
+            .unwrap_or_default();
+        self.process_network_dialog_actions(actions)
+    }
+
+    fn handle_startup_dialog_key(
+        &mut self,
+        key: KeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.legacy_control_options_active() {
+            let commands = self
+                .control_options
+                .as_mut()
+                .map(|options| match state {
+                    ElementState::Pressed => options.handle_key_down(key),
+                    ElementState::Released => options.handle_key_up(key),
+                })
+                .unwrap_or_default();
+            self.process_control_options_commands(commands)?;
+            return Ok(true);
+        }
+        match self.startup_view {
+            StartupView::NetworkGame => {
+                let actions = self
+                    .startup_network_dialog
+                    .as_mut()
+                    .map(|dialog| match state {
+                        ElementState::Pressed => dialog.handle_key_down(key),
+                        ElementState::Released => dialog.handle_key_up(key),
+                    })
+                    .unwrap_or_default();
+                self.process_network_dialog_actions(actions)?;
+            }
+            StartupView::PlayerSelection => {
+                let actions = self
+                    .startup_player_dialog
+                    .as_mut()
+                    .map(|dialog| match state {
+                        ElementState::Pressed => dialog.handle_key_down(key),
+                        ElementState::Released => dialog.handle_key_up(key),
+                    })
+                    .unwrap_or_default();
+                self.process_player_dialog_actions(actions)?;
+            }
+            StartupView::Options => {
+                let actions = self
+                    .startup_options_dialog
+                    .as_mut()
+                    .map(|dialog| match state {
+                        ElementState::Pressed => dialog.handle_key_down(key),
+                        ElementState::Released => dialog.handle_key_up(key),
+                    })
+                    .unwrap_or_default();
+                self.process_options_dialog_actions(actions)?;
+            }
+            StartupView::About => {
+                let actions = self
+                    .startup_about_dialog
+                    .as_mut()
+                    .map(|dialog| match state {
+                        ElementState::Pressed => dialog.handle_key_down(key),
+                        ElementState::Released => dialog.handle_key_up(key),
+                    })
+                    .unwrap_or_default();
+                self.process_about_dialog_actions(actions)?;
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn legacy_control_options_active(&self) -> bool {
+        self.startup_view == StartupView::Options
+            && self
+                .startup_options_dialog
+                .as_ref()
+                .is_some_and(|dialog| {
+                    dialog.active_sheet()
+                        == lc_frontend::startup_options_dlg::OptionsSheet::Keyboard
+                })
+    }
+
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
         if state == ElementState::Pressed {
             match key {
-                VirtualKeyCode::F5 => {
+                VirtualKeyCode::F5 if matches!(self.mode, AppMode::Running) => {
                     if let Err(err) = self.quick_save() {
                         tracing::error!(error = ?err, "quick save failed");
                     }
                     return Ok(());
                 }
-                VirtualKeyCode::F9 => {
+                VirtualKeyCode::F9 if matches!(self.mode, AppMode::Running) => {
                     if let Err(err) = self.quick_load() {
                         tracing::error!(error = ?err, "quick load failed");
                     }
@@ -5859,29 +6073,93 @@ impl GameApp {
                     }
                     return Ok(());
                 }
-                if self.startup_view == StartupView::Options {
-                    if let Some(options) = self.control_options.as_mut() {
-                        let mut commands = Vec::new();
-                        if state == ElementState::Pressed {
-                            if let Some(command) =
-                                options.handle_virtual_key(key, &mut self.bindings)
-                            {
-                                commands.push(command);
+                if self.startup_view == StartupView::NetworkGame
+                    && state == ElementState::Pressed
+                    && key == VirtualKeyCode::Back
+                {
+                    let actions = self
+                        .startup_network_dialog
+                        .as_mut()
+                        .map(|dialog| dialog.delete_join_address_char())
+                        .unwrap_or_default();
+                    if !actions.is_empty() {
+                        self.process_network_dialog_actions(actions)?;
+                        return Ok(());
+                    }
+                }
+                if state == ElementState::Pressed {
+                    if self.startup_view == StartupView::NetworkGame
+                        && key == VirtualKeyCode::F5
+                    {
+                        self.process_network_dialog_actions(vec![
+                            lc_frontend::startup_netdlg::NetDlgAction::Refresh,
+                        ])?;
+                        return Ok(());
+                    }
+                    if self.startup_view == StartupView::PlayerSelection {
+                        let selected = self
+                            .startup_player_dialog
+                            .as_ref()
+                            .and_then(|dialog| dialog.selected_index());
+                        let action = match key {
+                            VirtualKeyCode::Insert => {
+                                Some(lc_frontend::startup_plrsel::PlrSelAction::NewPlayer)
                             }
+                            VirtualKeyCode::Delete => selected.map(
+                                lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer,
+                            ),
+                            VirtualKeyCode::F2 => selected.map(
+                                lc_frontend::startup_plrsel::PlrSelAction::PlayerProperties,
+                            ),
+                            _ => None,
+                        };
+                        if let Some(action) = action {
+                            self.process_player_dialog_actions(vec![action])?;
+                            return Ok(());
                         }
-                        if let Some(gui_key) = map_key_code(key) {
-                            let action_commands = match state {
+                    }
+                }
+                if self.legacy_control_options_active() {
+                    if key == VirtualKeyCode::Back && state == ElementState::Pressed {
+                        self.process_control_options_commands(vec![
+                            ControlOptionsCommand::Close,
+                        ])?;
+                        return Ok(());
+                    }
+                    let mut commands = Vec::new();
+                    if state == ElementState::Pressed {
+                        if let Some(command) = self
+                            .control_options
+                            .as_mut()
+                            .and_then(|options| {
+                                options.handle_virtual_key(key, &mut self.bindings)
+                            })
+                        {
+                            commands.push(command);
+                        }
+                    }
+                    if let Some(gui_key) = map_key_code(key) {
+                        if let Some(options) = self.control_options.as_mut() {
+                            commands.extend(match state {
                                 ElementState::Pressed => options.handle_key_down(gui_key),
                                 ElementState::Released => options.handle_key_up(gui_key),
-                            };
-                            commands.extend(action_commands);
+                            });
                         }
-                        let _ = options;
-                        self.process_control_options_commands(commands)?;
                     }
+                    self.process_control_options_commands(commands)?;
+                    return Ok(());
+                }
+                if self.startup_view == StartupView::MainMenu
+                    && state == ElementState::Pressed
+                    && key == VirtualKeyCode::Escape
+                {
+                    self.request_exit();
                     return Ok(());
                 }
                 if let Some(gui_key) = map_key_code(key) {
+                    if self.handle_startup_dialog_key(gui_key, state)? {
+                        return Ok(());
+                    }
                     match self.startup_view {
                         StartupView::ScenarioBrowser => match state {
                             ElementState::Pressed => match gui_key {
@@ -5915,11 +6193,7 @@ impl GameApp {
                                 }
                             }
                         },
-                        StartupView::NetworkGame | StartupView::PlayerSelection => {
-                            if state == ElementState::Pressed && gui_key == KeyCode::Escape {
-                                self.show_main_menu();
-                            }
-                        }
+                        StartupView::NetworkGame | StartupView::PlayerSelection => {}
                         StartupView::MainMenu => {
                             let actions = match state {
                                 ElementState::Pressed => {
@@ -5948,16 +6222,7 @@ impl GameApp {
                                     .handle_menu_input(|menu| menu.menu().handle_key_up(gui_key))?,
                             }
                         }
-                        StartupView::Options => {}
-                        StartupView::About => {
-                            if let Some(about) = self.about_dialog.as_mut() {
-                                let actions = match state {
-                                    ElementState::Pressed => about.dialog.handle_key_down(gui_key),
-                                    ElementState::Released => about.dialog.handle_key_up(gui_key),
-                                };
-                                self.process_about_actions(actions)?;
-                            }
-                        }
+                        StartupView::Options | StartupView::About => {}
                     }
                 }
                 Ok(())
@@ -7222,6 +7487,9 @@ impl GameApp {
         match self.mode {
             AppMode::Menu => {
                 if let Some(key) = menu_key_from_control_button(button) {
+                    if self.handle_startup_dialog_key(key, state)? {
+                        return Ok(());
+                    }
                     match self.startup_view {
                         StartupView::ScenarioBrowser => match state {
                             ElementState::Pressed => {
@@ -7247,25 +7515,7 @@ impl GameApp {
                                 self.handle_menu_input(|menu| menu.menu().handle_key_up(key))?
                             }
                         },
-                        StartupView::Options => {
-                            if let Some(commands) =
-                                self.control_options.as_mut().map(|options| match state {
-                                    ElementState::Pressed => options.handle_key_down(key),
-                                    ElementState::Released => options.handle_key_up(key),
-                                })
-                            {
-                                self.process_control_options_commands(commands)?;
-                            }
-                        }
-                        StartupView::About => {
-                            if let Some(about) = self.about_dialog.as_mut() {
-                                let actions = match state {
-                                    ElementState::Pressed => about.dialog.handle_key_down(key),
-                                    ElementState::Released => about.dialog.handle_key_up(key),
-                                };
-                                self.process_about_actions(actions)?;
-                            }
-                        }
+                        StartupView::Options | StartupView::About => {}
                     }
                 }
             }
@@ -7288,6 +7538,9 @@ impl GameApp {
             }
             return Ok(());
         }
+        if self.handle_startup_dialog_key(KeyCode::Escape, state)? {
+            return Ok(());
+        }
         match self.startup_view {
             StartupView::ScenarioBrowser => match state {
                 ElementState::Pressed => {
@@ -7297,37 +7550,18 @@ impl GameApp {
                     self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?
                 }
             },
-            StartupView::NetworkGame | StartupView::PlayerSelection => {
-                if state == ElementState::Pressed {
-                    self.show_main_menu();
-                }
-            }
+            StartupView::NetworkGame | StartupView::PlayerSelection => {}
             StartupView::MainMenu => {
-                let actions = match state {
-                    ElementState::Pressed => self.main_menu_state.handle_key_down(KeyCode::Escape),
-                    ElementState::Released => self.main_menu_state.handle_key_up(KeyCode::Escape),
-                };
-                self.process_main_menu_actions(actions)?;
+                if state == ElementState::Pressed {
+                    self.request_exit();
+                }
             }
             StartupView::NetworkLobby => {
                 if state == ElementState::Pressed {
                     self.show_main_menu();
                 }
             }
-            StartupView::Options => {
-                if state == ElementState::Pressed {
-                    self.process_control_options_command(ControlOptionsCommand::Close)?;
-                }
-            }
-            StartupView::About => {
-                if let Some(about) = self.about_dialog.as_mut() {
-                    let actions = match state {
-                        ElementState::Pressed => about.dialog.handle_key_down(KeyCode::Escape),
-                        ElementState::Released => about.dialog.handle_key_up(KeyCode::Escape),
-                    };
-                    self.process_about_actions(actions)?;
-                }
-            }
+            StartupView::Options | StartupView::About => {}
         }
         Ok(())
     }
@@ -7352,7 +7586,11 @@ impl GameApp {
         }
         match action {
             GamepadActionType::Select => match self.mode {
-                AppMode::Menu => match self.startup_view {
+                AppMode::Menu => {
+                    if self.handle_startup_dialog_key(KeyCode::Enter, state)? {
+                        return Ok(());
+                    }
+                    match self.startup_view {
                     StartupView::ScenarioBrowser => match state {
                         ElementState::Pressed => self.handle_menu_input(|menu| {
                             menu.menu().handle_key_down(KeyCode::Enter)
@@ -7379,30 +7617,9 @@ impl GameApp {
                         ElementState::Released => self
                             .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
                     },
-                    StartupView::Options => {
-                        if let Some(commands) =
-                            self.control_options.as_mut().map(|options| match state {
-                                ElementState::Pressed => options.handle_key_down(KeyCode::Enter),
-                                ElementState::Released => options.handle_key_up(KeyCode::Enter),
-                            })
-                        {
-                            self.process_control_options_commands(commands)?;
-                        }
+                    StartupView::Options | StartupView::About => {}
                     }
-                    StartupView::About => {
-                        if let Some(about) = self.about_dialog.as_mut() {
-                            let actions = match state {
-                                ElementState::Pressed => {
-                                    about.dialog.handle_key_down(KeyCode::Enter)
-                                }
-                                ElementState::Released => {
-                                    about.dialog.handle_key_up(KeyCode::Enter)
-                                }
-                            };
-                            self.process_about_actions(actions)?;
-                        }
-                    }
-                },
+                }
                 AppMode::Running | AppMode::Loading => {}
             },
             GamepadActionType::Cancel => match self.mode {
@@ -7444,7 +7661,22 @@ impl GameApp {
                         state.set_pointer_position(Some(point));
                         state.menu().handle_pointer_move(point)
                     }),
-                    StartupView::NetworkGame | StartupView::PlayerSelection => Ok(()),
+                    StartupView::NetworkGame => {
+                        let actions = self
+                            .startup_network_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.handle_pointer_move(point))
+                            .unwrap_or_default();
+                        self.process_network_dialog_actions(actions)
+                    }
+                    StartupView::PlayerSelection => {
+                        let actions = self
+                            .startup_player_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.handle_pointer_move(point))
+                            .unwrap_or_default();
+                        self.process_player_dialog_actions(actions)
+                    }
                     StartupView::MainMenu => {
                         self.main_menu_state.set_pointer_position(Some(point));
                         let actions = self.main_menu_state.handle_pointer_move(point);
@@ -7471,26 +7703,32 @@ impl GameApp {
                         }
                     }
                     StartupView::Options => {
-                        let commands = if let Some(options) = self.control_options.as_mut() {
-                            options.set_pointer_position(Some(point));
-                            Some(options.handle_pointer_move(point))
-                        } else {
-                            None
-                        };
-                        if let Some(commands) = commands {
-                            self.process_control_options_commands(commands)
-                        } else {
-                            Ok(())
+                        let actions = self
+                            .startup_options_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.handle_pointer_move(point))
+                            .unwrap_or_default();
+                        self.process_options_dialog_actions(actions)?;
+                        if self.legacy_control_options_active() {
+                            let commands = self
+                                .control_options
+                                .as_mut()
+                                .map(|options| {
+                                    options.set_pointer_position(Some(point));
+                                    options.handle_pointer_move(point)
+                                })
+                                .unwrap_or_default();
+                            self.process_control_options_commands(commands)?;
                         }
+                        Ok(())
                     }
                     StartupView::About => {
-                        if let Some(about) = self.about_dialog.as_mut() {
-                            about.dialog.set_pointer_position(Some(point));
-                            let actions = about.dialog.handle_pointer_move(point);
-                            self.process_about_actions(actions)
-                        } else {
-                            Ok(())
-                        }
+                        let actions = self
+                            .startup_about_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.handle_pointer_move(point))
+                            .unwrap_or_default();
+                        self.process_about_dialog_actions(actions)
                     }
                 }
             }
@@ -7631,7 +7869,78 @@ impl GameApp {
                     return Ok(());
                 }
                 match self.startup_view {
-                    StartupView::NetworkGame | StartupView::PlayerSelection => Ok(()),
+                    StartupView::NetworkGame => {
+                        let actions = self
+                            .startup_network_dialog
+                            .as_mut()
+                            .and_then(|dialog| {
+                                dialog.pointer_position().map(|point| match button_state {
+                                    ElementState::Pressed => dialog.handle_pointer_down(point),
+                                    ElementState::Released => dialog.handle_pointer_up(point),
+                                })
+                            })
+                            .unwrap_or_default();
+                        self.process_network_dialog_actions(actions)
+                    }
+                    StartupView::PlayerSelection => {
+                        let point = self
+                            .startup_player_dialog
+                            .as_ref()
+                            .and_then(|dialog| dialog.pointer_position());
+                        let clicked_row = point.and_then(|point| {
+                            let layout = lc_frontend::startup_plrsel::plrsel_layout(
+                                self.graphics.surface().width() as i32,
+                                self.graphics.surface().height() as i32,
+                            );
+                            let offset = point.y as i32 - layout.list_client.y;
+                            let in_name_column = point.x
+                                >= (layout.list_client.x + layout.item_height) as f32
+                                && point.x
+                                    < (layout.list_client.x + layout.item_width) as f32;
+                            (in_name_column
+                                && offset >= 0
+                                && offset % layout.item_pitch < layout.item_height)
+                                .then_some((offset / layout.item_pitch) as usize)
+                                .filter(|index| *index < self.startup_player_models.len())
+                        });
+                        let is_double = if button_state == ElementState::Released {
+                            let now = Instant::now();
+                            let is_double = clicked_row.is_some_and(|index| {
+                                self.plrsel_last_click.is_some_and(|(last_index, at)| {
+                                    last_index == index
+                                        && now.duration_since(at) < Duration::from_millis(500)
+                                })
+                            });
+                            self.plrsel_last_click = clicked_row.map(|index| (index, now));
+                            is_double
+                        } else {
+                            false
+                        };
+                        let mut actions = self
+                            .startup_player_dialog
+                            .as_mut()
+                            .and_then(|dialog| {
+                                point.map(|point| match button_state {
+                                    ElementState::Pressed => dialog.handle_pointer_down(point),
+                                    ElementState::Released => dialog.handle_pointer_up(point),
+                                })
+                            })
+                            .unwrap_or_default();
+                        if is_double {
+                            actions.extend(
+                                self.startup_player_dialog
+                                    .as_mut()
+                                    .and_then(|dialog| {
+                                        point.map(|point| {
+                                            dialog.handle_pointer_double_click(point)
+                                        })
+                                    })
+                                    .unwrap_or_default(),
+                            );
+                            self.plrsel_last_click = None;
+                        }
+                        self.process_player_dialog_actions(actions)
+                    }
                     StartupView::ScenarioBrowser => {
                         if let Some(point) = self.menu_state.pointer_position() {
                             if button_state == ElementState::Released {
@@ -7705,30 +8014,48 @@ impl GameApp {
                         }
                     }
                     StartupView::Options => {
-                        let commands = if let Some(options) = self.control_options.as_mut() {
-                            options.pointer_position().map(|point| match button_state {
-                                ElementState::Pressed => options.handle_pointer_down(point),
-                                ElementState::Released => options.handle_pointer_up(point),
+                        let actions = self
+                            .startup_options_dialog
+                            .as_mut()
+                            .and_then(|dialog| {
+                                dialog.pointer_position().map(|point| match button_state {
+                                    ElementState::Pressed => dialog.handle_pointer_down(point),
+                                    ElementState::Released => dialog.handle_pointer_up(point),
+                                })
                             })
-                        } else {
-                            None
-                        };
-                        if let Some(commands) = commands {
+                            .unwrap_or_default();
+                        self.process_options_dialog_actions(actions)?;
+                        if self.legacy_control_options_active() {
+                            let commands = self
+                                .control_options
+                                .as_mut()
+                                .and_then(|options| {
+                                    options.pointer_position().map(|point| match button_state {
+                                        ElementState::Pressed => {
+                                            options.handle_pointer_down(point)
+                                        }
+                                        ElementState::Released => {
+                                            options.handle_pointer_up(point)
+                                        }
+                                    })
+                                })
+                                .unwrap_or_default();
                             self.process_control_options_commands(commands)?;
                         }
                         Ok(())
                     }
                     StartupView::About => {
-                        let point = self
-                            .about_dialog
-                            .as_ref()
-                            .and_then(|about| about.dialog.pointer_position());
-                        if let Some(point) = point {
-                            if button_state == ElementState::Released {
-                                self.handle_about_parity_click(point)?;
-                            }
-                        }
-                        Ok(())
+                        let actions = self
+                            .startup_about_dialog
+                            .as_mut()
+                            .and_then(|dialog| {
+                                dialog.pointer_position().map(|point| match button_state {
+                                    ElementState::Pressed => dialog.handle_pointer_down(point),
+                                    ElementState::Released => dialog.handle_pointer_up(point),
+                                })
+                            })
+                            .unwrap_or_default();
+                        self.process_about_dialog_actions(actions)
                     }
                 }
             }
@@ -7749,7 +8076,40 @@ impl GameApp {
             return Ok(());
         }
         match self.startup_view {
-            StartupView::NetworkGame | StartupView::PlayerSelection => Ok(()),
+            StartupView::NetworkGame => {
+                let actions = self
+                    .startup_network_dialog
+                    .as_mut()
+                    .map(|dialog| match phase {
+                        TouchPhase::Started => dialog.handle_pointer_down(position),
+                        TouchPhase::Moved => dialog.handle_pointer_move(position),
+                        TouchPhase::Ended => dialog.handle_pointer_up(position),
+                        TouchPhase::Cancelled => Vec::new(),
+                    })
+                    .unwrap_or_default();
+                self.process_network_dialog_actions(actions)?;
+                if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                    self.pointer_left();
+                }
+                Ok(())
+            }
+            StartupView::PlayerSelection => {
+                let actions = self
+                    .startup_player_dialog
+                    .as_mut()
+                    .map(|dialog| match phase {
+                        TouchPhase::Started => dialog.handle_pointer_down(position),
+                        TouchPhase::Moved => dialog.handle_pointer_move(position),
+                        TouchPhase::Ended => dialog.handle_pointer_up(position),
+                        TouchPhase::Cancelled => Vec::new(),
+                    })
+                    .unwrap_or_default();
+                self.process_player_dialog_actions(actions)?;
+                if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                    self.pointer_left();
+                }
+                Ok(())
+            }
             StartupView::ScenarioBrowser => match phase {
                 TouchPhase::Started => self.handle_menu_input(|state| {
                     state.set_pointer_position(Some(position));
@@ -7846,46 +8206,54 @@ impl GameApp {
                 }
             }
             StartupView::Options => {
-                let (commands, clear_pointer) = if let Some(options) = self.control_options.as_mut()
-                {
-                    options.set_pointer_position(Some(position));
-                    match phase {
-                        TouchPhase::Started => (options.handle_pointer_down(position), false),
-                        TouchPhase::Moved => (options.handle_pointer_move(position), false),
-                        TouchPhase::Ended => (options.handle_pointer_up(position), true),
-                        TouchPhase::Cancelled => (Vec::new(), true),
-                    }
-                } else {
-                    (
-                        Vec::new(),
-                        matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled),
-                    )
-                };
-                if clear_pointer {
+                let actions = self
+                    .startup_options_dialog
+                    .as_mut()
+                    .map(|dialog| match phase {
+                        TouchPhase::Started => dialog.handle_pointer_down(position),
+                        TouchPhase::Moved => dialog.handle_pointer_move(position),
+                        TouchPhase::Ended => dialog.handle_pointer_up(position),
+                        TouchPhase::Cancelled => Vec::new(),
+                    })
+                    .unwrap_or_default();
+                self.process_options_dialog_actions(actions)?;
+                if self.legacy_control_options_active() {
+                    let commands = self
+                        .control_options
+                        .as_mut()
+                        .map(|options| {
+                            options.set_pointer_position(Some(position));
+                            match phase {
+                                TouchPhase::Started => options.handle_pointer_down(position),
+                                TouchPhase::Moved => options.handle_pointer_move(position),
+                                TouchPhase::Ended => options.handle_pointer_up(position),
+                                TouchPhase::Cancelled => Vec::new(),
+                            }
+                        })
+                        .unwrap_or_default();
+                    self.process_control_options_commands(commands)?;
+                }
+                if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                     self.pointer_left();
                 }
-                self.process_control_options_commands(commands)
+                Ok(())
             }
             StartupView::About => {
-                if let Some(about) = self.about_dialog.as_mut() {
-                    about.dialog.set_pointer_position(Some(position));
-                    let actions = match phase {
-                        TouchPhase::Started => about.dialog.handle_pointer_down(position),
-                        TouchPhase::Moved => about.dialog.handle_pointer_move(position),
-                        TouchPhase::Ended => {
-                            let actions = about.dialog.handle_pointer_up(position);
-                            self.pointer_left();
-                            actions
-                        }
-                        TouchPhase::Cancelled => {
-                            self.pointer_left();
-                            Vec::new()
-                        }
-                    };
-                    self.process_about_actions(actions)
-                } else {
-                    Ok(())
+                let actions = self
+                    .startup_about_dialog
+                    .as_mut()
+                    .map(|dialog| match phase {
+                        TouchPhase::Started => dialog.handle_pointer_down(position),
+                        TouchPhase::Moved => dialog.handle_pointer_move(position),
+                        TouchPhase::Ended => dialog.handle_pointer_up(position),
+                        TouchPhase::Cancelled => Vec::new(),
+                    })
+                    .unwrap_or_default();
+                self.process_about_dialog_actions(actions)?;
+                if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                    self.pointer_left();
                 }
+                Ok(())
             }
         }
     }
@@ -7894,7 +8262,16 @@ impl GameApp {
         self.mark_menu_dirty();
         match self.mode {
             AppMode::Menu => match self.startup_view {
-                StartupView::NetworkGame | StartupView::PlayerSelection => {}
+                StartupView::NetworkGame => {
+                    if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                        dialog.pointer_left();
+                    }
+                }
+                StartupView::PlayerSelection => {
+                    if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                        dialog.pointer_left();
+                    }
+                }
                 StartupView::ScenarioBrowser => {
                     self.menu_state.set_pointer_position(None);
                 }
@@ -7908,13 +8285,16 @@ impl GameApp {
                     }
                 }
                 StartupView::Options => {
+                    if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                        dialog.pointer_left();
+                    }
                     if let Some(options) = self.control_options.as_mut() {
                         options.set_pointer_position(None);
                     }
                 }
                 StartupView::About => {
-                    if let Some(about) = self.about_dialog.as_mut() {
-                        about.dialog.set_pointer_position(None);
+                    if let Some(dialog) = self.startup_about_dialog.as_mut() {
+                        dialog.pointer_left();
                     }
                 }
             },
@@ -8088,80 +8468,313 @@ impl GameApp {
         commands: Vec<ControlOptionsCommand>,
     ) -> Result<(), EngineError> {
         for command in commands {
-            self.process_control_options_command(command)?;
+            match command {
+                ControlOptionsCommand::SelectionChanged(_) => self.status_text.clear(),
+                ControlOptionsCommand::BeginRebind(binding) => {
+                    self.status_text = format!(
+                        "Press a key for “{}” or Escape to cancel",
+                        binding_display_name(binding)
+                    );
+                }
+                ControlOptionsCommand::BindingUpdated(binding) => {
+                    if let Some(options) = self.control_options.as_mut() {
+                        options.apply_binding_change(binding, &self.bindings);
+                    }
+                    if let Some(paths) = self.app_paths.as_ref() {
+                        self.bindings.save(paths);
+                    }
+                    self.status_text =
+                        format!("Updated binding for “{}”", binding_display_name(binding));
+                }
+                ControlOptionsCommand::ResetAll => {
+                    self.bindings.reset_all();
+                    if let Some(options) = self.control_options.as_mut() {
+                        options.apply_reset_all(&self.bindings);
+                    }
+                    if let Some(paths) = self.app_paths.as_ref() {
+                        self.bindings.save(paths);
+                    }
+                    self.status_text = "Control bindings reset to defaults".to_string();
+                }
+                ControlOptionsCommand::Close => self.show_main_menu(),
+                ControlOptionsCommand::UnsupportedKey(key) => {
+                    self.status_text =
+                        format!("“{}” cannot be used for controls", format_key_label(key));
+                }
+            }
         }
         Ok(())
     }
 
-    fn process_control_options_command(
+    fn process_network_dialog_actions(
         &mut self,
-        command: ControlOptionsCommand,
+        actions: Vec<lc_frontend::startup_netdlg::NetDlgAction>,
     ) -> Result<(), EngineError> {
-        match command {
-            ControlOptionsCommand::SelectionChanged(_) => {
-                self.status_text.clear();
-            }
-            ControlOptionsCommand::BeginRebind(binding) => {
-                self.status_text = format!(
-                    "Press a key for “{}” or Escape to cancel",
-                    binding_display_name(binding)
-                );
-            }
-            ControlOptionsCommand::BindingUpdated(binding) => {
-                if let Some(options) = self.control_options.as_mut() {
-                    options.apply_binding_change(binding, &self.bindings);
-                }
-                self.persist_control_bindings();
-                self.status_text =
-                    format!("Updated binding for “{}”", binding_display_name(binding));
-            }
-            ControlOptionsCommand::ResetAll => {
-                self.bindings.reset_all();
-                if let Some(options) = self.control_options.as_mut() {
-                    options.apply_reset_all(&self.bindings);
-                }
-                self.persist_control_bindings();
-                self.status_text = "Control bindings reset to defaults".to_string();
-            }
-            ControlOptionsCommand::Close => {
-                if let Some(options) = self.control_options.as_mut() {
-                    options.set_pointer_position(None);
-                    options.cancel_rebind();
-                }
-                self.show_main_menu();
-            }
-            ControlOptionsCommand::UnsupportedKey(key) => {
-                self.status_text =
-                    format!("“{}” cannot be used for controls", format_key_label(key));
-            }
-        }
-        Ok(())
-    }
+        use lc_frontend::startup_netdlg::NetDlgAction;
 
-    fn process_about_actions(&mut self, actions: Vec<AboutAction>) -> Result<(), EngineError> {
         for action in actions {
-            self.process_about_action(action)?;
-        }
-        Ok(())
-    }
-
-    fn process_about_action(&mut self, action: AboutAction) -> Result<(), EngineError> {
-        match action {
-            AboutAction::Back => {
-                if let Some(dialog) = self.about_dialog.as_mut() {
-                    if dialog.dialog.current_page() > 0 {
-                        // Let the dialog handle it (already done in handle_key_down/button_click)
-                    } else {
-                        dialog.dialog.set_pointer_position(None);
-                        self.show_main_menu();
+            match action {
+                NetDlgAction::FocusChanged(_)
+                | NetDlgAction::ModeChanged(_)
+                | NetDlgAction::JoinAddressChanged(_) => {}
+                NetDlgAction::Back => self.show_main_menu(),
+                NetDlgAction::Refresh => {
+                    self.status_text = "Refreshing network games…".to_string();
+                }
+                NetDlgAction::JoinGame { address } => {
+                    let Some(address) = address else {
+                        self.status_text = "Select a game or enter its address".to_string();
+                        continue;
+                    };
+                    self.activate_network_join(address);
+                }
+                NetDlgAction::CreateGame => {
+                    let (_, port) = load_network_startup_settings(self.app_paths.as_ref());
+                    self.activate_network_mode(NetworkMode::Host(HostSettings {
+                        bind_addr: SocketAddr::from(([0, 0, 0, 0], port)),
+                        player_name: self.player_name.clone(),
+                    }));
+                }
+                NetDlgAction::MasterserverSignupChanged(enabled) => {
+                    if let Some(paths) = self.app_paths.as_ref() {
+                        if let Err(error) = persist_config_value(
+                            paths,
+                            "Network",
+                            "MasterServerSignUp",
+                            i32::from(enabled).to_string(),
+                        ) {
+                            self.status_text =
+                                format!("Unable to save network setting: {error}");
+                        }
+                    }
+                }
+                NetDlgAction::RecordingChanged(record) => {
+                    self.startup_view_flags.record = record;
+                    self.recording_enabled = record && self.recordings_dir.is_some();
+                    if let Some(paths) = self.app_paths.as_ref() {
+                        if let Err(error) = persist_config_value(
+                            paths,
+                            "General",
+                            "Record",
+                            i32::from(record).to_string(),
+                        ) {
+                            self.status_text =
+                                format!("Unable to save recording setting: {error}");
+                        }
                     }
                 }
             }
-            AboutAction::CheckForUpdates => {
-                self.status_text = "Update checking not yet implemented in Rust port".to_string();
+        }
+        Ok(())
+    }
+
+    fn activate_network_mode(&mut self, mode: NetworkMode) {
+        if self.startup_network_connection.is_some() {
+            self.status_text = "A network connection is already in progress".to_string();
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let local_owner = self.local_owner;
+        let worker_mode = mode.clone();
+        let spawn = thread::Builder::new()
+            .name("lc-startup-network".to_string())
+            .spawn(move || {
+                let result = NetworkManager::for_mode(worker_mode, local_owner)
+                    .map(|manager| (mode, manager))
+                    .map_err(|error| format!("{error:#}"));
+                let _ = sender.send(result);
+            });
+        match spawn {
+            Ok(_) => {
+                self.startup_network_connection = Some(StartupNetworkConnection { receiver });
+                self.status_text = "Connecting to network game…".to_string();
             }
-            AboutAction::NextPage => {
-                // Handled internally by the dialog
+            Err(error) => {
+                self.status_text = format!("Unable to start network worker: {error}");
+            }
+        }
+    }
+
+    fn activate_network_join(&mut self, address: String) {
+        if self.startup_network_connection.is_some() {
+            self.status_text = "A network connection is already in progress".to_string();
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let local_owner = self.local_owner;
+        let player_name = self.player_name.clone();
+        let (_, default_port) = load_network_startup_settings(self.app_paths.as_ref());
+        let spawn = thread::Builder::new()
+            .name("lc-startup-network".to_string())
+            .spawn(move || {
+                let result = resolve_join_socket(&address, default_port)
+                    .map_err(|error| format!("invalid network address: {error:#}"))
+                    .and_then(|server_addr| {
+                        let mode = NetworkMode::Client(ClientSettings {
+                            server_addr,
+                            player_name,
+                        });
+                        NetworkManager::for_mode(mode.clone(), local_owner)
+                            .map(|manager| (mode, manager))
+                            .map_err(|error| format!("{error:#}"))
+                    });
+                let _ = sender.send(result);
+            });
+        match spawn {
+            Ok(_) => {
+                self.startup_network_connection = Some(StartupNetworkConnection { receiver });
+                self.status_text = "Connecting to network game…".to_string();
+            }
+            Err(error) => {
+                self.status_text = format!("Unable to start network worker: {error}");
+            }
+        }
+    }
+
+    fn poll_startup_network_connection(&mut self) {
+        let result = match self
+            .startup_network_connection
+            .as_ref()
+            .map(|connection| connection.receiver.try_recv())
+        {
+            Some(Ok(result)) => result,
+            Some(Err(TryRecvError::Empty)) | None => return,
+            Some(Err(TryRecvError::Disconnected)) => {
+                Err("network worker disconnected before reporting readiness".to_string())
+            }
+        };
+        self.startup_network_connection = None;
+        self.mark_menu_dirty();
+        match result {
+            Ok((mode, manager)) => {
+                let lobby = NetworkLobbyState::new(
+                    manager.local_client_id(),
+                    self.player_name.clone(),
+                    matches!(mode, NetworkMode::Host(_)),
+                );
+                self.network_mode = Some(mode);
+                self.network = Some(manager);
+                self.network_lobby = Some(lobby);
+                self.open_network_lobby();
+            }
+            Err(error) => {
+                self.status_text = format!("Unable to start network session: {error}");
+            }
+        }
+    }
+
+    fn process_player_dialog_actions(
+        &mut self,
+        actions: Vec<lc_frontend::startup_plrsel::PlrSelAction>,
+    ) -> Result<(), EngineError> {
+        use lc_frontend::startup_plrsel::PlrSelAction;
+
+        for action in actions {
+            match action {
+                PlrSelAction::SelectionChanged(_) | PlrSelAction::FocusChanged(_) => {}
+                PlrSelAction::Back => self.show_main_menu(),
+                PlrSelAction::NewPlayer => {
+                    self.status_text = "Player creation is not yet implemented".to_string();
+                }
+                PlrSelAction::ActivationChanged { index, activated } => {
+                    let selected_before = self
+                        .startup_player_dialog
+                        .as_ref()
+                        .and_then(|dialog| dialog.selected_index());
+                    let old_activated = self
+                        .startup_player_models
+                        .get(index)
+                        .map(|player| player.activated);
+                    if let Some(player) = self.startup_player_files.get_mut(index) {
+                        player.set_activated(activated);
+                    }
+                    if let Some(player) = self.startup_player_models.get_mut(index) {
+                        player.activated = activated;
+                    }
+                    let persisted = self
+                        .app_paths
+                        .as_ref()
+                        .ok_or_else(|| "application paths are unavailable".to_string())
+                        .and_then(|paths| {
+                            persist_activations(&paths.config_file(), &self.startup_player_files)
+                                .map_err(|error| error.to_string())
+                        });
+                    match persisted {
+                        Ok(()) => {
+                            self.selected_player_file = self
+                                .startup_player_files
+                                .iter()
+                                .find(|player| player.render_model.activated)
+                                .map(|player| player.player_file.clone());
+                            self.refresh_participants_label();
+                            self.status_text.clear();
+                        }
+                        Err(error) => {
+                            if let Some(old_activated) = old_activated {
+                                if let Some(player) = self.startup_player_files.get_mut(index) {
+                                    player.set_activated(old_activated);
+                                }
+                                if let Some(player) = self.startup_player_models.get_mut(index) {
+                                    player.activated = old_activated;
+                                }
+                                if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                                    dialog.set_player_activations(
+                                        self.startup_player_models
+                                            .iter()
+                                            .map(|player| player.activated)
+                                            .collect(),
+                                    );
+                                    dialog.set_selected_index(selected_before);
+                                }
+                            }
+                            self.status_text =
+                                format!("Unable to save player selection: {error}");
+                        }
+                    }
+                }
+                PlrSelAction::DeletePlayer(_) => {
+                    self.status_text = "Player deletion is not yet implemented".to_string();
+                }
+                PlrSelAction::PlayerProperties(_) => {
+                    self.status_text = "Player properties are not yet implemented".to_string();
+                }
+                PlrSelAction::ShowCrew(_) => {
+                    self.status_text = "Crew editing is not yet implemented".to_string();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn process_options_dialog_actions(
+        &mut self,
+        actions: Vec<lc_frontend::startup_options_dlg::OptionsDlgAction>,
+    ) -> Result<(), EngineError> {
+        use lc_frontend::startup_options_dlg::OptionsDlgAction;
+
+        for action in actions {
+            match action {
+                OptionsDlgAction::Back => self.show_main_menu(),
+                OptionsDlgAction::SheetChanged(_) => self.play_ui_sound("Command"),
+            }
+        }
+        Ok(())
+    }
+
+    fn process_about_dialog_actions(
+        &mut self,
+        actions: Vec<lc_frontend::startup_about_dlg::AboutDlgAction>,
+    ) -> Result<(), EngineError> {
+        use lc_frontend::startup_about_dlg::AboutDlgAction;
+
+        for action in actions {
+            match action {
+                AboutDlgAction::Back => self.show_main_menu(),
+                AboutDlgAction::CheckForUpdates => {
+                    self.status_text =
+                        "Update checking is not yet implemented in the Rust port".to_string();
+                }
+                AboutDlgAction::PageChanged(_) => self.play_ui_sound("Command"),
             }
         }
         Ok(())
@@ -8206,12 +8819,6 @@ impl GameApp {
         Ok(())
     }
 
-    fn persist_control_bindings(&self) {
-        if let Ok(paths) = cached_app_paths() {
-            self.bindings.save(paths.as_ref());
-        }
-    }
-
     fn handle_main_menu_activation(&mut self, item: MainMenuItem) -> Result<(), EngineError> {
         match item {
             MainMenuItem::LocalGame => {
@@ -8221,15 +8828,11 @@ impl GameApp {
                 if self.network_mode.is_some() && self.network_lobby.is_some() {
                     self.open_network_lobby();
                 } else {
-                    // C4StartupMainDlg routes to the network game browser
-                    // (C4StartupNetDlg) regardless of host/join state.
-                    self.startup_view = StartupView::NetworkGame;
-                    self.status_text.clear();
+                    self.open_network_game_dialog();
                 }
             }
             MainMenuItem::PlayerSelection => {
-                self.startup_view = StartupView::PlayerSelection;
-                self.status_text.clear();
+                self.open_player_selection_dialog();
             }
             MainMenuItem::Options => {
                 self.open_options_menu();
@@ -8240,26 +8843,6 @@ impl GameApp {
             MainMenuItem::Quit => {
                 self.request_exit();
             }
-        }
-        Ok(())
-    }
-
-    /// Routes a click through the C++-faithful About layout
-    /// (Back / Check for updates / Licenses, C4StartupAboutDlg.cpp:277-283).
-    fn handle_about_parity_click(&mut self, point: GuiPoint) -> Result<(), EngineError> {
-        let layout = lc_frontend::startup_about_dlg::about_layout(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
-        );
-        let (px, py) = (point.x as i32, point.y as i32);
-        let inside =
-            |x: i32, y: i32, w: i32, h: i32| px >= x && px < x + w && py >= y && py < y + h;
-        let back = layout.buttons[0];
-        let update = layout.buttons[1];
-        if inside(back.x, back.y, back.w, back.h) {
-            self.show_main_menu();
-        } else if inside(update.x, update.y, update.w, update.h) {
-            self.status_text = "Update checking not yet implemented in Rust port".to_string();
         }
         Ok(())
     }
@@ -8365,36 +8948,106 @@ impl GameApp {
         self.status_text.clear();
     }
 
+    fn open_network_game_dialog(&mut self) {
+        let (masterserver_signup, _) =
+            load_network_startup_settings(self.app_paths.as_ref());
+        let metrics = self
+            .assets
+            .clonk_fonts
+            .as_deref()
+            .map(lc_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts)
+            .unwrap_or(lc_frontend::startup_netdlg::NetDlgFontMetrics {
+                caption_back_extent: 51,
+                text_ip_extent: 18,
+                text_line_height: 22,
+                caption_line_height: 25,
+                title_line_height: 34,
+            });
+        let mut dialog = lc_frontend::startup_netdlg::NetDlgController::new(
+            lc_frontend::startup_netdlg::NetDlgConfig {
+                masterserver_signup,
+                record: self.startup_view_flags.record,
+            },
+            metrics,
+        );
+        dialog.resize(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+        );
+        self.startup_network_dialog = Some(dialog);
+        self.startup_view = StartupView::NetworkGame;
+        self.status_text.clear();
+    }
+
+    fn open_player_selection_dialog(&mut self) {
+        let mut dialog =
+            lc_frontend::startup_plrsel::PlrSelController::new(self.startup_player_models.len());
+        dialog.set_player_activations(
+            self.startup_player_models
+                .iter()
+                .map(|player| player.activated)
+                .collect(),
+        );
+        dialog.resize(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+        );
+        self.startup_player_dialog = Some(dialog);
+        self.plrsel_last_click = None;
+        self.startup_view = StartupView::PlayerSelection;
+        self.status_text.clear();
+    }
+
     fn open_options_menu(&mut self) {
-        let width = self.graphics.surface().width() as f32;
-        let height = self.graphics.surface().height() as f32;
-        let mut state = self
+        let mut dialog = lc_frontend::startup_options_dlg::OptionsDlgState::default();
+        if let (Some(fonts), Some(book)) = (
+            self.assets.clonk_fonts.as_deref(),
+            self.assets.options_book_fonts.as_deref(),
+        ) {
+            dialog.resize(
+                self.graphics.surface().width() as i32,
+                self.graphics.surface().height() as i32,
+                fonts,
+                book,
+            );
+        }
+        let mut controls = self
             .control_options
             .take()
             .unwrap_or_else(|| ControlOptionsState::new(self.assets.font_arc()));
-        state.resize(width, height);
-        state.refresh_from_bindings(&self.bindings);
-        if state.selected_binding().is_none() {
-            state.set_selected_binding(ControlBindingId::CursorLeft);
+        controls.resize(
+            self.graphics.surface().width() as f32,
+            self.graphics.surface().height() as f32,
+        );
+        controls.refresh_from_bindings(&self.bindings);
+        if controls.selected_binding().is_none() {
+            controls.set_selected_binding(ControlBindingId::CursorLeft);
         }
-        state.set_pointer_position(None);
-        self.control_options = Some(state);
+        controls.set_pointer_position(None);
+        self.control_options = Some(controls);
+        self.startup_options_dialog = Some(dialog);
         self.startup_view = StartupView::Options;
         self.status_text.clear();
     }
 
     fn open_about_dialog(&mut self) {
-        let width = self.graphics.surface().width() as f32;
-        let height = self.graphics.surface().height() as f32;
-        let mut dialog = StartupAboutDialog::new(self.assets.font_arc());
-        dialog.resize(width, height);
-        dialog.set_pointer_position(None);
-        self.about_dialog = Some(AboutDialogState { dialog });
+        let mut dialog = lc_frontend::startup_about_dlg::AboutDlgState::new();
+        dialog.resize(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+        );
+        self.startup_about_dialog = Some(dialog);
         self.startup_view = StartupView::About;
         self.status_text.clear();
     }
 
     fn show_main_menu(&mut self) {
+        self.startup_network_connection = None;
+        if self.startup_view == StartupView::NetworkLobby {
+            self.network_lobby = None;
+            self.network = None;
+            self.network_mode = None;
+        }
         self.startup_view = StartupView::MainMenu;
         self.main_menu_state.pointer_left();
         if let Some(lobby) = self.network_lobby.as_mut() {
@@ -8403,17 +9056,26 @@ impl GameApp {
         self.refresh_participants_label();
         self.scenario_label = self.menu_state.label_path();
         self.status_text.clear();
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.pointer_left();
+        }
+        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            dialog.pointer_left();
+        }
+        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+            dialog.pointer_left();
+        }
         if let Some(options) = self.control_options.as_mut() {
             options.set_pointer_position(None);
             options.cancel_rebind();
         }
+        if let Some(dialog) = self.startup_about_dialog.as_mut() {
+            dialog.pointer_left();
+        }
     }
 
     fn refresh_participants_label(&mut self) {
-        let label = match cached_app_paths() {
-            Ok(paths) => load_participants_label(Some(paths.as_ref())),
-            Err(_) => load_participants_label(None),
-        };
+        let label = load_participants_label(self.app_paths.as_ref());
         self.main_menu_state.update_participants_label(label);
     }
 
@@ -8474,6 +9136,7 @@ impl GameApp {
     }
 
     fn update(&mut self) -> Result<(), EngineError> {
+        self.poll_startup_network_connection();
         self.process_network_events()?;
         if !matches!(self.mode, AppMode::Menu) {
             // Whatever happens while loading or in-game (game over, return
@@ -8859,17 +9522,21 @@ impl GameApp {
                 let control_options = self.control_options.as_mut();
                 let network_lobby = self.network_lobby.as_mut();
                 let game_over_dialog = self.game_over_dialog.as_ref();
-                let about_dialog = self.about_dialog.as_mut();
                 render_startup_frame(
                     &mut self.graphics,
                     self.assets.as_ref(),
                     &mut self.main_menu_state,
                     &mut self.menu_state,
+                    self.startup_network_dialog.as_ref(),
+                    self.startup_player_dialog.as_ref(),
+                    &self.startup_player_models,
+                    self.startup_options_dialog.as_ref(),
                     control_options,
+                    self.startup_about_dialog.as_ref(),
                     self.startup_view,
+                    &self.status_text,
                     network_lobby,
                     game_over_dialog,
-                    about_dialog,
                     self.startup_view_flags,
                     &mut self.menu_backdrop_cache,
                     frame,
@@ -10460,11 +11127,16 @@ fn render_startup_frame(
     assets: &FrontendAssets,
     main_menu: &mut MainMenuState,
     scenario_menu: &mut MenuState,
+    network_dialog: Option<&lc_frontend::startup_netdlg::NetDlgController>,
+    player_dialog: Option<&lc_frontend::startup_plrsel::PlrSelController>,
+    player_models: &[lc_frontend::startup_plrsel::PlrSelPlayer],
+    options_dialog: Option<&lc_frontend::startup_options_dlg::OptionsDlgState>,
     control_options: Option<&mut ControlOptionsState>,
+    about_dialog: Option<&lc_frontend::startup_about_dlg::AboutDlgState>,
     view: StartupView,
+    status_text: &str,
     network_lobby: Option<&mut NetworkLobbyState>,
     game_over: Option<&GameOverState>,
-    about_dialog: Option<&mut AboutDialogState>,
     flags: StartupViewFlags,
     backdrop: &mut StartupBackdropCache,
     frame: &mut [u8],
@@ -10481,16 +11153,19 @@ fn render_startup_frame(
 
         // C++-faithful parity renderers draw their own backgrounds.
         let parity_rendered = match view {
-            StartupView::About => match (assets.about_dlg_assets(), assets.clonk_fonts.as_ref()) {
-                (Some(dlg_assets), Some(fonts)) => {
-                    restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
-                        lc_frontend::startup_about_dlg::AboutDlgScreen::render(
-                            surface,
-                            &dlg_assets,
-                            fonts,
-                            Some(startup_gamma()),
-                        );
-                    });
+            StartupView::About => match (
+                assets.about_dlg_assets(),
+                assets.clonk_fonts.as_ref(),
+                about_dialog,
+            ) {
+                (Some(dlg_assets), Some(fonts), Some(dialog)) => {
+                    lc_frontend::startup_about_dlg::AboutDlgScreen::render_state(
+                        surface,
+                        &dlg_assets,
+                        fonts,
+                        dialog,
+                        Some(startup_gamma()),
+                    );
                     true
                 }
                 _ => false,
@@ -10526,43 +11201,46 @@ fn render_startup_frame(
                 }
                 _ => false,
             },
-            StartupView::NetworkGame => {
-                match (assets.netdlg_assets(), assets.clonk_fonts.as_ref()) {
-                    (Some(dlg_assets), Some(fonts)) => {
-                        restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
-                            lc_frontend::startup_netdlg::NetDlgScreen::render(
-                                surface,
-                                &dlg_assets,
-                                fonts,
-                                Some(startup_gamma()),
-                                lc_frontend::startup_netdlg::NetDlgConfig {
-                                    masterserver_signup: true,
-                                    record: flags.record,
-                                },
-                                0,
-                            );
-                        });
-                        true
-                    }
-                    _ => false,
+            StartupView::NetworkGame => match (
+                assets.netdlg_assets(),
+                assets.clonk_fonts.as_ref(),
+                network_dialog,
+            ) {
+                (Some(dlg_assets), Some(fonts), Some(dialog)) => {
+                    lc_frontend::startup_netdlg::NetDlgScreen::render_controller(
+                        surface,
+                        &dlg_assets,
+                        fonts,
+                        Some(startup_gamma()),
+                        dialog,
+                        0,
+                    );
+                    true
                 }
-            }
+                _ => false,
+            },
             StartupView::Options => match (
                 assets.options_dlg_assets(),
                 assets.clonk_fonts.as_ref(),
                 assets.options_book_fonts.as_ref(),
+                options_dialog,
             ) {
-                (Some(dlg_assets), Some(fonts), Some(book)) => {
-                    restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
-                        lc_frontend::startup_options_dlg::OptionsDlgScreen::render(
-                            surface,
-                            &dlg_assets,
-                            fonts,
-                            book,
-                            &lc_frontend::startup_options_dlg::ProgramSheetState::default(),
-                            Some(startup_gamma()),
-                        );
-                    });
+                (Some(dlg_assets), Some(fonts), Some(book), Some(dialog)) => {
+                    lc_frontend::startup_options_dlg::OptionsDlgScreen::render_state(
+                        surface,
+                        &dlg_assets,
+                        fonts,
+                        book,
+                        dialog,
+                        Some(startup_gamma()),
+                    );
+                    if dialog.active_sheet()
+                        == lc_frontend::startup_options_dlg::OptionsSheet::Keyboard
+                    {
+                        if let Some(controls) = control_options {
+                            controls.render(surface);
+                        }
+                    }
                     true
                 }
                 _ => false,
@@ -10571,21 +11249,18 @@ fn render_startup_frame(
                 assets.plrsel_assets(),
                 assets.clonk_fonts.as_ref(),
                 assets.plrsel_book_fonts.as_ref(),
+                player_dialog,
             ) {
-                (Some(dlg_assets), Some(fonts), Some(book)) => {
-                    restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
-                        // Player discovery from packed .c4p files is not wired
-                        // yet; the dialog shows its empty first-shown state.
-                        lc_frontend::startup_plrsel::PlrSelScreen::render(
-                            surface,
-                            &dlg_assets,
-                            fonts,
-                            book.as_ref(),
-                            &[],
-                            None,
-                            Some(startup_gamma()),
-                        );
-                    });
+                (Some(dlg_assets), Some(fonts), Some(book), Some(dialog)) => {
+                    lc_frontend::startup_plrsel::PlrSelScreen::render_controller(
+                        surface,
+                        &dlg_assets,
+                        fonts,
+                        book.as_ref(),
+                        player_models,
+                        dialog,
+                        Some(startup_gamma()),
+                    );
                     true
                 }
                 _ => false,
@@ -10593,6 +11268,7 @@ fn render_startup_frame(
             _ => false,
         };
         if parity_rendered {
+            draw_startup_status(surface, assets, status_text);
             startup_gamma().apply_to_surface(surface);
             let surface = graphics.surface();
             let pixels = surface.pixels();
@@ -10630,8 +11306,7 @@ fn render_startup_frame(
             }
         });
         match view {
-            // Renderers land per-dialog; until wired these views show the
-            // bare background.
+            // Missing parity assets leave the dialog's fallback background.
             StartupView::NetworkGame | StartupView::PlayerSelection => {}
             StartupView::MainMenu => {
                 main_menu.render(surface);
@@ -10691,16 +11366,7 @@ fn render_startup_frame(
             }
             StartupView::ScenarioBrowser => scenario_menu.menu().render(surface),
             StartupView::NetworkLobby => scenario_menu.menu().render(surface),
-            StartupView::Options => {
-                if let Some(options) = control_options {
-                    options.render(surface);
-                }
-            }
-            StartupView::About => {
-                if let Some(about) = about_dialog {
-                    about.dialog.render(surface);
-                }
-            }
+            StartupView::Options | StartupView::About => {}
         }
         if matches!(view, StartupView::NetworkLobby) {
             if let Some(lobby) = network_lobby {
@@ -10711,6 +11377,8 @@ fn render_startup_frame(
             let font = assets.font_arc();
             dialog.render(surface, font.as_ref());
         }
+
+        draw_startup_status(surface, assets, status_text);
 
         // The C++ blit shader applies the gamma ramp to every fragment
         // (StdGL.cpp:1082-1086, UseShaderGamma default on). The filtered
@@ -10726,6 +11394,36 @@ fn render_startup_frame(
         frame.copy_from_slice(pixels);
     } else {
         copy_surface(pixels, surface.width(), surface.height(), frame);
+    }
+}
+
+fn draw_startup_status(surface: &mut Surface, assets: &FrontendAssets, status: &str) {
+    if status.is_empty() {
+        return;
+    }
+    let surface_width = surface.width();
+    if let Some(fonts) = assets.clonk_fonts.as_ref() {
+        fonts.text.draw_with_gamma(
+            surface,
+            surface_width as i32 / 2,
+            52,
+            status,
+            [255, 255, 255, 255],
+            lc_graphics::clonk_font::TextAlign::Center,
+            true,
+            Some(startup_gamma()),
+        );
+    } else {
+        let font = assets.font_arc();
+        let metrics = font.measure_text(status, 14.0);
+        font.draw_text(
+            surface,
+            (surface_width as f32 - metrics.width) / 2.0,
+            52.0,
+            status,
+            14.0,
+            Color::opaque(255, 255, 255),
+        );
     }
 }
 
@@ -11107,13 +11805,13 @@ fn control_script_error_to_status(err: EngineError) -> Result<String, EngineErro
 
 fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
     match code {
-        VirtualKeyCode::Return => Some(KeyCode::Enter),
+        VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => Some(KeyCode::Enter),
         VirtualKeyCode::Escape => Some(KeyCode::Escape),
         VirtualKeyCode::Space => Some(KeyCode::Space),
         VirtualKeyCode::Tab => Some(KeyCode::Tab),
         VirtualKeyCode::Up => Some(KeyCode::Up),
         VirtualKeyCode::Down => Some(KeyCode::Down),
-        VirtualKeyCode::Left => Some(KeyCode::Left),
+        VirtualKeyCode::Left | VirtualKeyCode::Back => Some(KeyCode::Left),
         VirtualKeyCode::Right => Some(KeyCode::Right),
         _ => None,
     }
@@ -13367,6 +14065,193 @@ mod tests {
         .expect("initialise app");
         wait_for_menu(&mut app);
         app
+    }
+
+    #[test]
+    fn secondary_startup_dialogs_route_their_visible_controls() {
+        // C4StartupMainDlg switches to concrete dialogs whose controls remain
+        // live (C4StartupMainDlg.cpp:209-242). This guards the app-level seam:
+        // the parity renderer and the controller must be the same state.
+        let mut app = new_menu_app(1280, 720);
+        let main_layout = lc_frontend::main_menu_layout(1280, 720);
+        let click_main_button = |app: &mut GameApp, index: usize| {
+            let button = main_layout.buttons[index];
+            let point = PhysicalPosition::new(
+                f64::from(button.x + button.w / 2),
+                f64::from(button.y + button.h / 2),
+            );
+            app.handle_cursor_moved(point).expect("move over main button");
+            app.handle_mouse_button(ElementState::Pressed)
+                .expect("press main button");
+            app.handle_mouse_button(ElementState::Released)
+                .expect("release main button");
+        };
+
+        click_main_button(&mut app, 0);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        app.show_main_menu();
+
+        click_main_button(&mut app, 1);
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        };
+        let network_back =
+            lc_frontend::startup_netdlg::net_dlg_layout(1280, 720, &metrics).buttons[0];
+        let network_point = PhysicalPosition::new(
+            f64::from(network_back.x + network_back.w / 2),
+            f64::from(network_back.y + network_back.h / 2),
+        );
+        app.handle_cursor_moved(network_point)
+            .expect("move over network Back");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press network Back");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release network Back");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+
+        app.startup_player_models
+            .push(lc_frontend::startup_plrsel::PlrSelPlayer {
+                name: "Test Player".to_string(),
+                activated: false,
+                big_icon: None,
+                portrait: None,
+                color_dw: 0,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                comment: String::new(),
+            });
+        click_main_button(&mut app, 2);
+        assert_eq!(app.startup_view, StartupView::PlayerSelection);
+        let player_layout = lc_frontend::startup_plrsel::plrsel_layout(1280, 720);
+        let player_row = PhysicalPosition::new(
+            f64::from(player_layout.list_client.x + player_layout.item_height + 4),
+            f64::from(player_layout.list_client.y + player_layout.item_height / 2),
+        );
+        for _ in 0..2 {
+            app.handle_cursor_moved(player_row)
+                .expect("move over player row");
+            app.handle_mouse_button(ElementState::Pressed)
+                .expect("press player row");
+            app.handle_mouse_button(ElementState::Released)
+                .expect("release player row");
+        }
+        assert!(
+            app.status_text.contains("properties"),
+            "C4StartupPlrSelDlg::OnSelDblClick must open the selected player's properties"
+        );
+        let player_back = player_layout.buttons[0];
+        let player_point = PhysicalPosition::new(
+            f64::from(player_back.x + player_back.w / 2),
+            f64::from(player_back.y + player_back.h / 2),
+        );
+        app.handle_cursor_moved(player_point)
+            .expect("move over player Back");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press player Back");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release player Back");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+
+        click_main_button(&mut app, 3);
+        assert_eq!(app.startup_view, StartupView::Options);
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("select Graphics sheet");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("options state")
+                .active_sheet(),
+            lc_frontend::startup_options_dlg::OptionsSheet::Graphics
+        );
+        for _ in 0..2 {
+            app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+                .expect("advance to Keyboard sheet");
+        }
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("options state")
+                .active_sheet(),
+            lc_frontend::startup_options_dlg::OptionsSheet::Keyboard
+        );
+        app.handle_key(VirtualKeyCode::R, ElementState::Pressed)
+            .expect("reset visible keyboard bindings");
+        assert!(app.status_text.contains("reset to defaults"));
+        app.handle_key(VirtualKeyCode::Back, ElementState::Pressed)
+            .expect("Back leaves options");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+
+        click_main_button(&mut app, 4);
+        assert_eq!(app.startup_view, StartupView::About);
+        let about_layout = lc_frontend::startup_about_dlg::about_layout(1280, 720);
+        let licenses = about_layout.buttons[2];
+        let licenses_point = PhysicalPosition::new(
+            f64::from(licenses.x + licenses.w / 2),
+            f64::from(licenses.y + licenses.h / 2),
+        );
+        app.handle_cursor_moved(licenses_point)
+            .expect("move over Licenses");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Licenses");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release Licenses");
+        assert_eq!(
+            app.startup_about_dialog
+                .as_ref()
+                .expect("about state")
+                .current_page(),
+            lc_frontend::startup_about_dlg::AboutPage::Licenses
+        );
+
+        let about_back = about_layout.buttons[0];
+        let about_back_point = PhysicalPosition::new(
+            f64::from(about_back.x + about_back.w / 2),
+            f64::from(about_back.y + about_back.h / 2),
+        );
+        app.handle_cursor_moved(about_back_point)
+            .expect("move over About Back");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press About Back");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("return from licenses");
+        assert_eq!(app.startup_view, StartupView::About);
+
+        let mut before_update = vec![0_u8; 1280 * 720 * 4];
+        app.render(&mut before_update).expect("render credits");
+        let update = about_layout.buttons[1];
+        let update_point = PhysicalPosition::new(
+            f64::from(update.x + update.w / 2),
+            f64::from(update.y + update.h / 2),
+        );
+        app.handle_cursor_moved(update_point)
+            .expect("move over Update");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Update");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release Update");
+        assert!(app.status_text.contains("not yet implemented"));
+        let mut after_update = vec![0_u8; 1280 * 720 * 4];
+        app.render(&mut after_update).expect("render update feedback");
+        assert_ne!(before_update, after_update, "update feedback must be visible");
+
+        app.handle_cursor_moved(about_back_point)
+            .expect("move over About Back");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press About Back");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("leave About");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+
+        click_main_button(&mut app, 5);
+        assert!(app.take_exit_request(), "Exit button requests shutdown");
     }
 
     #[test]

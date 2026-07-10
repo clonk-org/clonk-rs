@@ -328,6 +328,10 @@ pub struct PlrSelAssets {
     pub checkbox: ImageData,
     /// `GUIButton.png` — 128x32 three-slice button bar (C4Gui.cpp:1089-1090).
     pub button: ImageData,
+    /// `GUIButtonDown.png` — pressed bottom-button plank.
+    pub button_down: ImageData,
+    /// `GUIButtonHighlight.png` — additive focus/hover overlay.
+    pub button_highlight: ImageData,
     /// `Player.png` — 48x48 ColorByOwner source used for the default player
     /// icon and portrait (C4GraphicsResource.cpp:265-268,
     /// C4StartupPlrSelDlg.cpp:168-170,230-233).
@@ -336,6 +340,7 @@ pub struct PlrSelAssets {
 
 /// One entry of the player file list (data from the `.c4p`'s Player.txt and
 /// images; C4StartupPlrSelDlg::PlayerListItem::Load, cpp:215-244).
+#[derive(Clone)]
 pub struct PlrSelPlayer {
     /// `Core.PrefName`.
     pub name: String,
@@ -374,6 +379,8 @@ const CLR_BUTTON_FONT: [u8; 4] = [0xff, 0xff, 0x00, 0xff];
 /// `C4GUI_ListBoxSelColor` (C4Gui.h:76): focused selection bar, engine
 /// AARRGGBB with inverted alpha.
 const CLR_LIST_BOX_SEL: u32 = 0xafaf0000;
+/// `C4GUI_ListBoxInactSelColor` when a bottom button owns focus.
+const CLR_LIST_BOX_INACTIVE_SEL: u32 = 0xaf7f7f7f;
 
 /// `CStdDDraw::DrawBoxDw` (StdDDraw2.cpp:1401-1404) → `CStdGL::DrawQuadDw`
 /// (StdGL.cpp:846-894): solid quad whose color carries engine INVERTED alpha
@@ -830,6 +837,10 @@ impl PlrSelController {
         self.hovered = self.hit_button(position);
         self.pointer_pressed = self.hovered;
 
+        if let Some(button) = self.hovered {
+            return self.change_focus(button);
+        }
+
         let layout = self.layout();
         if contains_plrsel(layout.list_client, position) {
             let mut actions = self.change_focus(PlrSelControl::PlayerList);
@@ -843,6 +854,10 @@ impl PlrSelController {
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
+        if let Some(index) = self.checkbox_at(position) {
+            self.pointer_pressed = None;
+            return self.toggle_activation(index);
+        }
         let Some(pressed) = self.pointer_pressed.take() else {
             return Vec::new();
         };
@@ -850,6 +865,21 @@ impl PlrSelController {
             return Vec::new();
         }
         self.activate(pressed)
+    }
+
+    pub fn handle_pointer_double_click(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
+        self.pointer_position = Some(position);
+        self.hovered = self.hit_button(position);
+        self.pointer_pressed = None;
+        let layout = self.layout();
+        if !contains_plrsel(layout.list_client, position) {
+            return Vec::new();
+        }
+        let selected = self.list_item_at(position);
+        let mut actions = self.change_focus(PlrSelControl::PlayerList);
+        actions.extend(self.change_selection(selected));
+        actions.extend(selected.map(PlrSelAction::PlayerProperties));
+        actions
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<PlrSelAction> {
@@ -924,6 +954,12 @@ impl PlrSelController {
         (index < self.activations.len()).then_some(index)
     }
 
+    fn checkbox_at(&self, point: GuiPoint) -> Option<usize> {
+        let layout = self.layout();
+        let index = self.list_item_at(point)?;
+        (point.x < (layout.list_client.x + layout.item_height) as f32).then_some(index)
+    }
+
     fn advance_focus(&mut self) -> Vec<PlrSelAction> {
         const ORDER: [PlrSelControl; 7] = [
             PlrSelControl::PlayerList,
@@ -972,6 +1008,10 @@ impl PlrSelController {
         let Some(index) = self.selected else {
             return Vec::new();
         };
+        self.toggle_activation(index)
+    }
+
+    fn toggle_activation(&mut self, index: usize) -> Vec<PlrSelAction> {
         let Some(activated) = self.activations.get_mut(index) else {
             return Vec::new();
         };
@@ -1012,6 +1052,15 @@ impl PlrSelController {
             .filter(|index| *index < self.activations.len())
             .or_else(|| (!self.activations.is_empty()).then_some(0));
     }
+
+    fn is_highlighted(&self, control: PlrSelControl) -> bool {
+        self.focus == control || self.hovered == Some(control)
+    }
+
+    fn is_pressed(&self, control: PlrSelControl) -> bool {
+        self.pointer_pressed == Some(control)
+            || self.key_pressed.is_some_and(|(pressed, _)| pressed == control)
+    }
 }
 
 fn contains_plrsel(rect: IntRect, point: GuiPoint) -> bool {
@@ -1044,6 +1093,43 @@ impl PlrSelScreen {
         selected: Option<usize>,
         gamma: Option<&GammaRamp>,
     ) {
+        Self::render_impl(surface, assets, fonts, book, players, selected, None, gamma);
+    }
+
+    /// Draws the live controller state, including activation flags and all
+    /// list/button interaction visuals.
+    pub fn render_controller(
+        surface: &mut Surface,
+        assets: &PlrSelAssets,
+        fonts: &ClonkFontSet,
+        book: &BookFontSet,
+        players: &[PlrSelPlayer],
+        controller: &PlrSelController,
+        gamma: Option<&GammaRamp>,
+    ) {
+        Self::render_impl(
+            surface,
+            assets,
+            fonts,
+            book,
+            players,
+            controller.selected,
+            Some(controller),
+            gamma,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_impl(
+        surface: &mut Surface,
+        assets: &PlrSelAssets,
+        fonts: &ClonkFontSet,
+        book: &BookFontSet,
+        players: &[PlrSelPlayer],
+        selected: Option<usize>,
+        controller: Option<&PlrSelController>,
+        gamma: Option<&GammaRamp>,
+    ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
         let layout = plrsel_layout(w, h);
         // Engine texture upload: fully transparent PNG texels turn black
@@ -1052,6 +1138,8 @@ impl PlrSelScreen {
             background: engine_png_texture(&assets.background),
             checkbox: engine_png_texture(&assets.checkbox),
             button: engine_png_texture(&assets.button),
+            button_down: engine_png_texture(&assets.button_down),
+            button_highlight: engine_png_texture(&assets.button_highlight),
             player: engine_png_texture(&assets.player),
         };
 
@@ -1068,18 +1156,37 @@ impl PlrSelScreen {
         //    C4GuiListBox.cpp:100-124), then the items in add-order.
         if let Some(sel) = selected.filter(|&sel| sel < players.len()) {
             let y = layout.list_client.y + layout.item_pitch * sel as i32;
+            let color = if controller
+                .is_none_or(|state| state.focus == PlrSelControl::PlayerList)
+            {
+                CLR_LIST_BOX_SEL
+            } else {
+                CLR_LIST_BOX_INACTIVE_SEL
+            };
             draw_box_dw(
                 surface,
                 layout.list_client.x,
                 y,
                 layout.list_client.x + layout.item_width - 1,
                 y + layout.item_height - 1,
-                CLR_LIST_BOX_SEL,
+                color,
                 gamma,
             );
         }
         for (i, player) in players.iter().enumerate() {
-            Self::render_list_item(surface, assets, book, &layout, player, i as i32, gamma);
+            let activated = controller
+                .and_then(|state| state.activations.get(i).copied())
+                .unwrap_or(player.activated);
+            Self::render_list_item(
+                surface,
+                assets,
+                book,
+                &layout,
+                player,
+                activated,
+                i as i32,
+                gamma,
+            );
         }
 
         // 3. Info panel text for the selected player
@@ -1095,24 +1202,35 @@ impl PlrSelScreen {
 
         // 5.-10. Bottom buttons (Button::DrawElement, C4GuiButton.cpp:80-111).
         let activate_label = selected
-            .and_then(|sel| players.get(sel))
-            .map_or("Activate", |p| if p.activated { "Deactivate" } else { "Activate" });
-        let labels = ["Back", "New", activate_label, "Delete", "Properties", "Crew"];
-        for (rect, label) in layout.buttons.iter().zip(labels) {
-            draw_bar(surface, &gui_rect(*rect), &assets.button, gamma);
-            // Caption font (largest GUI font fitting Hgt-2 = 30) centered at
-            // ((x0+x1)/2, (y0+y1-lineHgt)/2) in C4GUI_ButtonFontClr.
-            let font = fonts.button_font(rect.h);
-            let (x0, y0) = (rect.x, rect.y);
-            let (x1, y1) = (rect.x + rect.w - 1, rect.y + rect.h - 1);
-            font.draw_with_gamma(
+            .and_then(|sel| {
+                controller
+                    .and_then(|state| state.activations.get(sel).copied())
+                    .or_else(|| players.get(sel).map(|player| player.activated))
+            })
+            .map_or("Activate", |activated| {
+                if activated {
+                    "Deactivate"
+                } else {
+                    "Activate"
+                }
+            });
+        let buttons = [
+            (PlrSelControl::Back, "Back"),
+            (PlrSelControl::NewPlayer, "New"),
+            (PlrSelControl::Activate, activate_label),
+            (PlrSelControl::Delete, "Delete"),
+            (PlrSelControl::Properties, "Properties"),
+            (PlrSelControl::Crew, "Crew"),
+        ];
+        for (index, (control, label)) in buttons.into_iter().enumerate() {
+            Self::render_button(
                 surface,
-                (x0 + x1) / 2,
-                (y0 + y1 - font.line_height) / 2,
+                assets,
+                fonts,
+                layout.buttons[index],
                 label,
-                CLR_BUTTON_FONT,
-                TextAlign::Center,
-                true,
+                controller.is_some_and(|state| state.is_highlighted(control)),
+                controller.is_some_and(|state| state.is_pressed(control)),
                 gamma,
             );
         }
@@ -1131,6 +1249,54 @@ impl PlrSelScreen {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn render_button(
+        surface: &mut Surface,
+        assets: &PlrSelAssets,
+        fonts: &ClonkFontSet,
+        rect: IntRect,
+        label: &str,
+        highlighted: bool,
+        pressed: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let plank = if pressed {
+            &assets.button_down
+        } else {
+            &assets.button
+        };
+        draw_bar(surface, &gui_rect(rect), plank, gamma);
+        if highlighted {
+            crate::draw_image_bilinear_additive(
+                surface,
+                &GuiRect::new(
+                    (rect.x + 5) as f32,
+                    (rect.y + 3) as f32,
+                    (rect.w - 10) as f32,
+                    (rect.h - 6) as f32,
+                ),
+                &assets.button_highlight,
+                gamma,
+            );
+        }
+        // Button::DrawElement shifts the caption one pixel while held
+        // (C4GuiButton.cpp:81-110).
+        let offset = i32::from(pressed);
+        let font = fonts.button_font(rect.h);
+        let (x0, y0) = (rect.x, rect.y);
+        let (x1, y1) = (rect.x + rect.w - 1, rect.y + rect.h - 1);
+        font.draw_with_gamma(
+            surface,
+            (x0 + x1) / 2 + offset,
+            (y0 + y1 - font.line_height) / 2 + offset,
+            label,
+            CLR_BUTTON_FONT,
+            TextAlign::Center,
+            true,
+            gamma,
+        );
+    }
+
     /// One PlayerListItem: checkbox, icon, name label (cpp:76-103).
     fn render_list_item(
         surface: &mut Surface,
@@ -1138,6 +1304,7 @@ impl PlrSelScreen {
         book: &BookFontSet,
         layout: &PlrSelLayout,
         player: &PlrSelPlayer,
+        activated: bool,
         index: i32,
         gamma: Option<&GammaRamp>,
     ) {
@@ -1150,7 +1317,7 @@ impl PlrSelScreen {
         // Checkbox: phase = fChecked + 2*!fEnabled of the 32x32 facet,
         // stretched to Hgt x Hgt (CheckBox::DrawElement,
         // C4GuiCheckBox.cpp:110-115).
-        let phase = u32::from(player.activated);
+        let phase = u32::from(activated);
         let cb = extract_region(&assets.checkbox, phase * 32, 0, 32, 32);
         crate::draw_image_bilinear(
             surface,
@@ -1347,7 +1514,7 @@ mod tests {
 
     fn click(controller: &mut PlrSelController, rect: IntRect) -> Vec<PlrSelAction> {
         let point = center(rect);
-        assert!(controller.handle_pointer_down(point).is_empty());
+        let _ = controller.handle_pointer_down(point);
         controller.handle_pointer_up(point)
     }
 
@@ -1363,7 +1530,7 @@ mod tests {
         controller.resize(1280, 720);
 
         let second_row = crate::GuiPoint::new(
-            (layout.list_client.x + 4) as f32,
+            (layout.list_client.x + layout.item_height * 3) as f32,
             (layout.list_client.y + layout.item_pitch + 4) as f32,
         );
         assert_eq!(
@@ -1446,6 +1613,117 @@ mod tests {
             controller.handle_key_down(crate::KeyCode::Escape),
             vec![PlrSelAction::Back]
         );
+    }
+
+    // Mouse routing follows the nested C4GUI controls: button down transfers
+    // focus, checkbox up toggles that row, and ListBox left-double selects the
+    // row before invoking OnSelDblClick -> Properties
+    // (C4GuiContainers.cpp:695-710; C4GuiCheckBox.cpp:78-94;
+    // C4GuiListBox.cpp:142-173; C4StartupPlrSelDlg.cpp:568-569).
+    #[test]
+    fn controller_matches_button_checkbox_and_double_click_routing() {
+        let layout = plrsel_layout(1280, 720);
+        let mut controller = PlrSelController::new(2);
+        controller.resize(1280, 720);
+
+        let back = center(layout.buttons[0]);
+        assert_eq!(
+            controller.handle_pointer_down(back),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::Back)]
+        );
+        assert_eq!(controller.focused_control(), PlrSelControl::Back);
+        assert_eq!(controller.handle_pointer_up(back), vec![PlrSelAction::Back]);
+
+        let second_checkbox = crate::GuiPoint::new(
+            (layout.list_client.x + layout.item_height / 2) as f32,
+            (layout.list_client.y + layout.item_pitch + layout.item_height / 2) as f32,
+        );
+        assert_eq!(
+            controller.handle_pointer_down(second_checkbox),
+            vec![
+                PlrSelAction::FocusChanged(PlrSelControl::PlayerList),
+                PlrSelAction::SelectionChanged(Some(1)),
+            ]
+        );
+        assert_eq!(
+            controller.handle_pointer_up(second_checkbox),
+            vec![PlrSelAction::ActivationChanged {
+                index: 1,
+                activated: true,
+            }]
+        );
+
+        let first_row_name = crate::GuiPoint::new(
+            (layout.list_client.x + layout.item_height * 3) as f32,
+            (layout.list_client.y + layout.item_height / 2) as f32,
+        );
+        assert_eq!(
+            controller.handle_pointer_double_click(first_row_name),
+            vec![
+                PlrSelAction::SelectionChanged(Some(0)),
+                PlrSelAction::PlayerProperties(0),
+            ]
+        );
+    }
+
+    // Live rendering must consume the controller that receives input: list
+    // selection/focus, activation flags and C4GUI::Button interaction cannot
+    // remain frozen at the first-shown frame (C4GuiListBox.cpp:100-124;
+    // C4GuiButton.cpp:81-110; C4StartupPlrSelDlg.cpp:772-802,840-849).
+    #[test]
+    fn live_renderer_reflects_player_controller_state() {
+        use lc_graphics::PixelFormat;
+        let assets = PlrSelAssets {
+            background: crate::test_support::load_graphics_png("StartupPlrSelBG.png"),
+            checkbox: crate::test_support::load_graphics_png("GUICheckbox.png"),
+            button: crate::test_support::load_graphics_png("GUIButton.png"),
+            button_down: crate::test_support::load_graphics_png("GUIButtonDown.png"),
+            button_highlight: crate::test_support::load_graphics_png("GUIButtonHighlight.png"),
+            player: crate::test_support::load_graphics_png("Player.png"),
+        };
+        let fonts = crate::test_support::endeavour_font_set();
+        let book = book_fonts();
+        let gamma = crate::test_support::standard_gamma();
+        let mut second = tyler();
+        second.name = "Second".into();
+        let players = [tyler(), second];
+        let mut controller = PlrSelController::new(players.len());
+        controller.resize(1280, 720);
+
+        let render = |controller: &PlrSelController| {
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            PlrSelScreen::render_controller(
+                &mut surface,
+                &assets,
+                &fonts,
+                &book,
+                &players,
+                controller,
+                Some(gamma),
+            );
+            surface
+        };
+
+        let first = render(&controller);
+        controller.handle_key_down(crate::KeyCode::Down);
+        let selected_second = render(&controller);
+        assert_ne!(first.pixels(), selected_second.pixels());
+
+        controller.handle_key_down(crate::KeyCode::Space);
+        let activated = render(&controller);
+        assert_ne!(selected_second.pixels(), activated.pixels());
+
+        controller.handle_key_down(crate::KeyCode::Tab);
+        let button_focused = render(&controller);
+        assert_ne!(activated.pixels(), button_focused.pixels());
+
+        let layout = plrsel_layout(1280, 720);
+        controller.handle_pointer_move(center(layout.buttons[1]));
+        let hovered = render(&controller);
+        assert_ne!(button_focused.pixels(), hovered.pixels());
+        controller.handle_pointer_down(center(layout.buttons[1]));
+        let pressed = render(&controller);
+        assert_ne!(hovered.pixels(), pressed.pixels());
     }
 
     fn book_fonts() -> BookFontSet {
@@ -1623,6 +1901,8 @@ mod tests {
             background: crate::test_support::load_graphics_png("StartupPlrSelBG.png"),
             checkbox: crate::test_support::load_graphics_png("GUICheckbox.png"),
             button: crate::test_support::load_graphics_png("GUIButton.png"),
+            button_down: crate::test_support::load_graphics_png("GUIButtonDown.png"),
+            button_highlight: crate::test_support::load_graphics_png("GUIButtonHighlight.png"),
             player: crate::test_support::load_graphics_png("Player.png"),
         };
         let fonts = crate::test_support::endeavour_font_set();
