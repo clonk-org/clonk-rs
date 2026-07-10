@@ -6621,6 +6621,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("FindObjectOwner", find_object_owner);
     script.register_host_function("FindObject2", find_object2);
     script.register_host_function("FindObjects", find_objects_dispatch);
+    script.register_host_function("Find_Category", find_category);
     script.register_host_function("ObjectNumber", object_number);
     script.register_host_function("Object", object_by_number);
     script.register_host_function("ObjectCount2", object_count2);
@@ -16935,6 +16936,17 @@ fn find_objects_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 }
 
+/// `System.c4g/FindObject.c`'s `Find_Category` wrapper: construct the
+/// two-cell C4FO_Category criterion consumed by `FindObjects`.
+fn find_category(args: &[Value]) -> Result<Value, RuntimeError> {
+    let category = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "Find_Category",
+        "category",
+    )?;
+    Ok(Value::Array(vec![Value::Int(22), Value::Int(category)]))
+}
+
 fn find_objects(args: &[Value]) -> Result<Value, RuntimeError> {
     let params = FindObjectParams::parse(args)?;
     HOST_CONTEXT.with(|cell| {
@@ -26737,6 +26749,7 @@ mod tests {
         "FindObjectOwner",
         "FindObjects",
         "FindOtherContents",
+        "Find_Category",
         "FinishCommand",
         "Fling",
         "Format",
@@ -27006,6 +27019,28 @@ mod tests {
             .map(|name| name.to_string())
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn find_category_builds_the_cpp_system_criterion() {
+        // The C++ engine loads this exact wrapper from
+        // System.c4g/FindObject.c:61-63; C4FO_Category is 22
+        // (C4FindObject.h:25-40). An omitted typed-int argument is zero.
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                "#strict 2\nfunc Probe() { return [Find_Category(32), Find_Category()]; }",
+            )
+            .expect("Find_Category probe compiles");
+
+        assert_eq!(
+            engine.call("Probe", &[]).expect("Find_Category succeeds"),
+            Value::Array(vec![
+                Value::Array(vec![Value::Int(22), Value::Int(32)]),
+                Value::Array(vec![Value::Int(22), Value::Int(0)]),
+            ])
+        );
     }
 
     #[test]
