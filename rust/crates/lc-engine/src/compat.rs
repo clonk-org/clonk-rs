@@ -6519,7 +6519,7 @@ fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let portrait = match args.get(7) {
-        Some(Value::Nil) | None => None,
+        Some(Value::Nil | Value::Int(0) | Value::Bool(false)) | None => None,
         Some(Value::String(name)) if !name.is_empty() => Some(name.clone()),
         Some(other) => {
             return Err(RuntimeError::new(format!(
@@ -25622,6 +25622,31 @@ func Trigger(object pOther)
             MessageCommand::Add(spec) => {
                 assert_eq!(spec.decoration.as_deref(), Some("DECO"));
                 assert_eq!(spec.portrait.as_deref(), Some("Portrait:SCLK::"));
+            }
+        }
+    }
+
+    #[test]
+    fn custom_message_falsy_portrait_becomes_a_null_string_pointer() {
+        // Legacy callers eagerly turn every falsy argument into C4V_Any nil
+        // before converting a C4String* parameter (C4AulExec.cpp:1364-1396).
+        // Western's ExtraLog passes integer zero in the portrait slot.
+        for portrait in [Value::Int(0), Value::Bool(false)] {
+            let args = [
+                Value::String("Log line".into()),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                portrait,
+            ];
+            let (result, outcome) = with_object_host_context(|| custom_message(&args));
+            assert_eq!(result.expect("CustomMessage succeeds"), Value::Bool(true));
+            assert_eq!(outcome.messages.len(), 1);
+            match &outcome.messages[0] {
+                MessageCommand::Add(spec) => assert!(spec.portrait.is_none()),
             }
         }
     }
