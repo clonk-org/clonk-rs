@@ -1042,11 +1042,12 @@ unsafe fn make_snapshot(
             contents,
             components: HashMap::new(),
             status: ObjectStatus::Normal,
-// The bridge ABI does not carry Controller yet — the C++
+            // The bridge ABI does not carry Base or Controller yet. The C++
             // expected-side snapshot mirrors the owner-inherit default
-            // (C4Object.cpp:162); the comparator does not check it.
+            // for Controller (C4Object.cpp:162); the comparator checks neither.
+            base: crate::OWNER_NONE,
             controller: entry.owner,
-                        owner: entry.owner,
+            owner: entry.owner,
             category: entry.category,
             crew_member: entry.crew_member,
             alive: entry.alive,
