@@ -2419,6 +2419,7 @@ fn close_object_menu(target: ObjectId, force: bool) -> bool {
 /// idMenuID ? idMenuID : iSymbol, the given style, and permanence.
 fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
     let symbol = args.first().cloned().unwrap_or(Value::Nil);
+    let symbol_id = c4id_text_of(&symbol);
     let menu_target = parse_object_reference_argument(
         args.get(1).unwrap_or(&Value::Nil),
         "CreateMenu",
@@ -2465,6 +2466,7 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     let menu = crate::ObjectMenuState {
         caption,
+        symbol_id,
         identification,
         // Style & C4MN_Style_BaseMask (C4Menu::InitMenu, C4Menu.cpp:359).
         style,
@@ -2730,8 +2732,8 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     )?;
     let mut count = parse_optional_i32(args.get(4), "AddMenuItem", "count")?.unwrap_or(0);
     let parameter = args.get(5).cloned().unwrap_or(Value::Nil);
-    // args[6] is the info caption — presentation only (item descriptions
-    // are not script-observable).
+    let info_caption =
+        parse_optional_string(args.get(6), "AddMenuItem", "info caption")?.unwrap_or_default();
     let extra = parse_optional_i32(args.get(7), "AddMenuItem", "extra")?.unwrap_or(0);
     let xpar = args.get(8).cloned().unwrap_or(Value::Nil);
     let xpar2 = args.get(9).cloned().unwrap_or(Value::Nil);
@@ -2857,6 +2859,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     menu.items.push(crate::ObjectMenuItem {
         caption,
+        info_caption,
         command,
         command2,
         count,

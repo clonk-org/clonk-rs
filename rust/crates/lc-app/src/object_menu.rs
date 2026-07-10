@@ -3,8 +3,15 @@ use std::collections::HashMap;
 use lc_engine::{
     CommandKind, ContextMenuEntry, ControlCommand, Engine, ObjectId, SimulationSnapshot, OWNER_NONE,
 };
+use lc_frontend::hud::HudFont;
+use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, Rect, Surface, TextFont};
 use lc_gui::ImageData;
+
+use crate::ingame_menu::{
+    draw_caption_bar, draw_command_key, draw_image_region_aspect, draw_ok_cancel, draw_3d_frame,
+    draw_tooltip, IngameMenuGraphics,
+};
 
 const BACKDROP_COLOR: Color = Color::new(0, 0, 0, 172);
 const PANEL_COLOR: Color = Color::new(18, 28, 48, 240);
@@ -25,6 +32,14 @@ const TITLE_FONT_SIZE: f32 = 22.0;
 const ITEM_FONT_SIZE: f32 = 18.0;
 const DETAIL_FONT_SIZE: f32 = 14.0;
 const MODE_HINT: &str = "Press ←/→ to switch menus";
+const CLASSIC_ITEM_SIZE: i32 = 35;
+const CLASSIC_FRAME_WIDTH: i32 = 2;
+const CLASSIC_COMMAND_HEIGHT: i32 = 16;
+const CLASSIC_TITLE_HEIGHT: i32 = 23;
+const CLASSIC_BG_ALPHA: u8 = 255 - 0x5f;
+const CLASSIC_SELECTION_COLOR: Color = Color::opaque(0xc8, 0, 0);
+const CLASSIC_EXTRA_FRAME_COLOR: Color = Color::opaque(0x44, 0, 0);
+const CLASSIC_CAPTION_COLOR: Color = Color::opaque(0xff, 0xff, 0xff);
 /// `C4MN_Item_NoCount` (`src/C4Menu.h:67`): this sentinel suppresses the
 /// count suffix even though it lives in the same field as real counts.
 const MENU_ITEM_NO_COUNT: i32 = 12_345_678;
@@ -118,7 +133,7 @@ impl MenuEntry for lc_engine::ObjectMenuItem {
     }
 
     fn count_label(&self) -> Option<String> {
-        (self.count != MENU_ITEM_NO_COUNT).then(|| format!("x{}", self.count))
+        (self.count != MENU_ITEM_NO_COUNT).then(|| format!("{}x", self.count))
     }
 
     fn selectable(&self) -> bool {
@@ -148,25 +163,239 @@ fn engine_script_menu_title(menu: &lc_engine::ObjectMenuState) -> String {
 /// is deliberately a read-only presentation view.
 pub fn render_engine_script_menu(
     surface: &mut Surface,
-    font: &dyn TextFont,
+    area: Rect,
+    font: &HudFont<'_>,
+    fallback_font: &dyn TextFont,
+    tiny_font: Option<&HudFont<'_>>,
     menu: &lc_engine::ObjectMenuState,
+    gfx: &IngameMenuGraphics,
+    title_icon: Option<&ImageData>,
+    item_icons: &[Option<ImageData>],
+    time_on_selection: u32,
 ) {
-    if surface.width() == 0 || surface.height() == 0 {
+    if surface.width() == 0 || surface.height() == 0 || area.width == 0 || area.height == 0 {
         return;
     }
 
     let selected = usize::try_from(menu.selection)
         .ok()
         .filter(|selection| *selection < menu.items.len());
+    if menu.style == 0 {
+        render_engine_normal_menu(
+            surface,
+            area,
+            font,
+            tiny_font,
+            menu,
+            gfx,
+            title_icon,
+            item_icons,
+            selected,
+            time_on_selection,
+        );
+        return;
+    }
     ObjectMenuState::render_entries(
         surface,
-        font,
+        fallback_font,
         &menu.items,
         selected,
         &engine_script_menu_title(menu),
         "No menu entries.",
         None,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_engine_normal_menu(
+    surface: &mut Surface,
+    area: Rect,
+    font: &HudFont<'_>,
+    tiny_font: Option<&HudFont<'_>>,
+    menu: &lc_engine::ObjectMenuState,
+    gfx: &IngameMenuGraphics,
+    title_icon: Option<&ImageData>,
+    item_icons: &[Option<ImageData>],
+    selected: Option<usize>,
+    time_on_selection: u32,
+) {
+    // C4MN_Style_Normal is a fixed 35px icon grid; five columns are set
+    // by InitMenu unless SetMenuSize replaced them (C4Menu.cpp:359-365,
+    // 642-648, 715-762).
+    let columns = menu.columns.max(1);
+    let item_count = i32::try_from(menu.items.len()).unwrap_or(i32::MAX);
+    let natural_lines = (item_count / columns) + i32::from(item_count % columns != 0);
+    let max_lines = ((area.height as i32 - 100) / CLASSIC_ITEM_SIZE).max(1);
+    let lines = natural_lines.max(1).min(max_lines);
+    let title_height = font.line_height().max(CLASSIC_TITLE_HEIGHT);
+    let command_height = i32::from(gfx.show_commands) * CLASSIC_COMMAND_HEIGHT;
+    let width = columns * CLASSIC_ITEM_SIZE + 2 * CLASSIC_FRAME_WIDTH;
+    let height = lines * CLASSIC_ITEM_SIZE
+        + title_height
+        + command_height
+        + CLASSIC_FRAME_WIDTH;
+
+    // Default C4Menu alignment is Right|Bottom with one C4SymbolSize (35)
+    // below and two at the right (C4Menu.cpp:298, 727-745).
+    let mut x = area.width as i32 - 2 * CLASSIC_ITEM_SIZE - width;
+    let mut y = area.height as i32 - CLASSIC_ITEM_SIZE - height;
+    if width > area.width as i32 - 2 * CLASSIC_ITEM_SIZE {
+        x = (area.width as i32 - width) / 2;
+    }
+    if height > area.height as i32 - 2 * CLASSIC_ITEM_SIZE {
+        y = (area.height as i32 - height) / 2;
+    }
+    x += area.x;
+    y += area.y;
+    let bounds = Rect::new(x, y, width as u32, height as u32);
+
+    fill_rect(
+        surface,
+        bounds,
+        Color::new(0, 0, 0, CLASSIC_BG_ALPHA),
+    );
+    draw_3d_frame(surface, bounds);
+
+    let title_rect = Rect::new(x, y, width as u32, title_height as u32);
+    if let Some(caption_bar) = gfx.caption_bar.as_ref() {
+        draw_caption_bar(surface, title_rect, caption_bar);
+    }
+    let icon_indent = title_icon.map_or(0, |icon| {
+        let side = (title_height - 2) as u32;
+        draw_image_region_aspect(
+            surface,
+            icon,
+            Rect::new(0, 0, icon.width(), icon.height()),
+            Rect::new(x + 1, y + 1, side, side),
+            false,
+        );
+        title_height
+    });
+    font.draw(
+        surface,
+        x + icon_indent + 5,
+        y + (title_height - font.line_height()) / 2 - 1,
+        &engine_script_menu_title(menu),
+        CLASSIC_CAPTION_COLOR,
+        TextAlign::Left,
+    );
+
+    let client_x = x + CLASSIC_FRAME_WIDTH;
+    let client_y = y + title_height;
+    let visible = (columns * lines) as usize;
+    let first_index = selected
+        .filter(|selection| *selection >= visible && lines > 1)
+        .map(|selection| {
+            ((selection / columns as usize) + 1 - lines as usize) * columns as usize
+        })
+        .unwrap_or(0);
+    for (slot, (index, item)) in menu
+        .items
+        .iter()
+        .enumerate()
+        .skip(first_index)
+        .take(visible)
+        .enumerate()
+    {
+        let cell_x = client_x + (slot as i32 % columns) * CLASSIC_ITEM_SIZE;
+        let cell_y = client_y + (slot as i32 / columns) * CLASSIC_ITEM_SIZE;
+        let cell = Rect::new(
+            cell_x,
+            cell_y,
+            CLASSIC_ITEM_SIZE as u32,
+            CLASSIC_ITEM_SIZE as u32,
+        );
+        if selected == Some(index) && menu.text_progress != Some(0) {
+            fill_rect(surface, cell, CLASSIC_SELECTION_COLOR);
+        }
+        if let Some(icon) = item_icons.get(index).and_then(Option::as_ref) {
+            draw_image_region_aspect(
+                surface,
+                icon,
+                Rect::new(0, 0, icon.width(), icon.height()),
+                cell,
+                false,
+            );
+        }
+        if item.count != MENU_ITEM_NO_COUNT {
+            font.draw(
+                surface,
+                cell_x + CLASSIC_ITEM_SIZE - 1,
+                cell_y + CLASSIC_ITEM_SIZE - 1 - font.line_height(),
+                &format!("{}x", item.count),
+                CLASSIC_CAPTION_COLOR,
+                TextAlign::Right,
+            );
+        }
+    }
+
+    if gfx.show_commands {
+        let extra = Rect::new(
+            x + 1,
+            y + height - CLASSIC_COMMAND_HEIGHT - 1,
+            (width - 2) as u32,
+            CLASSIC_COMMAND_HEIGHT as u32,
+        );
+        draw_border(surface, extra, CLASSIC_EXTRA_FRAME_COLOR);
+        let size = extra.height;
+        let tiny = tiny_font.unwrap_or(font);
+        let mut control_x = extra.x;
+        draw_command_key(
+            surface,
+            gfx,
+            tiny,
+            control_x,
+            extra.y,
+            size,
+            3,
+            &gfx.throw_key,
+        );
+        control_x += size as i32;
+        draw_ok_cancel(surface, gfx, control_x, extra.y, size, 0, 0);
+        control_x += size as i32;
+        if selected
+            .and_then(|selection| menu.items.get(selection))
+            .is_some_and(|item| !item.command2.is_empty())
+        {
+            draw_command_key(
+                surface,
+                gfx,
+                tiny,
+                control_x,
+                extra.y,
+                size,
+                11,
+                &gfx.special2_key,
+            );
+            control_x += size as i32;
+            draw_ok_cancel(surface, gfx, control_x, extra.y, size, 2, 1);
+            control_x += size as i32;
+        }
+        draw_command_key(
+            surface,
+            gfx,
+            tiny,
+            control_x,
+            extra.y,
+            size,
+            5,
+            &gfx.dig_key,
+        );
+        control_x += size as i32;
+        draw_ok_cancel(surface, gfx, control_x, extra.y, size, 1, 0);
+    }
+
+    if time_on_selection >= 90 {
+        if let Some((selection, item)) = selected
+            .and_then(|selection| menu.items.get(selection).map(|item| (selection, item)))
+            .filter(|(_, item)| !item.info_caption.is_empty())
+        {
+            let slot = selection.saturating_sub(first_index);
+            let cell_x = client_x + (slot as i32 % columns) * CLASSIC_ITEM_SIZE;
+            let cell_y = client_y + (slot as i32 / columns) * CLASSIC_ITEM_SIZE;
+            draw_tooltip(surface, font, cell_x, cell_y, &item.info_caption);
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1526,7 +1755,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_script_menu_render_shows_selection_and_item_presentation() {
+    fn engine_script_normal_menu_uses_cpp_grid_geometry_and_selection_color() {
         // CreateMenu/AddMenuItem populate the runtime menu drawn by
         // C4Viewport::DrawMenu (C4Viewport.cpp:983-995). An item without a
         // command is not selectable and a forced non-sentinel count is drawn
@@ -1536,7 +1765,7 @@ mod tests {
         {
             CreateMenu(MENU, this(), this(), 0, "Choose");
             AddMenuItem("Information", "", MENU, this(), 0);
-            AddMenuItem("Selectable", "Choose()", MENU, this(), 3);
+            AddMenuItem("Selectable", "Choose()", MENU, this(), 3, 0, "Details");
         }
         "#;
         let mut engine = Engine::new();
@@ -1554,6 +1783,7 @@ mod tests {
             .expect("Initialize created its menu");
 
         assert_eq!(engine_script_menu_title(&menu), "Selectable");
+        assert_eq!(menu.symbol_id, "MENU");
         let mut menu_without_caption = menu.clone();
         menu_without_caption.caption.clear();
         menu_without_caption.selection = -1;
@@ -1563,32 +1793,42 @@ mod tests {
         assert!(!entries[0].selectable());
         assert_eq!(entries[0].count_label(), None);
         assert_eq!(entries[1].label(), "Selectable");
+        assert_eq!(entries[1].info_caption, "Details");
         assert!(entries[1].selectable());
-        assert_eq!(entries[1].count_label().as_deref(), Some("x3"));
+        assert_eq!(entries[1].count_label().as_deref(), Some("3x"));
         assert_eq!(menu.selection, 1);
 
         let font = lc_graphics::BitmapFont::new();
+        let hud_font = HudFont::Fallback(&font);
+        let gfx = IngameMenuGraphics {
+            show_commands: true,
+            ..IngameMenuGraphics::default()
+        };
+        let icons = vec![None, None];
         let mut surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
-        render_engine_script_menu(&mut surface, &font, &menu);
+        render_engine_script_menu(
+            &mut surface,
+            Rect::new(0, 0, 640, 480),
+            &hud_font,
+            &font,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &icons,
+            0,
+        );
 
-        let panel_width = 340;
-        let panel_height = PANEL_PADDING * 2 + TITLE_GAP + ITEM_HEIGHT * 2 + ITEM_SPACING;
-        let panel_x = (surface.width() as i32 - panel_width) / 2;
-        let panel_y = (surface.height() as i32 - panel_height) / 2;
-        let first_row_y = panel_y + PANEL_PADDING + TITLE_GAP;
-        let probe_x = (panel_x + PANEL_PADDING + 2) as u32;
-        let unselected = surface
-            .get_pixel(probe_x, (first_row_y + 2) as u32)
-            .expect("unselected row pixel");
-        let selected = surface
-            .get_pixel(
-                probe_x,
-                (first_row_y + ITEM_HEIGHT + ITEM_SPACING + 2) as u32,
-            )
-            .expect("selected row pixel");
-        assert_ne!(
-            selected, unselected,
-            "the engine-owned selection must be visibly highlighted"
+        // Normal style is always a five-column 35px icon grid. With the
+        // 23px wooden title, 16px command bar and 2px frame, this two-item
+        // menu is 179x76 and aligns Right|Bottom at (391,369) in 640x480
+        // (C4Menu.cpp:642-762). Item 1 starts at client (428,392), and the
+        // selected cell is filled with palette CRed (#c80000) before its
+        // icon is drawn (C4Menu.cpp:147-154).
+        assert_eq!(
+            surface.get_pixel(429, 393).expect("selected cell pixel"),
+            Color::opaque(0xc8, 0, 0),
+            "script menus must use the C++ five-column icon-grid geometry"
         );
     }
 }

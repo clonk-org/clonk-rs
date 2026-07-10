@@ -586,6 +586,16 @@ impl GraphicsSystem {
         &mut self.surface
     }
 
+    /// Output rectangle of the player's active viewport. Viewport-owned GUI
+    /// such as C4ObjectMenu aligns inside this area, not the full backbuffer
+    /// (C4Viewport::DrawMenu, C4Viewport.cpp:967-1014).
+    pub fn viewport_rect(&self, owner: i32) -> Option<SurfaceRect> {
+        self.active_viewports
+            .iter()
+            .find(|viewport| viewport.owner == owner)
+            .map(|viewport| viewport.rect)
+    }
+
     pub fn world_to_screen(&self, owner: i32, position: Vector2) -> Option<(f32, f32)> {
         self.active_viewports
             .iter()

@@ -2749,6 +2749,20 @@ fn wrap_word_units(
     lines
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScriptMenuPresentationKey {
+    target: ObjectId,
+    symbol_id: String,
+    caption: String,
+    selection: i32,
+}
+
+#[derive(Clone, Debug)]
+struct ScriptMenuPresentationState {
+    key: ScriptMenuPresentationKey,
+    time_on_selection: u32,
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -2781,6 +2795,9 @@ struct GameApp {
     ingame_menu: Option<IngameMenuState>,
     /// Cached Graphics.c4g sheets for the in-game menu renderer.
     ingame_menu_gfx: Option<IngameMenuGraphics>,
+    /// Async C4Menu::TimeOnSelection presentation state. This is deliberately
+    /// outside the deterministic engine menu state (C4Menu.cpp:804-821).
+    script_menu_presentation: Option<ScriptMenuPresentationState>,
     /// `Config.Graphics` display toggles driven by the Display submenu
     /// (C4MainMenu.cpp:855-884); session-only, not persisted.
     display_flags: DisplayFlags,
@@ -5439,6 +5456,7 @@ impl GameApp {
             object_menu: None,
             ingame_menu: None,
             ingame_menu_gfx: None,
+            script_menu_presentation: None,
             display_flags: DisplayFlags::default(),
             mouse_control: true,
             save_browser: None,
@@ -6830,6 +6848,11 @@ impl GameApp {
                 .key_for(ControlBindingId::Dig)
                 .map(format_key_label)
                 .unwrap_or_default();
+            let special2_key = self
+                .bindings
+                .key_for(ControlBindingId::Special2)
+                .map(format_key_label)
+                .unwrap_or_default();
             self.ingame_menu_gfx = Some(IngameMenuGraphics {
                 menu: self.assets.dialog_image("Menu.png"),
                 options: self.assets.dialog_image("Options.png"),
@@ -6841,6 +6864,7 @@ impl GameApp {
                 show_commands: self.display_flags.show_commands,
                 show_command_keys: self.display_flags.show_command_keys,
                 throw_key,
+                special2_key,
                 dig_key,
             });
         }
@@ -9040,11 +9064,98 @@ impl GameApp {
         let script_menu = self
             .engine
             .cursor_object_menu(self.local_owner)
-            .map(|(_, menu)| menu.clone());
-        if let Some(menu) = script_menu.as_ref() {
-            let font = self.assets.font_arc();
-            let surface = self.graphics.surface_mut();
-            render_engine_script_menu(surface, font.as_ref(), menu);
+            .map(|(target, menu)| (target, menu.clone()));
+        let script_menu_time = script_menu
+            .as_ref()
+            .map(|(target, menu)| {
+                let key = ScriptMenuPresentationKey {
+                    target: *target,
+                    symbol_id: menu.symbol_id.clone(),
+                    caption: menu.caption.clone(),
+                    selection: menu.selection,
+                };
+                let progressing = menu.text_progress.is_some();
+                match self.script_menu_presentation.as_mut() {
+                    Some(state) if state.key == key => {
+                        if !progressing {
+                            state.time_on_selection = state.time_on_selection.saturating_add(1);
+                        }
+                        state.time_on_selection
+                    }
+                    _ => {
+                        let time_on_selection = u32::from(!progressing);
+                        self.script_menu_presentation = Some(ScriptMenuPresentationState {
+                            key,
+                            time_on_selection,
+                        });
+                        time_on_selection
+                    }
+                }
+            })
+            .unwrap_or_else(|| {
+                self.script_menu_presentation = None;
+                0
+            });
+        if let Some((_, menu)) = script_menu.as_ref() {
+            let fonts = self.assets.clonk_fonts.clone();
+            let fallback = self.assets.font_arc();
+            let legacy_title_id = menu.identification.to_string();
+            let legacy_title_id = legacy_title_id
+                .strip_prefix('"')
+                .and_then(|id| id.strip_suffix('"'))
+                .unwrap_or(&legacy_title_id);
+            let title_id = if menu.symbol_id.is_empty() {
+                legacy_title_id
+            } else {
+                &menu.symbol_id
+            };
+            let title_icon = self.engine.definition_picture_image(title_id).map(|image| {
+                ImageData::from_arc(image.width(), image.height(), image.pixels())
+            });
+            let item_icons = menu
+                .items
+                .iter()
+                .map(|item| {
+                    self.engine
+                        .definition_picture_image(&item.item_id)
+                        .map(|image| {
+                            ImageData::from_arc(image.width(), image.height(), image.pixels())
+                        })
+                })
+                .collect::<Vec<_>>();
+            {
+                let show_commands = self.display_flags.show_commands;
+                let show_command_keys = self.display_flags.show_command_keys;
+                let gfx = self.ensure_ingame_menu_gfx();
+                gfx.show_commands = show_commands;
+                gfx.show_command_keys = show_command_keys;
+            }
+            if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
+                let font = lc_frontend::hud::HudFont::from_set(
+                    fonts.as_deref(),
+                    fallback.as_ref(),
+                );
+                let tiny = fonts
+                    .as_deref()
+                    .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
+                let area = self.graphics.viewport_rect(self.local_owner).unwrap_or_else(|| {
+                    let surface = self.graphics.surface();
+                    Rect::new(0, 0, surface.width(), surface.height())
+                });
+                let surface = self.graphics.surface_mut();
+                render_engine_script_menu(
+                    surface,
+                    area,
+                    &font,
+                    fallback.as_ref(),
+                    tiny.as_ref(),
+                    menu,
+                    gfx,
+                    title_icon.as_ref(),
+                    &item_icons,
+                    script_menu_time,
+                );
+            }
         }
 
         if let Some(browser) = self.save_browser.as_ref() {
@@ -9595,6 +9706,7 @@ impl GameApp {
         self.finish_recording();
         self.close_ingame_menu();
         self.object_menu = None;
+        self.script_menu_presentation = None;
         self.save_browser = None;
         self.save_browser_return_to_menu = false;
         self.game_over_dialog = None;
@@ -10102,6 +10214,7 @@ impl GameApp {
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
         self.ingame_menu = None;
+        self.script_menu_presentation = None;
         self.game_over_handled = false;
         self.mode = AppMode::Running;
         // Game clock + startup hint + join log line for the HUD.
@@ -13394,6 +13507,7 @@ mod tests {
             .expect("sandbox cursor");
         let menu = lc_engine::ObjectMenuState {
             caption: "Choose".to_string(),
+            symbol_id: "MENU".to_string(),
             identification: serde_json::from_value(serde_json::json!({ "C4Id": "MENU" }))
                 .expect("menu identification deserializes"),
             style: 0,
@@ -13404,6 +13518,7 @@ mod tests {
             items: vec![
                 lc_engine::ObjectMenuItem {
                     caption: "First".to_string(),
+                    info_caption: "First details".to_string(),
                     command: "0".to_string(),
                     command2: "0".to_string(),
                     count: 12_345_678,
@@ -13413,6 +13528,7 @@ mod tests {
                 },
                 lc_engine::ObjectMenuItem {
                     caption: "Second".to_string(),
+                    info_caption: "Second details".to_string(),
                     command: "0".to_string(),
                     command2: "0".to_string(),
                     count: 12_345_678,
@@ -13443,6 +13559,16 @@ mod tests {
         assert_ne!(
             with_menu, baseline,
             "an engine-created script menu must be visible"
+        );
+        let mut before_tooltip = with_menu.clone();
+        for _ in 1..89 {
+            app.render(&mut before_tooltip).expect("pre-tooltip render");
+        }
+        let mut with_tooltip = vec![0u8; 320 * 200 * 4];
+        app.render(&mut with_tooltip).expect("90th menu render");
+        assert_ne!(
+            with_tooltip, before_tooltip,
+            "C4MN_InfoCaption_Delay shows the tooltip on draw 90"
         );
 
         app.dispatch_control_event(ControlEvent::Press(ControlButton::Right))

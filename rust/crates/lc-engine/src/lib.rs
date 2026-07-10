@@ -1942,6 +1942,9 @@ fn default_construction() -> i32 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectMenuItem {
     pub caption: String,
+    /// Tooltip text shown after C4MN_InfoCaption_Delay.
+    #[serde(default)]
+    pub info_caption: String,
     pub command: String,
     pub command2: String,
     /// C4MN_Item_NoCount (12345678) when the script passed no count
@@ -1967,6 +1970,10 @@ pub struct ObjectMenuState {
     /// it (C4Menu.cpp:351-358, 577-584).
     #[serde(default)]
     pub caption: String,
+    /// Definition picture used as the wooden title-bar icon. This is the
+    /// CreateMenu symbol even when idMenuID overrides `identification`.
+    #[serde(default)]
+    pub symbol_id: String,
     /// C4Menu::Identification: idMenuID if given, else the symbol id
     /// (C4Script.cpp:1452). Kept as the raw script value (C4ID or int)
     /// so GetMenu returns exactly what the script compares against.
@@ -38654,6 +38661,7 @@ func Trigger() {
             .expect("clonk exists")
             .expect("menu is open");
         assert_eq!(menu.caption, "Choose");
+        assert_eq!(menu.symbol_id, "WIPF");
         assert_eq!(menu.style, 0, "C4MN_Style_Normal");
         assert!(!menu.permanent, "fPermanent defaults false");
         assert_eq!(menu.selection, -1, "C4Menu::Default Selection (-1)");
@@ -38683,6 +38691,10 @@ func Trigger() {
             .expect("clonk exists")
             .expect("menu is open");
         assert_eq!(menu.style, 1, "iStyle stored (C4MN_Style_Context)");
+        assert_eq!(
+            menu.symbol_id, "WIPF",
+            "idMenuID changes identity but not the title-bar symbol"
+        );
     }
 
     #[test]

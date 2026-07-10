@@ -1020,6 +1020,8 @@ pub struct IngameMenuGraphics {
     pub show_command_keys: bool,
     /// `PlrControlKeyName(..., CON_Throw)` — the menu-enter key label.
     pub throw_key: String,
+    /// `PlrControlKeyName(..., CON_Special2)` — the menu-enter-all label.
+    pub special2_key: String,
     /// `PlrControlKeyName(..., CON_Dig)` — the menu-close key label.
     pub dig_key: String,
 }
@@ -1211,7 +1213,7 @@ fn draw_menu(
 /// `DrawCommandKey` (C4ObjectCom.cpp:930-945): key cap (fctKey, Control.png
 /// (0,100) 64x64) + command symbol (fctCommand, Control.png (0,36) 32x32
 /// phases) + the key name in the small font when ShowCommandKeys is set.
-fn draw_command_key(
+pub(crate) fn draw_command_key(
     surface: &mut Surface,
     gfx: &IngameMenuGraphics,
     tiny_font: &HudFont<'_>,
@@ -1244,7 +1246,7 @@ fn draw_command_key(
 }
 
 /// `GfxR->fctOKCancel.Draw(cgo, true, px, py)` (C4Menu.cpp:860,880).
-fn draw_ok_cancel(
+pub(crate) fn draw_ok_cancel(
     surface: &mut Surface,
     gfx: &IngameMenuGraphics,
     x: i32,
@@ -1264,7 +1266,13 @@ fn draw_ok_cancel(
 }
 
 /// `C4GUI::Screen::DrawToolTip` (C4Gui.cpp:907-928).
-fn draw_tooltip(surface: &mut Surface, font: &HudFont<'_>, x: i32, y: i32, text: &str) {
+pub(crate) fn draw_tooltip(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+) {
     let area_w = surface.width() as i32;
     let lines = break_message(font, text, MAX_TOOLTIP_WDT);
     let text_w = lines
@@ -1324,7 +1332,7 @@ fn break_message(font: &HudFont<'_>, text: &str, max_width: i32) -> Vec<String> 
 
 /// `C4GUI::Element::Draw3DFrame` (C4Gui.cpp:264-279) with the default border
 /// colors at `C4GUI_BorderAlpha`.
-fn draw_3d_frame(surface: &mut Surface, rect: Rect) {
+pub(crate) fn draw_3d_frame(surface: &mut Surface, rect: Rect) {
     let x0 = rect.x;
     let y0 = rect.y;
     let x1 = rect.x + rect.width as i32 - 1;
@@ -1356,7 +1364,7 @@ fn draw_3d_frame(surface: &mut Surface, rect: Rect) {
 
 /// The zoomed branch of `C4GUI::Element::DrawBar` (C4Gui.cpp:313-329) for
 /// `GetRes()->barCaption`: GUICaption.png sliced 32/128/32 horizontally.
-fn draw_caption_bar(surface: &mut Surface, rect: Rect, image: &ImageData) {
+pub(crate) fn draw_caption_bar(surface: &mut Surface, rect: Rect, image: &ImageData) {
     let img_h = image.height() as i32;
     if img_h <= 0 || rect.height == 0 {
         return;
@@ -1397,7 +1405,12 @@ fn draw_caption_bar(surface: &mut Surface, rect: Rect, image: &ImageData) {
 
 /// Nearest-neighbour stretch blit of `src` (source-pixel rect) into `dest`
 /// with alpha blending — the software analogue of `C4Facet::DrawX`.
-fn draw_image_region(surface: &mut Surface, image: &ImageData, src: Rect, dest: Rect) {
+pub(crate) fn draw_image_region(
+    surface: &mut Surface,
+    image: &ImageData,
+    src: Rect,
+    dest: Rect,
+) {
     if dest.width == 0 || dest.height == 0 || src.width == 0 || src.height == 0 {
         return;
     }
@@ -1446,7 +1459,7 @@ fn draw_image_region(surface: &mut Surface, image: &ImageData, src: Rect, dest: 
 /// `C4Facet::Draw` with `fAspect=true`: scale to fit, keep the aspect ratio
 /// and center in the target. `colorize` applies the default blue player
 /// color like `fctPlayerClr.Surface->SetClr(0xff)` (C4MainMenu.cpp:69-70).
-fn draw_image_region_aspect(
+pub(crate) fn draw_image_region_aspect(
     surface: &mut Surface,
     image: &ImageData,
     src: Rect,
