@@ -7322,6 +7322,7 @@ impl Definition {
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
+            script_counter: host_script_counter,
             next_object_id,
             other_objects,
             context_locals: _,
@@ -7388,6 +7389,9 @@ impl Definition {
         }
         if host_script_go.is_some() {
             batch.script_go = host_script_go;
+        }
+        if host_script_counter.is_some() {
+            batch.script_counter = host_script_counter;
         }
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng, next_object_id, script_error))
@@ -7526,6 +7530,7 @@ impl Definition {
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
+            script_counter: host_script_counter,
             next_object_id,
             other_objects,
             context_locals: _,
@@ -7572,6 +7577,9 @@ impl Definition {
         }
         if host_script_go.is_some() {
             batch.script_go = host_script_go;
+        }
+        if host_script_counter.is_some() {
+            batch.script_counter = host_script_counter;
         }
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng, next_object_id, script_error))
@@ -7695,6 +7703,7 @@ impl Definition {
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
+            script_counter: host_script_counter,
             next_object_id,
             other_objects,
             context_locals: _,
@@ -7761,6 +7770,9 @@ impl Definition {
         }
         if host_script_go.is_some() {
             batch.script_go = host_script_go;
+        }
+        if host_script_counter.is_some() {
+            batch.script_counter = host_script_counter;
         }
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng, next_object_id))
@@ -9338,6 +9350,7 @@ impl ScenarioScript {
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
+            script_counter: host_script_counter,
             next_object_id: _,
             other_objects,
             context_locals: _,
@@ -9404,6 +9417,9 @@ impl ScenarioScript {
         }
         if host_script_go.is_some() {
             batch.script_go = host_script_go;
+        }
+        if host_script_counter.is_some() {
+            batch.script_counter = host_script_counter;
         }
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng, script_error))
@@ -9500,6 +9516,7 @@ impl ScenarioScript {
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
+            script_counter: host_script_counter,
             next_object_id: _,
             other_objects,
             context_locals: _,
@@ -9539,6 +9556,9 @@ impl ScenarioScript {
         }
         if host_script_go.is_some() {
             batch.script_go = host_script_go;
+        }
+        if host_script_counter.is_some() {
+            batch.script_counter = host_script_counter;
         }
         let audio_state = audio_guard.finish();
         (value, finals, batch, audio_state, rng)
@@ -9597,6 +9617,7 @@ struct CommandBatch {
     next_mission_commands: Vec<NextMissionCommand>,
     trigger_game_over: bool,
     script_go: Option<bool>,
+    script_counter: Option<i32>,
 }
 
 #[derive(Debug, Default)]
@@ -9618,6 +9639,7 @@ struct ScenarioBatch {
     next_mission_commands: Vec<NextMissionCommand>,
     trigger_game_over: bool,
     script_go: Option<bool>,
+    script_counter: Option<i32>,
 }
 
 #[derive(Clone)]
@@ -13577,6 +13599,7 @@ impl Engine {
             next_mission_commands,
             trigger_game_over,
             script_go,
+            script_counter,
         } = batch;
 
         if !player_commands.is_empty() {
@@ -13664,6 +13687,9 @@ impl Engine {
         self.apply_nested_object_outcomes(other_objects)?;
         if let Some(go) = script_go {
             self.scenario_script_go = go;
+        }
+        if let Some(counter) = script_counter {
+            self.scenario_script_counter = counter;
         }
         if trigger_game_over {
             self.request_game_over()?;
@@ -15932,6 +15958,7 @@ impl Engine {
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
+                    effect_script_counter,
                     audio_state,
                     new_rng,
                 ) = {
@@ -15984,6 +16011,9 @@ impl Engine {
                 }
                 if let Some(go) = effect_script_go {
                     self.scenario_script_go = go;
+                }
+                if let Some(counter) = effect_script_counter {
+                    self.scenario_script_counter = counter;
                 }
                 if triggered_game_over {
                     self.request_game_over()?;
@@ -16435,10 +16465,14 @@ impl Engine {
                 next_mission_commands,
                 trigger_game_over,
                 script_go,
+                script_counter,
             } = command;
 
             if let Some(go) = script_go {
                 self.scenario_script_go = go;
+            }
+            if let Some(counter) = script_counter {
+                self.scenario_script_counter = counter;
             }
             if trigger_game_over {
                 self.request_game_over()?;
@@ -16541,6 +16575,7 @@ impl Engine {
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
+                    effect_script_counter,
                     audio_state,
                     new_rng,
                 ) = {
@@ -16595,6 +16630,9 @@ impl Engine {
                 }
                 if let Some(go) = effect_script_go {
                     self.scenario_script_go = go;
+                }
+                if let Some(counter) = effect_script_counter {
+                    self.scenario_script_counter = counter;
                 }
                 if triggered_game_over {
                     self.request_game_over()?;
@@ -17344,6 +17382,7 @@ impl Engine {
             audio: outcome_audio,
             trigger_game_over,
             script_go,
+            script_counter,
             next_object_id,
             context_locals,
         } = outcome;
@@ -17390,6 +17429,9 @@ impl Engine {
 
         if let Some(go) = script_go {
             self.scenario_script_go = go;
+        }
+        if let Some(counter) = script_counter {
+            self.scenario_script_counter = counter;
         }
         if trigger_game_over {
             self.request_game_over()?;
@@ -17533,6 +17575,7 @@ impl Engine {
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,
+                effect_script_counter,
                 audio_state,
                 new_rng,
             ) = Self::run_effect_events_for_object(
@@ -17577,6 +17620,9 @@ impl Engine {
             }
             if let Some(go) = effect_script_go {
                 self.scenario_script_go = go;
+            }
+            if let Some(counter) = effect_script_counter {
+                self.scenario_script_counter = counter;
             }
             if triggered_game_over {
                 self.request_game_over()?;
@@ -17744,6 +17790,7 @@ impl Engine {
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
+                    effect_script_counter,
                     audio_state,
                     new_rng,
                 ) = Self::run_effect_events_for_object(
@@ -17788,6 +17835,9 @@ impl Engine {
                 }
                 if let Some(go) = effect_script_go {
                     self.scenario_script_go = go;
+                }
+                if let Some(counter) = effect_script_counter {
+                    self.scenario_script_counter = counter;
                 }
                 if triggered_game_over {
                     self.request_game_over()?;
@@ -18564,6 +18614,7 @@ impl Engine {
             effect_next_object_id,
             triggered_game_over,
             effect_script_go,
+            effect_script_counter,
             audio_state,
             new_rng,
         ) = {
@@ -18617,6 +18668,9 @@ impl Engine {
         if let Some(go) = effect_script_go {
             self.scenario_script_go = go;
         }
+        if let Some(counter) = effect_script_counter {
+            self.scenario_script_counter = counter;
+        }
         if triggered_game_over {
             self.request_game_over()?;
         }
@@ -18660,6 +18714,7 @@ impl Engine {
             u64,
             bool,
             Option<bool>,
+            Option<i32>,
             AudioRegistry,
             LcgRng,
         ),
@@ -18681,6 +18736,7 @@ impl Engine {
                 Vec::new(),
                 next_object_id,
                 false,
+                None,
                 None,
                 audio,
                 rng,
@@ -18712,6 +18768,7 @@ impl Engine {
         let mut pending_other_objects = Vec::new();
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
+        let mut script_counter_requested: Option<i32> = None;
         // Pending-effect bookkeeping is keyed by the effect NUMBER — the
         // C++ identity (C4Effect.cpp:76-78); names may repeat.
         let mut checked_started: HashSet<i32> = HashSet::new();
@@ -19158,6 +19215,7 @@ impl Engine {
                 audio: outcome_audio,
                 trigger_game_over,
                 script_go,
+                script_counter,
                 context_locals,
                 spawns,
                 next_object_id,
@@ -19258,6 +19316,9 @@ impl Engine {
             if script_go.is_some() {
                 script_go_requested = script_go;
             }
+            if script_counter.is_some() {
+                script_counter_requested = script_counter;
+            }
             if trigger_game_over {
                 game_over_requested = true;
             }
@@ -19281,6 +19342,7 @@ impl Engine {
             next_object_id,
             game_over_requested,
             script_go_requested,
+            script_counter_requested,
             current_audio,
             rng,
         ))
@@ -28116,6 +28178,7 @@ impl Engine {
             next_object_id,
             game_over,
             script_go,
+            script_counter,
             audio_state,
             rng,
         } = outcome?;
@@ -28144,6 +28207,9 @@ impl Engine {
         }
         if let Some(go) = script_go {
             self.scenario_script_go = go;
+        }
+        if let Some(counter) = script_counter {
+            self.scenario_script_counter = counter;
         }
         if game_over {
             self.request_game_over()?;
@@ -28193,6 +28259,7 @@ impl Engine {
         let mut pending_other_objects = Vec::new();
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
+        let mut script_counter_requested: Option<i32> = None;
         // Anchors whose temp remove/readd bracket was already queued (a
         // re-popped anchor event must not expand again); see the object
         // runner's temp_wrapped_stopped.
@@ -28384,6 +28451,7 @@ impl Engine {
                 audio: outcome_audio,
                 trigger_game_over,
                 script_go,
+                script_counter,
                 spawns,
                 next_object_id,
                 other_objects: event_other_objects,
@@ -28427,6 +28495,9 @@ impl Engine {
             if script_go.is_some() {
                 script_go_requested = script_go;
             }
+            if script_counter.is_some() {
+                script_counter_requested = script_counter;
+            }
             if trigger_game_over {
                 game_over_requested = true;
             }
@@ -28448,6 +28519,7 @@ impl Engine {
             next_object_id,
             game_over: game_over_requested,
             script_go: script_go_requested,
+            script_counter: script_counter_requested,
             audio_state: current_audio,
             rng,
         })
@@ -28813,6 +28885,7 @@ impl Engine {
                     next_mission_commands,
                     trigger_game_over,
                     script_go,
+                    script_counter,
                 },
                 audio_state,
                 new_rng,
@@ -28850,6 +28923,9 @@ impl Engine {
             self.audio_registry = audio_state;
             if let Some(go) = script_go {
                 self.scenario_script_go = go;
+            }
+            if let Some(counter) = script_counter {
+                self.scenario_script_counter = counter;
             }
             if trigger_game_over {
                 self.request_game_over()?;
@@ -28956,6 +29032,7 @@ impl Engine {
                     next_mission_commands,
                     trigger_game_over,
                     script_go,
+                    script_counter,
                 },
                 audio_state,
                 new_rng,
@@ -28994,6 +29071,9 @@ impl Engine {
             self.audio_registry = audio_state;
             if let Some(go) = script_go {
                 self.scenario_script_go = go;
+            }
+            if let Some(counter) = script_counter {
+                self.scenario_script_counter = counter;
             }
             if trigger_game_over {
                 self.request_game_over()?;
@@ -29079,6 +29159,7 @@ impl Engine {
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,
+                effect_script_counter,
                 audio_state,
                 new_rng,
             ) = Self::run_effect_events_for_object(
@@ -29123,6 +29204,9 @@ impl Engine {
             }
             if let Some(go) = effect_script_go {
                 self.scenario_script_go = go;
+            }
+            if let Some(counter) = effect_script_counter {
+                self.scenario_script_counter = counter;
             }
             if triggered_game_over {
                 self.request_game_over()?;
@@ -29851,6 +29935,7 @@ struct GlobalEffectRunOutcome {
     next_object_id: u64,
     game_over: bool,
     script_go: Option<bool>,
+    script_counter: Option<i32>,
     audio_state: AudioRegistry,
     rng: LcgRng,
 }

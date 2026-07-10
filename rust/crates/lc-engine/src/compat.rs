@@ -7584,6 +7584,9 @@ pub(crate) struct EffectContextOutcome {
     pub audio: AudioOutcome,
     pub trigger_game_over: bool,
     pub script_go: Option<bool>,
+    /// Last synchronous write to `Game.Script.Counter` made during this VM
+    /// call. The engine folds it even when the call subsequently errors.
+    pub script_counter: Option<i32>,
     pub next_object_id: u64,
     /// VM-final locals of an effect callback that ran in its command
     /// target's own context (pFn->Exec(pCommandTarget, ...),
@@ -7611,6 +7614,7 @@ impl EffectContextOutcome {
         audio: AudioOutcome,
         trigger_game_over: bool,
         script_go: Option<bool>,
+        script_counter: Option<i32>,
         next_object_id: u64,
     ) -> Self {
         Self {
@@ -7635,6 +7639,7 @@ impl EffectContextOutcome {
             audio,
             trigger_game_over,
             script_go,
+            script_counter,
             next_object_id,
             context_locals: None,
         }
@@ -7666,6 +7671,7 @@ impl EffectContextOutcome {
             },
             trigger_game_over: false,
             script_go: None,
+            script_counter: None,
             next_object_id,
             context_locals: None,
         }
@@ -21609,6 +21615,7 @@ struct EffectHostContext {
     next_object_id: u64,
     trigger_game_over: bool,
     script_go_request: Option<bool>,
+    script_counter_request: Option<i32>,
     game_over_triggered: bool,
     /// Saved `object` scopes of in-flight nested calls, one per nesting
     /// level (`None` = the level had no object scope). The active scope is
@@ -21766,6 +21773,7 @@ impl EffectHostContext {
             next_object_id,
             trigger_game_over: false,
             script_go_request: None,
+            script_counter_request: None,
             game_over_triggered,
             dormant_scopes: Vec::new(),
             nested_objects: HashMap::new(),
@@ -22947,6 +22955,7 @@ impl EffectHostContext {
             },
             self.trigger_game_over,
             self.script_go_request,
+            self.script_counter_request,
             self.next_object_id,
         );
         outcome.menu_requests = self.pending_menu_requests;
