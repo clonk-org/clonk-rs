@@ -42801,6 +42801,7 @@ protected func Activity() { SetActionTargets(); return(1); }
             climate: flat(50),
             wind: flat(0),
             rain: flat(0),
+            precipitation: "Water".to_string(),
             lightning: flat(0),
             meteorite: flat(0),
             volcano: flat(0),

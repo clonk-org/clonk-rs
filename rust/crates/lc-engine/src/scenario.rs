@@ -938,11 +938,11 @@ impl Scenario {
         {
             engine.run_legacy_init_placements(placement);
         }
-        if let Some(weather_init) = self.weather_init {
+        if let Some(weather_init) = self.weather_init.as_ref() {
             // C4Weather::Init runs at the END of C4Game::InitGame after
             // Landscape.ScenarioInit's Gravity draw and the placements
             // (C4Game.cpp:2507).
-            engine.apply_weather_init(&weather_init);
+            engine.apply_weather_init(weather_init);
         }
 
         // C4Game::Init tail: SyncClearance + Synchronize AFTER InitGame,
@@ -3699,13 +3699,14 @@ fn derive_legacy_physics(
 /// The C4SVals C4Weather::Init evaluates at scenario start
 /// (C4Weather.cpp:36-70) plus the NoInitialize gate for the rain-cloud
 /// block (:49-58).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct LegacyWeatherInit {
     pub(crate) season: LegacyC4SVal,
     pub(crate) year_speed: LegacyC4SVal,
     pub(crate) climate: LegacyC4SVal,
     pub(crate) wind: LegacyC4SVal,
     pub(crate) rain: LegacyC4SVal,
+    pub(crate) precipitation: String,
     pub(crate) lightning: LegacyC4SVal,
     pub(crate) meteorite: LegacyC4SVal,
     pub(crate) volcano: LegacyC4SVal,
@@ -3726,6 +3727,7 @@ fn derive_legacy_weather_init(
         climate: legacy_c4s_value(weather, "climate", LegacyC4SVal::new(50, 10, 0, 100))?,
         wind: legacy_c4s_value(weather, "wind", LegacyC4SVal::new(0, 70, -100, 100))?,
         rain: legacy_c4s_value(weather, "rain", LegacyC4SVal::new(0, 0, 0, 100))?,
+        precipitation: manifest.core.weather.precipitation.clone(),
         lightning: legacy_c4s_value(weather, "lightning", LegacyC4SVal::new(0, 0, 0, 100))?,
         meteorite: legacy_c4s_value(disasters, "meteorite", LegacyC4SVal::new(0, 0, 0, 100))?,
         volcano: legacy_c4s_value(disasters, "volcano", LegacyC4SVal::new(0, 0, 0, 100))?,
@@ -10743,6 +10745,20 @@ public func ActualizePhase(pClonk)
     // Lightning and the Disasters. Every C4SVal::Evaluate draws
     // Random(2*Rnd+1) even for Rnd=0 (C4Scenario.cpp:43-46), so the whole
     // RNG stream shifts if any draw is skipped.
+    #[test]
+    fn weather_init_retains_the_precipitation_material_name() {
+        // C4SWeather::CompileFunc stores `Precipitation` and
+        // C4Weather::Init passes that exact name to LaunchCloud
+        // (C4Scenario.cpp:390; C4Weather.cpp:55-57,205-211).
+        let manifest = parse_legacy_scenario_text(
+            "[Head]\nTitle=Rain\n\n[Weather]\nPrecipitation=AcidRain\n",
+        )
+        .expect("scenario parses");
+
+        let weather = derive_legacy_weather_init(&manifest).expect("weather derives");
+        assert_eq!(weather.precipitation, "AcidRain");
+    }
+
     #[test]
     fn scenario_apply_replays_the_weather_init_ledger_like_cpp() {
         let dir = tempdir().expect("tempdir");
