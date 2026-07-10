@@ -125,7 +125,7 @@ use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     object_reference_value, AudioRegistry, DefinitionMetadata, EffectContextOutcome,
     EnvironmentDelta, HostWorldContext, HostWorldObject, LandscapeOperation, PhysicsDelta,
-    ObjectOrderCommand, PlayerCommand,
+    NextMissionCommand, ObjectOrderCommand, PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use material::{
@@ -5356,6 +5356,16 @@ pub struct PersistedObject {
     pub command_stack: CommandStackSnapshot,
 }
 
+/// Scenario selected by `SetNextMission` for the evaluation dialog.
+/// C4Game persists the path, button text, and description independently
+/// (C4Game.cpp:1963-1965).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextMissionState {
+    pub path: String,
+    pub text: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineState {
     pub frame: u64,
@@ -5390,6 +5400,8 @@ pub struct EngineState {
     pub messages: Vec<PersistedMessage>,
     #[serde(default)]
     pub pending_menu_requests: Vec<MenuRequest>,
+    #[serde(default)]
+    pub next_mission: NextMissionState,
     #[serde(default)]
     pub game_over: bool,
     #[serde(default)]
@@ -5486,6 +5498,7 @@ impl EngineState {
             transfer_zones: snapshot.transfer_zones.clone(),
             pending_menu_requests: snapshot.menu_requests.clone(),
             messages: Vec::new(),
+            next_mission: NextMissionState::default(),
             game_over: snapshot.game_over,
             landscape_insert_thrust: false,
             // SimulationSnapshot carries no mover slots (the C++ snapshot
@@ -7302,6 +7315,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
+            next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
@@ -7315,6 +7329,9 @@ impl Definition {
             batch.player_commands.extend(host_player_commands);
         }
         batch.object_order_commands.extend(host_object_order_commands);
+        batch
+            .next_mission_commands
+            .extend(host_next_mission_commands);
 
         if let Some(delta) = physics_from_host {
             merge_physics_delta(&mut physics_delta, &delta);
@@ -7501,6 +7518,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
+            next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
@@ -7514,6 +7532,9 @@ impl Definition {
             batch.player_commands.extend(host_player_commands);
         }
         batch.object_order_commands.extend(host_object_order_commands);
+        batch
+            .next_mission_commands
+            .extend(host_next_mission_commands);
 
         if let Some(delta) = physics_from_host {
             merge_physics_delta(&mut physics_delta, &delta);
@@ -7665,6 +7686,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
+            next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
@@ -7678,6 +7700,9 @@ impl Definition {
             batch.player_commands.extend(host_player_commands);
         }
         batch.object_order_commands.extend(host_object_order_commands);
+        batch
+            .next_mission_commands
+            .extend(host_next_mission_commands);
 
         if let Some(delta) = environment_from_host {
             merge_environment_delta(&mut environment_delta, &delta);
@@ -9132,9 +9157,9 @@ impl ScenarioScript {
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
         engine_next_object_id: u64,
-    ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
+    ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng, Option<EngineError>), EngineError> {
         if !self.has_initialize {
-            return Ok((ScenarioBatch::default(), audio, rng));
+            return Ok((ScenarioBatch::default(), audio, rng, None));
         }
         // C++: Game.Script.Call(PSF_Initialize) has NO parameters; the
         // state/random pair is the JSON-fixture convention.
@@ -9143,7 +9168,7 @@ impl ScenarioScript {
             args.push(build_scenario_state_value(snapshot));
             args.push(Value::Int(random));
         }
-        match self.call_raw(
+        self.call_raw(
             "Initialize",
             args,
             snapshot,
@@ -9157,13 +9182,7 @@ impl ScenarioScript {
             definition_scripts,
             definition_metadata,
             engine_next_object_id,
-        ) {
-            Ok((batch, audio, rng, None)) => Ok((batch, audio, rng)),
-            // Strict wrappers surface the script error (fixtures assert
-            // on it); the partial batch is dropped like before.
-            Ok((_, _, _, Some(error))) => Err(error),
-            Err(error) => Err(error),
-        }
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -9303,6 +9322,7 @@ impl ScenarioScript {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
+            next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
@@ -9330,6 +9350,9 @@ impl ScenarioScript {
             batch.player_commands.extend(host_player_commands);
         }
         batch.object_order_commands.extend(host_object_order_commands);
+        batch
+            .next_mission_commands
+            .extend(host_next_mission_commands);
         if !host_global_effects.is_empty() {
             batch.global_effects.extend(host_global_effects);
         }
@@ -9460,6 +9483,7 @@ impl ScenarioScript {
             messages: host_messages,
             player_commands: host_player_commands,
             object_order_commands: host_object_order_commands,
+            next_mission_commands: host_next_mission_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
@@ -9474,6 +9498,9 @@ impl ScenarioScript {
         };
         batch.player_commands.extend(host_player_commands);
         batch.object_order_commands.extend(host_object_order_commands);
+        batch
+            .next_mission_commands
+            .extend(host_next_mission_commands);
         batch.global_effects.extend(host_global_effects);
         batch.landscape_ops.extend(host_landscape_ops);
         if let Some(delta) = environment_from_host {
@@ -9553,6 +9580,7 @@ struct CommandBatch {
     messages: Vec<MessageCommand>,
     player_commands: Vec<PlayerCommand>,
     object_order_commands: Vec<ObjectOrderCommand>,
+    next_mission_commands: Vec<NextMissionCommand>,
     trigger_game_over: bool,
     script_go: Option<bool>,
 }
@@ -9573,6 +9601,7 @@ struct ScenarioBatch {
     messages: Vec<MessageCommand>,
     player_commands: Vec<PlayerCommand>,
     object_order_commands: Vec<ObjectOrderCommand>,
+    next_mission_commands: Vec<NextMissionCommand>,
     trigger_game_over: bool,
     script_go: Option<bool>,
 }
@@ -9675,6 +9704,7 @@ pub struct Engine {
     /// The System.c4g global-function table (Game.ScriptEngine in C++),
     /// shared into every script host.
     global_script_functions: Option<Arc<HashMap<String, lc_script::Function>>>,
+    next_mission: NextMissionState,
     game_over_triggered: bool,
     objectives: ScenarioObjectives,
     objective_check_counter: u8,
@@ -11321,6 +11351,7 @@ impl Engine {
             weather_events: Vec::new(),
             scenario_script: None,
             global_script_functions: None,
+            next_mission: NextMissionState::default(),
             game_over_triggered: false,
             objectives: ScenarioObjectives::default(),
             objective_check_counter: 0,
@@ -13158,7 +13189,7 @@ impl Engine {
         let Some(script) = self.scenario_script.as_mut() else {
             return Ok(Vec::new());
         };
-        let initialize = script.initialize(
+        let (batch, audio_state, new_rng, script_error) = script.initialize(
             &snapshot,
             rng_state,
             random,
@@ -13170,18 +13201,17 @@ impl Engine {
             definition_scripts,
             definition_metadata_table,
             next_object_id,
-        );
+        )?;
         // Initialize is a game call: a script error logs and the scenario
         // still runs WITH its script installed (C++ fail-safe exec,
-        // C4AulExec.cpp:1318-1342).
-        let created = match tolerate_script_error(initialize)? {
-            Some((batch, audio_state, new_rng)) => {
-                self.rng = new_rng;
-                self.audio_registry = audio_state;
-                self.apply_scenario_batch(batch)?
-            }
-            None => Vec::new(),
-        };
+        // C4AulExec.cpp:1318-1342). Host mutations made before the error
+        // already happened and therefore apply before the error is logged.
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        let created = self.apply_scenario_batch(batch)?;
+        if let Some(error) = script_error {
+            tolerate_script_error::<()>(Err(error))?;
+        }
         self.game_over_triggered = false;
         Ok(created)
     }
@@ -13465,6 +13495,37 @@ impl Engine {
         Ok(true)
     }
 
+    pub fn next_mission(&self) -> &NextMissionState {
+        &self.next_mission
+    }
+
+    fn apply_next_mission_commands(
+        &mut self,
+        commands: impl IntoIterator<Item = NextMissionCommand>,
+    ) {
+        for command in commands {
+            match command {
+                NextMissionCommand::Set {
+                    path,
+                    text,
+                    description,
+                } => {
+                    self.next_mission = NextMissionState {
+                        path,
+                        text,
+                        description,
+                    };
+                }
+                NextMissionCommand::Clear => {
+                    self.next_mission.path.clear();
+                    self.next_mission.text.clear();
+                    // FnSetNextMission deliberately leaves NextMissionDesc
+                    // untouched when clearing (C4Script.cpp:6055-6061).
+                }
+            }
+        }
+    }
+
     fn apply_scenario_batch(&mut self, batch: ScenarioBatch) -> Result<Vec<ObjectId>, EngineError> {
         let ScenarioBatch {
             spawns,
@@ -13480,6 +13541,7 @@ impl Engine {
             messages,
             player_commands,
             object_order_commands,
+            next_mission_commands,
             trigger_game_over,
             script_go,
         } = batch;
@@ -13488,6 +13550,7 @@ impl Engine {
             self.apply_player_commands(player_commands)?;
         }
         self.pending_object_order_commands.extend(object_order_commands);
+        self.apply_next_mission_commands(next_mission_commands);
 
         if !landscape_ops.is_empty() {
             self.apply_landscape_operations(landscape_ops);
@@ -15719,6 +15782,7 @@ impl Engine {
                     event_messages,
                     player_commands,
                     object_order_commands,
+                    next_mission_commands,
                     landscape_ops,
                     effect_spawns,
                     effect_other_objects,
@@ -15766,6 +15830,7 @@ impl Engine {
                     self.apply_player_commands(player_commands)?;
                 }
                 self.pending_object_order_commands.extend(object_order_commands);
+                self.apply_next_mission_commands(next_mission_commands);
                 if !audio_events.is_empty() {
                     self.pending_audio.extend(audio_events);
                 }
@@ -16219,6 +16284,7 @@ impl Engine {
                 messages,
                 player_commands,
                 object_order_commands,
+                next_mission_commands,
                 trigger_game_over,
                 script_go,
             } = command;
@@ -16234,6 +16300,7 @@ impl Engine {
                 self.apply_player_commands(player_commands)?;
             }
             self.pending_object_order_commands.extend(object_order_commands);
+            self.apply_next_mission_commands(next_mission_commands);
 
             if !landscape_ops.is_empty() {
                 self.apply_landscape_operations(landscape_ops);
@@ -16319,6 +16386,7 @@ impl Engine {
                     event_messages,
                     player_commands,
                     object_order_commands,
+                    next_mission_commands,
                     landscape_ops,
                     effect_spawns,
                     effect_other_objects,
@@ -16365,6 +16433,7 @@ impl Engine {
                     self.apply_player_commands(player_commands)?;
                 }
                 self.pending_object_order_commands.extend(object_order_commands);
+                self.apply_next_mission_commands(next_mission_commands);
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
                 }
@@ -17122,6 +17191,7 @@ impl Engine {
             messages,
             player_commands,
             object_order_commands,
+            next_mission_commands,
             audio: outcome_audio,
             trigger_game_over,
             script_go,
@@ -17137,6 +17207,7 @@ impl Engine {
             self.apply_player_commands(player_commands)?;
         }
         self.pending_object_order_commands.extend(object_order_commands);
+        self.apply_next_mission_commands(next_mission_commands);
 
         if let Some(update) = environment {
             update.apply(&mut self.environment);
@@ -17301,6 +17372,7 @@ impl Engine {
                 event_messages,
                 player_commands,
                 object_order_commands,
+                next_mission_commands,
                 landscape_ops,
                 effect_spawns,
                 effect_other_objects,
@@ -17340,6 +17412,7 @@ impl Engine {
                 self.apply_player_commands(player_commands)?;
             }
             self.pending_object_order_commands.extend(object_order_commands);
+            self.apply_next_mission_commands(next_mission_commands);
             if !audio_events.is_empty() {
                 self.pending_audio.extend(audio_events);
             }
@@ -17510,6 +17583,7 @@ impl Engine {
                     event_messages,
                     player_commands,
                     object_order_commands,
+                    next_mission_commands,
                     landscape_ops,
                     effect_spawns,
                     effect_other_objects,
@@ -17549,6 +17623,7 @@ impl Engine {
                     self.apply_player_commands(player_commands)?;
                 }
                 self.pending_object_order_commands.extend(object_order_commands);
+                self.apply_next_mission_commands(next_mission_commands);
                 if !audio_events.is_empty() {
                     self.pending_audio.extend(audio_events);
                 }
@@ -17954,6 +18029,7 @@ impl Engine {
             transfer_zones: self.transfer_zones.states(),
             messages: self.messages.persisted(),
             pending_menu_requests: self.pending_menu_requests.clone(),
+            next_mission: self.next_mission.clone(),
             game_over: self.game_over_triggered,
             landscape_insert_thrust: self.landscape_insert_thrust,
             mass_movers: self.mass_movers.clone(),
@@ -18263,6 +18339,7 @@ impl Engine {
             .map(|player| (player.id(), player))
             .collect();
         self.players_registered = !self.players.is_empty();
+        self.next_mission = state.next_mission.clone();
         self.game_over_triggered = state.game_over;
 
         self.known_crew_owners = state.known_crew_owners.iter().cloned().collect();
@@ -18326,6 +18403,7 @@ impl Engine {
             event_messages,
             player_commands,
             object_order_commands,
+            next_mission_commands,
             landscape_ops,
             effect_spawns,
             effect_other_objects,
@@ -18373,6 +18451,7 @@ impl Engine {
             self.apply_player_commands(player_commands)?;
         }
         self.pending_object_order_commands.extend(object_order_commands);
+        self.apply_next_mission_commands(next_mission_commands);
         if !audio_events.is_empty() {
             self.pending_audio.extend(audio_events);
         }
@@ -18420,6 +18499,7 @@ impl Engine {
             Vec<MessageCommand>,
             Vec<PlayerCommand>,
             Vec<ObjectOrderCommand>,
+            Vec<NextMissionCommand>,
             Vec<LandscapeOperation>,
             Vec<SpawnConfig>,
             Vec<compat::NestedObjectOutcome>,
@@ -18437,6 +18517,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 PhysicsDelta::default(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -18469,6 +18550,7 @@ impl Engine {
         let mut current_audio = audio;
         let mut pending_player_commands = Vec::new();
         let mut pending_object_order_commands = Vec::new();
+        let mut pending_next_mission_commands = Vec::new();
         let mut pending_landscape_ops = Vec::new();
         // Nested-call mutations to OTHER objects (the copy-in/copy-out
         // model's deferred fold; C++ mutates live state mid-call): the
@@ -18918,6 +19000,7 @@ impl Engine {
                 messages: event_messages,
                 player_commands: effect_player_commands,
                 object_order_commands: effect_object_order_commands,
+                next_mission_commands: effect_next_mission_commands,
                 audio: outcome_audio,
                 trigger_game_over,
                 script_go,
@@ -18952,6 +19035,7 @@ impl Engine {
                 pending_player_commands.extend(effect_player_commands);
             }
             pending_object_order_commands.extend(effect_object_order_commands);
+            pending_next_mission_commands.extend(effect_next_mission_commands);
 
             if let Some(update) = environment_update {
                 update.apply(&mut current_environment);
@@ -19036,6 +19120,7 @@ impl Engine {
             pending_messages,
             pending_player_commands,
             pending_object_order_commands,
+            pending_next_mission_commands,
             pending_landscape_ops,
             pending_spawns,
             pending_other_objects,
@@ -27823,6 +27908,7 @@ impl Engine {
             messages,
             player_commands,
             object_order_commands,
+            next_mission_commands,
             landscape_ops,
             spawns,
             other_objects,
@@ -27848,6 +27934,7 @@ impl Engine {
             self.apply_player_commands(player_commands)?;
         }
         self.pending_object_order_commands.extend(object_order_commands);
+        self.apply_next_mission_commands(next_mission_commands);
         if !audio_events.is_empty() {
             self.pending_audio.extend(audio_events);
         }
@@ -27900,6 +27987,7 @@ impl Engine {
         let mut current_audio = audio;
         let mut pending_player_commands = Vec::new();
         let mut pending_object_order_commands = Vec::new();
+        let mut pending_next_mission_commands = Vec::new();
         let mut pending_landscape_ops = Vec::new();
         let mut pending_other_objects = Vec::new();
         let mut game_over_requested = false;
@@ -28091,6 +28179,7 @@ impl Engine {
                 messages: event_messages,
                 player_commands: effect_player_commands,
                 object_order_commands: effect_object_order_commands,
+                next_mission_commands: effect_next_mission_commands,
                 audio: outcome_audio,
                 trigger_game_over,
                 script_go,
@@ -28114,6 +28203,7 @@ impl Engine {
                 pending_player_commands.extend(effect_player_commands);
             }
             pending_object_order_commands.extend(effect_object_order_commands);
+            pending_next_mission_commands.extend(effect_next_mission_commands);
             if let Some(update) = environment_update {
                 update.apply(&mut current_environment);
             }
@@ -28150,6 +28240,7 @@ impl Engine {
             messages: pending_messages,
             player_commands: pending_player_commands,
             object_order_commands: pending_object_order_commands,
+            next_mission_commands: pending_next_mission_commands,
             landscape_ops: pending_landscape_ops,
             spawns: pending_spawns,
             other_objects: pending_other_objects,
@@ -28518,6 +28609,7 @@ impl Engine {
                     messages,
                     player_commands,
                     object_order_commands,
+                    next_mission_commands,
                     trigger_game_over,
                     script_go,
                 },
@@ -28574,6 +28666,7 @@ impl Engine {
                 self.apply_player_commands(player_commands)?;
             }
             self.pending_object_order_commands.extend(object_order_commands);
+            self.apply_next_mission_commands(next_mission_commands);
             if destroy {
                 destroy_requested = true;
             }
@@ -28659,6 +28752,7 @@ impl Engine {
                     messages,
                     player_commands,
                     object_order_commands,
+                    next_mission_commands,
                     trigger_game_over,
                     script_go,
                 },
@@ -28716,6 +28810,7 @@ impl Engine {
                 self.apply_player_commands(player_commands)?;
             }
             self.pending_object_order_commands.extend(object_order_commands);
+            self.apply_next_mission_commands(next_mission_commands);
             if destroy {
                 destroy_requested = true;
             }
@@ -28776,6 +28871,7 @@ impl Engine {
                 event_messages,
                 player_commands,
                 object_order_commands,
+                next_mission_commands,
                 landscape_ops,
                 effect_spawns,
                 effect_other_objects,
@@ -28812,6 +28908,7 @@ impl Engine {
                 self.apply_player_commands(player_commands)?;
             }
             self.pending_object_order_commands.extend(object_order_commands);
+            self.apply_next_mission_commands(next_mission_commands);
             if !landscape_ops.is_empty() {
                 self.apply_landscape_operations(landscape_ops);
             }
@@ -29543,6 +29640,7 @@ struct GlobalEffectRunOutcome {
     messages: Vec<MessageCommand>,
     player_commands: Vec<PlayerCommand>,
     object_order_commands: Vec<ObjectOrderCommand>,
+    next_mission_commands: Vec<NextMissionCommand>,
     landscape_ops: Vec<LandscapeOperation>,
     spawns: Vec<SpawnConfig>,
     other_objects: Vec<compat::NestedObjectOutcome>,
@@ -54861,6 +54959,86 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert!(snapshot.game_over);
         assert_eq!(engine.physics().gravity, 42);
 
+        Ok(())
+    }
+
+    #[test]
+    fn scenario_set_next_mission_survives_a_later_initialize_error() -> Result<(), EngineError> {
+        // C4AulExec aborts only the continuation on error; host mutations
+        // before the failing call remain live (C4AulExec.cpp:1318-1342).
+        // FnSetNextMission writes the three C4Game fields immediately
+        // (C4Script.cpp:6053-6081).
+        let mut engine = Engine::with_seed(0);
+        engine.load_scenario_script_with_convention(
+            "Script.c",
+            r#"
+            #strict
+            func Initialize() {
+                SetNextMission("Tutorial.c4f\\Tutorial01.c4s", "Repeat", "Play again");
+                MissingAfterNextMission();
+            }
+            "#,
+            true,
+        )?;
+
+        engine.initialize_scenario_script()?;
+
+        assert_eq!(
+            engine.next_mission(),
+            &NextMissionState {
+                path: "Tutorial.c4f\\Tutorial01.c4s".to_string(),
+                text: "Repeat".to_string(),
+                description: "Play again".to_string(),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn next_mission_clear_and_save_restore_match_cpp() -> Result<(), EngineError> {
+        // An empty mission clears only NextMission/NextMissionText
+        // (C4Script.cpp:6055-6061); all three fields persist in exact saves
+        // (C4Game.cpp:1963-1965).
+        let mut engine = Engine::with_seed(0);
+        engine.install_scenario_script_with_convention(
+            "Script.c",
+            r#"
+            #strict
+            func Initialize() {
+                SetNextMission("Tutorial02", "Next", "Keep this description");
+                SetNextMission(0);
+            }
+            "#,
+            true,
+        )?;
+        assert_eq!(
+            engine.next_mission(),
+            &NextMissionState {
+                path: String::new(),
+                text: String::new(),
+                description: "Keep this description".to_string(),
+            }
+        );
+
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("next mission state serializes");
+        let state =
+            EngineState::from_json_str(&encoded).expect("next mission state deserializes");
+        let mut restored = Engine::with_seed(1);
+        restored.restore_state(&state)?;
+        assert_eq!(restored.next_mission(), engine.next_mission());
+
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&encoded).expect("state JSON parses");
+        legacy
+            .as_object_mut()
+            .expect("engine state is an object")
+            .remove("next_mission");
+        let legacy: EngineState =
+            serde_json::from_value(legacy).expect("legacy state without next mission parses");
+        assert_eq!(legacy.next_mission, NextMissionState::default());
         Ok(())
     }
 

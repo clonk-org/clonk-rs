@@ -5439,6 +5439,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Log", log_message);
     script.register_host_function("DebugLog", debug_log_message);
     script.register_host_function("GameOver", game_over);
+    script.register_host_function("SetNextMission", set_next_mission);
     script.register_host_function("Call", call_self);
     script.register_host_function("ObjectCall", object_call);
     script.register_host_function("ProtectedCall", object_call);
@@ -6140,6 +6141,43 @@ fn game_over(args: &[Value]) -> Result<Value, RuntimeError> {
         let triggered = context.request_game_over();
         Ok(Value::Bool(triggered))
     })
+}
+
+const DEFAULT_NEXT_MISSION_TEXT: &str = "&Next scenario";
+const DEFAULT_NEXT_MISSION_DESCRIPTION: &str = "Continue with the next scenario.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NextMissionCommand {
+    Set {
+        path: String,
+        text: String,
+        description: String,
+    },
+    Clear,
+}
+
+fn set_next_mission(args: &[Value]) -> Result<Value, RuntimeError> {
+    let path = parse_optional_string(args.first(), "SetNextMission", "mission")?;
+    let command = match path.filter(|path| !path.is_empty()) {
+        Some(path) => NextMissionCommand::Set {
+            path,
+            text: parse_optional_string(args.get(1), "SetNextMission", "button text")?
+                .unwrap_or_else(|| DEFAULT_NEXT_MISSION_TEXT.to_string()),
+            description: parse_optional_string(
+                args.get(2),
+                "SetNextMission",
+                "description",
+            )?
+            .unwrap_or_else(|| DEFAULT_NEXT_MISSION_DESCRIPTION.to_string()),
+        },
+        None => NextMissionCommand::Clear,
+    };
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.next_mission_commands.push(command);
+        }
+    });
+    Ok(Value::Nil)
 }
 
 fn get_keys(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -7291,6 +7329,7 @@ pub(crate) struct EffectContextOutcome {
     pub messages: Vec<MessageCommand>,
     pub player_commands: Vec<PlayerCommand>,
     pub object_order_commands: Vec<ObjectOrderCommand>,
+    pub next_mission_commands: Vec<NextMissionCommand>,
     pub audio: AudioOutcome,
     pub trigger_game_over: bool,
     pub script_go: Option<bool>,
@@ -7340,6 +7379,7 @@ impl EffectContextOutcome {
             messages,
             player_commands,
             object_order_commands,
+            next_mission_commands: Vec::new(),
             audio,
             trigger_game_over,
             script_go,
@@ -7366,6 +7406,7 @@ impl EffectContextOutcome {
             messages: Vec::new(),
             player_commands: Vec::new(),
             object_order_commands: Vec::new(),
+            next_mission_commands: Vec::new(),
             audio: AudioOutcome {
                 state: audio,
                 events: Vec::new(),
@@ -20723,6 +20764,7 @@ struct EffectHostContext {
     player_overrides: HashMap<i32, PlayerState>,
     player_commands: Vec<PlayerCommand>,
     object_order_commands: Vec<ObjectOrderCommand>,
+    next_mission_commands: Vec<NextMissionCommand>,
     team_home_base_rule: bool,
     pending_spawns: Vec<SpawnConfig>,
     pending_objects: HashMap<ObjectId, HostWorldObject>,
@@ -20871,6 +20913,7 @@ impl EffectHostContext {
             player_overrides: HashMap::new(),
             player_commands: Vec::new(),
             object_order_commands: Vec::new(),
+            next_mission_commands: Vec::new(),
             team_home_base_rule,
             pending_spawns: Vec::new(),
             pending_objects: HashMap::new(),
@@ -21829,6 +21872,7 @@ impl EffectHostContext {
             self.next_object_id,
         );
         outcome.particles = self.pending_particles;
+        outcome.next_mission_commands = self.next_mission_commands;
         outcome.other_objects = other_objects;
         outcome
     }
@@ -23227,6 +23271,7 @@ mod tests {
         "SetMenuSize",
         "SetMenuTextProgress",
         "SetName",
+        "SetNextMission",
         "SetObjDrawTransform",
         "SetObjDrawTransform2",
         "SetObjectBlitMode",
@@ -23865,6 +23910,76 @@ func Trigger(object pOther)
                 },
                 AudioCommand::SetMusicLevel { level: 100 },
                 AudioCommand::StopMusic,
+            ]
+        );
+    }
+
+    #[test]
+    fn set_next_mission_returns_nil_like_cpp() {
+        // FnSetNextMission is a void host function; a non-empty path records
+        // the next scenario metadata (C4Script.cpp:6053-6081).
+        let (result, _) = with_object_host_context(|| {
+            let mut script = lc_script::Engine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    r#"
+                    #strict
+                    func Probe() {
+                        return SetNextMission("Tutorial.c4f\\Tutorial01.c4s", "Repeat", "Again");
+                    }
+                    "#,
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call("Probe", &[])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(result.expect("SetNextMission runs"), Value::Nil);
+    }
+
+    #[test]
+    fn set_next_mission_preserves_order_defaults_and_explicit_empty_strings() {
+        // FnSetNextMission distinguishes omitted string pointers from an
+        // explicit empty C4String, and clears path/text without touching the
+        // description (C4Script.cpp:6053-6081).
+        let (result, outcome) = with_object_host_context(|| {
+            let mut script = lc_script::Engine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    r#"
+                    #strict
+                    func Probe() {
+                        SetNextMission("First", "", "");
+                        SetNextMission("Second");
+                        SetNextMission(0);
+                        return 1;
+                    }
+                    "#,
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call("Probe", &[])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(result.expect("ordered calls run"), Value::Int(1));
+        assert_eq!(
+            outcome.next_mission_commands,
+            vec![
+                NextMissionCommand::Set {
+                    path: "First".to_string(),
+                    text: String::new(),
+                    description: String::new(),
+                },
+                NextMissionCommand::Set {
+                    path: "Second".to_string(),
+                    text: DEFAULT_NEXT_MISSION_TEXT.to_string(),
+                    description: DEFAULT_NEXT_MISSION_DESCRIPTION.to_string(),
+                },
+                NextMissionCommand::Clear,
             ]
         );
     }
