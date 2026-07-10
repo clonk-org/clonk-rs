@@ -979,6 +979,46 @@ impl Landscape {
         }
     }
 
+    /// Selected `C4Landscape::MatCount`/`EffectiveMatCount` value for one
+    /// material. `minimum_height=None` is the raw per-pixel count; `Some`
+    /// counts only complete vertical runs reaching `MinHeightCount`
+    /// (C4Landscape.cpp:2904-2967). The value wraps as the C++ `uint32_t`
+    /// counters do (C4Landscape.h:59-60).
+    pub fn material_pixel_count(
+        &self,
+        material: MaterialId,
+        minimum_height: Option<i32>,
+    ) -> u32 {
+        let (width, height) = self
+            .pixels
+            .as_ref()
+            .map(|grid| (grid.width() as i32, grid.height() as i32))
+            .unwrap_or((self.width as i32, self.estimated_height()));
+        let mut count = 0_u32;
+        for x in 0..width {
+            let mut run = 0_u32;
+            for y in 0..height {
+                if self.material_at(x, y) == Some(material) {
+                    run = run.wrapping_add(1);
+                    if minimum_height.is_none() {
+                        count = count.wrapping_add(1);
+                    }
+                } else if let Some(minimum_height) = minimum_height {
+                    if i64::from(run) >= i64::from(minimum_height) {
+                        count = count.wrapping_add(run);
+                    }
+                    run = 0;
+                }
+            }
+            if let Some(minimum_height) = minimum_height {
+                if i64::from(run) >= i64::from(minimum_height) {
+                    count = count.wrapping_add(run);
+                }
+            }
+        }
+        count
+    }
+
     /// The GetPix border rules (C4Landscape.h:144-161), checked in the C++
     /// branch order (x before y). `None` = in bounds, read the landscape.
     fn border_pixel(&self, x: i32, y: i32) -> Option<BorderPixel> {

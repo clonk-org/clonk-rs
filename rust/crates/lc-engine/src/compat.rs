@@ -2567,6 +2567,48 @@ fn material(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetMaterialCount (C4Script.cpp:2207-2213): invalid material indices
+/// return -1. Otherwise select the raw MatCount for fReal/materials without
+/// MinHeightCount, or the vertically filtered EffectiveMatCount.
+fn get_material_count(args: &[Value]) -> Result<Value, RuntimeError> {
+    let material_index = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetMaterialCount",
+        "material",
+    )?;
+    let real = value_to_bool(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetMaterialCount",
+        "real",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Int(-1));
+        };
+        let Some(material_id) = usize::try_from(material_index)
+            .ok()
+            .and_then(crate::material::MaterialId::new)
+        else {
+            return Ok(Value::Int(-1));
+        };
+        let Some(material) = context
+            .world
+            .materials()
+            .and_then(|materials| materials.get_by_id(material_id))
+        else {
+            return Ok(Value::Int(-1));
+        };
+        let minimum_height = (!real && material.min_height_count() != 0)
+            .then_some(material.min_height_count());
+        let count = context
+            .landscape_ref()
+            .map(|landscape| landscape.material_pixel_count(material_id, minimum_height))
+            .unwrap_or(0);
+        Ok(Value::Int(count as i32))
+    })
+}
+
 /// FnGetMaterialVal (C4Script.cpp:4282-4300): a [Material] core entry by
 /// compile name; the section must be "Material", the material is an
 /// index into the loaded map, out-of-range or unknown entries are nil.
@@ -6114,6 +6156,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GrabContents", grab_contents);
     script.register_host_function("InLiquid", in_liquid);
     script.register_host_function("Material", material);
+    script.register_host_function("GetMaterialCount", get_material_count);
     script.register_host_function("GetMaterialVal", get_material_val);
     script.register_host_function("ObjectSetAction", object_set_action);
     script.register_host_function("Smoke", smoke);
@@ -25237,6 +25280,7 @@ mod tests {
         "GetMagicEnergy",
         "GetMass",
         "GetMaterial",
+        "GetMaterialCount",
         "GetMaterialVal",
         "GetMenu",
         "GetMenuSelection",
@@ -28322,6 +28366,93 @@ func ProbeBadIndex(id) {
         assert_eq!(
             result.expect("Material succeeds"),
             Value::Int(MATERIAL_NONE)
+        );
+    }
+
+    #[test]
+    fn get_material_count_matches_cpp_real_and_effective_counts() {
+        // FnGetMaterialCount returns -1 for an invalid material, otherwise
+        // MatCount when fReal is true (or MinHeightCount is zero) and
+        // EffectiveMatCount when it is false (C4Script.cpp:2207-2213).
+        // C4Landscape::UpdateMatCnt counts only vertical runs reaching
+        // MinHeightCount in the effective total (C4Landscape.cpp:2904-2967).
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material Oil]\nName=Oil\nDensity=60\nMinHeightCount=4\n\n\
+             [Material Gold]\nName=Gold\nDensity=50\n",
+        )
+        .expect("oil library builds");
+        let materials = MaterialSet::from_resource_library(&library);
+        let oil = materials.id_of("Oil").expect("oil exists");
+        assert_eq!(oil.index(), 0, "missing C4ValueInt material becomes index 0");
+
+        // Runs by column: [4], [3, 2], [5]. Raw=14; effective=4+0+5=9.
+        let bytes = vec![
+            1, 1, 2,
+            1, 1, 1,
+            1, 1, 1,
+            1, 0, 1,
+            0, 1, 1,
+            0, 1, 1,
+        ];
+        let mut densities = vec![0; 3];
+        densities[1] = 60;
+        densities[2] = 50;
+        let names = vec![
+            None,
+            Some("Oil".to_string()),
+            Some("Gold".to_string()),
+        ];
+        let mut landscape = Landscape::new(3, vec![0; 3]).expect("landscape builds");
+        landscape.set_world_height(6);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            3,
+            6,
+            bytes,
+            densities,
+            names,
+            vec![None; 3],
+        ));
+        landscape.resolve_grid_materials(|name| materials.id_of(name));
+
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+        .with_materials(Some(Rc::new(materials)));
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                "#strict 2\nfunc Probe() { return [\n\
+                 GetMaterialCount(),\n\
+                 GetMaterialCount(Material(\"Oil\")),\n\
+                 GetMaterialCount(Material(\"Oil\"), true),\n\
+                 GetMaterialCount(Material(\"Gold\")),\n\
+                 GetMaterialCount(-1),\n\
+                 GetMaterialCount(2),\n\
+                 GetMaterialCount(Material(\"Oil\"), false, 99)\n\
+                 ]; }",
+            )
+            .expect("material-count probe compiles");
+
+        let (result, _) = with_effect_context(None, &[], world, 1, || engine.call("Probe", &[]));
+        assert_eq!(
+            result.expect("GetMaterialCount succeeds"),
+            Value::Array(vec![
+                Value::Int(9),
+                Value::Int(9),
+                Value::Int(14),
+                Value::Int(1),
+                Value::Int(-1),
+                Value::Int(-1),
+                Value::Int(9),
+            ])
         );
     }
 
