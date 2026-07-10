@@ -548,46 +548,42 @@ impl<'de> Deserialize<'de> for Direction {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CommandDirection {
-    #[default]
-    Stop,
-    Up,
-    UpRight,
-    Right,
-    DownRight,
-    Down,
-    DownLeft,
-    Left,
-    UpLeft,
-}
+/// C4Action::ComDir storage.
+///
+/// The named `COMD_*` values form the engine's directional ring. The backing
+/// field is prepared as an int32 newtype so persisted action state can retain
+/// C++ values outside that ring without conflating them with `COMD_Stop`.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct CommandDirection(i32);
 
 impl CommandDirection {
+    #[allow(non_upper_case_globals)]
+    pub const Stop: Self = Self(0);
+    #[allow(non_upper_case_globals)]
+    pub const Up: Self = Self(1);
+    #[allow(non_upper_case_globals)]
+    pub const UpRight: Self = Self(2);
+    #[allow(non_upper_case_globals)]
+    pub const Right: Self = Self(3);
+    #[allow(non_upper_case_globals)]
+    pub const DownRight: Self = Self(4);
+    #[allow(non_upper_case_globals)]
+    pub const Down: Self = Self(5);
+    #[allow(non_upper_case_globals)]
+    pub const DownLeft: Self = Self(6);
+    #[allow(non_upper_case_globals)]
+    pub const Left: Self = Self(7);
+    #[allow(non_upper_case_globals)]
+    pub const UpLeft: Self = Self(8);
+
     pub const fn to_script_value(self) -> i32 {
-        match self {
-            CommandDirection::Stop => 0,
-            CommandDirection::Up => 1,
-            CommandDirection::UpRight => 2,
-            CommandDirection::Right => 3,
-            CommandDirection::DownRight => 4,
-            CommandDirection::Down => 5,
-            CommandDirection::DownLeft => 6,
-            CommandDirection::Left => 7,
-            CommandDirection::UpLeft => 8,
-        }
+        self.0
     }
 
     pub const fn from_script_value(value: i32) -> Option<Self> {
         match value {
-            0 => Some(CommandDirection::Stop),
-            1 => Some(CommandDirection::Up),
-            2 => Some(CommandDirection::UpRight),
-            3 => Some(CommandDirection::Right),
-            4 => Some(CommandDirection::DownRight),
-            5 => Some(CommandDirection::Down),
-            6 => Some(CommandDirection::DownLeft),
-            7 => Some(CommandDirection::Left),
-            8 => Some(CommandDirection::UpLeft),
+            0..=8 => Some(Self(value)),
             _ => None,
         }
     }
@@ -603,6 +599,7 @@ impl CommandDirection {
             CommandDirection::DownLeft => (-1, 1),
             CommandDirection::Left => (-1, 0),
             CommandDirection::UpLeft => (-1, -1),
+            _ => (0, 0),
         }
     }
 }
@@ -1335,18 +1332,19 @@ impl BridgeParameters {
     }
 
     fn step_interval(&self, direction: CommandDirection) -> Option<u32> {
-        use CommandDirection::*;
         if self.wall {
             match direction {
-                Left | Right => Some(4),
-                UpLeft | UpRight | Up => Some(5),
+                CommandDirection::Left | CommandDirection::Right => Some(4),
+                CommandDirection::UpLeft
+                | CommandDirection::UpRight
+                | CommandDirection::Up => Some(5),
                 _ => None,
             }
         } else {
             match direction {
-                Left | Right => Some(5),
-                Up => Some(4),
-                UpLeft | UpRight => Some(6),
+                CommandDirection::Left | CommandDirection::Right => Some(5),
+                CommandDirection::Up => Some(4),
+                CommandDirection::UpLeft | CommandDirection::UpRight => Some(6),
                 _ => None,
             }
         }
@@ -10778,6 +10776,7 @@ fn apply_float_physical_movement(
             velocity.x -= math::FLOAT_ACCEL;
         }
         CommandDirection::Stop => {}
+        _ => {}
     }
 
     // xdir/ydir bounds (C4Object.cpp:5284-5285).
@@ -10863,6 +10862,7 @@ fn apply_walk_physical_movement(
                 velocity.x = C4Fixed::ZERO;
             }
         }
+        _ => {}
     }
 }
 
@@ -10954,6 +10954,7 @@ fn apply_walk_command_movement(
                 velocity.x = decelerate_fixed_toward_zero(velocity.x, accel);
             }
         }
+        _ => {}
     }
 
     velocity.x = clamp_fixed_to_limit(velocity.x, limit);
@@ -11012,6 +11013,7 @@ fn apply_swim_physical_movement(
                 velocity.y = C4Fixed::ZERO;
             }
         }
+        _ => {}
     }
 
     // xdir/ydir bounds (C4Object.cpp:4959-4960).
@@ -11113,6 +11115,7 @@ fn apply_scale_physical_movement(
                 velocity.y = C4Fixed::ZERO;
             }
         }
+        _ => {}
     }
     velocity.x = C4Fixed::ZERO;
 }
@@ -11148,6 +11151,7 @@ fn apply_scale_command_movement(
                 velocity.y = decelerate_fixed_toward_zero(velocity.y, accel);
             }
         }
+        _ => {}
     }
 
     velocity.y = clamp_fixed_to_limit(velocity.y, limit);
@@ -11203,6 +11207,7 @@ fn apply_hangle_physical_movement(
                 velocity.x = C4Fixed::ZERO;
             }
         }
+        _ => {}
     }
     velocity.y = C4Fixed::ZERO;
 
@@ -11249,6 +11254,7 @@ fn apply_hangle_command_movement(
                 velocity.x = decelerate_fixed_toward_zero(velocity.x, accel);
             }
         }
+        _ => {}
     }
 
     velocity.x = clamp_fixed_to_limit(velocity.x, limit);
@@ -11318,6 +11324,7 @@ fn apply_dig_physical_movement(
             velocity.y = C4Fixed::ZERO;
             return None;
         }
+        _ => {}
     }
 
     if velocity.x < C4Fixed::ZERO {
@@ -11382,6 +11389,7 @@ fn apply_dig_command_movement(
             velocity.x = speed;
             velocity.y = -half_speed;
         }
+        _ => {}
     }
 
     if velocity.x < C4Fixed::ZERO {
@@ -21532,8 +21540,8 @@ impl Engine {
         let com_dir_like = |com: CommandDirection, sample: CommandDirection| -> bool {
             // ComDirLike (C4ObjectCom.cpp:922-928): the two COMD ring
             // neighbours count as "like".
-            let com = com as i32;
-            let sample = sample as i32;
+            let com = com.to_script_value();
+            let sample = sample.to_script_value();
             com == sample || com % 8 + 1 == sample || com == sample % 8 + 1
         };
 
@@ -22748,6 +22756,7 @@ impl Engine {
             CommandDirection::UpRight => (limit, true),
             CommandDirection::Up => (C4Fixed::ZERO, true),
             CommandDirection::Stop | CommandDirection::Down => (C4Fixed::ZERO, false),
+            _ => (C4Fixed::ZERO, false),
         };
         // Push object (C4Object.cpp:5059-5062).
         if !self.push_object(
