@@ -6141,6 +6141,84 @@ fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 }
 
+/// Reference-preserving AB_CALL twin for an arrow call in lvalue position.
+/// C++ passes the call-target stack cell as `pReturn`; a `func &` therefore
+/// leaves a C4V_pC4Value in the suspended caller instead of a copied value
+/// (C4AulExec.cpp:1290-1299, 1054-1067).
+fn arrow_method_reference_dispatch(
+    args: &[Value],
+) -> Result<lc_script::ValueReference, RuntimeError> {
+    let target_value = args.first().cloned().unwrap_or(Value::Nil);
+    let Some(Value::String(name)) = args.get(1) else {
+        return Err(RuntimeError::new(
+            "Object call: missing function name".to_string(),
+        ));
+    };
+    let failsafe = args.get(2).map(Value::as_bool).unwrap_or(false);
+    let pars: Vec<Value> = args.iter().skip(3).cloned().collect();
+
+    if let Value::C4Id(def_id) = &target_value {
+        let script = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.world.definition_script(def_id).cloned())
+        });
+        let Some(script) = script else {
+            return Err(RuntimeError::new(format!(
+                "Definition call: Definition for id {def_id} not found!"
+            )));
+        };
+        return match call_scoped_script_reference(script, name, &pars) {
+            Some(result) => result,
+            None if failsafe => Err(RuntimeError::new(format!(
+                "function '{name}' does not return a reference"
+            ))),
+            None => Err(RuntimeError::new(format!(
+                "Definition call: No function \"{name}\" in definition \"{def_id}\"!"
+            ))),
+        };
+    }
+
+    let Some(target) = object_id_from_value(&target_value) else {
+        return Err(RuntimeError::new(format!(
+            "Object call: Invalid target type {}, expected object or id!",
+            target_value.type_name()
+        )));
+    };
+    if let Some((namespace, function)) = name.split_once("::") {
+        let script = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.world.definition_script(namespace).cloned())
+        });
+        let Some(script) = script else {
+            return Err(RuntimeError::new(format!(
+                "direct object call: def not found: {namespace}"
+            )));
+        };
+        if !script.has_function(function) {
+            return Err(RuntimeError::new(format!(
+                "direct object call: function {namespace}::{function} not found"
+            )));
+        }
+        return call_world_object_reference_in_scope(target, script, function, &pars)
+            .unwrap_or_else(|| {
+                Err(RuntimeError::new(format!(
+                    "function '{namespace}::{function}' does not return a reference"
+                )))
+            });
+    }
+    match call_world_object_reference(target, name, &pars) {
+        Some(result) => result,
+        None if failsafe => Err(RuntimeError::new(format!(
+            "function '{name}' does not return a reference"
+        ))),
+        None => Err(RuntimeError::new(format!(
+            "Object call: No function \"{name}\" in object {target}!"
+        ))),
+    }
+}
+
 /// Runs `function` on a script host with NO object context (Obj=nullptr,
 /// C4AulExec.cpp:343): the active object scope is parked on the dormant
 /// stack while the nested VM runs, so host functions see no `this`. Used by
@@ -6163,6 +6241,34 @@ fn call_scoped_script_function_or_global(
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
     call_scoped_script_function_impl(script, function, args, true)
+}
+
+fn call_scoped_script_reference(
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
+    if !script.has_function_or_global(function) {
+        return None;
+    }
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            let active = context.object.take();
+            context.dormant_scopes.push(active);
+        }
+    });
+    let cells = lc_script::LocalCells::from_local_vars(&HashMap::new());
+    let call = script.call_reference_with_cells_and_this(function, args, &cells, Value::Nil);
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.object = context.dormant_scopes.pop().unwrap_or(None);
+        }
+    });
+    Some(match call {
+        Ok(reference) => Ok(reference),
+        Err(lc_script::ScriptError::Runtime(err)) => Err(err),
+        Err(other) => Err(RuntimeError::new(other.to_string())),
+    })
 }
 
 fn call_scoped_script_function_impl(
@@ -6535,6 +6641,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetCategory", get_category);
     script.register_host_function("SetCategory", set_category);
     script.register_method_dispatch(std::sync::Arc::new(arrow_method_dispatch));
+    script.register_method_reference_dispatch(std::rc::Rc::new(
+        arrow_method_reference_dispatch,
+    ));
     script.register_local_cell_hook(std::rc::Rc::new(foreign_local_cell_hook));
     script.register_host_function("NoContainer", no_container);
     script.register_host_function("AnyContainer", any_container);
@@ -23019,6 +23128,14 @@ pub(crate) fn call_world_object_function(
     call_world_object_function_with(target, function, args, true, true, None)
 }
 
+fn call_world_object_reference(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
+    call_world_object_reference_with(target, function, args, true, None)
+}
+
 /// `obj->ID::Func(...)` (AB_CALLNS, C4AulParse.cpp:3160-3245): runs the
 /// NAMED def's function with the target object as context — the target's
 /// own same-name function is bypassed. Script functions only (GetSFunc).
@@ -23029,6 +23146,96 @@ pub(crate) fn call_world_object_function_in_scope(
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
     call_world_object_function_with(target, function, args, false, false, Some(script))
+}
+
+fn call_world_object_reference_in_scope(
+    target: ObjectId,
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
+    call_world_object_reference_with(target, function, args, false, Some(script))
+}
+
+fn call_world_object_reference_with(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+    include_globals: bool,
+    script_override: Option<Arc<ScriptEngine>>,
+) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
+    let prep = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut().as_mut().and_then(|context| {
+            context.prepare_nested_call(
+                target,
+                function,
+                false,
+                include_globals,
+                script_override,
+            )
+        })
+    })?;
+    let NestedCallPrep {
+        script,
+        local_vars,
+        origin,
+    } = prep;
+    let entry_locals = local_vars.clone();
+    let (cells, created_session) = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        match borrow.as_mut() {
+            Some(context) => match context.session_local_cells.get(&target) {
+                Some(cells) => (cells.clone(), false),
+                None => {
+                    let cells = lc_script::LocalCells::from_local_vars(&local_vars);
+                    context
+                        .session_local_cells
+                        .insert(target, cells.clone());
+                    (cells, true)
+                }
+            },
+            None => (lc_script::LocalCells::from_local_vars(&local_vars), false),
+        }
+    });
+    let call = script.call_reference_with_cells_and_this(
+        function,
+        args,
+        &cells,
+        object_reference_value(target),
+    );
+    let succeeded = call.is_ok();
+    if created_session && !succeeded {
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                context.session_local_cells.remove(&target);
+            }
+        });
+    }
+    let result = match call {
+        Ok(reference) => Ok(reference),
+        Err(lc_script::ScriptError::Runtime(err)) => Err(err),
+        Err(other) => Err(RuntimeError::new(other.to_string())),
+    };
+    let stored_locals = cells.snapshot();
+    if let Some(origin) = origin {
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                let mut stored_locals = stored_locals;
+                for ((object, name), slot) in &context.foreign_local_cells {
+                    if *object != target {
+                        continue;
+                    }
+                    let outer_unchanged = entry_locals.get(name).unwrap_or(&Value::Nil)
+                        == stored_locals.get(name).unwrap_or(&Value::Nil);
+                    if outer_unchanged {
+                        stored_locals.insert(name.clone(), slot.borrow().clone());
+                    }
+                }
+                context.finish_nested_call(target, origin, stored_locals);
+            }
+        });
+    }
+    Some(result)
 }
 
 /// Like [`call_world_object_function`], but resolves SCRIPT functions only —
@@ -24486,6 +24693,13 @@ impl EffectHostContext {
             else {
                 continue;
             };
+            // A successful `func &` call keeps its VM session alive until
+            // the suspended caller consumes the returned reference. Fold the
+            // final cells here, after that write, rather than the pre-AB_Set
+            // snapshot stored when the nested call returned.
+            if let Some(cells) = self.session_local_cells.get(&id) {
+                local_vars.extend(cells.snapshot());
+            }
             if let Some(cells) = cell_locals.remove(&id) {
                 local_vars.extend(cells);
             }

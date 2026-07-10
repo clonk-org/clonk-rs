@@ -40231,6 +40231,64 @@ func Trigger() {
     }
 
     #[test]
+    fn arrow_reference_return_assigns_the_target_objects_local() {
+        // Kingdoms' THRN line 195 uses this exact C4Aul sequence:
+        // `pReviveObject->SacrificeMade()=1`. AB_CALL installs the target
+        // function's reference return in the caller stack cell
+        // (C4AulExec.cpp:1290-1299); AB_RETURN preserves `func &`
+        // (C4AulExec.cpp:1054-1067); AB_Set writes through it (:858-865).
+        let caller_script = r#"
+            public func Mark(target) {
+                target->SacrificeMade() = 1;
+                return 1;
+            }
+        "#;
+        let revive_script = r#"
+            local sacrifice_made;
+            public func & SacrificeMade() { return sacrifice_made; }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("RVIV", "Revive", revive_script)
+                    .expect("revive compiles"),
+            )
+            .expect("revive registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let revive = engine
+            .spawn_object(SpawnConfig::new("RVIV"))
+            .expect("revive spawns");
+        engine.tick().expect("tick succeeds");
+
+        let caller_idx = engine.find_object_index(caller).expect("caller exists");
+        engine
+            .call_object_function(
+                caller_idx,
+                "Mark",
+                vec![Value::Object(revive.as_u64())],
+            )
+            .expect("reference assignment succeeds");
+
+        let revive_idx = engine.find_object_index(revive).expect("revive exists");
+        assert_eq!(
+            engine.objects[revive_idx]
+                .state
+                .local_vars
+                .get("sacrifice_made"),
+            Some(&Value::Int(1))
+        );
+    }
+
+    #[test]
     fn object_call_family_runs_target_def_script_function_like_cpp() {
         // FnObjectCall/FnProtectedCall/FnPrivateCall (C4Script.cpp:3434-3449,
         // 3502-3534): all three resolve in the TARGET object's def script

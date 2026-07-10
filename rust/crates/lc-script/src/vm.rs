@@ -255,7 +255,6 @@ pub(crate) enum LValueRef {
 /// dispatch boundary. The VM alone interprets the underlying lvalue; hosts
 /// may retain and route it without flattening it to a value.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct ValueReference(LValueRef);
 
 impl ValueReference {
@@ -263,7 +262,6 @@ impl ValueReference {
         Self(LValueRef::Cell(cell))
     }
 
-    #[allow(dead_code)]
     fn into_lvalue(self) -> LValueRef {
         self.0
     }
@@ -2316,6 +2314,11 @@ impl<'a> Vm<'a> {
                 method,
                 args,
             } => {
+                if !matches!(method.as_str(), "LocalN" | "Local" | "Var" | "EffectVar") {
+                    return self
+                        .assignment_target_to_lvalue(env, target, 0)?
+                        .write(value);
+                }
                 // Evaluate the object to get its identity
                 let object_value = self.evaluate(object, env, 0)?;
                 // `LocalN("name", obj) = v` / `obj->LocalN("name") = v`:
@@ -2415,6 +2418,9 @@ impl<'a> Vm<'a> {
                 method,
                 args,
             } => {
+                if !matches!(method.as_str(), "LocalN" | "Local" | "Var" | "EffectVar") {
+                    return self.assignment_target_to_lvalue(env, target, 0)?.read();
+                }
                 // Evaluate the object to get its identity
                 let object_value = self.evaluate(object, env, 0)?;
                 // `LocalN("name", obj)` / `obj->LocalN("name")` reads the
@@ -2603,6 +2609,65 @@ impl<'a> Vm<'a> {
                     Some(object_value),
                 )))
             }
+            AssignmentTarget::MethodSlot {
+                object,
+                method,
+                args,
+            } if !matches!(method.as_str(), "Var" | "EffectVar") => {
+                let mut target = self.evaluate(object, env, depth + 1)?;
+                if let Value::Proplist(map) = &target {
+                    if let Some(Value::Int(id)) = map.get("id") {
+                        if *id > 0 {
+                            target = Value::Object(*id as u64);
+                        }
+                    }
+                }
+                if matches!(target, Value::Nil | Value::Int(0) | Value::Bool(false)) {
+                    return Err(RuntimeError::new("Object call: target is zero!"));
+                }
+
+                let function = self.functions.get(method);
+                let evaluated_args = self.build_call_args(function, args, env, depth + 1)?;
+                match &target {
+                    Value::Object(_) | Value::C4Id(_)
+                        if self.method_reference_dispatch.is_some()
+                            && target != self.this_value =>
+                    {
+                        let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
+                        dispatch_args.push(target);
+                        dispatch_args.push(Value::String(method.clone()));
+                        dispatch_args.push(Value::Bool(false));
+                        for arg in &evaluated_args {
+                            dispatch_args.push(arg.read()?);
+                        }
+                        self.method_reference_dispatch
+                            .ok_or_else(|| {
+                                RuntimeError::new("method reference dispatch vanished")
+                            })?(&dispatch_args)
+                        .map(ValueReference::into_lvalue)
+                    }
+                    Value::Object(_) | Value::C4Id(_) => self.invoke_reference(
+                        method,
+                        evaluated_args,
+                        depth + 1,
+                        env.object_state.clone(),
+                        Some(env.var_slots.clone()),
+                    ),
+                    other if self.method_reference_dispatch.is_some() => {
+                        Err(RuntimeError::new(format!(
+                            "Object call: Invalid target type {}, expected object or id!",
+                            other.type_name()
+                        )))
+                    }
+                    _ => self.invoke_reference(
+                        method,
+                        evaluated_args,
+                        depth + 1,
+                        env.object_state.clone(),
+                        Some(env.var_slots.clone()),
+                    ),
+                }
+            }
             AssignmentTarget::EffectSlot(_) | AssignmentTarget::MethodSlot { .. } => Err(
                 RuntimeError::new("this assignment target cannot be passed by reference"),
             ),
@@ -2684,11 +2749,10 @@ impl<'a> Vm<'a> {
                         });
                     }
                 }
-                // Handle obj->LocalN("key"), obj->Local(index), etc.
+                // Direct calls may return a C4Value reference. The operator
+                // validates that fact at runtime, after dynamic dispatch.
                 else if let Expr::Property(ref object, ref method) = **callee {
-                    if !is_optional
-                        && matches!(method.as_str(), "LocalN" | "Local" | "Var" | "EffectVar")
-                    {
+                    if !is_optional {
                         return Ok(AssignmentTarget::MethodSlot {
                             object: object.clone(),
                             method: method.clone(),

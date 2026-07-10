@@ -5,6 +5,7 @@
 //! an engine-registered method-dispatch hook performs the cross-object
 //! resolution; only self-calls stay in-VM.
 
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use lc_script::{Engine, Script, Value};
@@ -134,4 +135,35 @@ fn self_target_calls_stay_in_the_vm() {
         )
         .expect("call succeeds");
     assert_eq!(value, Value::Int(42));
+}
+
+#[test]
+fn arrow_func_ref_result_writes_through_the_dispatch_reference() {
+    // C4AulExec.cpp:1290-1299 passes the call-target stack cell as the
+    // callee's return slot; AB_RETURN keeps a `func &` reference there
+    // (:1054-1067), and AB_Set writes through it (:858-865).
+    let source = r#"
+        global func Mark(target) {
+            target->SacrificeMade() = 1;
+            return 7;
+        }
+    "#;
+    let slot = lc_script::value_cell(Value::Nil);
+    let mut engine = Engine::new();
+    engine.add_script(Script::compile(source).expect("script compiles"));
+    {
+        let slot = Rc::clone(&slot);
+        engine.register_method_reference_dispatch(Rc::new(move |args: &[Value]| {
+            assert_eq!(args[0], Value::Object(9));
+            assert_eq!(args[1], Value::String("SacrificeMade".into()));
+            assert_eq!(args[2], Value::Bool(false));
+            Ok(lc_script::ValueReference::from_cell(Rc::clone(&slot)))
+        }));
+    }
+
+    assert_eq!(
+        engine.call("Mark", &[Value::Object(9)]).expect("call succeeds"),
+        Value::Int(7)
+    );
+    assert_eq!(*slot.borrow(), Value::Int(1));
 }

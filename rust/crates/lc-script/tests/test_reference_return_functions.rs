@@ -267,3 +267,17 @@ fn reference_return_mutates_array_and_proplist_elements() {
     assert_eq!(engine.call("TestArray", &[]).unwrap(), Value::Int(10));
     assert_eq!(engine.call("TestProplist", &[]).unwrap(), Value::Int(11));
 }
+
+#[test]
+fn arrow_reference_return_call_is_an_assignment_lvalue() {
+    // C4AulParse.cpp:3154-3245 leaves AB_CALL's result reference intact for
+    // the AB_Set lvalue; C4AulExec.cpp:1054-1067 preserves it when the
+    // callee is `func &`. Kingdoms' THRN uses this exact call-lvalue shape.
+    let source = r#"
+        local sacrifice_made;
+        public func & SacrificeMade() { return sacrifice_made; }
+        public func Mark(target) { target->SacrificeMade() = 1; }
+    "#;
+
+    lc_script::Script::compile(source).expect("arrow func-& result is assignable");
+}
