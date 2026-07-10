@@ -2024,12 +2024,25 @@ impl AudioContext {
             }
             self.active_channels.remove(&key);
         }
-        let Some(handle) = self.ensure_sound(name)? else {
+        let Some((handle, sample_key)) = self.ensure_sound_with_key(name)? else {
             return Ok(());
         };
+        // NewInstance rejects another instance of the resolved sample within
+        // NearSoundRadius, including global/global pairs, even when FnSound's
+        // fMultiple flag bypassed its exact-object check
+        // (C4SoundSystem.cpp:341-350).
+        let already_playing_near = self.active_channels.values().any(|info| {
+            info.sample_key == sample_key
+                && self.system.channel_is_playing(info.channel)
+                && sound_targets_are_near(info.target, target, snapshot)
+        });
+        if already_playing_near {
+            return Ok(());
+        }
         let channel = self.system.play_sound(&handle, looped)?;
         let info = ChannelInfo {
             channel,
+            sample_key,
             looped,
             target,
             volume,
@@ -2172,10 +2185,32 @@ impl SoundInstanceKey {
 #[derive(Clone)]
 struct ChannelInfo {
     channel: ChannelId,
+    sample_key: String,
     looped: bool,
     target: Option<ObjectId>,
     volume: u8,
     custom_falloff: Option<i32>,
+}
+
+fn sound_targets_are_near(
+    existing: Option<ObjectId>,
+    requested: Option<ObjectId>,
+    snapshot: &SimulationSnapshot,
+) -> bool {
+    const NEAR_SOUND_RADIUS: i64 = 50;
+    match (existing, requested) {
+        (None, None) => true,
+        (Some(existing), Some(requested)) if existing == requested => true,
+        (Some(existing), Some(requested)) => snapshot
+            .object(existing)
+            .zip(snapshot.object(requested))
+            .is_some_and(|(existing, requested)| {
+                let dx = i64::from(existing.position.x) - i64::from(requested.position.x);
+                let dy = i64::from(existing.position.y) - i64::from(requested.position.y);
+                dx * dx + dy * dy <= NEAR_SOUND_RADIUS * NEAR_SOUND_RADIUS
+            }),
+        _ => false,
+    }
 }
 
 struct SoundResolver {
@@ -14103,6 +14138,7 @@ mod tests {
         );
         let info = ChannelInfo {
             channel: ChannelId(0),
+            sample_key: String::new(),
             looped: false,
             target: Some(source.id),
             volume: 100,
@@ -14131,6 +14167,7 @@ mod tests {
         );
         let info = ChannelInfo {
             channel: ChannelId(0),
+            sample_key: String::new(),
             looped: false,
             target: Some(source.id),
             volume: 100,
@@ -14158,6 +14195,7 @@ mod tests {
         );
         let info = ChannelInfo {
             channel: ChannelId(0),
+            sample_key: String::new(),
             looped: false,
             target: None,
             volume: 80,
@@ -14205,6 +14243,56 @@ mod tests {
 
         play(&mut audio).expect("first horse step starts");
         play(&mut audio).expect("duplicate horse step is already playing");
+    }
+
+    #[test]
+    fn nearby_objects_share_the_cpp_sample_instance_even_when_multiple_is_requested() {
+        // C4SoundSystem::NewInstance rejects another instance of the resolved
+        // sample within NearSoundRadius=50, after FnSound's fMultiple check
+        // (C4SoundSystem.cpp:341-350; C4SoundSystem.h:43).
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Goldrush.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("HorseWalk1.wav"), silent_pcm_wav(1_000))
+            .expect("write horse sound");
+
+        let options = AudioOptions {
+            max_channels: 1,
+            ..AudioOptions::default()
+        };
+        let mut audio = AudioContext::try_new(options).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+
+        let left = make_object(1, "HORS", Vector2::new(100, 100));
+        let right = make_object(2, "HORS", Vector2::new(149, 100));
+        let snapshot = make_snapshot(vec![left.clone(), right.clone()], Vec::new());
+
+        audio
+            .start_sound(
+                "HorseWalk*",
+                Some(left.id),
+                100,
+                false,
+                true,
+                None,
+                &snapshot,
+                Some(&left),
+                left.position,
+            )
+            .expect("first nearby horse starts");
+        audio
+            .start_sound(
+                "HorseWalk*",
+                Some(right.id),
+                100,
+                false,
+                true,
+                None,
+                &snapshot,
+                Some(&left),
+                left.position,
+            )
+            .expect("nearby horse reuses the sample instance");
     }
 
     #[test]
