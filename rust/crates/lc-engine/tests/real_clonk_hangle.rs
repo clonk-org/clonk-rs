@@ -4,13 +4,92 @@ use std::path::PathBuf;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ocf, CommandDirection, Definition, DefinitionTargetRect, Direction, Engine, JoinPlayerConfig,
-    Landscape, ObjectUpdate, Scenario, ScenarioError, SpawnConfig, Vector2, CATEGORY_STATIC_BACK,
-    CNAT_TOP, COM_UP,
+    Landscape, ObjectUpdate, PhysicalsUpdate, Scenario, ScenarioError, SpawnConfig, Vector2,
+    CATEGORY_STATIC_BACK, CNAT_TOP, COM_DIG, COM_UP,
 };
 use lc_resources::Group;
 
 struct ContentResolver {
     root: PathBuf,
+}
+
+#[test]
+fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp() {
+    // C4Player::Execute flushes a buffered COM_Dig as COM_Dig_S after
+    // C4DoubleClick frames (C4Player.cpp:1215-1229). In DFA_WALK that calls
+    // ObjectComDig and selects the real CLNK "Dig" action
+    // (C4Object.cpp:3422-3434; C4ObjectCom.cpp:353-362).
+    let content = content_root();
+    let tutorial = content.join("Tutorial.c4f/Tutorial01.c4s");
+    let resolver = ContentResolver {
+        root: content.clone(),
+    };
+    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
+        .expect("Tutorial01 and the real Objects.c4d load");
+    let mut engine = Engine::with_seed(0);
+    scenario.apply(&mut engine).expect("Tutorial01 applies");
+    let joined = engine
+        .join_player(JoinPlayerConfig {
+            name: "Dig tester".to_string(),
+            team: None,
+            color_dw: 0xff_00_00,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            startup_player_count: 1,
+        })
+        .expect("Tutorial01 player joins");
+    let clonk = engine
+        .crew_cursor(joined.number)
+        .expect("Tutorial01 joins one selected CLNK");
+
+    for _ in 0..100 {
+        engine.tick().expect("settling frame");
+    }
+    let settled = engine.object_snapshot(clonk).expect("settled CLNK");
+    assert_eq!(
+        settled.action.name,
+        "Walk",
+        "the tutorial CLNK must be walking before the dig control"
+    );
+    assert_eq!(
+        settled
+            .temporary_physical
+            .expect("InitializePlayer installs temporary physicals")
+            .can_dig,
+        0,
+        "Tutorial01 intentionally locks digging until Script160"
+    );
+
+    // Tutorial01 Script160 calls ResetPhysical(GetCrew()) before teaching
+    // the dig key (Script.c:134-141). Model that exact milestone so this
+    // regression tests COM_Dig after the intentional tutorial lock expires.
+    let mut reset = ObjectUpdate::new();
+    reset.physicals = Some(PhysicalsUpdate {
+        info: settled.info_physical,
+        temporary: None,
+        changes: Vec::new(),
+    });
+    engine
+        .apply_object_update(clonk, reset)
+        .expect("Script160 ResetPhysical milestone");
+
+    engine
+        .player_in_com(joined.number, COM_DIG, 0)
+        .expect("normal player Dig control");
+    for _ in 0..=10 {
+        engine.tick().expect("dig single-click timeout frame");
+    }
+
+    assert_eq!(
+        engine
+            .object_snapshot(clonk)
+            .expect("CLNK after Dig")
+            .action
+            .name,
+        "Dig"
+    );
 }
 
 impl LegacyDefinitionResolver for ContentResolver {
