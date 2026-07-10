@@ -5,7 +5,7 @@ use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ocf, CommandDirection, Definition, DefinitionTargetRect, Direction, Engine, JoinPlayerConfig,
     Landscape, ObjectUpdate, PhysicalsUpdate, Scenario, ScenarioError, SpawnConfig, Vector2,
-    CATEGORY_STATIC_BACK, CNAT_TOP, COM_DIG, COM_UP,
+    CATEGORY_STATIC_BACK, CNAT_TOP, COM_DIG, COM_THROW, COM_UP,
 };
 use lc_resources::Group;
 
@@ -218,6 +218,126 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
         hut_after_open.action,
         clonk_after_open.position,
         clonk_after_open.command_stack.command_names(),
+    );
+}
+
+#[test]
+fn tutorial_flag_throw_assigns_base_and_advances_past_script120() {
+    // Tutorial01's real sequence carries FLAG through Script60, teaches
+    // contained COM_Throw in Script110, observes C4Object::Base through
+    // GetBase in Script120, then unlocks digging in Script160. Contained
+    // Throw is synchronous (C4Object.cpp:3280-3282; C4Command.cpp:966-970)
+    // and ExecBase attaches the flag on Tick10 (C4Object.cpp:1000-1018).
+    let content = content_root();
+    let tutorial = content.join("Tutorial.c4f/Tutorial01.c4s");
+    let resolver = ContentResolver {
+        root: content.clone(),
+    };
+    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
+        .expect("Tutorial01 and the real Objects.c4d load");
+    let mut engine = Engine::with_seed(0);
+    scenario.apply(&mut engine).expect("Tutorial01 applies");
+    let joined = engine
+        .join_player(JoinPlayerConfig {
+            name: "Flag tester".to_string(),
+            team: None,
+            color_dw: 0xff_00_00,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            startup_player_count: 1,
+        })
+        .expect("Tutorial01 player joins");
+    assert_eq!(joined.number, 0, "Tutorial01 scripts address player zero");
+    let clonk = engine
+        .crew_cursor(joined.number)
+        .expect("Tutorial01 joins one selected CLNK");
+    let hut = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .find(|object| object.definition_id.as_str() == "HUT2")
+        .expect("Tutorial01 creates HUT2")
+        .id;
+
+    let flag = (0..700)
+        .find_map(|_| {
+            engine.tick().expect("tutorial lead-in frame");
+            engine
+                .snapshot()
+                .objects
+                .into_iter()
+                .find(|object| object.definition_id.as_str() == "FLAG")
+                .map(|object| object.id)
+        })
+        .expect("Script50 creates the tutorial flag");
+    engine
+        .apply_object_update(flag, ObjectUpdate::new().with_container(clonk))
+        .expect("collect the real tutorial flag");
+    engine
+        .apply_object_update(
+            clonk,
+            ObjectUpdate::new()
+                .with_container(hut)
+                .with_action("Walk")
+                .with_command_direction(CommandDirection::Stop),
+        )
+        .expect("stand inside the tutorial hut");
+
+    let mut mask = engine.snapshot().players[0].show_control;
+    let mut mask_changes = 0;
+    for _ in 0..400 {
+        engine.tick().expect("tutorial flag instruction frame");
+        let next = engine.snapshot().players[0].show_control;
+        if next != mask {
+            mask = next;
+            mask_changes += 1;
+            if mask_changes == 2 {
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        mask_changes, 2,
+        "Script60 must accept the carried flag and reach Script110"
+    );
+
+    engine
+        .player_in_com(joined.number, COM_THROW, 0)
+        .expect("contained Throw control");
+    assert_eq!(
+        engine.object_snapshot(flag).expect("FLAG after Throw").container,
+        Some(hut),
+        "COM_Throw puts FLAG into HUT2 before returning"
+    );
+    for _ in 0..20 {
+        engine.tick().expect("ExecBase frame");
+        if engine
+            .object_snapshot(hut)
+            .is_some_and(|object| object.base == joined.number)
+        {
+            break;
+        }
+    }
+    let hut_after_flag = engine.object_snapshot(hut).expect("HUT2 after FLAG");
+    let flag_after_base = engine.object_snapshot(flag).expect("attached FLAG");
+    assert_eq!(hut_after_flag.base, joined.number);
+    assert_eq!(flag_after_base.container, None);
+    assert_eq!(flag_after_base.action.name, "FlyBase");
+    assert_eq!(flag_after_base.action.target, Some(hut));
+
+    let script110_mask = engine.snapshot().players[0].show_control;
+    for _ in 0..150 {
+        engine.tick().expect("Script120 frame");
+        if engine.snapshot().players[0].show_control != script110_mask {
+            break;
+        }
+    }
+    assert_ne!(
+        engine.snapshot().players[0].show_control,
+        script110_mask,
+        "Script120 must call GetBase(HUT2) and advance without a script error"
     );
 }
 

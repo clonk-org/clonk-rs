@@ -6400,6 +6400,7 @@ impl Definition {
         definition.set_grab_put_get(resource.core.grab_put_get);
         definition.set_vehicle_control(resource.core.vehicle_control);
         definition.set_constructable(resource.core.constructable);
+        definition.set_can_be_base(resource.core.can_be_base);
         definition.set_construction_offset(resource.core.con_size_off);
         definition.set_stretch_growth(resource.core.stretch_growth);
         definition.set_placement(resource.core.placement);

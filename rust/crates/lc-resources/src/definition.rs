@@ -666,7 +666,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "crewmember" => {
                 crew_member = parse_bool(value);
             }
-            "canbebase" => {
+            // C4DefCore::CompileFunc names CanBeBase as "Base"
+            // (C4Def.cpp:317). Keep the descriptive alias for fixtures.
+            "base" | "canbebase" => {
                 can_be_base = parse_bool(value);
             }
             "picture" => {
