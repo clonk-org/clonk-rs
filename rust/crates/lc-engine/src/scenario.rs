@@ -10,7 +10,7 @@ use lc_resources::definition::{
     ActionFacet as ResourceActionFacet, DefinitionGraphicsVariant as ResourceGraphicsVariant,
 };
 use lc_resources::{
-    decode_legacy_script_text, localize_script_source,
+    decode_legacy_script_text, localize_quoted_script_strings, localize_script_source,
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap, ColorByOwnerMask,
     DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
     ResourceDefinition as ResourceDefinitionData,
@@ -5274,7 +5274,7 @@ fn collect_definitions_from_group<S: AsRef<str>>(
     group: &Group,
     load_system_groups: bool,
     skip_ids: &HashSet<String>,
-    _languages: &[S],
+    languages: &[S],
     output: &mut Vec<CollectedDefinition>,
 ) -> Result<(), ScenarioError> {
     let mut primary_definition = false;
@@ -5282,9 +5282,10 @@ fn collect_definitions_from_group<S: AsRef<str>>(
         let resource = ResourceDefinitionData::load(group)?;
         if !skip_ids.contains(&resource.core.id.to_ascii_uppercase()) {
             primary_definition = true;
-            output.push(CollectedDefinition::Definition(
-                scenario_definition_from_resource(resource, Some(group.clone())),
-            ));
+            let mut definition = scenario_definition_from_resource(resource, Some(group.clone()));
+            definition.script =
+                localize_quoted_script_strings(group, &definition.script, languages)?;
+            output.push(CollectedDefinition::Definition(definition));
         }
     }
 
@@ -5300,7 +5301,7 @@ fn collect_definitions_from_group<S: AsRef<str>>(
         let child = group.open_child(&entry.relative_path)?;
         // The recursive call omits fLoadSysGroups in C++, so its default true
         // applies even when only the scenario root suppressed System loading.
-        collect_definitions_from_group(&child, true, skip_ids, _languages, output)?;
+        collect_definitions_from_group(&child, true, skip_ids, languages, output)?;
     }
 
     // A non-primary definition root loads its System.c4g only AFTER all child
@@ -7583,6 +7584,53 @@ global func Step(state, frame, random)
             command,
             crate::AudioCommand::PlaySound { name, .. } if name == "MsgIntro2a"
         )));
+    }
+
+    #[test]
+    fn legacy_definition_script_localizes_runtime_strings_without_parse_regressions() {
+        // C4Def::Load gives each definition script its local StringTbl and
+        // C4ScriptHost::MakeScript replaces `$key$` before Preparse
+        // (C4Def.cpp:625-633; C4ScriptHost.cpp:46-82). Localized context text
+        // such as `Put/Get` must not make an otherwise valid definition fail.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        let definition_dir = dir.path().join("Defs.c4d/Good.c4d");
+        std::fs::write(
+            definition_dir.join("Script.c"),
+            "#strict\n\
+             func Label() { return \"$Reloaded$\"; }\n\
+             func ContextAction() {\n\
+               [$ActionLabel$|Image=GOOD]\n\
+               return 1;\n\
+             }\n",
+        )
+        .expect("write definition script");
+        std::fs::write(
+            definition_dir.join("StringTblUS.txt"),
+            "Reloaded=Reloaded %dx {{%i}}.\nActionLabel=Put/Get\n",
+        )
+        .expect("write definition string table");
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario
+            .apply(&mut engine)
+            .expect("localized definition compiles");
+        let id = engine
+            .spawn_object(SpawnConfig::new("GOOD"))
+            .expect("GOOD spawns");
+        let index = engine.find_object_index(id).expect("GOOD object index");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Label", Vec::new())
+                .expect("Label runs"),
+            lc_script::Value::String("Reloaded %dx {{%i}}.".to_string())
+        );
     }
 
     #[test]
