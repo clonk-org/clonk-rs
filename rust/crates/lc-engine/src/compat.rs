@@ -15815,6 +15815,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     rotateable: 0,
                     line: 0,
                     vertices: Vec::new(),
+                    fire: DefinitionFireMetadata::default(),
                 });
             // C4Object::Init discards sampled rotation/rdir for definitions
             // without Rotateable, after the synced draws already happened.
@@ -15874,6 +15875,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 ObjectStatus::Normal,
                 false,
                 0,
+                metadata.category,
             );
             let preview_velocity = Vector2::new(fixed_velocity.int_x(), fixed_velocity.int_y());
             let preview = HostWorldObject::with_category(
