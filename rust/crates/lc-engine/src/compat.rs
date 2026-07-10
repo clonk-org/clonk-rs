@@ -6595,6 +6595,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ObjectDistance", object_distance);
     script.register_host_function("GetX", get_x);
     script.register_host_function("GetY", get_y);
+    script.register_host_function("GetDefBottom", get_def_bottom);
     script.register_host_function("GetID", get_id);
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
@@ -6654,6 +6655,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetEntrance", set_entrance);
     script.register_host_function("SetColorDw", set_color_dw);
     script.register_host_function("SetShape", set_shape);
+    script.register_host_function("AddVertex", add_vertex);
     script.register_host_function("SetVertex", set_vertex);
     script.register_host_function("SetAlive", set_alive);
     script.register_host_function("GetAlive", get_alive);
@@ -17959,6 +17961,63 @@ fn get_y(args: &[Value]) -> Result<Value, RuntimeError> {
     get_position_component(args, PositionComponent::Y)
 }
 
+/// FnGetDefBottom (C4Script.cpp:4445-4449): the object's integer Y plus
+/// the untransformed definition-shape bottom. Live Shape changes, Con and
+/// rotation do not participate.
+fn get_def_bottom(args: &[Value]) -> Result<Value, RuntimeError> {
+    let explicit_target = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "GetDefBottom", "object"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let target = explicit_target.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(target) = target else {
+            return Ok(Value::Nil);
+        };
+        let position = context
+            .object_scope(target)
+            .map(ObjectScopeContext::effective_position)
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .map(|object| object.position())
+            });
+        let Some(position) = position else {
+            return Ok(Value::Nil);
+        };
+        let definition = context
+            .object_scope(target)
+            .and_then(|object| {
+                object
+                    .pending_update
+                    .change_def
+                    .clone()
+                    .or_else(|| object.definition_id.clone())
+            })
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .map(|object| object.definition_id().to_string())
+            });
+        let Some(shape) = definition
+            .as_deref()
+            .and_then(|definition| context.definition_metadata(definition))
+            .map(|metadata| metadata.shape.unwrap_or(DefinitionRect::new(0, 0, 0, 0)))
+        else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Int(
+            position.y.wrapping_add(shape.y).wrapping_add(shape.height),
+        ))
+    })
+}
+
 fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -21409,6 +21468,43 @@ fn set_shape(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
         object.pending_update.shape_override = Some(DefinitionRect::new(x, y, width, height));
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnAddVertex (C4Script.cpp:1274-1278): append one raw X/Y pair to the
+/// current live shape. C4Shape::AddVertex rejects the 31st vertex without
+/// enabling C4Object::fOwnVertices (C4Shape.cpp:26-32).
+fn add_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "AddVertex", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "AddVertex", "y")?;
+    let explicit_target = args
+        .get(2)
+        .map(|arg| parse_object_reference_argument(arg, "AddVertex", "object"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let target = explicit_target.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
+        let mut vertices = object.vertices().to_vec();
+        if vertices.len() >= MAX_VERTEX_COUNT as usize {
+            return Ok(Value::Bool(false));
+        }
+        vertices.push(ObjectVertex::new(x, y));
+        object.pending_update.live_vertices = Some(vertices);
         Ok(Value::Bool(true))
     })
 }
@@ -26097,6 +26193,7 @@ mod tests {
         "AddEffect",
         "AddMenuItem",
         "AddMessage",
+        "AddVertex",
         "AdjustWalkRotation",
         "And",
         "Angle",
@@ -26196,6 +26293,7 @@ mod tests {
         "GetCrewEnabled",
         "GetCursor",
         "GetDamage",
+        "GetDefBottom",
         "GetDefCoreVal",
         "GetDefinition",
         "GetDir",
@@ -31472,6 +31570,175 @@ func ProbeBadIndex(id) {
 
         let value = result.expect("GetVertexNum succeeds");
         assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn get_def_bottom_uses_the_untransformed_definition_shape() {
+        // FnGetDefBottom returns `pObj->y + pObj->Def->Shape.y +
+        // pObj->Def->Shape.Hgt`, defaults pObj to cthr->Obj, and returns
+        // nil without either (C4Script.cpp:4445-4449). The object's live
+        // vertices and construction/rotation are deliberately irrelevant.
+        let other_id = ObjectId::new(2);
+        let other = HostWorldObject::new(
+            other_id,
+            "OTHR",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::new(10, 50),
+            Vector2::ZERO,
+            vec![ObjectVertex::new(0, 900)],
+            0,
+            0,
+            None,
+        );
+        let definitions = Rc::new(HashMap::from([
+            (
+                DefinitionId::from("SELF"),
+                DefinitionMetadata {
+                    shape: Some(DefinitionRect::new(-2, -6, 4, 12)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+            (
+                DefinitionId::from("OTHR"),
+                DefinitionMetadata {
+                    shape: Some(DefinitionRect::new(1, 2, 4, 7)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+        ]));
+        let world =
+            HostWorldContext::from_objects(vec![other]).with_definition_metadata(definitions);
+        let live_vertices = [ObjectVertex::new(0, 1_000)];
+        let object = HostObjectContext::new(
+            ObjectId::new(1),
+            None,
+            ObjectStatus::Normal,
+            0,
+            OWNER_NONE,
+            Vector2::new(100, 200),
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &live_vertices,
+            crate::FULL_CON,
+        )
+        .with_definition_id("SELF");
+        let (result, _) = with_effect_context(Some(object), &[], world, 1, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                get_def_bottom(&[])?,
+                get_def_bottom(&[Value::Nil])?,
+                get_def_bottom(&[object_reference_value(other_id)])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("GetDefBottom calls succeed"),
+            Value::Array(vec![Value::Int(206), Value::Int(206), Value::Int(59)])
+        );
+        assert_eq!(
+            get_def_bottom(&[]).expect("context-free call runs"),
+            Value::Nil
+        );
+    }
+
+    #[test]
+    fn add_vertex_appends_to_the_calling_objects_live_shape() {
+        // FnAddVertex defaults a null pObj to cthr->Obj and returns the bool
+        // from C4Shape::AddVertex (C4Script.cpp:1274-1278); AddVertex only
+        // appends X/Y and increments VtxNum (C4Shape.cpp:26-32).
+        let (result, outcome) =
+            with_object_host_context(|| add_vertex(&[Value::Int(17), Value::Int(-9)]));
+
+        assert_eq!(result.expect("AddVertex succeeds"), Value::Bool(true));
+        let update = outcome.object_update.expect("live shape update recorded");
+        assert_eq!(update.live_vertices, Some(vec![ObjectVertex::new(17, -9)]));
+        assert_eq!(
+            update.vertices, None,
+            "AddVertex must not enable C4Object::fOwnVertices"
+        );
+    }
+
+    #[test]
+    fn add_vertex_targets_foreign_shapes_and_stops_at_the_cpp_limit() {
+        // C4Shape::AddVertex fails once VtxNum reaches C4D_MaxVertex (30)
+        // and leaves the shape unchanged (C4Shape.cpp:26-32;
+        // C4Constants.h C4D_MaxVertex). FnAddVertex forwards that bool for
+        // an explicit pObj and returns false without any object
+        // (C4Script.cpp:1274-1278).
+        let target_id = ObjectId::new(2);
+        let vertices: Vec<ObjectVertex> = (0..29)
+            .map(|index| ObjectVertex::new(index, -index))
+            .collect();
+        let target = HostWorldObject::new(
+            target_id,
+            "LINE",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            vertices.clone(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            vertices,
+        )));
+        let target_value = object_reference_value(target_id);
+        let world = HostWorldContext::from_objects(vec![target]).with_definition_metadata(Rc::new(
+            HashMap::from([(DefinitionId::from("LINE"), DefinitionMetadata::default())]),
+        ));
+        let (result, outcome) = with_object_host_context_with_world(
+            world,
+            || {
+                Ok::<_, RuntimeError>(Value::Array(vec![
+                    add_vertex(&[Value::Int(29), Value::Int(-29), target_value.clone()])?,
+                    add_vertex(&[Value::Int(30), Value::Int(-30), target_value.clone()])?,
+                ]))
+            },
+        );
+
+        assert_eq!(
+            result.expect("explicit AddVertex calls succeed"),
+            Value::Array(vec![Value::Bool(true), Value::Bool(false)])
+        );
+        let update = outcome.other_objects[0]
+            .update
+            .as_ref()
+            .and_then(|update| update.live_vertices.as_ref())
+            .expect("foreign live-shape update recorded");
+        assert_eq!(update.len(), 30);
+        assert_eq!(update[29], ObjectVertex::new(29, -29));
+        assert_eq!(
+            add_vertex(&[]).expect("context-free call runs"),
+            Value::Bool(false)
+        );
     }
 
     #[test]

@@ -3173,6 +3173,7 @@ impl ObjectUpdate {
             && self.selected.is_none()
             && self.alive.is_none()
             && self.container.is_none()
+            && self.live_vertices.is_none()
             && self.vertices.is_none()
             && self.graphics_overlays.is_none()
             && self.draw_transform.is_none()
@@ -58710,6 +58711,112 @@ func Probe() {
             "#,
         )
         .expect("script compiles")
+    }
+
+    #[test]
+    fn shape_hosts_apply_live_vertices_and_definition_bottoms_end_to_end() {
+        // FnAddVertex writes the live C4Object::Shape and forwards
+        // C4Shape::AddVertex's false-at-30 result without setting
+        // fOwnVertices (C4Script.cpp:1274-1278; C4Shape.cpp:26-32).
+        // FnGetDefBottom reads y + Def->Shape.y + Def->Shape.Hgt, not that
+        // live shape (C4Script.cpp:4445-4449).
+        let script = r#"#strict 2
+local add_self, add_foreign, add_overflow;
+local self_count, self_bottom, foreign_bottom;
+public func Probe(object target) {
+    add_self = AddVertex(17, -9);
+    add_foreign = AddVertex(500, 900, target);
+    add_overflow = AddVertex(501, 901, target);
+    self_count = GetVertexNum();
+    self_bottom = GetDefBottom();
+    foreign_bottom = GetDefBottom(target);
+    return 1;
+}
+"#;
+        let mut caller =
+            Definition::from_script("CALL", "Caller", script).expect("caller compiles");
+        caller.set_shape_rect(Some(DefinitionRect::new(-2, -6, 4, 12)));
+        caller.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        let mut target = simple_definition("TARG");
+        target.set_shape_rect(Some(DefinitionRect::new(1, -4, 4, 9)));
+        target.set_shape_vertices(
+            (0..29)
+                .map(|index| ObjectVertex::new(index, index))
+                .collect(),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        engine
+            .register_definition(target)
+            .expect("target registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(100, 200)))
+            .expect("caller spawns");
+        let target_id = engine
+            .spawn_object(SpawnConfig::new("TARG").with_position(Vector2::new(300, 400)))
+            .expect("target spawns");
+        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+        let self_bottom = engine.objects[caller_index]
+            .state
+            .position
+            .y
+            .wrapping_add(-6)
+            .wrapping_add(12);
+        let target_index = engine.find_object_index(target_id).expect("target exists");
+        let foreign_bottom = engine.objects[target_index]
+            .state
+            .position
+            .y
+            .wrapping_add(-4)
+            .wrapping_add(9);
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Probe",
+                    vec![Value::Object(target_id.as_u64())],
+                )
+                .expect("shape hosts run"),
+            Value::Int(1)
+        );
+        let caller_index = engine.find_object_index(caller_id).expect("caller remains");
+        let locals = &engine.objects[caller_index].state.local_vars;
+        assert_eq!(locals.get("add_self"), Some(&Value::Bool(true)));
+        assert_eq!(locals.get("add_foreign"), Some(&Value::Bool(true)));
+        assert_eq!(locals.get("add_overflow"), Some(&Value::Bool(false)));
+        assert_eq!(locals.get("self_count"), Some(&Value::Int(2)));
+        assert_eq!(locals.get("self_bottom"), Some(&Value::Int(self_bottom)));
+        assert_eq!(
+            locals.get("foreign_bottom"),
+            Some(&Value::Int(foreign_bottom))
+        );
+        assert_eq!(engine.objects[caller_index].state.vertices.len(), 2);
+        assert!(engine.objects[caller_index].own_shape_vertices.is_none());
+        let target_index = engine.find_object_index(target_id).expect("target remains");
+        assert_eq!(engine.objects[target_index].state.vertices.len(), 30);
+        assert_eq!(
+            engine.objects[target_index].state.vertices[29],
+            ObjectVertex::new(500, 900)
+        );
+        assert!(engine.objects[target_index].own_shape_vertices.is_none());
+
+        // A later UpdateShape restores definition vertices because AddVertex
+        // did not switch on C4Object::fOwnVertices (C4Object.cpp:322-329).
+        engine
+            .apply_object_update(
+                target_id,
+                ObjectUpdate::new().with_construction(FULL_CON - 1),
+            )
+            .expect("construction refresh succeeds");
+        let target_index = engine
+            .find_object_index(target_id)
+            .expect("target remains after refresh");
+        assert_eq!(engine.objects[target_index].state.vertices.len(), 29);
+        assert!(engine.objects[target_index].own_shape_vertices.is_none());
     }
 
     #[test]
