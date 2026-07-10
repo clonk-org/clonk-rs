@@ -16876,7 +16876,12 @@ impl Engine {
                 }
                 let mut applied = object.apply_effect_commands(&effects);
                 effect_events.append(&mut applied);
-                object.clamp_velocity(&self.physics);
+                if !matches!(
+                    action_library.procedure_for_action(&object.state.action.name),
+                    ActionProcedure::Flight
+                ) {
+                    object.clamp_velocity(&self.physics);
+                }
                 if destroy {
                     effect_events.extend(object.mark_destroyed());
                 }
@@ -17878,7 +17883,12 @@ impl Engine {
                 effect_events.append(&mut applied);
             }
 
-            if clamp_velocity {
+            if clamp_velocity
+                && !matches!(
+                    action_library.procedure_for_action(&object.state.action.name),
+                    ActionProcedure::Flight
+                )
+            {
                 object.clamp_velocity(&self.physics);
             }
         }
@@ -21132,8 +21142,14 @@ impl Engine {
                 }
                 _ => {}
             }
-            self.physics
-                .clamp_fixed_velocity(&mut object.fixed_velocity);
+            // DFA_FLIGHT is only DoGravity + Mobile in C++
+            // (C4Object.cpp:4893-4904). In particular, its free-fall
+            // velocity is not subject to the synthetic PhysicsSettings
+            // terminal-speed bounds; DoGravity keeps adding GravAccel.
+            if !matches!(procedure, ActionProcedure::Flight) {
+                self.physics
+                    .clamp_fixed_velocity(&mut object.fixed_velocity);
+            }
             object.refresh_velocity_from_fixed();
             match procedure {
                 // WALK/HANGLE/DIG/SWIM all call C4Object::SetDir from the

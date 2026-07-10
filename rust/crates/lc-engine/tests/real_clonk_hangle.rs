@@ -145,3 +145,71 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp() {
     assert_eq!(hangle.direction, Direction::Right);
     assert_eq!(hangle.velocity, Vector2::ZERO);
 }
+
+#[test]
+fn tutorial_clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick() {
+    // DFA_FLIGHT calls DoGravity every frame (C4Object.cpp:4893-4904), whose
+    // free-fall branch only adds GravAccel (C4Object.cpp:4672-4674). C++ has
+    // no generic terminal-velocity clamp, so a Clonk falling through enough
+    // open space must accelerate past 12 px/tick.
+    let content = content_root();
+    let tutorial = content.join("Tutorial.c4f/Tutorial01.c4s");
+    assert!(
+        tutorial.is_dir(),
+        "Tutorial01 content is required at {}; set LC_CONTENT_ROOT for an isolated worktree",
+        content.display()
+    );
+
+    let resolver = ContentResolver {
+        root: content.clone(),
+    };
+    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
+        .expect("Tutorial01 and the real Objects.c4d load");
+    let mut engine = Engine::with_seed(0);
+    scenario
+        .apply_before_players(&mut engine)
+        .expect("Tutorial01 definitions apply");
+    let joined = engine
+        .join_player(JoinPlayerConfig {
+            name: "Flight tester".to_string(),
+            team: None,
+            color_dw: 0xff_00_00,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            startup_player_count: 1,
+        })
+        .expect("Tutorial01 player joins");
+    let clonk = engine
+        .crew_cursor(joined.number)
+        .expect("Tutorial01 joins one selected CLNK");
+
+    engine.set_landscape(Landscape::flat(80, 400));
+    engine
+        .apply_object_update(
+            clonk,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(40, 100))
+                .with_velocity(Vector2::new(0, 11))
+                .with_action("Jump")
+                .with_command_direction(CommandDirection::Stop),
+        )
+        .expect("place the real CLNK in open flight");
+
+    for _ in 0..9 {
+        engine.tick().expect("open flight frame");
+    }
+
+    let falling = engine.object_snapshot(clonk).expect("CLNK after flight");
+    assert_eq!(falling.action.name, "Jump");
+    assert_eq!(falling.command_direction, CommandDirection::Stop);
+    assert_eq!(
+        falling.velocity.y, 13,
+        "eleven plus nine 0.2px gravity steps rounds to 13 without a C++-foreign terminal clamp"
+    );
+    assert_eq!(
+        falling.position.y, 208,
+        "the unbounded fixed-point velocities must also drive the C++ flight trajectory"
+    );
+}
