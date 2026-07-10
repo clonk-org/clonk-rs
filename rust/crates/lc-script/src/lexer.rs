@@ -692,7 +692,7 @@ impl<'a> Lexer<'a> {
         // (`1HUD`, `2HUD`, `3HUD`) depend on this path.
         if matches!(self.peek_char(), Some('A'..='Z' | '_')) {
             while let Some(ch) = self.peek_char() {
-                if ch.is_ascii_alphanumeric() || ch == '_' {
+                if ch.is_ascii_alphanumeric() {
                     let (idx, consumed, _, _) = self.bump_char().unwrap();
                     end_idx = idx + consumed.len_utf8();
                 } else {
@@ -948,6 +948,15 @@ mod tests {
                 TokenKind::C4Id("3HUD".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn digit_leading_c4id_does_not_consume_an_underscore_like_cpp() {
+        // TGS_Int enters TGS_C4ID when it sees `_`, but TGS_C4ID itself
+        // consumes only ASCII letters and digits; the partial token then
+        // fails LooksLikeID (C4AulParse.cpp:711-723,747-763). Preserve that
+        // historical asymmetry instead of accepting a new identifier form.
+        assert!(lex_all("1_AA").is_err());
     }
 
     #[test]
