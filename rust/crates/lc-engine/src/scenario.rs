@@ -418,6 +418,7 @@ impl Scenario {
                     &definition_group,
                     true,
                     &skip_ids,
+                    languages,
                     &mut load_items,
                 )?;
             }
@@ -439,13 +440,19 @@ impl Scenario {
         }
         for folder in folder_groups.iter().rev() {
             if let Ok(folder_group) = Group::open(folder) {
-                collect_definitions_from_group(&folder_group, true, &skip_ids, &mut load_items)?;
+                collect_definitions_from_group(
+                    &folder_group,
+                    true,
+                    &skip_ids,
+                    languages,
+                    &mut load_items,
+                )?;
             }
         }
 
         // InitDefs' scenario pass disables System.c4g discovery because the
         // scenario-local group is loaded later by LoadScenarioScripts.
-        collect_definitions_from_group(group, false, &skip_ids, &mut load_items)?;
+        collect_definitions_from_group(group, false, &skip_ids, languages, &mut load_items)?;
 
         // fOverload replaces and destroys an earlier same-ID C4Def script,
         // while System hosts loaded between the two definitions remain live.
@@ -5263,10 +5270,11 @@ fn is_missing_group_error(error: &GroupError) -> bool {
     )
 }
 
-fn collect_definitions_from_group(
+fn collect_definitions_from_group<S: AsRef<str>>(
     group: &Group,
     load_system_groups: bool,
     skip_ids: &HashSet<String>,
+    _languages: &[S],
     output: &mut Vec<CollectedDefinition>,
 ) -> Result<(), ScenarioError> {
     let mut primary_definition = false;
@@ -5292,7 +5300,7 @@ fn collect_definitions_from_group(
         let child = group.open_child(&entry.relative_path)?;
         // The recursive call omits fLoadSysGroups in C++, so its default true
         // applies even when only the scenario root suppressed System loading.
-        collect_definitions_from_group(&child, true, skip_ids, output)?;
+        collect_definitions_from_group(&child, true, skip_ids, _languages, output)?;
     }
 
     // A non-primary definition root loads its System.c4g only AFTER all child
