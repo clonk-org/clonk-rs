@@ -336,14 +336,18 @@ impl Engine {
         let base_player = base.state.base;
         let base_is_container = base.state.ocf & ocf::CONTAINER != 0;
         let mut items = Vec::new();
-        let item = |caption: &str, command: String, item_id: String| crate::ObjectMenuItem {
+        let item =
+            |caption: &str,
+             command: String,
+             item_id: String,
+             symbol: crate::ObjectMenuSymbol| crate::ObjectMenuItem {
             caption: caption.to_string(),
             info_caption: String::new(),
             command,
             command2: String::new(),
             count: C4MN_ITEM_NO_COUNT,
             item_id,
-            symbol: crate::ObjectMenuSymbol::default(),
+            symbol,
             selectable: true,
             value: None,
         };
@@ -356,6 +360,7 @@ impl Engine {
                     base_id.as_u64()
                 ),
                 base_definition.clone(),
+                crate::ObjectMenuSymbol::Definition,
             ));
         }
         if self.players.contains_key(&base_player)
@@ -369,6 +374,7 @@ impl Engine {
                         base_id.as_u64()
                     ),
                     "NONE".to_string(),
+                    crate::ObjectMenuSymbol::Buy { owner: base_player },
                 ));
             }
             if self.base_sell_enabled {
@@ -379,6 +385,7 @@ impl Engine {
                         base_id.as_u64()
                     ),
                     "NONE".to_string(),
+                    crate::ObjectMenuSymbol::Sell { owner: base_player },
                 ));
             }
         }
@@ -392,6 +399,7 @@ impl Engine {
                 "Info",
                 format!("ShowInfo(Object({}))", base_id.as_u64()),
                 base_definition.clone(),
+                crate::ObjectMenuSymbol::Info,
             ));
         }
         if base_is_container && self.objects[crew_index].state.container == Some(base_id) {
@@ -399,6 +407,7 @@ impl Engine {
                 "Exit",
                 "PlayerObjectCommand(GetOwner(),\"Exit\")&&ExecuteCommand()".to_string(),
                 "NONE".to_string(),
+                crate::ObjectMenuSymbol::Exit,
             ));
         }
         let selection = i32::from(!items.is_empty()) - 1;

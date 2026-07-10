@@ -212,6 +212,27 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
             .collect::<Vec<_>>(),
         vec!["Contents", "Buy", "Sell", "Info", "Exit"]
     );
+    // C4ObjectMenu::RefillInternal composes the context symbols from the
+    // target picture, owner-colored Buy/Sell recipes, target+OKCancel Info,
+    // and fctExit respectively (C4ObjectMenu.cpp:361-427; C4Menu.cpp:43-70).
+    assert_eq!(
+        context
+            .items
+            .iter()
+            .map(|item| item.symbol)
+            .collect::<Vec<_>>(),
+        vec![
+            lc_engine::ObjectMenuSymbol::Definition,
+            lc_engine::ObjectMenuSymbol::Buy {
+                owner: joined.number,
+            },
+            lc_engine::ObjectMenuSymbol::Sell {
+                owner: joined.number,
+            },
+            lc_engine::ObjectMenuSymbol::Info,
+            lc_engine::ObjectMenuSymbol::Exit,
+        ]
+    );
 
     engine
         .player_in_com(joined.number, COM_RIGHT, 0)
