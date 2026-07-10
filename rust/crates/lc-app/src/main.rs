@@ -47,7 +47,7 @@ use clap::Parser;
 use control_options::{
     binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
 };
-use game_over::{GameOverEntry, GameOverOutcome, GameOverState};
+use game_over::{GameOverAction, GameOverEntry, GameOverOutcome, GameOverState, NextMissionButton};
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
 use ingame_menu::{
     DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
@@ -6148,6 +6148,38 @@ impl GameApp {
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.game_over_dialog.is_some() {
+            let action = if state == ElementState::Pressed {
+                match key {
+                    VirtualKeyCode::Left | VirtualKeyCode::Up => {
+                        if let Some(dialog) = self.game_over_dialog.as_mut() {
+                            dialog.move_selection(-1);
+                        }
+                        None
+                    }
+                    VirtualKeyCode::Right | VirtualKeyCode::Down => {
+                        if let Some(dialog) = self.game_over_dialog.as_mut() {
+                            dialog.move_selection(1);
+                        }
+                        None
+                    }
+                    VirtualKeyCode::Return
+                    | VirtualKeyCode::NumpadEnter
+                    | VirtualKeyCode::Space => self
+                        .game_over_dialog
+                        .as_ref()
+                        .and_then(GameOverState::activate_selected),
+                    VirtualKeyCode::Escape => Some(GameOverAction::End),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(action) = action {
+                self.handle_game_over_action(action)?;
+            }
+            return Ok(());
+        }
         if state == ElementState::Pressed {
             match key {
                 VirtualKeyCode::F5 if matches!(self.mode, AppMode::Running) => {
@@ -7576,7 +7608,7 @@ impl GameApp {
                 self.handle_gamepad_command(command, state)?;
             }
             GamepadEvent::Clear => {
-                if matches!(self.mode, AppMode::Running) {
+                if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
                     self.dispatch_control_event(ControlEvent::ClearPressed)?;
                 }
             }
@@ -7592,6 +7624,9 @@ impl GameApp {
         command: ControlCommand,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        if self.game_over_dialog.is_some() {
+            return Ok(());
+        }
         if !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
@@ -7607,6 +7642,18 @@ impl GameApp {
         button: ControlButton,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        if self.game_over_dialog.is_some() {
+            if state == ElementState::Pressed {
+                let delta = match button {
+                    ControlButton::Left | ControlButton::Up => -1,
+                    ControlButton::Right | ControlButton::Down => 1,
+                };
+                if let Some(dialog) = self.game_over_dialog.as_mut() {
+                    dialog.move_selection(delta);
+                }
+            }
+            return Ok(());
+        }
         match self.mode {
             AppMode::Menu => {
                 if let Some(key) = menu_key_from_control_button(button) {
@@ -7657,7 +7704,7 @@ impl GameApp {
     fn handle_menu_cancel_action(&mut self, state: ElementState) -> Result<(), EngineError> {
         if self.game_over_dialog.is_some() {
             if state == ElementState::Pressed {
-                self.dismiss_game_over_dialog();
+                self.handle_game_over_action(GameOverAction::End)?;
             }
             return Ok(());
         }
@@ -7694,16 +7741,20 @@ impl GameApp {
         action: GamepadActionType,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        if matches!(self.mode, AppMode::Menu) && self.game_over_dialog.is_some() {
-            if state == ElementState::Pressed
-                && matches!(
-                    action,
-                    GamepadActionType::Select
-                        | GamepadActionType::Cancel
-                        | GamepadActionType::MenuToggle
-                )
-            {
-                self.dismiss_game_over_dialog();
+        if self.game_over_dialog.is_some() {
+            if state == ElementState::Pressed {
+                let action = match action {
+                    GamepadActionType::Select => self
+                        .game_over_dialog
+                        .as_ref()
+                        .and_then(GameOverState::activate_selected),
+                    GamepadActionType::Cancel | GamepadActionType::MenuToggle => {
+                        Some(GameOverAction::End)
+                    }
+                };
+                if let Some(action) = action {
+                    self.handle_game_over_action(action)?;
+                }
             }
             return Ok(());
         }
@@ -7773,6 +7824,16 @@ impl GameApp {
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         self.mark_menu_dirty();
         let point = gui_point_from_position(position);
+        if let Some(dialog) = self.game_over_dialog.as_mut() {
+            let surface = self.graphics.surface();
+            dialog.handle_pointer_move(
+                point.x,
+                point.y,
+                surface.width(),
+                surface.height(),
+            );
+            return Ok(());
+        }
         match self.mode {
             AppMode::Menu => {
                 if self.game_over_dialog.is_some() {
@@ -7983,6 +8044,22 @@ impl GameApp {
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.game_over_dialog.is_some() {
+            if button_state == ElementState::Released {
+                let (width, height) = {
+                    let surface = self.graphics.surface();
+                    (surface.width(), surface.height())
+                };
+                let action = self
+                    .game_over_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.activate_pointer_position(width, height));
+                if let Some(action) = action {
+                    self.handle_game_over_action(action)?;
+                }
+            }
+            return Ok(());
+        }
         match self.mode {
             AppMode::Menu => {
                 if self.game_over_dialog.is_some() {
@@ -8188,6 +8265,29 @@ impl GameApp {
     }
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
+        if self.game_over_dialog.is_some() {
+            let (width, height) = {
+                let surface = self.graphics.surface();
+                (surface.width(), surface.height())
+            };
+            if !matches!(phase, TouchPhase::Cancelled) {
+                if let Some(dialog) = self.game_over_dialog.as_mut() {
+                    dialog.handle_pointer_move(position.x, position.y, width, height);
+                }
+            }
+            if phase == TouchPhase::Ended {
+                let action = self
+                    .game_over_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.activate_pointer_position(width, height));
+                if let Some(action) = action {
+                    self.handle_game_over_action(action)?;
+                }
+            } else if phase == TouchPhase::Cancelled {
+                self.pointer_left();
+            }
+            return Ok(());
+        }
         if self.mode != AppMode::Menu {
             return Ok(());
         }
@@ -8383,6 +8483,10 @@ impl GameApp {
 
     fn pointer_left(&mut self) {
         self.mark_menu_dirty();
+        if let Some(dialog) = self.game_over_dialog.as_mut() {
+            dialog.pointer_left();
+            return;
+        }
         match self.mode {
             AppMode::Menu => match self.startup_view {
                 StartupView::NetworkGame => {
@@ -9270,6 +9374,9 @@ impl GameApp {
         }
         match self.mode {
             AppMode::Running => {
+                if self.game_over_dialog.is_some() {
+                    return Ok(());
+                }
                 if let Some(network) = self.network.as_ref() {
                     let frame = self.engine.frame();
                     let tick = u32::try_from(frame).unwrap_or(u32::MAX);
@@ -9409,6 +9516,31 @@ impl GameApp {
         }
     }
 
+    fn handle_game_over_action(&mut self, action: GameOverAction) -> Result<(), EngineError> {
+        match action {
+            GameOverAction::Continue => {
+                self.dismiss_game_over_dialog();
+            }
+            GameOverAction::End => {
+                self.return_to_menu();
+            }
+            GameOverAction::Restart => {
+                self.restart_current_scenario()?;
+            }
+            GameOverAction::NextMission => {
+                let path = self.engine.next_mission().path.clone();
+                let Some(scenario) = resolve_next_mission_scenario(&self.scenario_catalog, &path)
+                else {
+                    self.status_text = format!("Next scenario is unavailable: {path}");
+                    return Ok(());
+                };
+                self.return_to_menu();
+                self.start_scenario(scenario)?;
+            }
+        }
+        Ok(())
+    }
+
     fn handle_game_over(&mut self) {
         let scenario_title = self
             .active_scenario
@@ -9416,7 +9548,17 @@ impl GameApp {
             .map(|scenario| scenario.title.clone())
             .unwrap_or_else(|| "Scenario".to_string());
         let entries = self.build_game_over_entries();
-        let dialog = GameOverState::new(scenario_title.clone(), entries);
+        let next_mission = self.engine.next_mission();
+        let next_mission = (!next_mission.path.is_empty()).then(|| NextMissionButton {
+            label: next_mission.text.clone(),
+            description: next_mission.description.clone(),
+        });
+        let dialog = GameOverState::with_next_mission(
+            scenario_title.clone(),
+            entries,
+            self.graphics.surface().width(),
+            next_mission,
+        );
         let status_message = if dialog.subtitle().is_empty() {
             format!("{scenario_title} complete")
         } else {
@@ -9424,11 +9566,7 @@ impl GameApp {
         };
         self.finish_recording();
         self.game_over_handled = true;
-        self.mode = AppMode::Menu;
-        self.show_main_menu();
         self.status_text = status_message;
-        self.active_scenario = None;
-        self.ensure_menu_music();
         self.game_over_dialog = Some(dialog);
     }
 
@@ -9988,6 +10126,11 @@ impl GameApp {
         }
 
         self.draw_messages();
+
+        if let Some(dialog) = self.game_over_dialog.as_ref() {
+            let font = self.assets.font_arc();
+            dialog.render(self.graphics.surface_mut(), font.as_ref());
+        }
 
         let surface = self.graphics.surface();
         let pixels = surface.pixels();
@@ -12001,6 +12144,27 @@ fn build_scenario_catalog(entries: &[FrontendScenario]) -> HashMap<String, Front
     catalog
 }
 
+fn normalized_scenario_identifier(identifier: &str) -> String {
+    identifier
+        .replace('\\', "/")
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+        .to_ascii_lowercase()
+}
+
+fn resolve_next_mission_scenario(
+    catalog: &HashMap<String, FrontendScenario>,
+    identifier: &str,
+) -> Option<FrontendScenario> {
+    let requested = normalized_scenario_identifier(identifier);
+    catalog
+        .iter()
+        .find(|(candidate, _)| normalized_scenario_identifier(candidate) == requested)
+        .map(|(_, scenario)| scenario.clone())
+}
+
 fn insert_scenario_recursive(
     entry: &FrontendScenario,
     catalog: &mut HashMap<String, FrontendScenario>,
@@ -13727,6 +13891,40 @@ mod tests {
     }
 
     #[test]
+    fn next_mission_lookup_normalizes_cpp_backslashes_and_case() {
+        // C4Application::QuitGame converts the SetNextMission path's
+        // backslashes to the platform separator before starting it
+        // (C4Application.cpp:385-399).
+        let scenario = FrontendScenario {
+            identifier: "Tutorial.c4f/Tutorial02.c4s".to_string(),
+            title: "The First Hut".to_string(),
+            description: None,
+            kind: ScenarioKind::Scenario,
+            is_editable: false,
+            is_playable: true,
+            path: None,
+            root_label: None,
+            preview: None,
+            title_picture: None,
+            children: Vec::new(),
+            folder_index: None,
+            icon_index: None,
+            difficulty: None,
+            author: None,
+            version: None,
+            local_only: None,
+            allow_user_change: None,
+        };
+        let catalog = HashMap::from([(scenario.identifier.clone(), scenario)]);
+
+        assert_eq!(
+            resolve_next_mission_scenario(&catalog, "tutorial.c4f\\TUTORIAL02.c4s")
+                .map(|scenario| scenario.title),
+            Some("The First Hut".to_string())
+        );
+    }
+
+    #[test]
     fn placeholder_preview_has_expected_dimensions() {
         let preview = generate_preview_placeholder(ScenarioKind::Scenario, "Alpha");
         assert_eq!(preview.width(), PLACEHOLDER_PREVIEW_WIDTH);
@@ -15044,6 +15242,38 @@ mod tests {
             }
         }
         assert!(app.snapshot.game_over, "round should end after surrender");
+    }
+
+    #[test]
+    fn next_mission_action_launches_the_catalog_target() {
+        // C4GameOverDlg's Next button passes Game.NextMission through
+        // C4Application::SetNextMission/QuitGame and starts that scenario
+        // (C4GameOverDlg.cpp:335-382; C4Application.cpp:373-399).
+        let mut app = new_running_sandbox_app();
+        let mut target = FrontendScenario::fallback();
+        target.identifier = "Tutorial.c4f/Tutorial02.c4s".to_string();
+        target.title = "The First Hut".to_string();
+        app.scenario_catalog
+            .insert(target.identifier.clone(), target.clone());
+
+        let mut state = app.engine.capture_state();
+        state.next_mission = lc_engine::NextMissionState {
+            path: "Tutorial.c4f\\Tutorial02.c4s".to_string(),
+            text: "Next tutorial".to_string(),
+            description: "Continue learning".to_string(),
+        };
+        app.engine.restore_state(&state).expect("state restores");
+
+        app.handle_game_over_action(GameOverAction::NextMission)
+            .expect("next mission starts");
+
+        assert_eq!(
+            app.active_scenario
+                .as_ref()
+                .map(|scenario| scenario.identifier.as_str()),
+            Some("Tutorial.c4f/Tutorial02.c4s")
+        );
+        assert!(app.game_over_dialog.is_none());
     }
 
     #[test]

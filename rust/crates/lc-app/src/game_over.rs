@@ -11,6 +11,9 @@ const MUTED_TEXT_COLOR: Color = Color::opaque(164, 176, 196);
 const LOCAL_ROW_HIGHLIGHT: Color = Color::new(48, 72, 124, 185);
 const HEADER_RULE_COLOR: Color = Color::opaque(84, 108, 156);
 const COLOR_SWATCH_BORDER: Color = Color::opaque(28, 38, 58);
+const BUTTON_COLOR: Color = Color::opaque(48, 62, 88);
+const BUTTON_SELECTED_COLOR: Color = Color::opaque(70, 98, 152);
+const BUTTON_BORDER_COLOR: Color = Color::opaque(154, 174, 208);
 
 const PANEL_WIDTH: u32 = 760;
 const PANEL_HEIGHT_MIN: u32 = 320;
@@ -20,6 +23,7 @@ const SUBTITLE_FONT_SIZE: f32 = 20.0;
 const HEADER_FONT_SIZE: f32 = 16.0;
 const ROW_FONT_SIZE: f32 = 18.0;
 const FOOTER_FONT_SIZE: f32 = 14.0;
+const BUTTON_FONT_SIZE: f32 = 16.0;
 const ROW_HEIGHT: i32 = 40;
 const GAP_AFTER_TITLE: i32 = 14;
 const GAP_AFTER_SUBTITLE: i32 = 20;
@@ -29,8 +33,10 @@ const COLUMN_GAP: i32 = 14;
 const OUTCOME_WIDTH: i32 = 130;
 const STAT_COLUMN_WIDTH: i32 = 96;
 const COLOR_SWATCH_SIZE: i32 = 16;
-
-const FOOTER_TEXT: &str = "Press Enter or click to return to the menu";
+const BUTTON_HEIGHT: i32 = 32;
+const BUTTON_GAP: i32 = 8;
+const GAP_BEFORE_BUTTONS: i32 = 18;
+const GAP_AFTER_BUTTONS: i32 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameOverOutcome {
@@ -86,15 +92,48 @@ pub struct GameOverEntry {
     pub color: Option<Color>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameOverAction {
+    End,
+    Continue,
+    Restart,
+    NextMission,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NextMissionButton {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Debug)]
+struct GameOverButton {
+    action: GameOverAction,
+    label: String,
+    description: String,
+}
+
 #[derive(Debug)]
 pub struct GameOverState {
     title: String,
     subtitle: String,
     entries: Vec<GameOverEntry>,
+    buttons: Vec<GameOverButton>,
+    selected_button: usize,
+    pointer_position: Option<(f32, f32)>,
 }
 
 impl GameOverState {
-    pub fn new(title: String, mut entries: Vec<GameOverEntry>) -> Self {
+    pub fn new(title: String, entries: Vec<GameOverEntry>) -> Self {
+        Self::with_next_mission(title, entries, u32::MAX, None)
+    }
+
+    pub fn with_next_mission(
+        title: String,
+        mut entries: Vec<GameOverEntry>,
+        screen_width: u32,
+        next_mission: Option<NextMissionButton>,
+    ) -> Self {
         entries.sort_by(|left, right| {
             left.outcome
                 .sort_rank()
@@ -120,10 +159,41 @@ impl GameOverState {
             "Defeat".to_string()
         };
 
+        let mut buttons = vec![
+            GameOverButton {
+                action: GameOverAction::End,
+                label: "&End game".to_string(),
+                description: "End the round.".to_string(),
+            },
+            GameOverButton {
+                action: GameOverAction::Continue,
+                label: "&Continue playing".to_string(),
+                description: "Continue playing this round (with no further evaluation)."
+                    .to_string(),
+            },
+        ];
+        if next_mission.is_none() || screen_width >= 1280 {
+            buttons.push(GameOverButton {
+                action: GameOverAction::Restart,
+                label: "&Restart".to_string(),
+                description: "Play this scenario again.".to_string(),
+            });
+        }
+        if let Some(next_mission) = next_mission {
+            buttons.push(GameOverButton {
+                action: GameOverAction::NextMission,
+                label: next_mission.label,
+                description: next_mission.description,
+            });
+        }
+
         Self {
             title,
             subtitle,
             entries,
+            buttons,
+            selected_button: 0,
+            pointer_position: None,
         }
     }
 
@@ -136,16 +206,72 @@ impl GameOverState {
         &self.entries
     }
 
-    pub fn render(&self, surface: &mut Surface, font: &dyn TextFont) {
-        if surface.width() == 0 || surface.height() == 0 {
+    pub fn actions(&self) -> Vec<GameOverAction> {
+        self.buttons.iter().map(|button| button.action).collect()
+    }
+
+    pub fn selected_description(&self) -> &str {
+        self.buttons
+            .get(self.selected_button)
+            .map(|button| button.description.as_str())
+            .unwrap_or("")
+    }
+
+    pub fn move_selection(&mut self, delta: i32) {
+        let count = self.buttons.len() as i32;
+        if count == 0 {
             return;
         }
+        self.selected_button = (self.selected_button as i32 + delta).rem_euclid(count) as usize;
+    }
 
-        let surface_rect = Rect::new(0, 0, surface.width(), surface.height());
-        fill_rect(surface, surface_rect, BACKDROP_COLOR);
+    pub fn activate_selected(&self) -> Option<GameOverAction> {
+        self.buttons
+            .get(self.selected_button)
+            .map(|button| button.action)
+    }
 
-        let min_width = 360.min(surface.width());
-        let panel_width = PANEL_WIDTH.min(surface.width()).max(min_width);
+    pub fn handle_pointer_move(&mut self, x: f32, y: f32, surface_width: u32, surface_height: u32) {
+        self.pointer_position = Some((x, y));
+        if let Some(index) = self
+            .button_rects(surface_width, surface_height)
+            .iter()
+            .position(|rect| point_in_rect(x, y, *rect))
+        {
+            self.selected_button = index;
+        }
+    }
+
+    pub fn pointer_left(&mut self) {
+        self.pointer_position = None;
+    }
+
+    pub fn activate_pointer_position(
+        &self,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> Option<GameOverAction> {
+        self.pointer_position
+            .and_then(|(x, y)| self.activate_pointer(x, y, surface_width, surface_height))
+    }
+
+    pub fn activate_pointer(
+        &self,
+        x: f32,
+        y: f32,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> Option<GameOverAction> {
+        self.button_rects(surface_width, surface_height)
+            .iter()
+            .position(|rect| point_in_rect(x, y, *rect))
+            .and_then(|index| self.buttons.get(index))
+            .map(|button| button.action)
+    }
+
+    fn panel_rect(&self, surface_width: u32, surface_height: u32) -> Rect {
+        let min_width = 360.min(surface_width);
+        let panel_width = PANEL_WIDTH.min(surface_width).max(min_width);
         let rows = self.entries.len().max(1) as i32;
         let title_height = TITLE_FONT_SIZE.ceil() as i32;
         let subtitle_height = if self.subtitle.is_empty() {
@@ -160,14 +286,61 @@ impl GameOverState {
         if subtitle_height > 0 {
             panel_height += subtitle_height + GAP_AFTER_SUBTITLE;
         }
-        panel_height += header_height + GAP_AFTER_HEADER;
-        panel_height += rows * ROW_HEIGHT;
-        panel_height += GAP_BEFORE_FOOTER + footer_height;
+        panel_height += header_height + GAP_AFTER_HEADER + rows * ROW_HEIGHT;
+        panel_height += GAP_BEFORE_BUTTONS + BUTTON_HEIGHT + GAP_AFTER_BUTTONS + footer_height;
         let panel_height = panel_height.max(PANEL_HEIGHT_MIN as i32) as u32;
+        Rect::new(
+            ((surface_width as i32 - panel_width as i32) / 2).max(0),
+            ((surface_height as i32 - panel_height as i32) / 2).max(0),
+            panel_width,
+            panel_height,
+        )
+    }
 
-        let panel_x = ((surface.width() as i32 - panel_width as i32) / 2).max(0);
-        let panel_y = ((surface.height() as i32 - panel_height as i32) / 2).max(0);
-        let panel_rect = Rect::new(panel_x, panel_y, panel_width, panel_height);
+    fn button_rects(&self, surface_width: u32, surface_height: u32) -> Vec<Rect> {
+        let panel_rect = self.panel_rect(surface_width, surface_height);
+        let content_left = panel_rect.x + PANEL_PADDING;
+        let content_right = panel_rect.x + panel_rect.width as i32 - PANEL_PADDING;
+        let footer_height = FOOTER_FONT_SIZE.ceil() as i32;
+        let buttons_y = panel_rect.y + panel_rect.height as i32
+            - PANEL_PADDING
+            - footer_height
+            - GAP_AFTER_BUTTONS
+            - BUTTON_HEIGHT;
+        let button_count = self.buttons.len().max(1) as i32;
+        let button_width = ((content_right - content_left - BUTTON_GAP * (button_count - 1))
+            / button_count)
+            .max(1);
+        self.buttons
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                Rect::new(
+                    content_left + index as i32 * (button_width + BUTTON_GAP),
+                    buttons_y,
+                    button_width as u32,
+                    BUTTON_HEIGHT as u32,
+                )
+            })
+            .collect()
+    }
+
+    pub fn render(&self, surface: &mut Surface, font: &dyn TextFont) {
+        if surface.width() == 0 || surface.height() == 0 {
+            return;
+        }
+
+        let surface_rect = Rect::new(0, 0, surface.width(), surface.height());
+        fill_rect(surface, surface_rect, BACKDROP_COLOR);
+
+        let title_height = TITLE_FONT_SIZE.ceil() as i32;
+        let subtitle_height = if self.subtitle.is_empty() {
+            0
+        } else {
+            SUBTITLE_FONT_SIZE.ceil() as i32
+        };
+        let header_height = HEADER_FONT_SIZE.ceil() as i32;
+        let panel_rect = self.panel_rect(surface.width(), surface.height());
         fill_rect(surface, panel_rect, PANEL_COLOR);
         draw_border(surface, panel_rect, PANEL_BORDER);
 
@@ -284,13 +457,41 @@ impl GameOverState {
             draw_stat(surface, font, value_column_x, text_y, entry.value);
         }
 
+        for (index, (button, rect)) in self
+            .buttons
+            .iter()
+            .zip(self.button_rects(surface.width(), surface.height()))
+            .enumerate()
+        {
+            fill_rect(
+                surface,
+                rect,
+                if index == self.selected_button {
+                    BUTTON_SELECTED_COLOR
+                } else {
+                    BUTTON_COLOR
+                },
+            );
+            draw_border(surface, rect, BUTTON_BORDER_COLOR);
+            draw_text_centered(
+                surface,
+                font,
+                &button.label.replace('&', ""),
+                BUTTON_FONT_SIZE,
+                TEXT_COLOR,
+                rect.x,
+                rect.x + rect.width as i32,
+                rect.y + (BUTTON_HEIGHT - BUTTON_FONT_SIZE.ceil() as i32) / 2,
+            );
+        }
+
         let footer_y = panel_rect.y as f32 + panel_rect.height as f32
             - PANEL_PADDING as f32
             - FOOTER_FONT_SIZE;
         draw_text_centered(
             surface,
             font,
-            FOOTER_TEXT,
+            self.selected_description(),
             FOOTER_FONT_SIZE,
             MUTED_TEXT_COLOR,
             content_left,
@@ -298,6 +499,13 @@ impl GameOverState {
             footer_y as i32,
         );
     }
+}
+
+fn point_in_rect(x: f32, y: f32, rect: Rect) -> bool {
+    x >= rect.x as f32
+        && y >= rect.y as f32
+        && x < (rect.x + rect.width as i32) as f32
+        && y < (rect.y + rect.height as i32) as f32
 }
 
 fn draw_header(
@@ -417,6 +625,58 @@ mod tests {
         ];
         let state = GameOverState::new("Goldmine".into(), entries);
         assert_eq!(state.subtitle(), "Victory!");
+    }
+
+    #[test]
+    fn next_mission_replaces_restart_on_narrow_screens_like_cpp() {
+        // C4GameOverDlg hides Restart below 1280 px when a next mission is
+        // available, leaving End/Continue/Next (C4GameOverDlg.cpp:125-139,
+        // 232-258).
+        let state = GameOverState::with_next_mission(
+            "A Clonk".into(),
+            Vec::new(),
+            1279,
+            Some(NextMissionButton {
+                label: "Next tutorial".into(),
+                description: "Continue learning".into(),
+            }),
+        );
+
+        assert_eq!(
+            state.actions(),
+            &[
+                GameOverAction::End,
+                GameOverAction::Continue,
+                GameOverAction::NextMission,
+            ]
+        );
+        assert_eq!(state.selected_description(), "End the round.");
+    }
+
+    #[test]
+    fn wide_game_over_keeps_restart_and_navigation_wraps() {
+        let mut state = GameOverState::with_next_mission(
+            "A Clonk".into(),
+            Vec::new(),
+            1280,
+            Some(NextMissionButton {
+                label: "Next tutorial".into(),
+                description: "Continue learning".into(),
+            }),
+        );
+        assert_eq!(
+            state.actions(),
+            &[
+                GameOverAction::End,
+                GameOverAction::Continue,
+                GameOverAction::Restart,
+                GameOverAction::NextMission,
+            ]
+        );
+
+        state.move_selection(-1);
+        assert_eq!(state.activate_selected(), Some(GameOverAction::NextMission));
+        assert_eq!(state.selected_description(), "Continue learning");
     }
 
     #[test]
