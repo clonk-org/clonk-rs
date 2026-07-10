@@ -24,7 +24,8 @@ rebuilt pinned live comparison.
 
 - **Simulation:** solid/rotated masks, landscape scan/RNG order, liquids,
   DigFree/BlastFree, fire/effects/explosions, temperature, map post-init, and
-  remaining non-C++ movement damping/clamping/collision behavior.
+  same-callback reads after deferred landscape writes, plus remaining non-C++
+  movement damping/clamping/collision behavior.
 - **Commands/objects:** pathfinding/Tick35, FLOAT, Exit/Throw, arrival/intervals,
   vehicle/linekit/dig/trade behavior, OCF/sectors/find order, containers,
   permanent crew/base state, elimination, and rank/version gates.
