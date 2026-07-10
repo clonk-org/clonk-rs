@@ -5,9 +5,9 @@
 
 ## Current state
 
-- Pinned Goldrush (`LC_PIN_SEED=424242`) matches through frame 366; frame 367
-  first differs at object #1595 definition timer (Rust `0`, C++ `1`). Frame 309's
-  Fish corner probes now dispatch C++-ordered `Contact*` callbacks.
+- Pinned Goldrush (`LC_PIN_SEED=424242`) matches through frame 402; frame 403
+  first differs because Rust lacks seven C++ `FXU1` bubbles. Newborn objects on
+  the live iterator's remaining side now execute in their birth frame.
 - Foundational motion and RNG gaps are closed: object motion uses signed 16.16
   `C4Fixed`; `Random()` uses the shared C++ LCG/draw ledger.
 - Scenarios load/apply 93/93; audit is 92/93. CTF_DeepSea's animal result is

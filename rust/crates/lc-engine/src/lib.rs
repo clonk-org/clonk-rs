@@ -8998,6 +8998,10 @@ pub struct Engine {
     /// semantics) on spawn and pruned of removed ids each tick. Enter/Exit
     /// never touch it (C4Object.cpp:1513-1615 only move Contents).
     exec_list: Vec<ObjectId>,
+    /// Next `exec_list` slot during the live reverse-list walk. Insertions
+    /// before this cursor have already missed the C++ iterator; insertions at
+    /// or after it still execute this frame.
+    exec_cursor: Option<usize>,
     frame: u64,
     landscape: Option<Landscape>,
     sectors: Option<SectorMap>,
@@ -10647,6 +10651,7 @@ impl Engine {
             scenario_script_counter: 0,
             random_seed: seed,
             exec_list: Vec::new(),
+            exec_cursor: None,
             frame: 0,
             landscape: None,
             sectors: None,
@@ -14348,7 +14353,69 @@ impl Engine {
         Ok(true)
     }
 
+    /// Build the live command view for an object inserted after the frame's
+    /// bulk command snapshot. C++'s live ExecObjects iterator still runs
+    /// ExecuteCommand for such newborn objects in the same frame.
+    fn live_command_snapshot(
+        &self,
+        index: usize,
+        selected_objects: &HashSet<ObjectId>,
+    ) -> CommandObjectSnapshot {
+        let object = &self.objects[index];
+        let (procedure, line_connect, collectible) = self
+            .definitions
+            .get(&object.definition_id)
+            .map(|definition| {
+                (
+                    definition
+                        .action_library()
+                        .procedure_for_action(&object.state.action.name),
+                    definition.line_connect(),
+                    definition.is_collectible(),
+                )
+            })
+            .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false));
+        CommandObjectSnapshot {
+            id: object.id,
+            definition_id: object.definition_id.clone(),
+            position: object.state.position,
+            contact: {
+                let landscape = self.landscape.as_ref();
+                object.state.vertices.iter().fold(0u32, |bits, vertex| {
+                    bits
+                        | compat::compute_vertex_contact(
+                            landscape,
+                            object.state.position,
+                            vertex,
+                            0,
+                        )
+                })
+            },
+            shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
+            shape: self.object_shape_rect(object),
+            status: object.state.status,
+            destroyed: object.destroyed,
+            category: object.state.category,
+            container: object.state.container,
+            action_target: object.state.action.target,
+            action_procedure: procedure,
+            command_direction: object.state.command_direction,
+            construction: object.state.construction,
+            direction: object.state.direction,
+            physical: self.object_physical(index),
+            owner: object.state.owner,
+            crew_member: object.state.crew_member,
+            selected: selected_objects.contains(&object.id),
+            alive: object.state.alive,
+            contents: object.state.contents.clone(),
+            line_connect,
+            ocf: object.state.ocf,
+            collectible,
+        }
+    }
+
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
+        self.exec_cursor = None;
         self.frame += 1;
         self.objective_check_counter =
             (self.objective_check_counter + 1) % GAME_OVER_CHECK_INTERVAL;
@@ -14591,6 +14658,7 @@ impl Engine {
                         object = self.objects[idx].id.as_u64(),
                         "object missing from exec_list; appending"
                     );
+                    self.insert_exec_link(self.exec_list.len(), self.objects[idx].id);
                     exec_order.push(idx);
                 }
             }
@@ -14642,9 +14710,22 @@ impl Engine {
                 }
             }
         }
-        for idx in exec_order {
+        self.exec_cursor = Some(0);
+        while self
+            .exec_cursor
+            .is_some_and(|cursor| cursor < self.exec_list.len())
+        {
+            let cursor = self.exec_cursor.unwrap_or_default();
+            let current_id = self.exec_list[cursor];
+            self.exec_cursor = Some(cursor + 1);
+            let Some(idx) = self.find_object_index(current_id) else {
+                continue;
+            };
             // UpdateOCF runs first in C4Object::Execute (C4Object.cpp:1058).
             self.refresh_object_ocf(idx);
+            command_snapshots
+                .entry(current_id)
+                .or_insert_with(|| self.live_command_snapshot(idx, &selected_objects));
             let definition_id = self.objects[idx].definition_id.clone();
             let previous_action_state = self.objects[idx].state.action.clone();
             let previous_action_name = previous_action_state.name.clone();
@@ -15482,6 +15563,7 @@ impl Engine {
             );
             spawn_requests.extend(spawns.into_iter());
         }
+        self.exec_cursor = None;
 
         // C4GameObjects::CrossCheck runs once per frame after object        // execution (C4Game.cpp ExecObjects → Objects.CrossCheck()).
         self.cross_check(frame)?;
@@ -16916,6 +16998,7 @@ impl Engine {
         self.rng = state.rng.clone();
         self.objects.clear();
         self.exec_list.clear();
+        self.exec_cursor = None;
         self.note_objects_changed();
         self.global_effects = state.global_effects.clone();
         self.particles.clear();
@@ -23067,9 +23150,18 @@ impl Engine {
         self.exec_list = keyed.into_iter().map(|(_, _, id)| id).collect();
     }
 
+    fn insert_exec_link(&mut self, position: usize, id: ObjectId) {
+        self.exec_list.insert(position, id);
+        if let Some(cursor) = self.exec_cursor {
+            if position < cursor {
+                self.exec_cursor = Some(cursor + 1);
+            }
+        }
+    }
+
     fn insert_into_exec_list(&mut self, id: ObjectId, loaded: bool) {
         if loaded {
-            self.exec_list.push(id);
+            self.insert_exec_link(self.exec_list.len(), id);
             return;
         }
         let Some(index) = self.find_object_index(id) else {
@@ -23083,7 +23175,7 @@ impl Engine {
                 .unwrap_or(false)
         };
         if is_line(self, index) {
-            self.exec_list.insert(0, id);
+            self.insert_exec_link(0, id);
             return;
         }
         let category = self.objects[index].state.category;
@@ -23106,7 +23198,7 @@ impl Engine {
                 })
             });
             if let Some(position) = cluster_position {
-                self.exec_list.insert(position + 1, id);
+                self.insert_exec_link(position + 1, id);
                 return;
             }
         }
@@ -23116,8 +23208,8 @@ impl Engine {
             })
         });
         match bracket_position {
-            Some(position) => self.exec_list.insert(position + 1, id),
-            None => self.exec_list.insert(0, id),
+            Some(position) => self.insert_exec_link(position + 1, id),
+            None => self.insert_exec_link(0, id),
         }
     }
 
@@ -48614,6 +48706,57 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
             Some(Value::Int(2)),
             "the counter resets and fires again every interval"
         );
+    }
+
+    #[test]
+    fn timer_spawn_on_remaining_list_side_executes_in_the_same_frame_like_cpp() {
+        // C4Game::ExecObjects walks a LIVE reverse-list iterator
+        // (src/C4Game.cpp:1588-1597). C4Game::NewObject adds a child by its
+        // initial definition category (src/C4Game.cpp:1117-1127), and
+        // C4ObjectList::Add places that link on the iterator's remaining side
+        // (src/C4ObjectList.cpp:134-175). The pinned GoldRush frame-367
+        // differential freezes this with newborn WMPF #1595: C++ Timer=1.
+        let mut parent = Definition::from_script(
+            "PRNT",
+            "Parent",
+            "#strict\nfunc Seed() { var child = CreateObject(CHLD, 0, 0, -1); child->Place(); return(1); }\n",
+        )
+        .expect("parent compiles");
+        parent.set_category(CATEGORY_STATIC_BACK);
+        parent.set_timer(1);
+        parent.set_timer_call(Some("Seed".to_string()));
+
+        let mut child = Definition::from_script(
+            "CHLD",
+            "Child",
+            "#strict\nfunc Place() { SetCategory(1); return(1); }\n",
+        )
+        .expect("child compiles");
+        child.set_category(CATEGORY_OBJECT);
+        child.configure_actions(
+            Some("Exist".to_string()),
+            HashMap::from([("Exist".to_string(), ActionSpec::default())]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(parent).expect("parent registers");
+        engine.register_definition(child).expect("child registers");
+        engine
+            .spawn_object(SpawnConfig::new("PRNT"))
+            .expect("parent spawns");
+
+        engine.tick().expect("tick succeeds");
+        let child = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "CHLD")
+            .expect("timer callback created child");
+        assert_eq!(
+            child.state.timer, 1,
+            "the live reverse iterator executes the newborn child before frame end"
+        );
+        assert_eq!(child.state.action.time, 1, "ExecAction also ran once");
+        assert_eq!(child.state.category, CATEGORY_STATIC_BACK);
     }
 
     #[test]
