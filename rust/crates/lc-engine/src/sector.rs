@@ -237,8 +237,24 @@ impl SectorMap {
         ids
     }
 
+    /// The per-sector point lists in C4LArea enumeration order, kept
+    /// separate: C4FindObject::Find with a sort finds a best PER LIST
+    /// before meeting the running best (C4FindObject.cpp:296-306).
+    pub(crate) fn object_id_lists_in_area(&self, area: &SectorArea) -> Vec<Vec<ObjectId>> {
+        area.iter()
+            .map(|key| self.object_ids(key).to_vec())
+            .collect()
+    }
+
     pub(crate) fn shape_ids(&self, key: SectorKey) -> &[ObjectId] {
         &self.sector(key).object_shapes
+    }
+
+    /// The per-sector shape lists in C4LArea order, NOT deduplicated:
+    /// C4FindObject::Find has no Marker (C4FindObject.cpp:283-294), so an
+    /// object whose shape spans sectors is re-encountered per sector.
+    pub(crate) fn shape_id_lists_in_area(&self, area: &SectorArea) -> Vec<Vec<ObjectId>> {
+        area.iter().map(|key| self.shape_ids(key).to_vec()).collect()
     }
 
     /// Same C++ enumeration order as `object_ids_in_area`, over the

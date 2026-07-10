@@ -861,6 +861,20 @@ impl HostWorldContext {
         })
     }
 
+    fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        self.sector_map().map(|sectors| {
+            let area = sectors.area(rect);
+            sectors.object_id_lists_in_area(&area)
+        })
+    }
+
+    fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        self.sector_map().map(|sectors| {
+            let area = sectors.area(rect);
+            sectors.shape_id_lists_in_area(&area)
+        })
+    }
+
     pub(crate) fn player_ids(&self) -> &[i32] {
         self.player_order.as_ref()
     }
@@ -952,6 +966,11 @@ trait WorldAccessor {
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect;
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
     fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
+    /// The bounded Find-with-sort walk needs the per-sector lists kept
+    /// separate (C4FindObject.cpp:283-307); shape lists arrive without the
+    /// Marker dedup the flat variants apply.
+    fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>>;
+    fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>>;
     /// Definition mass/value for the C4SO_Mass/C4SO_Value sorts.
     fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata>;
     /// Whether any definition script (or host function) knows `name` —
@@ -979,6 +998,14 @@ impl WorldAccessor for HostWorldContext {
 
     fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
         self.shape_sector_ids_in_rect(rect)
+    }
+
+    fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        self.object_sector_id_lists_in_rect(rect)
+    }
+
+    fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        self.shape_sector_id_lists_in_rect(rect)
     }
 
     fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata> {
@@ -1049,6 +1076,45 @@ impl WorldAccessor for FuncFindView {
             }
         }
         Some(ids)
+    }
+
+    fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        let mut lists = self.world.object_sector_id_lists_in_rect(rect)?;
+        let mut seen = lists.iter().flatten().copied().collect::<HashSet<_>>();
+        let pending: Vec<ObjectId> = self
+            .pending_order
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.pending_objects.get(&id).is_some_and(|object| {
+                    rect.contains_point(object.position.x, object.position.y)
+                }) && seen.insert(id)
+            })
+            .collect();
+        if !pending.is_empty() {
+            lists.push(pending);
+        }
+        Some(lists)
+    }
+
+    fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        let mut lists = self.world.shape_sector_id_lists_in_rect(rect)?;
+        let mut seen = lists.iter().flatten().copied().collect::<HashSet<_>>();
+        let pending: Vec<ObjectId> = self
+            .pending_order
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.pending_objects
+                    .get(&id)
+                    .is_some_and(|object| self.object_shape_rect(object).overlaps(&rect))
+                    && seen.insert(id)
+            })
+            .collect();
+        if !pending.is_empty() {
+            lists.push(pending);
+        }
+        Some(lists)
     }
 
     fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata> {
@@ -1133,6 +1199,45 @@ impl WorldAccessor for EffectHostContext {
             }
         }
         Some(ids)
+    }
+
+    fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        let mut lists = self.world.object_sector_id_lists_in_rect(rect)?;
+        let mut seen = lists.iter().flatten().copied().collect::<HashSet<_>>();
+        let pending: Vec<ObjectId> = self
+            .pending_order
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.pending_objects.get(&id).is_some_and(|object| {
+                    rect.contains_point(object.position.x, object.position.y)
+                }) && seen.insert(id)
+            })
+            .collect();
+        if !pending.is_empty() {
+            lists.push(pending);
+        }
+        Some(lists)
+    }
+
+    fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        let mut lists = self.world.shape_sector_id_lists_in_rect(rect)?;
+        let mut seen = lists.iter().flatten().copied().collect::<HashSet<_>>();
+        let pending: Vec<ObjectId> = self
+            .pending_order
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.pending_objects
+                    .get(&id)
+                    .is_some_and(|object| self.object_shape_rect(object).overlaps(&rect))
+                    && seen.insert(id)
+            })
+            .collect();
+        if !pending.is_empty() {
+            lists.push(pending);
+        }
+        Some(lists)
     }
 }
 
@@ -4400,6 +4505,12 @@ impl FindObjectParams {
         Some(squared_distance(object.position(), self.x, self.y))
     }
 
+    /// Sector-prefiltered candidates for the port-internal fixed-parameter
+    /// FindObjects (modelled on C4FindObject::FindMany's bounded arms —
+    /// this form has no C++ counterpart) and the order-insensitive
+    /// ObjectCount. The legacy single-result FindObject does NOT use this:
+    /// C4Game::FindObject scans the MASTER list for every query form
+    /// (C4Game.cpp:1367-1424).
     fn candidate_ids(&self, world: &impl WorldAccessor) -> Vec<ObjectId> {
         if self.is_closest_query() || self.is_full_range() {
             return world.object_ids();
@@ -13130,6 +13241,9 @@ enum FindCondition {
         x: i32,
         y: i32,
         r2: i64,
+        /// The enclosing square the C++ constructor precomputes for
+        /// GetBounds (C4FindObject.h:253).
+        bounds: DefinitionRect,
     },
     Ocf(u32),
     Category(i32),
@@ -13260,11 +13374,20 @@ impl FindCondition {
             13 => FindCondition::OnLine(arg_i32(1), arg_i32(2), arg_i32(3), arg_i32(4)),
             // C4FO_Distance
             14 => {
-                let r = i64::from(arg_i32(3));
+                let r = arg_i32(3);
+                let (x, y) = (arg_i32(1), arg_i32(2));
                 FindCondition::Distance {
-                    x: arg_i32(1),
-                    y: arg_i32(2),
-                    r2: r * r,
+                    x,
+                    y,
+                    r2: i64::from(r) * i64::from(r),
+                    // (x - r, y - r, 2r + 1, 2r + 1), C4FindObject.h:253 —
+                    // wrapping like the C++ int32 arithmetic.
+                    bounds: DefinitionRect::new(
+                        x.wrapping_sub(r),
+                        y.wrapping_sub(r),
+                        r.wrapping_mul(2).wrapping_add(1),
+                        r.wrapping_mul(2).wrapping_add(1),
+                    ),
                 }
             }
             // C4FO_ID
@@ -13379,7 +13502,7 @@ impl FindCondition {
                     .map(|bounds| segment_intersects_bounds(*x1, *y1, *x2, *y2, bounds))
                     .unwrap_or(false)
             }
-            FindCondition::Distance { x, y, r2 } => {
+            FindCondition::Distance { x, y, r2, .. } => {
                 let position = object.position();
                 let dx = i64::from(position.x - x);
                 let dy = i64::from(position.y - y);
@@ -13433,8 +13556,103 @@ impl FindCondition {
     fn is_ensured(&self, world: &impl WorldAccessor) -> bool {
         match self {
             FindCondition::Not(child) => child.is_impossible(world),
+            // C4FindObjectAnd::IsEnsured is `!iCnt` AFTER the constructor
+            // filtered ensured children (C4FindObject.h:135) — recursively:
+            // ensured iff every child is.
+            FindCondition::And(children) => {
+                children.iter().all(|child| child.is_ensured(world))
+            }
+            // C4FindObjectOr::IsEnsured (C4FindObject.cpp:514-520)
+            FindCondition::Or(children) => {
+                children.iter().any(|child| child.is_ensured(world))
+            }
             FindCondition::Category(category) => *category == 0,
             _ => false,
+        }
+    }
+
+    /// The construction-time pruning of C4FindObjectAnd/Or
+    /// (C4FindObject.cpp:400-410, 466-476), bottom-up like CreateByValue:
+    /// And drops ensured children (whose Check may still be false —
+    /// Category(0), C4FindObject.cpp:582-590), Or drops impossible ones
+    /// (which would otherwise kill the sibling bounds). The drivers prune
+    /// once before Check/bounds/IsImpossible run, matching the C++ tree.
+    fn pruned(self, world: &impl WorldAccessor) -> FindCondition {
+        match self {
+            FindCondition::Not(child) => FindCondition::Not(Box::new(child.pruned(world))),
+            FindCondition::And(children) => FindCondition::And(
+                children
+                    .into_iter()
+                    .map(|child| child.pruned(world))
+                    .filter(|child| !child.is_ensured(world))
+                    .collect(),
+            ),
+            FindCondition::Or(children) => FindCondition::Or(
+                children
+                    .into_iter()
+                    .map(|child| child.pruned(world))
+                    .filter(|child| !child.is_impossible(world))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    /// GetBounds + UseShapes (C4FindObject.h:93-94): `Some((rect, shapes))`
+    /// when the criteria bound the search area — the drivers then walk the
+    /// sector lists (shape lists when `shapes`) instead of the master list.
+    fn bounds(&self) -> Option<(DefinitionRect, bool)> {
+        match self {
+            // C4FindObjectAnd constructor (C4FindObject.cpp:411-434): a
+            // bounded shapes child wins outright ("some objects might be in
+            // an rect and at a point not in that rect"); otherwise all
+            // bounded children intersect.
+            FindCondition::And(children) => {
+                let mut bounds: Option<DefinitionRect> = None;
+                for child in children {
+                    if let Some((child_bounds, child_shapes)) = child.bounds() {
+                        if child_shapes {
+                            return Some((child_bounds, true));
+                        }
+                        bounds = Some(match bounds {
+                            Some(rect) => rect_intersect_cpp(rect, child_bounds),
+                            None => child_bounds,
+                        });
+                    }
+                }
+                bounds.map(|rect| (rect, false))
+            }
+            // C4FindObjectOr constructor (C4FindObject.cpp:477-496): the
+            // union of all child bounds; a boundless or shapes child (which
+            // could report an object twice) kills the bounds entirely.
+            FindCondition::Or(children) => {
+                let mut bounds: Option<DefinitionRect> = None;
+                for child in children {
+                    match child.bounds() {
+                        None | Some((_, true)) => return None,
+                        Some((child_bounds, false)) => {
+                            bounds = Some(match bounds {
+                                Some(rect) => rect_add_cpp(rect, child_bounds),
+                                None => child_bounds,
+                            });
+                        }
+                    }
+                }
+                bounds.map(|rect| (rect, false))
+            }
+            FindCondition::InRect(rect) => Some((*rect, false)),
+            FindCondition::AtPoint(x, y) => Some((DefinitionRect::new(*x, *y, 1, 1), true)),
+            FindCondition::AtRect(rect) => Some((*rect, true)),
+            // bounds(x, y, 1, 1) + Add((x2, y2, 1, 1)), C4FindObject.h:234-237
+            FindCondition::OnLine(x1, y1, x2, y2) => Some((
+                rect_add_cpp(
+                    DefinitionRect::new(*x1, *y1, 1, 1),
+                    DefinitionRect::new(*x2, *y2, 1, 1),
+                ),
+                true,
+            )),
+            FindCondition::Distance { bounds, .. } => Some((*bounds, false)),
+            _ => None,
         }
     }
 
@@ -13450,6 +13668,72 @@ impl FindCondition {
             _ => false,
         }
     }
+}
+
+/// C4Rect::Intersect (C4Rect.cpp:101-133): narrow `a` to the overlap with
+/// `b`; a degenerated result clamps to zero size.
+fn rect_intersect_cpp(a: DefinitionRect, b: DefinitionRect) -> DefinitionRect {
+    let mut result = a;
+    if b.x > result.x {
+        if b.x + b.width < result.x + result.width {
+            result.x = b.x;
+            result.width = b.width;
+        } else {
+            result.width -= b.x - result.x;
+            result.x = b.x;
+        }
+    } else if b.x + b.width < result.x + result.width {
+        result.width = b.x + b.width - result.x;
+    }
+    if b.y > result.y {
+        if b.y + b.height < result.y + result.height {
+            result.y = b.y;
+            result.height = b.height;
+        } else {
+            result.height -= b.y - result.y;
+            result.y = b.y;
+        }
+    } else if b.y + b.height < result.y + result.height {
+        result.height = b.y + b.height - result.y;
+    }
+    result.width = result.width.max(0);
+    result.height = result.height.max(0);
+    result
+}
+
+/// C4Rect::Add (C4Rect.cpp:153-185): expand `a` to cover `b`; a null rect
+/// on either side leaves the other unchanged.
+fn rect_add_cpp(a: DefinitionRect, b: DefinitionRect) -> DefinitionRect {
+    if b.width == 0 || b.height == 0 {
+        return a;
+    }
+    if a.width == 0 || a.height == 0 {
+        return b;
+    }
+    let mut result = a;
+    if b.x < result.x {
+        if b.x + b.width > result.x + result.width {
+            result.x = b.x;
+            result.width = b.width;
+        } else {
+            result.width += result.x - b.x;
+            result.x = b.x;
+        }
+    } else if b.x + b.width > result.x + result.width {
+        result.width = b.x + b.width - result.x;
+    }
+    if b.y < result.y {
+        if b.y + b.height > result.y + result.height {
+            result.y = b.y;
+            result.height = b.height;
+        } else {
+            result.height += result.y - b.y;
+            result.y = b.y;
+        }
+    } else if b.y + b.height > result.y + result.height {
+        result.height = b.y + b.height - result.y;
+    }
+    result
 }
 
 /// Axis-aligned segment/box intersection for C4FO_OnLine (the C++ uses
@@ -13717,10 +14001,16 @@ impl SortCriterion {
     }
 }
 
-/// The single-result Find with a sort attached (C4FindObject.cpp:186-199):
-/// a running best, replaced when the uncached `Compare(candidate, best)`
-/// is positive. No PrepareCache — value functions (and `C4SO_Random`
-/// draws) run per comparison.
+/// The single-result Find with a sort attached (C4FindObject.cpp:272-308).
+/// Bounded criteria walk the per-sector lists: the inner
+/// `Find(*pLst)` (C4FindObject.cpp:186-199) keeps a running best PER LIST
+/// — replaced when the uncached `Compare(candidate, best)` is positive —
+/// and only each list's winner meets the outer running best
+/// (C4FindObject.cpp:287-293/299-305). The unbounded walk is the
+/// single-list case. No PrepareCache — value functions (and `C4SO_Random`
+/// draws) run per comparison, so the pairing is lockstep-relevant. The
+/// UseShapes lists carry no Marker: a shape spanning sectors is compared
+/// in every list holding it.
 fn find_first_with_sort(
     world: &impl WorldAccessor,
     condition: &FindCondition,
@@ -13729,27 +14019,54 @@ fn find_first_with_sort(
     if condition.is_impossible(world) {
         return Ok(None);
     }
-    let mut best: Option<(ObjectId, HostWorldObject)> = None;
-    for object_id in world.object_ids() {
-        let Some(object) = world.get_object(object_id) else {
-            continue;
-        };
-        if !object.status().is_active() {
-            continue;
-        }
-        if !condition.check(world, &object)? {
-            continue;
-        }
-        best = match best {
-            None => Some((object_id, object)),
-            Some((best_id, best_object)) => {
-                if sort.compare_uncached(world, &object, &best_object)? > 0 {
-                    Some((object_id, object))
-                } else {
-                    Some((best_id, best_object))
-                }
+    let lists = condition
+        .bounds()
+        .and_then(|(rect, use_shapes)| {
+            if use_shapes {
+                world.shape_sector_id_lists_in_rect(rect)
+            } else {
+                world.object_sector_id_lists_in_rect(rect)
             }
-        };
+        })
+        .unwrap_or_else(|| vec![world.object_ids()]);
+    let mut best: Option<(ObjectId, HostWorldObject)> = None;
+    for ids in lists {
+        // inner Find(*pLst): the per-list best
+        let mut list_best: Option<(ObjectId, HostWorldObject)> = None;
+        for object_id in ids {
+            let Some(object) = world.get_object(object_id) else {
+                continue;
+            };
+            if !object.status().is_active() {
+                continue;
+            }
+            if !condition.check(world, &object)? {
+                continue;
+            }
+            list_best = match list_best {
+                None => Some((object_id, object)),
+                Some((best_id, best_object)) => {
+                    if sort.compare_uncached(world, &object, &best_object)? > 0 {
+                        Some((object_id, object))
+                    } else {
+                        Some((best_id, best_object))
+                    }
+                }
+            };
+        }
+        // outer walk: the list winner vs the running best
+        if let Some((list_id, list_object)) = list_best {
+            best = match best {
+                None => Some((list_id, list_object)),
+                Some((best_id, best_object)) => {
+                    if sort.compare_uncached(world, &list_object, &best_object)? > 0 {
+                        Some((list_id, list_object))
+                    } else {
+                        Some((best_id, best_object))
+                    }
+                }
+            };
+        }
     }
     Ok(best.map(|(id, _)| id))
 }
@@ -13788,10 +14105,27 @@ fn parse_criterions(args: &[Value]) -> Option<(FindCondition, Option<SortCriteri
     Some((condition, sort))
 }
 
-/// Search over the main object list (C4FindObject::Find/FindMany,
-/// C4FindObject.cpp:180-226). The sector-bounds traversal optimization (and
-/// its sector-order result ordering) is still open — the main list is always
-/// walked, which matches the C++ unbounded path.
+/// The C++ bounded-vs-full walk decision (C4FindObject.cpp:315-328):
+/// criteria bounds pick the sector walk — the ObjectShapes lists (with
+/// first-encounter dedup standing in for the Marker) when the criteria use
+/// shapes, the per-sector point lists otherwise. Boundless criteria — or a
+/// world without a sector map (legacy fixture contexts) — walk the master
+/// list.
+fn find_candidate_ids(world: &impl WorldAccessor, condition: &FindCondition) -> Vec<ObjectId> {
+    condition
+        .bounds()
+        .and_then(|(rect, use_shapes)| {
+            if use_shapes {
+                world.shape_sector_ids_in_rect(rect)
+            } else {
+                world.object_sector_ids_in_rect(rect)
+            }
+        })
+        .unwrap_or_else(|| world.object_ids())
+}
+
+/// Collect matches in C++ walk order (C4FindObject::FindMany,
+/// C4FindObject.cpp:203-226 unbounded, :310-355 sector-bounded).
 fn find_condition_matches(
     world: &impl WorldAccessor,
     condition: &FindCondition,
@@ -13800,7 +14134,7 @@ fn find_condition_matches(
         return Ok(Vec::new());
     }
     let mut matches = Vec::new();
-    for object_id in world.object_ids() {
+    for object_id in find_candidate_ids(world, condition) {
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
@@ -13830,6 +14164,7 @@ fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(view) = snapshot_func_find_view() else {
             return Ok(Value::Nil);
         };
+        let condition = condition.pruned(&view);
         if let Some(sort) = sort {
             return Ok(find_first_with_sort(&view, &condition, &sort)?
                 .map(object_reference_value)
@@ -13847,6 +14182,7 @@ fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
+        let condition = condition.pruned(context);
         if let Some(sort) = sort {
             return Ok(find_first_with_sort(context, &condition, &sort)?
                 .map(object_reference_value)
@@ -13871,6 +14207,7 @@ fn find_objects2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(view) = snapshot_func_find_view() else {
             return Ok(Value::Array(Vec::new()));
         };
+        let condition = condition.pruned(&view);
         let mut matches = find_condition_matches(&view, &condition)?;
         // Pre-sort: erase objects deleted during Check
         // (C4FindObject.cpp:217-218).
@@ -13903,6 +14240,7 @@ fn find_objects2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Array(Vec::new()));
         };
+        let condition = condition.pruned(context);
         let mut matches = find_condition_matches(context, &condition)?;
         if let Some(sort) = sort {
             sort.sort(context, &mut matches)?;
@@ -13924,6 +14262,10 @@ fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(view) = snapshot_func_find_view() else {
             return Ok(Value::Int(0));
         };
+        let condition = condition.pruned(&view);
+        if condition.is_ensured(&view) {
+            return Ok(Value::Int(truncate_to_i32(view.object_ids().len() as u64)));
+        }
         let matches = find_condition_matches(&view, &condition)?;
         return Ok(Value::Int(truncate_to_i32(matches.len() as u64)));
     }
@@ -13932,6 +14274,7 @@ fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Int(0));
         };
+        let condition = condition.pruned(context);
         if condition.is_ensured(context) {
             return Ok(Value::Int(truncate_to_i32(
                 context.world_object_ids().len() as u64,
@@ -14011,9 +14354,12 @@ fn find_object_owner(args: &[Value]) -> Result<Value, RuntimeError> {
     find_object_cpp(&remapped, "FindObjectOwner", Some(owner))
 }
 
+/// C4Game::FindObject (C4Game.cpp:1334-1424): the legacy single-result
+/// search scans the MASTER list for every query form — first master-order
+/// match wins; sectors are never consulted (unlike the criteria form).
 fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let mut skip_until = params.find_next;
-    for object_id in params.candidate_ids(world) {
+    for object_id in world.object_ids() {
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
@@ -29258,6 +29604,575 @@ func ProbeBadIndex(id) {
         assert_eq!(
             object_id_from_value(&result.expect("FindObject2 succeeds")),
             Some(ObjectId::new(1))
+        );
+    }
+
+    fn parsed_condition(entries: Vec<Value>) -> FindCondition {
+        match FindCondition::parse(&Value::Array(entries)) {
+            ParsedCriterion::Condition(condition) => condition,
+            _ => panic!("expected a parsed condition"),
+        }
+    }
+
+    #[test]
+    fn find_condition_primitive_bounds_match_cpp_getbounds() {
+        // GetBounds/UseShapes overrides (C4FindObject.h:93-94):
+        // InRect → its rect, no shapes (C4FindObject.h:196);
+        // AtPoint → 1x1 at the point, shapes (C4FindObject.h:203,211-212);
+        // AtRect → its rect, shapes (C4FindObject.h:226-227);
+        // OnLine → endpoint bounding box, shapes (C4FindObject.h:234-246);
+        // Distance → enclosing square, NO shapes (C4FindObject.h:253,260-261);
+        // all remaining criteria → no bounds (base default).
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(10),
+                Value::Int(5),
+                Value::Int(6),
+                Value::Int(20),
+                Value::Int(30),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(5, 6, 20, 30), false))
+        );
+        assert_eq!(
+            parsed_condition(vec![Value::Int(11), Value::Int(70), Value::Int(80)]).bounds(),
+            Some((DefinitionRect::new(70, 80, 1, 1), true))
+        );
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(12),
+                Value::Int(5),
+                Value::Int(6),
+                Value::Int(20),
+                Value::Int(30),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(5, 6, 20, 30), true))
+        );
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(13),
+                Value::Int(90),
+                Value::Int(10),
+                Value::Int(20),
+                Value::Int(45),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(20, 10, 71, 36), true)),
+            "OnLine: union of the two 1x1 endpoint rects (C4FindObject.h:234-237)"
+        );
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(14),
+                Value::Int(100),
+                Value::Int(50),
+                Value::Int(30),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(70, 20, 61, 61), false)),
+            "Distance: (x-r, y-r, 2r+1, 2r+1) (C4FindObject.h:253)"
+        );
+        assert_eq!(
+            parsed_condition(vec![Value::Int(21), Value::Int(16)]).bounds(),
+            None,
+            "OCF has no bounds"
+        );
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(1),
+                Value::Array(vec![
+                    Value::Int(10),
+                    Value::Int(5),
+                    Value::Int(6),
+                    Value::Int(20),
+                    Value::Int(30),
+                ]),
+            ])
+            .bounds(),
+            None,
+            "Not never has bounds (no GetBounds override, C4FindObject.h:104-118)"
+        );
+    }
+
+    #[test]
+    fn find_condition_combinator_bounds_match_cpp_constructors() {
+        let in_rect = |x, y, w, h| {
+            Value::Array(vec![
+                Value::Int(10),
+                Value::Int(x),
+                Value::Int(y),
+                Value::Int(w),
+                Value::Int(h),
+            ])
+        };
+        let ocf = Value::Array(vec![Value::Int(21), Value::Int(16)]);
+        let at_rect = Value::Array(vec![
+            Value::Int(12),
+            Value::Int(60),
+            Value::Int(60),
+            Value::Int(10),
+            Value::Int(10),
+        ]);
+
+        // C4FindObjectAnd constructor (C4FindObject.cpp:411-434): intersect
+        // the bounded children; boundless children are skipped.
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(2),
+                in_rect(0, 0, 100, 100),
+                ocf.clone(),
+                in_rect(50, 40, 100, 100),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(50, 40, 50, 60), false))
+        );
+        // A shapes child replaces any accumulated intersection and stops the
+        // walk ("do not intersect an atpoint bound with an rect bound",
+        // C4FindObject.cpp:417-425).
+        assert_eq!(
+            parsed_condition(vec![Value::Int(2), in_rect(0, 0, 100, 100), at_rect.clone()])
+                .bounds(),
+            Some((DefinitionRect::new(60, 60, 10, 10), true))
+        );
+
+        // C4FindObjectOr constructor (C4FindObject.cpp:477-496): union of
+        // the child bounds; any boundless or shapes child kills the bounds.
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(3),
+                in_rect(0, 0, 20, 20),
+                in_rect(80, 90, 20, 20),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(0, 0, 100, 110), false))
+        );
+        assert_eq!(
+            parsed_condition(vec![Value::Int(3), in_rect(0, 0, 20, 20), ocf]).bounds(),
+            None,
+            "boundless child → no Or bounds (C4FindObject.cpp:481)"
+        );
+        assert_eq!(
+            parsed_condition(vec![Value::Int(3), in_rect(0, 0, 20, 20), at_rect]).bounds(),
+            None,
+            "shapes child → no Or bounds (C4FindObject.cpp:482-488)"
+        );
+    }
+
+    /// A 150x120px world (3x3 sectors of 50px) so sector-walk order can
+    /// diverge from master-list order.
+    fn sectored_find_world(
+        objects: Vec<HostWorldObject>,
+        definitions: HashMap<DefinitionId, DefinitionMetadata>,
+    ) -> HostWorldContext {
+        let landscape = Landscape::new(150, vec![120; 150]).expect("landscape builds");
+        HostWorldContext::with_landscape(
+            objects,
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            10,
+            false,
+        )
+    }
+
+    #[test]
+    fn find_objects2_bounded_criteria_walk_sectors_not_the_master_list() {
+        // C4FindObject::FindMany(Objs, Sct) (C4FindObject.cpp:310-355):
+        // criteria with bounds walk the C4LArea sector lists — result order
+        // is sector-major (row-major sectors, master-relative within each
+        // sector), NOT master order. Boundless criteria keep the master
+        // walk (C4FindObject.cpp:316-317).
+        let world = sectored_find_world(
+            vec![
+                find_world_object(1, "ROCK", 80, 10, 1), // sector (1,0)
+                find_world_object(2, "ROCK", 10, 10, 1), // sector (0,0)
+                find_world_object(3, "ROCK", 20, 10, 1), // sector (0,0)
+            ],
+            HashMap::new(),
+        );
+        // [C4FO_InRect(10), 0, 0, 150, 40] — bounded, no shapes
+        let bounded = vec![Value::Array(vec![
+            Value::Int(10),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(150),
+            Value::Int(40),
+        ])];
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || find_objects2(&bounded));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![
+                Some(ObjectId::new(2)),
+                Some(ObjectId::new(3)),
+                Some(ObjectId::new(1)),
+            ],
+            "sector (0,0) list first, then sector (1,0)"
+        );
+        // FindObject = first in the same walk (C4FindObject.cpp:296-306)
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || find_object2(&bounded));
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(2))
+        );
+
+        // [C4FO_ID(20), ROCK] — no bounds → master-list order
+        let boundless = vec![Value::Array(vec![
+            Value::Int(20),
+            Value::String("ROCK".into()),
+        ])];
+        let (result, _) =
+            with_object_host_context_with_world(world, || find_objects2(&boundless));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![
+                Some(ObjectId::new(1)),
+                Some(ObjectId::new(2)),
+                Some(ObjectId::new(3)),
+            ],
+            "boundless criteria keep the master-list walk"
+        );
+    }
+
+    #[test]
+    fn find_objects2_shape_criteria_walk_shape_lists_with_marker_dedup() {
+        // UseShapes criteria walk the per-sector ObjectShapes lists
+        // (C4FindObject.cpp:321-343): an object whose shape spans several
+        // sectors sits in each of their lists but reports only at its FIRST
+        // encounter (the Marker, C4FindObject.cpp:331-342).
+        let definitions: HashMap<DefinitionId, DefinitionMetadata> = [
+            (
+                "SMLL".to_string(),
+                DefinitionMetadata {
+                    shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+            (
+                "BIGG".to_string(),
+                DefinitionMetadata {
+                    shape: Some(DefinitionRect::new(-30, -5, 60, 10)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let world = sectored_find_world(
+            vec![
+                // rank 1: shape (88,8)-(92,12) → sector (1,0) only
+                find_world_object(1, "SMLL", 90, 10, 1),
+                // rank 2: shape (20,5)-(80,15) → sectors (0,0) AND (1,0)
+                find_world_object(2, "BIGG", 50, 10, 1),
+            ],
+            definitions,
+        );
+        // [C4FO_AtRect(12), 0, 0, 120, 40] — bounded, shapes
+        let args = vec![Value::Array(vec![
+            Value::Int(12),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(120),
+            Value::Int(40),
+        ])];
+        let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![Some(ObjectId::new(2)), Some(ObjectId::new(1))],
+            "sector (0,0) encounters BIGG first; its sector (1,0) repeat is deduped"
+        );
+    }
+
+    #[test]
+    fn find_object2_bounded_sort_walks_sector_lists_nested() {
+        // C4FindObject::Find(Objs, Sct) with a sort (C4FindObject.cpp:
+        // 283-307): each sector list yields its own best via the inner
+        // Find(*pLst), and only the per-list winners meet the running best.
+        // With C4SO_Random the uncached Compare draws value(obj1) then
+        // value(obj2) per comparison (C4FindObject.cpp:834-842,914-917), so
+        // the pairing — not just the draw count — is lockstep-relevant.
+        let world = sectored_find_world(
+            vec![
+                find_world_object(1, "ROCK", 10, 10, 1), // sector (0,0): [1]
+                find_world_object(2, "ROCK", 60, 10, 1), // sector (1,0): [2,3]
+                find_world_object(3, "ROCK", 70, 10, 1),
+            ],
+            HashMap::new(),
+        );
+        let args = vec![
+            Value::Array(vec![
+                Value::Int(10),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(150),
+                Value::Int(40),
+            ]),
+            Value::Array(vec![Value::Int(120)]), // C4SO_Random
+        ];
+        let rng = LcgRng::seed_from_u64(3);
+        let mut mirror = rng.clone();
+        let guard = enter_random_context(rng);
+        let (result, _) = with_object_host_context_with_world(world, || find_object2(&args));
+        let rng_after = guard.finish();
+        // Nested walk: sector (0,0) seeds best=1 without a draw; sector
+        // (1,0) draws Compare(3, 2) = (r1, r2) for its list winner, then
+        // Compare(winner, 1) = (r3, r4) against the running best.
+        let r1 = mirror.random(1 << 16);
+        let r2 = mirror.random(1 << 16);
+        let list_winner = if r2 - r1 > 0 { 3u64 } else { 2 };
+        let r3 = mirror.random(1 << 16);
+        let r4 = mirror.random(1 << 16);
+        let expected = if r4 - r3 > 0 { list_winner } else { 1 };
+        assert_eq!(rng_after, mirror, "exactly two Compare calls, four draws");
+        assert_eq!(
+            (expected, r2 - r1 > 0, r4 - r3 > 0),
+            (2, false, true),
+            "seed 3 discriminates the nested pairing from a flat running-best walk"
+        );
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(expected))
+        );
+    }
+
+    #[test]
+    fn find_object2_bounded_sort_ties_keep_the_first_in_sector_order() {
+        // Equal sort values compare to zero, so the incumbent stays
+        // (C4FindObject.cpp:196-198) — the winner is the first match in
+        // SECTOR-walk order, not master order.
+        let world = sectored_find_world(
+            vec![
+                find_world_object(1, "ROCK", 80, 10, 1), // sector (1,0)
+                find_world_object(2, "ROCK", 10, 10, 1), // sector (0,0)
+                find_world_object(3, "ROCK", 20, 10, 1), // sector (0,0)
+            ],
+            HashMap::new(),
+        );
+        let args = vec![
+            Value::Array(vec![
+                Value::Int(10),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(150),
+                Value::Int(40),
+            ]),
+            Value::Array(vec![Value::Int(140)]), // C4SO_Mass — all equal
+        ];
+        let (result, _) = with_object_host_context_with_world(world, || find_object2(&args));
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(2)),
+            "first match of the first sector list wins ties"
+        );
+    }
+
+    #[test]
+    fn find_object2_shape_sort_has_no_marker_so_spanning_shapes_compare_twice() {
+        // C4FindObject::Find's UseShapes arm has NO marker
+        // (C4FindObject.cpp:283-294, unlike FindMany:331-342): an object
+        // whose shape spans two sectors sits in both lists and is compared
+        // in both — its repeat costs Compare draws.
+        let definitions: HashMap<DefinitionId, DefinitionMetadata> = [
+            (
+                "SMLL".to_string(),
+                DefinitionMetadata {
+                    shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+            (
+                "BIGG".to_string(),
+                DefinitionMetadata {
+                    shape: Some(DefinitionRect::new(-30, -5, 60, 10)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let world = sectored_find_world(
+            vec![
+                // rank 1: sector (1,0) only
+                find_world_object(1, "SMLL", 90, 10, 1),
+                // rank 2: sectors (0,0) and (1,0)
+                find_world_object(2, "BIGG", 50, 10, 1),
+            ],
+            definitions,
+        );
+        let args = vec![
+            Value::Array(vec![
+                Value::Int(12),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(120),
+                Value::Int(40),
+            ]),
+            Value::Array(vec![Value::Int(120)]), // C4SO_Random
+        ];
+        let rng = LcgRng::seed_from_u64(7);
+        let mut mirror = rng.clone();
+        let guard = enter_random_context(rng);
+        let (result, _) = with_object_host_context_with_world(world, || find_object2(&args));
+        let rng_after = guard.finish();
+        // Sector (0,0) list [2]: best=2, no draw. Sector (1,0) list [1,2]:
+        // inner Compare(2, 1) draws (r1, r2); outer Compare(winner, 2)
+        // draws (r3, r4) — 2 can even meet itself.
+        let r1 = mirror.random(1 << 16);
+        let r2 = mirror.random(1 << 16);
+        let list_winner = if r2 - r1 > 0 { 2u64 } else { 1 };
+        let r3 = mirror.random(1 << 16);
+        let r4 = mirror.random(1 << 16);
+        let expected = if r4 - r3 > 0 { list_winner } else { 2 };
+        assert_eq!(
+            rng_after, mirror,
+            "four draws: the spanning shape is compared in BOTH sector lists"
+        );
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(expected))
+        );
+    }
+
+    #[test]
+    fn find_criteria_prune_ensured_and_children_like_the_cpp_constructor() {
+        // C4FindObjectAnd's constructor REMOVES ensured children
+        // (C4FindObject.cpp:400-410) before Check ever runs: Find_Category(0)
+        // is ensured (C4FindObject.cpp:587-590) yet its Check is always
+        // false (:582-585) — pruning makes it act as always-true inside an
+        // And (and CreateCriterionsFromPars' top-level And,
+        // C4Script.cpp:2023-2026).
+        let world = HostWorldContext::from_objects(vec![
+            find_world_object(1, "ROCK", 10, 10, 1),
+            find_world_object(2, "TREE", 50, 10, 1),
+            find_world_object(3, "ROCK", 90, 10, 1),
+        ]);
+        let args = vec![
+            Value::Array(vec![Value::Int(22), Value::Int(0)]), // ensured
+            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+        ];
+        let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![Some(ObjectId::new(1)), Some(ObjectId::new(3))],
+            "the ensured Category(0) child must not veto the And"
+        );
+    }
+
+    #[test]
+    fn find_criteria_prune_impossible_or_children_for_the_bounds_decision() {
+        // C4FindObjectOr's constructor removes impossible children
+        // (C4FindObject.cpp:466-476) BEFORE summing bounds — an OCF(0)
+        // child (impossible, C4FindObject.cpp:577-580) must not kill the
+        // sibling rect's bounds, so the walk stays sector-ordered.
+        let world = sectored_find_world(
+            vec![
+                find_world_object(1, "ROCK", 80, 10, 1), // sector (1,0)
+                find_world_object(2, "ROCK", 10, 10, 1), // sector (0,0)
+                find_world_object(3, "ROCK", 20, 10, 1), // sector (0,0)
+            ],
+            HashMap::new(),
+        );
+        let args = vec![Value::Array(vec![
+            Value::Int(3), // C4FO_Or
+            Value::Array(vec![
+                Value::Int(10),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(150),
+                Value::Int(40),
+            ]),
+            Value::Array(vec![Value::Int(21), Value::Int(0)]), // impossible
+        ])];
+        let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![
+                Some(ObjectId::new(2)),
+                Some(ObjectId::new(3)),
+                Some(ObjectId::new(1)),
+            ],
+            "the pruned Or keeps the InRect bounds → sector-walk order"
+        );
+    }
+
+    #[test]
+    fn object_count2_or_with_ensured_child_counts_the_full_list() {
+        // C4FindObjectOr::IsEnsured (C4FindObject.cpp:514-520) + the Count
+        // ensured shortcut (C4FindObject.cpp:233-234): an Or with an
+        // ensured child counts every object without checking any.
+        let world = HostWorldContext::from_objects(vec![
+            find_world_object(1, "ROCK", 10, 10, 1),
+            find_world_object(2, "TREE", 50, 10, 1),
+            find_world_object(3, "ROCK", 90, 10, 1),
+        ]);
+        let args = vec![Value::Array(vec![
+            Value::Int(3),
+            Value::Array(vec![Value::Int(22), Value::Int(0)]), // ensured
+            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+        ])];
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || object_count2(&args));
+        assert_eq!(result.expect("ObjectCount2 succeeds"), Value::Int(3));
+
+        // Same through the Func-criterion view path: the unknown-Func child
+        // is impossible (C4FindObject.cpp:664-667), pruned from the Or —
+        // the ensured Category(0) child remains and the shortcut fires.
+        let args = vec![Value::Array(vec![
+            Value::Int(3),
+            Value::Array(vec![Value::Int(22), Value::Int(0)]),
+            Value::Array(vec![Value::Int(60), Value::String("NoSuchFunc".into())]),
+        ])];
+        let (result, _) = with_object_host_context_with_world(world, || object_count2(&args));
+        assert_eq!(result.expect("ObjectCount2 succeeds"), Value::Int(3));
+    }
+
+    #[test]
+    fn legacy_find_object_rect_query_walks_the_master_list_not_sectors() {
+        // C4Game::FindObject (C4Game.cpp:1334-1424) — the legacy
+        // fixed-parameter FindObject — scans Objects.First, the MASTER
+        // list, for EVERY query form; the rect arm returns the first
+        // master-order object inside the rect (C4Game.cpp:1414-1416).
+        // Sectors belong only to the criteria form (C4FindObject's
+        // Find(Objs, Sct) arms).
+        let world = sectored_find_world(
+            vec![
+                // ids clear of the harness caller (object 1, self-excluded
+                // per C4Script.cpp:2125)
+                find_world_object(11, "ROCK", 80, 10, 1), // sector (1,0)
+                find_world_object(12, "ROCK", 10, 10, 1), // sector (0,0)
+            ],
+            HashMap::new(),
+        );
+        let args = vec![
+            Value::Nil,      // id
+            Value::Int(0),   // x
+            Value::Int(0),   // y
+            Value::Int(150), // wdt
+            Value::Int(40),  // hgt
+        ];
+        let (result, _) = with_object_host_context_with_world(world, || find_object(&args));
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject succeeds")),
+            Some(ObjectId::new(11)),
+            "first MASTER-order match wins, not the sector-walk first"
         );
     }
 

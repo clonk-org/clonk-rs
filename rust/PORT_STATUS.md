@@ -29,9 +29,9 @@ cargo xtask parity verify
 Runtime/content validation when relevant:
 
 ```sh
-cargo xtask scenario-sweep                  # 93/93
-cargo xtask scenario-errors Goldrush        # clean at 120+ ticks
-cargo xtask scenario-audit                  # 92/93; exception above
+cargo xtask scenario-sweep                         # 93/93
+cargo xtask scenario-errors Goldrush --ticks 1000  # clean
+cargo xtask scenario-audit                         # 92/93; exception above
 ```
 
 Behavioral sync slices also require a rebuilt/relinked pinned live shadow run
@@ -57,15 +57,17 @@ and a recorded new first mismatch.
   `SetCommand`; linekit DigDouble/DFA_CONNECT; auto-sell/snow-dig; legacy version
   gates/ranks; app trade-menu UI.
 - **Objects/find/OCF:** `InMat`/`ClosedContainer`, preview OCF and `At` addtop;
-  permanent info; DFA_CONNECT; sector traversal; `Sort_Value` via object value.
+  permanent info; DFA_CONNECT; `Sort_Value` via object value; no-sort FindObject2
+  early exit; immediate sector registration for mid-call creations.
 - **Players/game/network:** home-base production, asset value, crew persistence;
   elimination presentation/script-player flag; control sync and protocol/auth/
   league completeness.
 - **Definitions/values:** `Oversize`, numeric ActMap, GetComponents/CalcDefValue,
-  remaining DefCore fields; AH_Predator preview/final creation-number skew;
-  C4Value interning/serialization and strict host conversion.
-- **Script host:** partial-error recovery at effect/definition seams; foreign
-  fixed-dir precision; FnExit cancel-attach/bounds and Ejection/Departure.
+  remaining DefCore fields; Goldrush's three missing startup creations/C++ +3 ID
+  skew; C4Value interning/serialization and strict host conversion.
+- **Script host:** partial-error recovery for effects and remaining definition/menu
+  seams; foreign fixed-dir precision; FnExit cancel-attach/bounds and
+  Ejection/Departure.
 - **Weather/config/resources:** remaining sky presentation/LaunchCloud; control
   preferences; names/promotions/locales; group write/gzip/CRC/directory order.
 - **Hosts/menus:** exact `CanConcatPictureWith` and object-info payloads; app menu
