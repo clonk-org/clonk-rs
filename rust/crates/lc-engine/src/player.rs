@@ -571,6 +571,37 @@ impl Player {
         self.surrendered
     }
 
+    pub(crate) fn mark_won(&mut self) {
+        self.won = true;
+    }
+
+    /// C4Player::Evaluate's cooperative settlement-score and profile-time
+    /// update. Returns the old/new score pair exactly once.
+    pub(crate) fn evaluate(
+        &mut self,
+        average_value_gain: i32,
+        game_time: i32,
+    ) -> Option<(i32, i32)> {
+        if self.evaluated {
+            return None;
+        }
+        self.won = !matches!(
+            self.status,
+            PlayerStatus::Eliminated | PlayerStatus::Surrendered
+        ) && !self.surrendered;
+        let score_old = self.score;
+        let success_bonus = if self.won { 100 } else { 0 };
+        let final_score = average_value_gain
+            .max(0)
+            .wrapping_add(success_bonus);
+        self.score = self.score.wrapping_add(final_score);
+        self.total_playing_time = self
+            .total_playing_time
+            .wrapping_add(game_time.wrapping_sub(self.game_join_time));
+        self.evaluated = true;
+        Some((score_old, self.score))
+    }
+
     pub fn set_surrendered(&mut self, surrendered: bool) {
         self.surrendered = surrendered;
         if surrendered {

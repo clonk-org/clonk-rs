@@ -392,6 +392,7 @@ pub const CATEGORY_STRUCTURE: i32 = 1 << 1;
 pub const CATEGORY_VEHICLE: i32 = 1 << 2;
 pub const CATEGORY_LIVING: i32 = 1 << 3;
 pub const CATEGORY_OBJECT: i32 = 1 << 4;
+const CATEGORY_GOAL: i32 = 1 << 5;
 pub const CATEGORY_MAGIC: i32 = 1 << 17;
 pub const CATEGORY_SORT_LIMIT: i32 = CATEGORY_STATIC_BACK
     | CATEGORY_STRUCTURE
@@ -10014,7 +10015,7 @@ pub struct Engine {
     /// or after it still execute this frame.
     exec_cursor: Option<usize>,
     frame: u64,
-    /// `C4Game::Time` seconds, advanced only by the future Sec1Timer port.
+    /// `C4Game::Time` seconds, advanced only by `sec1_timer`.
     game_time: i32,
     /// Runtime-only one-second latch (`C4Game::TimeGo`), never serialized.
     time_go: bool,
@@ -10046,15 +10047,17 @@ pub struct Engine {
     global_script_functions: Option<Arc<HashMap<String, lc_script::Function>>>,
     next_mission: NextMissionState,
     game_over_triggered: bool,
-    /// C4RoundResults is populated by the later evaluation behavior. Keep its
-    /// state distinct from the game-over trigger (C4Game.cpp:845-854).
+    /// Runtime-only C4Game::Evaluated guard. Restored games re-evaluate
+    /// after their next synchronized frame just like C++.
+    game_evaluated: bool,
+    /// C4RoundResults, kept distinct from the game-over trigger and runtime
+    /// evaluation guard (C4Game.cpp:845-854).
     round_results: RoundResultsState,
     objectives: ScenarioObjectives,
     objective_check_counter: u8,
     players_registered: bool,
     players: HashMap<i32, Player>,
-    /// C4PlayerInfoList::iLastPlayerID. This structural slice only persists
-    /// and restores the counter; it does not allocate IDs.
+    /// C4PlayerInfoList::iLastPlayerID, persisted and repaired across loads.
     last_player_info_id: i32,
     /// Scenario `[Head] ForcedAutoStopControl`, separate from each player's
     /// effective `PlayerControlState::control_style` preference.
@@ -11721,6 +11724,7 @@ impl Engine {
             global_script_functions: None,
             next_mission: NextMissionState::default(),
             game_over_triggered: false,
+            game_evaluated: false,
             round_results: RoundResultsState::default(),
             objectives: ScenarioObjectives::default(),
             objective_check_counter: 0,
@@ -13715,6 +13719,7 @@ impl Engine {
             tolerate_script_error::<()>(Err(error))?;
         }
         self.game_over_triggered = false;
+        self.game_evaluated = false;
         Ok(created)
     }
 
@@ -14003,8 +14008,179 @@ impl Engine {
             return Ok(false);
         }
         self.game_over_triggered = true;
-        self.broadcast_scenario_function("OnGameOver", Vec::new())?;
+        tolerate_script_error(self.broadcast_scenario_function("OnGameOver", Vec::new()))?;
+        // C4Game::DoGameOver marks winners only after OnGameOver, so any
+        // player eliminated by that callback is not promoted (C4Game.cpp:
+        // 3659-3670).
+        for player in self.players.values_mut() {
+            if !matches!(
+                player.status(),
+                PlayerStatus::Eliminated | PlayerStatus::Surrendered
+            ) && !player.surrendered()
+            {
+                player.mark_won();
+            }
+        }
         Ok(true)
+    }
+
+    fn evaluate_game(&mut self) -> Result<(), EngineError> {
+        if self.game_evaluated {
+            return Ok(());
+        }
+
+        // Cooperative games award every player the average of all positive
+        // ValueGain values (C4PlayerList::AverageValueGain). A melee flag is
+        // not modeled yet, so do not infer one from goals or player count.
+        let average_value_gain = if self.players.is_empty() {
+            0
+        } else {
+            let sum = self.players.values().fold(0_i32, |sum, player| {
+                sum.wrapping_add(player.value_gain().max(0))
+            });
+            sum / i32::try_from(self.players.len()).unwrap_or(i32::MAX)
+        };
+
+        let mut player_numbers: Vec<_> = self.players.keys().copied().collect();
+        player_numbers.sort_unstable();
+        for number in player_numbers {
+            let evaluated = {
+                let player = self
+                    .players
+                    .get_mut(&number)
+                    .ok_or(EngineError::UnknownPlayer(number))?;
+                player
+                    .evaluate(average_value_gain, self.game_time)
+                    .map(|(score_old, score_new)| {
+                        (
+                            player.player_info_id(),
+                            player.total_playing_time() as u32,
+                            score_old,
+                            score_new,
+                        )
+                    })
+            };
+            let Some((player_info_id, total_playing_time, score_old, score_new)) = evaluated else {
+                continue;
+            };
+            if let Some(result) = self
+                .round_results
+                .players
+                .iter_mut()
+                .find(|result| result.player_info_id == player_info_id)
+            {
+                result.total_playing_time = total_playing_time;
+                result.score_old = score_old;
+                result.score_new = Some(score_new);
+            } else {
+                self.round_results.players.push(RoundResultsPlayerState {
+                    player_info_id,
+                    total_playing_time,
+                    score_old,
+                    score_new: Some(score_new),
+                    custom_evaluation_strings: String::new(),
+                });
+            }
+        }
+
+        let (goals, fulfilled_goals) = self.evaluate_round_goals()?;
+        self.round_results.goals = goals;
+        self.round_results.fulfilled_goals = fulfilled_goals;
+        // C4RoundResults::EvaluateGame writes playing time after all goal
+        // callbacks, whose scripts may mutate Game.Time.
+        self.round_results.playing_time_seconds = self.game_time as u32;
+        self.game_evaluated = true;
+        Ok(())
+    }
+
+    fn evaluate_round_goals(
+        &mut self,
+    ) -> Result<(Vec<DefinitionId>, Vec<DefinitionId>), EngineError> {
+        let rivalry = self
+            .exec_list
+            .iter()
+            .rev()
+            .any(|&object_id| {
+                let Some(index) = self.find_object_index(object_id) else {
+                    return false;
+                };
+                let object = &self.objects[index];
+                !object.destroyed
+                    && object.state.status.is_active()
+                    && object.definition_id.as_str() == "RVLR"
+            });
+        let first_local_player = self
+            .players
+            .keys()
+            .copied()
+            .filter(|player| {
+                self.local_players
+                    .as_ref()
+                    .is_none_or(|local| local.contains(player))
+            })
+            .min()
+            .unwrap_or(OWNER_NONE);
+
+        let mut goals = Vec::new();
+        let mut fulfilled = Vec::new();
+        // C4ObjectList::GetListID uses a 500-entry temporary ID table.
+        for goal_index in 0..500 {
+            // GetListID rebuilds its unique-ID list on every call. Goal
+            // callbacks can remove objects, so the cnt-th ID must be found
+            // again from the current master list (C4ObjectList.cpp:58-78).
+            let goal = {
+                let mut seen = HashSet::new();
+                self.exec_list
+                    .iter()
+                    .rev()
+                    .filter_map(|&object_id| {
+                        let index = self.find_object_index(object_id)?;
+                        let object = &self.objects[index];
+                        if object.destroyed || !object.state.status.is_active() {
+                            return None;
+                        }
+                        let definition = self.definitions.get(&object.definition_id)?;
+                        (definition.category() & CATEGORY_GOAL != 0
+                            && seen.insert(object.definition_id.clone()))
+                        .then(|| object.definition_id.clone())
+                    })
+                    .nth(goal_index)
+            };
+            let Some(goal) = goal else {
+                break;
+            };
+
+            // C4ObjectList::Find re-resolves the first live instance for
+            // every distinct goal ID; an earlier callback may have removed
+            // the instance that originally contributed the ID.
+            let target = self.exec_list.iter().rev().find_map(|&object_id| {
+                let index = self.find_object_index(object_id)?;
+                let object = &self.objects[index];
+                (!object.destroyed
+                    && object.state.status.is_active()
+                    && object.definition_id == goal)
+                    .then_some(index)
+            });
+            let is_fulfilled = if let Some(index) = target {
+                let (function, args) = if rivalry {
+                    (
+                        "IsFulfilledforPlr",
+                        vec![Value::Int(first_local_player)],
+                    )
+                } else {
+                    ("IsFulfilled", Vec::new())
+                };
+                tolerate_script_error(self.call_object_function(index, function, args))?
+                    .is_some_and(|value| compat::value_raw_truthy(&value))
+            } else {
+                false
+            };
+            goals.push(goal.clone());
+            if is_fulfilled {
+                fulfilled.push(goal);
+            }
+        }
+        Ok((goals, fulfilled))
     }
 
     pub fn next_mission(&self) -> &NextMissionState {
@@ -17429,6 +17605,11 @@ impl Engine {
         self.check_game_over()?;
         // Control.DoSyncCheck() closes the frame (C4Game.cpp:829)
         self.do_sync_check();
+        // C4Game::Execute evaluates only after the synchronized frame closes
+        // (C4Game.cpp:845-854).
+        if self.game_over_triggered && !self.game_evaluated {
+            self.evaluate_game()?;
+        }
         let mut snapshot = self.snapshot();
         snapshot.menu_requests = self.pending_menu_requests.drain(..).collect();
         snapshot.audio = self.pending_audio.drain(..).collect();
@@ -19357,6 +19538,7 @@ impl Engine {
         self.next_mission = state.next_mission.clone();
         *self.scoreboard.borrow_mut() = state.scoreboard.clone();
         self.game_over_triggered = state.game_over;
+        self.game_evaluated = false;
         self.round_results = state.round_results.clone();
 
         self.known_crew_owners = state.known_crew_owners.iter().cloned().collect();
@@ -46322,8 +46504,7 @@ func CrewSelection()
         // C4RoundResultsPlayer defaults both settlement scores to -1 and the
         // remaining game data to zero (C4RoundResults.h:63-69). The round
         // container starts with no goals/players and zero time
-        // (C4RoundResults.cpp:249-259). This slice only carries that state;
-        // C4Game::Evaluate remains the future behavioral trigger.
+        // (C4RoundResults.cpp:249-259).
         let mut engine = Engine::new();
         assert_eq!(engine.round_results, RoundResultsState::default());
 
@@ -59650,6 +59831,12 @@ func Probe() {
 
     #[test]
     fn script_game_over_triggers_on_game_over() -> Result<(), EngineError> {
+        // DoGameOver broadcasts OnGameOver before survivor winner flags
+        // (C4Game.cpp:3659-3670); C4Game::Execute closes DoSyncCheck before
+        // Evaluate (C4Game.cpp:845-854). Player evaluation then applies the
+        // cooperative AverageValueGain and winner bonus before RoundResults
+        // evaluates goals and records Game.Time (C4Player.cpp:930-970;
+        // C4RoundResults.cpp:280-313).
         const SCRIPT: &str = r#"
         global func Initialize(state, random) { return nil; }
         global func Step(state, frame, random)
@@ -59667,7 +59854,23 @@ func Probe() {
         "#;
 
         let mut engine = Engine::with_seed(7);
-        engine.register_definition(simple_definition("Crew"))?;
+        let mut crew_definition = simple_definition("Crew");
+        crew_definition.set_value(165);
+        engine.register_definition(crew_definition)?;
+        let mut goal_definition = Definition::from_script(
+            "GOAL",
+            "Goal",
+            r#"
+            local calls;
+            func IsFulfilled()
+            {
+                calls++;
+                return true;
+            }
+            "#,
+        )?;
+        goal_definition.set_category(1 << 5); // C4D_Goal
+        engine.register_definition(goal_definition)?;
         engine.spawn_object(
             SpawnConfig::new("Crew")
                 .with_alive(true)
@@ -59675,14 +59878,189 @@ func Probe() {
                 .with_crew_member(true)
                 .with_position(Vector2::new(50, 50)),
         )?;
+        let goal = engine.spawn_object(SpawnConfig::new("GOAL"))?;
 
         engine.install_scenario_script("Scenario", SCRIPT)?;
-        engine.register_player(PlayerConfig::new(0, "Player"))?;
+        engine.register_player(
+            PlayerConfig::new(0, "Player")
+                .with_player_info_id(41)
+                .with_score(250)
+                .with_total_playing_time(1_234)
+                .with_initial_value(100),
+        )?;
+        engine.game_time = 19;
+        engine.round_results.players = vec![
+            RoundResultsPlayerState {
+                player_info_id: 99,
+                custom_evaluation_strings: "Other row".to_string(),
+                ..RoundResultsPlayerState::default()
+            },
+            RoundResultsPlayerState {
+                player_info_id: 41,
+                custom_evaluation_strings: "Keep this".to_string(),
+                ..RoundResultsPlayerState::default()
+            },
+        ];
 
-        let snapshot = engine.tick()?;
-        assert!(snapshot.game_over);
+        let first = engine.tick()?;
+        assert!(first.game_over);
         assert_eq!(engine.physics().gravity, 42);
+        let player = first
+            .players
+            .iter()
+            .find(|player| player.id == 0)
+            .expect("evaluated player");
+        assert!(player.won, "post-OnGameOver survivor is a winner");
+        assert!(player.evaluated);
+        assert_eq!(player.score, 415, "65 gain + 100 winner bonus");
+        assert_eq!(player.total_playing_time, 1_253);
+        assert_eq!(
+            first.round_results.goals,
+            vec![DefinitionId::from("GOAL")]
+        );
+        assert_eq!(
+            first.round_results.fulfilled_goals,
+            vec![DefinitionId::from("GOAL")]
+        );
+        assert_eq!(first.round_results.playing_time_seconds, 19);
+        assert_eq!(
+            first.round_results.players,
+            vec![
+                RoundResultsPlayerState {
+                    player_info_id: 99,
+                    custom_evaluation_strings: "Other row".to_string(),
+                    ..RoundResultsPlayerState::default()
+                },
+                RoundResultsPlayerState {
+                    player_info_id: 41,
+                    total_playing_time: 1_253,
+                    score_old: 250,
+                    score_new: Some(415),
+                    custom_evaluation_strings: "Keep this".to_string(),
+                },
+            ]
+        );
 
+        let second = engine.tick()?;
+        assert_eq!(second.round_results, first.round_results);
+        let player = second
+            .players
+            .iter()
+            .find(|player| player.id == 0)
+            .expect("still-evaluated player");
+        assert_eq!(player.score, 415, "second tick must not score again");
+        assert_eq!(player.total_playing_time, 1_253);
+        assert_eq!(
+            second
+                .object(goal)
+                .and_then(|goal| goal.local_vars.get("calls")),
+            Some(&Value::Int(1)),
+            "goal callback runs once"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn round_goal_evaluation_recomputes_master_order_and_uses_rivalry_callback(
+    ) -> Result<(), EngineError> {
+        // C4RoundResults::EvaluateGoals asks GetListID for the cnt-th unique
+        // goal on every iteration, then Find re-resolves the first live
+        // instance (C4RoundResults.cpp:280-304; C4ObjectList.cpp:58-78,
+        // 271-281). RVLR switches the callback to exact
+        // IsFulfilledforPlr(first-local-player).
+        const GOAL_SCRIPT: &str = r#"
+        local generic_calls, per_player_calls, seen_player;
+        func IsFulfilled()
+        {
+            generic_calls++;
+            return false;
+        }
+        func IsFulfilledforPlr(player)
+        {
+            per_player_calls++;
+            seen_player = player;
+            return true;
+        }
+        "#;
+        const REMOVING_GOAL_SCRIPT: &str = r#"
+        local generic_calls, per_player_calls, seen_player;
+        func IsFulfilled()
+        {
+            generic_calls++;
+            return false;
+        }
+        func IsFulfilledforPlr(player)
+        {
+            per_player_calls++;
+            seen_player = player;
+            RemoveObject();
+            return true;
+        }
+        "#;
+
+        let mut engine = Engine::new();
+        for (id, script) in [
+            ("GOLB", REMOVING_GOAL_SCRIPT),
+            ("GOLA", GOAL_SCRIPT),
+            ("GOLC", GOAL_SCRIPT),
+        ] {
+            let mut definition = Definition::from_script(id, id, script)?;
+            definition.set_category(CATEGORY_GOAL);
+            engine.register_definition(definition)?;
+        }
+        engine.register_definition(simple_definition("RVLR"))?;
+
+        let goal_b = engine.spawn_object(SpawnConfig::new("GOLB"))?;
+        let goal_a = engine.spawn_object(SpawnConfig::new("GOLA"))?;
+        let goal_c_first = engine.spawn_object(SpawnConfig::new("GOLC"))?;
+        let goal_c_second = engine.spawn_object(SpawnConfig::new("GOLC"))?;
+        let rivalry = engine.spawn_object(SpawnConfig::new("RVLR"))?;
+        // exec_list is the reverse of C++ master-list order. B removes
+        // itself while cnt=0; recomputing cnt=1 over [A,C] selects C, not A.
+        engine.exec_list = vec![
+            rivalry,
+            goal_c_second,
+            goal_c_first,
+            goal_a,
+            goal_b,
+        ];
+        engine.register_player(PlayerConfig::new(2, "Remote"))?;
+        engine.register_player(PlayerConfig::new(7, "Local"))?;
+        engine.set_local_players([7]);
+
+        let (goals, fulfilled) = engine.evaluate_round_goals()?;
+        assert_eq!(
+            goals,
+            vec![DefinitionId::from("GOLB"), DefinitionId::from("GOLC")]
+        );
+        assert_eq!(fulfilled, goals);
+
+        let local = |id, name: &str| {
+            engine
+                .object_snapshot(id)
+                .and_then(|object| object.local_vars.get(name).cloned())
+        };
+        assert_eq!(local(goal_b, "per_player_calls"), Some(Value::Int(1)));
+        assert_eq!(local(goal_b, "seen_player"), Some(Value::Int(7)));
+        assert_eq!(local(goal_b, "generic_calls"), Some(Value::Nil));
+        assert_eq!(
+            local(goal_a, "per_player_calls"),
+            None,
+            "A is skipped"
+        );
+        assert_eq!(
+            local(goal_c_first, "per_player_calls"),
+            Some(Value::Int(1)),
+            "first live C instance handles the callback"
+        );
+        assert_eq!(local(goal_c_first, "seen_player"), Some(Value::Int(7)));
+        assert_eq!(local(goal_c_first, "generic_calls"), Some(Value::Nil));
+        assert_eq!(
+            local(goal_c_second, "per_player_calls"),
+            None,
+            "duplicate goal instance is not called"
+        );
         Ok(())
     }
 
