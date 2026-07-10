@@ -4567,17 +4567,21 @@ fn get_crew_count(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() || args.len() > 2 {
+    if args.len() > 2 {
         return Err(RuntimeError::new(
-            "GetCursor expects 1 or 2 arguments: player and optional index",
+            "GetCursor expects at most 2 arguments: player and optional index",
         ));
     }
-    let player_id = value_to_i32(&args[0], "GetCursor", "player")?;
-    let index = if args.len() == 2 {
-        value_to_i32(&args[1], "GetCursor", "index")?
-    } else {
-        0
-    };
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetCursor",
+        "player",
+    )?;
+    let index = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetCursor",
+        "index",
+    )?;
     if index < 0 {
         return Ok(Value::Nil);
     }
@@ -29333,6 +29337,36 @@ func ProbeBadIndex(id) {
 
         assert_eq!(
             result.expect("GetCursor succeeds"),
+            object_reference_value(cursor)
+        );
+    }
+
+    #[test]
+    fn get_cursor_omitted_player_defaults_to_player_zero_like_cpp() {
+        // Native calls always provide C4AUL_MAX_Par slots and convert an
+        // omitted integer slot from nil to zero (C4AulExec.cpp:1364-1396),
+        // so FnGetCursor's iPlr is 0 when script calls GetCursor() with no
+        // arguments (C4Script.cpp:2905-2925).
+        let cursor = ObjectId::new(905);
+        let mut player = PlayerState::default();
+        player.id = 0;
+        player.cursor = Some(cursor);
+        player.crew = vec![cursor];
+
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::from([(0, player)]),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_cursor_host(&[]));
+
+        assert_eq!(
+            result.expect("omitted iPlr converts to player zero"),
             object_reference_value(cursor)
         );
     }
