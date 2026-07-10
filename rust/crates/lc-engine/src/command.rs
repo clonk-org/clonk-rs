@@ -1311,6 +1311,9 @@ mod tests {
 
     #[test]
     fn get_transfers_item_when_in_range() {
+        // C4Command::Get only requires a live target pointer with OCF_Carryable;
+        // nonliving items such as the Tutorial04 construction kit are valid
+        // Get targets (C4Command.cpp:1129-1152,1206-1216).
         let actor_id = ObjectId::new(100);
         let target_id = ObjectId::new(200);
 
@@ -1324,6 +1327,7 @@ mod tests {
         item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
         item.collectible = true;
         item.construction = FULL_CON;
+        item.alive = false;
 
         let mut objects = HashMap::new();
         objects.insert(actor.id, actor.clone());
@@ -1367,6 +1371,67 @@ mod tests {
             }
             other => panic!("unexpected event: {:?}", other),
         }
+    }
+
+    #[test]
+    fn get_resolves_nonliving_item_by_container_and_definition() {
+        // C4Command::Get resolves Target2->Contents.Find(Data) without an
+        // Alive check, then collects the carryable target from the actor's
+        // container (C4Command.cpp:1138-1152,1206-1216).
+        let actor_id = ObjectId::new(100);
+        let container_id = ObjectId::new(200);
+        let item_id = ObjectId::new(300);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.contents.push(item_id);
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "CNKT".into();
+        item.container = Some(container_id);
+        item.collectible = true;
+        item.construction = FULL_CON;
+        item.alive = false;
+
+        let objects = HashMap::from([
+            (actor_id, actor),
+            (container_id, container),
+            (item_id, item),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = GetState::from_request(
+            &CommandRequest::new(CommandId::Get)
+                .with_target2(Some(container_id))
+                .with_data(CommandData::Text("CNKT".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            CommandEvent::ApplyObjectUpdate { object_id, update }
+                if *object_id == item_id && update.container == Some(Some(actor_id))
+        )));
     }
 
     #[test]
@@ -10746,7 +10811,7 @@ impl GetState {
         let container_snapshot = ctx.resolve(container_id)?;
         for item_id in &container_snapshot.contents {
             if let Some(item_snapshot) = ctx.resolve(*item_id) {
-                if item_snapshot.is_active()
+                if item_snapshot.is_status_active()
                     && item_snapshot.definition_id == definition_id
                     && item_snapshot.collectible
                     && item_snapshot.construction >= FULL_CON
@@ -10958,7 +11023,7 @@ impl GetState {
         };
 
         let target_snapshot = match ctx.resolve(target_id) {
-            Some(snapshot) if snapshot.is_active() => snapshot,
+            Some(snapshot) if snapshot.is_status_active() => snapshot,
             _ => return CommandStepResult::failed(update),
         };
 
