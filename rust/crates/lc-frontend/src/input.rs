@@ -555,6 +555,11 @@ global func Step(state, frame, random) { return nil; }
         engine.select_crew(1, vec![crew])?;
         engine.set_crew_cursor(1, Some(crew))?;
         let hut = engine.spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(0, 2)))?;
+        // This synthetic hut has no door script; model its already-open state
+        // explicitly, as SetEntrance(1) does in C++ (C4Script.cpp:690-695).
+        let mut open_entrance = ObjectUpdate::new();
+        open_entrance.entrance_status = Some(true);
+        engine.apply_object_update(hut, open_entrance)?;
         let mut dispatcher = InputDispatcher::new();
 
         dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Up))?;
