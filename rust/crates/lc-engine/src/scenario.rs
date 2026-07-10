@@ -3857,14 +3857,66 @@ fn collect_legacy_objects(
         .iter()
         .map(|definition| definition.id.as_str())
         .collect();
+    let object_numbers: HashSet<u64> = records
+        .iter()
+        .filter(|record| !matches!(record.status, Some(ObjectStatus::Deleted)))
+        .filter(|record| {
+            record
+                .id
+                .as_deref()
+                .is_some_and(|id| definition_ids.contains(id))
+        })
+        .filter_map(|record| record.number)
+        .collect();
+    let strings = load_legacy_string_table(group)?;
+    let value_resolution = SerializedC4ValueResolution {
+        object_numbers: &object_numbers,
+        strings: &strings,
+    };
 
     let mut spawns = Vec::new();
     for record in records.into_iter() {
-        if let Some(spawn) = record.into_spawn(&definition_ids)? {
+        if let Some(spawn) = record.into_spawn(&definition_ids, &value_resolution)? {
             spawns.push(spawn);
         }
     }
     Ok(spawns)
+}
+
+/// C4StringTable::Load assigns each Strings.txt line its zero-based enum ID.
+/// Repeated text reuses the existing C4String and updates that one instance to
+/// the later ID, so the earlier ID is no longer resolvable
+/// (C4StringTable.cpp:201-216).
+fn load_legacy_string_table(group: &Group) -> Result<HashMap<i32, String>, ScenarioError> {
+    let bytes = match group.read_file("Strings.txt") {
+        Ok(bytes) => bytes,
+        Err(GroupError::EntryNotFound(_)) => return Ok(HashMap::new()),
+        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(HashMap::new());
+        }
+        Err(error) => return Err(ScenarioError::Resources(error)),
+    };
+
+    let mut id_by_bytes = HashMap::<Vec<u8>, i32>::new();
+    let mut value_by_id = HashMap::new();
+    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        let index = i32::try_from(index).unwrap_or(i32::MAX);
+        // SCopySegment copies at most C4AUL_MAX_String bytes and
+        // SReplaceChar turns the first CR into the string terminator
+        // (C4StringTable.cpp:208-211).
+        let end = line
+            .iter()
+            .position(|byte| *byte == b'\r')
+            .unwrap_or(line.len())
+            .min(1024);
+        let raw_value = line[..end].to_vec();
+        let value = decode_legacy_script_text(&raw_value);
+        if let Some(previous_id) = id_by_bytes.insert(raw_value, index) {
+            value_by_id.remove(&previous_id);
+        }
+        value_by_id.insert(index, value);
+    }
+    Ok(value_by_id)
 }
 
 #[derive(Debug, Default)]
@@ -4341,6 +4393,7 @@ impl LegacyObjectRecord {
     fn into_spawn(
         self,
         definition_ids: &HashSet<&str>,
+        value_resolution: &SerializedC4ValueResolution<'_>,
     ) -> Result<Option<ScenarioSpawn>, ScenarioError> {
         let Self {
             line,
@@ -4477,12 +4530,12 @@ impl LegacyObjectRecord {
         }
         if let Some(local_named) = local_named {
             // Loaded objects keep their script locals verbatim (the tree
-            // MotionThreshold, bandit AI state); C++ denumerates object
-            // refs after load — Value::Object carries the number directly.
+            // MotionThreshold, bandit AI state). C++ resolves string IDs while
+            // compiling and denumerates object refs after every object exists.
             config = config.with_local_vars(
                 local_named
                     .into_iter()
-                    .map(|(name, value)| (name, value.into_unresolved_value()))
+                    .map(|(name, value)| (name, value.resolve(value_resolution)))
                     .collect(),
             );
         }
@@ -4810,30 +4863,47 @@ enum SerializedC4Value {
     Unsupported(String),
 }
 
+struct SerializedC4ValueResolution<'a> {
+    object_numbers: &'a HashSet<u64>,
+    strings: &'a HashMap<i32, String>,
+}
+
 impl SerializedC4Value {
-    /// Preserve the pre-resolution loader behavior while serialized identity
-    /// values remain distinct from live VM values. Resolution is a separate
-    /// post-parse step because object numbers are only meaningful once every
-    /// Objects.txt record has been accepted.
-    fn into_unresolved_value(self) -> lc_script::Value {
+    /// Mirror C4Value::DenumeratePointer and serialized-string lookup
+    /// (C4Value.cpp:686-713,783-798). Serialized identities become live VM
+    /// values only after the accepted object-number and string tables exist.
+    fn resolve(self, resolution: &SerializedC4ValueResolution<'_>) -> lc_script::Value {
         use lc_script::Value;
         match self {
             Self::Value(value) => value,
-            Self::ObjectNumber(number) if number > 0 => Value::Object(number as u64),
-            Self::ObjectNumber(_) => Value::Nil,
+            Self::ObjectNumber(number) => {
+                // Old pointer-enumeration saves add C4EnumPointer1. For an
+                // explicitly C4V_C4ObjectEnum value C++ subtracts it from any
+                // value at or above the lower bound, then searches active and
+                // inactive object lists (C4Value.cpp:693-703).
+                let number = if number >= 1_000_000_000 {
+                    number - 1_000_000_000
+                } else {
+                    number
+                };
+                u64::try_from(number)
+                    .ok()
+                    .filter(|number| resolution.object_numbers.contains(number))
+                    .map(Value::Object)
+                    .unwrap_or(Value::Nil)
+            }
             Self::Array(values) => Value::Array(
                 values
                     .into_iter()
-                    .map(Self::into_unresolved_value)
+                    .map(|value| value.resolve(resolution))
                     .collect(),
             ),
-            Self::StringTableIndex(index) => {
-                tracing::warn!(
-                    value = format!("S{index}"),
-                    "LocalNamed C4Value type not modeled yet; reading as nil"
-                );
-                Value::Nil
-            }
+            Self::StringTableIndex(index) => resolution
+                .strings
+                .get(&index)
+                .cloned()
+                .map(Value::String)
+                .unwrap_or(Value::Nil),
             Self::Unsupported(encoded) => {
                 tracing::warn!(
                     value = encoded,
@@ -4897,8 +4967,9 @@ fn split_outside_brackets(text: &str) -> Vec<&str> {
 /// GetC4VID :368-394): `A`=any (zero data reads back nil, nonzero guesses
 /// int), `i`=int, `b`=bool, `O`=enumerated object number (0 = no object),
 /// `I`=C4ID stored as its signed 32-bit payload, `a[size;elems]`=array with
-/// trailing nils omitted on write. `S` (string-table id) and `m` (map) are
-/// not modeled yet — they read as nil with a warning.
+/// trailing nils omitted on write, and `S` indexes the scenario Strings.txt.
+/// `m` (a generic C4Value-keyed map) is not modeled yet and reads as nil with
+/// a warning.
 fn parse_serialized_c4value(
     encoded: &str,
     line: usize,
@@ -10716,7 +10787,8 @@ public func ActualizePhase(pClonk)
             "[Object]\nid=GOOD\nNumber=95\nStatus=1\nX=5\nY=5\n\
              LocalNamed=10;iNum=i17,fFlag=b1,pRef=O80,junk=A0,aList=a[4;i1,i2],\
              idSpell=I1112688205,aiFirst=I1145979202,numeric=I1337,none=I0,\
-             aSpells=a[3;I959858757,I1145979202]\n",
+             aSpells=a[3;I959858757,I1145979202]\n\n\
+             [Object]\nid=GOOD\nNumber=80\nStatus=1\n",
         )
         .expect("write objects");
 
@@ -10737,7 +10809,7 @@ public func ActualizePhase(pClonk)
         assert_eq!(
             locals.get("pRef"),
             Some(&lc_script::Value::Object(80)),
-            "O-typed refs carry the enumerated Number (denumerated at use)"
+            "O-typed refs resolve after every object has loaded"
         );
         assert_eq!(
             locals.get("junk"),
@@ -10783,6 +10855,106 @@ public func ActualizePhase(pClonk)
             ])),
             "nested C4IDs restore through the recursive array decoder"
         );
+    }
+
+    // C4Value::DenumeratePointer subtracts the legacy enumeration offset,
+    // searches both active and inactive object lists, and clears a missing
+    // object (C4Value.cpp:693-713; C4ObjectList.h:32-34). It recurses through
+    // containers, and C4Object applies it to LocalNamed after every object is
+    // loaded (C4Value.cpp:686-690; C4Object.cpp:2914-2923).
+    // Serialized strings resolve by the IDs loaded from Strings.txt; duplicate
+    // text reuses the existing C4String and moves its enum ID to the later line
+    // (C4StringTable.cpp:201-216; C4Value.cpp:783-798).
+    #[test]
+    fn objects_txt_denumerates_named_local_identities_like_cpp() {
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=16\n",
+        )
+        .expect("write defcore");
+
+        let scenario_dir = dir.path().join("Identities.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Identities\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Strings.txt"),
+            b"first\r\nM\xfcnkelburg\r\nsame\r\nsame\r\n",
+        )
+        .expect("write string table");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=GOOD\nNumber=10\nStatus=1\n\
+             LocalNamed=9;pOffset=O1000000419,pPlain=O419,pMissing=O1000000999,\
+             aRefs=a[3;O1000000419,O1000000999],sFirst=S0,sUmlaut=S1,\
+             sOldDuplicate=S2,sDuplicate=S3,sMissing=S7\n\n\
+             [Object]\nid=GOOD\nNumber=419\nStatus=2\n",
+        )
+        .expect("write objects");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let holder = engine
+            .object_snapshot(ObjectId::new(10))
+            .expect("holder exists");
+        let locals = &holder.local_vars;
+        assert_eq!(
+            locals.get("pOffset"),
+            Some(&lc_script::Value::Object(419)),
+            "C4EnumPointer1 is removed before lookup"
+        );
+        assert_eq!(
+            locals.get("pPlain"),
+            Some(&lc_script::Value::Object(419)),
+            "unoffset enum values resolve too"
+        );
+        assert_eq!(locals.get("pMissing"), Some(&lc_script::Value::Nil));
+        assert_eq!(
+            locals.get("aRefs"),
+            Some(&lc_script::Value::Array(vec![
+                lc_script::Value::Object(419),
+                lc_script::Value::Nil,
+                lc_script::Value::Nil,
+            ])),
+            "container denumeration is recursive"
+        );
+        assert_eq!(
+            locals.get("sFirst"),
+            Some(&lc_script::Value::String("first".to_string()))
+        );
+        assert_eq!(
+            locals.get("sUmlaut"),
+            Some(&lc_script::Value::String("Münkelburg".to_string()))
+        );
+        assert_eq!(
+            locals.get("sOldDuplicate"),
+            Some(&lc_script::Value::Nil),
+            "a duplicate string moves the shared C4String to the later enum ID"
+        );
+        assert_eq!(
+            locals.get("sDuplicate"),
+            Some(&lc_script::Value::String("same".to_string()))
+        );
+        assert_eq!(locals.get("sMissing"), Some(&lc_script::Value::Nil));
+
+        let persisted = serde_json::to_string(&holder).expect("snapshot serializes");
+        let restored: crate::ObjectSnapshot =
+            serde_json::from_str(&persisted).expect("snapshot restores");
+        assert_eq!(restored.local_vars, holder.local_vars);
     }
 
     // C4Weather::Init at scenario start draws from the SYNCED ledger
