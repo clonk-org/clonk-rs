@@ -13130,6 +13130,9 @@ enum FindCondition {
         x: i32,
         y: i32,
         r2: i64,
+        /// The enclosing square the C++ constructor precomputes for
+        /// GetBounds (C4FindObject.h:253).
+        bounds: DefinitionRect,
     },
     Ocf(u32),
     Category(i32),
@@ -13260,11 +13263,20 @@ impl FindCondition {
             13 => FindCondition::OnLine(arg_i32(1), arg_i32(2), arg_i32(3), arg_i32(4)),
             // C4FO_Distance
             14 => {
-                let r = i64::from(arg_i32(3));
+                let r = arg_i32(3);
+                let (x, y) = (arg_i32(1), arg_i32(2));
                 FindCondition::Distance {
-                    x: arg_i32(1),
-                    y: arg_i32(2),
-                    r2: r * r,
+                    x,
+                    y,
+                    r2: i64::from(r) * i64::from(r),
+                    // (x - r, y - r, 2r + 1, 2r + 1), C4FindObject.h:253 —
+                    // wrapping like the C++ int32 arithmetic.
+                    bounds: DefinitionRect::new(
+                        x.wrapping_sub(r),
+                        y.wrapping_sub(r),
+                        r.wrapping_mul(2).wrapping_add(1),
+                        r.wrapping_mul(2).wrapping_add(1),
+                    ),
                 }
             }
             // C4FO_ID
@@ -13379,7 +13391,7 @@ impl FindCondition {
                     .map(|bounds| segment_intersects_bounds(*x1, *y1, *x2, *y2, bounds))
                     .unwrap_or(false)
             }
-            FindCondition::Distance { x, y, r2 } => {
+            FindCondition::Distance { x, y, r2, .. } => {
                 let position = object.position();
                 let dx = i64::from(position.x - x);
                 let dy = i64::from(position.y - y);
@@ -13438,6 +13450,64 @@ impl FindCondition {
         }
     }
 
+    /// GetBounds + UseShapes (C4FindObject.h:93-94): `Some((rect, shapes))`
+    /// when the criteria bound the search area — the drivers then walk the
+    /// sector lists (shape lists when `shapes`) instead of the master list.
+    fn bounds(&self) -> Option<(DefinitionRect, bool)> {
+        match self {
+            // C4FindObjectAnd constructor (C4FindObject.cpp:411-434): a
+            // bounded shapes child wins outright ("some objects might be in
+            // an rect and at a point not in that rect"); otherwise all
+            // bounded children intersect.
+            FindCondition::And(children) => {
+                let mut bounds: Option<DefinitionRect> = None;
+                for child in children {
+                    if let Some((child_bounds, child_shapes)) = child.bounds() {
+                        if child_shapes {
+                            return Some((child_bounds, true));
+                        }
+                        bounds = Some(match bounds {
+                            Some(rect) => rect_intersect_cpp(rect, child_bounds),
+                            None => child_bounds,
+                        });
+                    }
+                }
+                bounds.map(|rect| (rect, false))
+            }
+            // C4FindObjectOr constructor (C4FindObject.cpp:477-496): the
+            // union of all child bounds; a boundless or shapes child (which
+            // could report an object twice) kills the bounds entirely.
+            FindCondition::Or(children) => {
+                let mut bounds: Option<DefinitionRect> = None;
+                for child in children {
+                    match child.bounds() {
+                        None | Some((_, true)) => return None,
+                        Some((child_bounds, false)) => {
+                            bounds = Some(match bounds {
+                                Some(rect) => rect_add_cpp(rect, child_bounds),
+                                None => child_bounds,
+                            });
+                        }
+                    }
+                }
+                bounds.map(|rect| (rect, false))
+            }
+            FindCondition::InRect(rect) => Some((*rect, false)),
+            FindCondition::AtPoint(x, y) => Some((DefinitionRect::new(*x, *y, 1, 1), true)),
+            FindCondition::AtRect(rect) => Some((*rect, true)),
+            // bounds(x, y, 1, 1) + Add((x2, y2, 1, 1)), C4FindObject.h:234-237
+            FindCondition::OnLine(x1, y1, x2, y2) => Some((
+                rect_add_cpp(
+                    DefinitionRect::new(*x1, *y1, 1, 1),
+                    DefinitionRect::new(*x2, *y2, 1, 1),
+                ),
+                true,
+            )),
+            FindCondition::Distance { bounds, .. } => Some((*bounds, false)),
+            _ => None,
+        }
+    }
+
     /// Whether any node needs the nested-call seam (drives the borrow-free
     /// snapshot-view evaluation path in the drivers).
     fn uses_func(&self) -> bool {
@@ -13450,6 +13520,72 @@ impl FindCondition {
             _ => false,
         }
     }
+}
+
+/// C4Rect::Intersect (C4Rect.cpp:101-133): narrow `a` to the overlap with
+/// `b`; a degenerated result clamps to zero size.
+fn rect_intersect_cpp(a: DefinitionRect, b: DefinitionRect) -> DefinitionRect {
+    let mut result = a;
+    if b.x > result.x {
+        if b.x + b.width < result.x + result.width {
+            result.x = b.x;
+            result.width = b.width;
+        } else {
+            result.width -= b.x - result.x;
+            result.x = b.x;
+        }
+    } else if b.x + b.width < result.x + result.width {
+        result.width = b.x + b.width - result.x;
+    }
+    if b.y > result.y {
+        if b.y + b.height < result.y + result.height {
+            result.y = b.y;
+            result.height = b.height;
+        } else {
+            result.height -= b.y - result.y;
+            result.y = b.y;
+        }
+    } else if b.y + b.height < result.y + result.height {
+        result.height = b.y + b.height - result.y;
+    }
+    result.width = result.width.max(0);
+    result.height = result.height.max(0);
+    result
+}
+
+/// C4Rect::Add (C4Rect.cpp:153-185): expand `a` to cover `b`; a null rect
+/// on either side leaves the other unchanged.
+fn rect_add_cpp(a: DefinitionRect, b: DefinitionRect) -> DefinitionRect {
+    if b.width == 0 || b.height == 0 {
+        return a;
+    }
+    if a.width == 0 || a.height == 0 {
+        return b;
+    }
+    let mut result = a;
+    if b.x < result.x {
+        if b.x + b.width > result.x + result.width {
+            result.x = b.x;
+            result.width = b.width;
+        } else {
+            result.width += result.x - b.x;
+            result.x = b.x;
+        }
+    } else if b.x + b.width > result.x + result.width {
+        result.width = b.x + b.width - result.x;
+    }
+    if b.y < result.y {
+        if b.y + b.height > result.y + result.height {
+            result.y = b.y;
+            result.height = b.height;
+        } else {
+            result.height += result.y - b.y;
+            result.y = b.y;
+        }
+    } else if b.y + b.height > result.y + result.height {
+        result.height = b.y + b.height - result.y;
+    }
+    result
 }
 
 /// Axis-aligned segment/box intersection for C4FO_OnLine (the C++ uses
@@ -29258,6 +29394,157 @@ func ProbeBadIndex(id) {
         assert_eq!(
             object_id_from_value(&result.expect("FindObject2 succeeds")),
             Some(ObjectId::new(1))
+        );
+    }
+
+    fn parsed_condition(entries: Vec<Value>) -> FindCondition {
+        match FindCondition::parse(&Value::Array(entries)) {
+            ParsedCriterion::Condition(condition) => condition,
+            _ => panic!("expected a parsed condition"),
+        }
+    }
+
+    #[test]
+    fn find_condition_primitive_bounds_match_cpp_getbounds() {
+        // GetBounds/UseShapes overrides (C4FindObject.h:93-94):
+        // InRect → its rect, no shapes (C4FindObject.h:196);
+        // AtPoint → 1x1 at the point, shapes (C4FindObject.h:203,211-212);
+        // AtRect → its rect, shapes (C4FindObject.h:226-227);
+        // OnLine → endpoint bounding box, shapes (C4FindObject.h:234-246);
+        // Distance → enclosing square, NO shapes (C4FindObject.h:253,260-261);
+        // all remaining criteria → no bounds (base default).
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(10),
+                Value::Int(5),
+                Value::Int(6),
+                Value::Int(20),
+                Value::Int(30),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(5, 6, 20, 30), false))
+        );
+        assert_eq!(
+            parsed_condition(vec![Value::Int(11), Value::Int(70), Value::Int(80)]).bounds(),
+            Some((DefinitionRect::new(70, 80, 1, 1), true))
+        );
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(12),
+                Value::Int(5),
+                Value::Int(6),
+                Value::Int(20),
+                Value::Int(30),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(5, 6, 20, 30), true))
+        );
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(13),
+                Value::Int(90),
+                Value::Int(10),
+                Value::Int(20),
+                Value::Int(45),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(20, 10, 71, 36), true)),
+            "OnLine: union of the two 1x1 endpoint rects (C4FindObject.h:234-237)"
+        );
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(14),
+                Value::Int(100),
+                Value::Int(50),
+                Value::Int(30),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(70, 20, 61, 61), false)),
+            "Distance: (x-r, y-r, 2r+1, 2r+1) (C4FindObject.h:253)"
+        );
+        assert_eq!(
+            parsed_condition(vec![Value::Int(21), Value::Int(16)]).bounds(),
+            None,
+            "OCF has no bounds"
+        );
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(1),
+                Value::Array(vec![
+                    Value::Int(10),
+                    Value::Int(5),
+                    Value::Int(6),
+                    Value::Int(20),
+                    Value::Int(30),
+                ]),
+            ])
+            .bounds(),
+            None,
+            "Not never has bounds (no GetBounds override, C4FindObject.h:104-118)"
+        );
+    }
+
+    #[test]
+    fn find_condition_combinator_bounds_match_cpp_constructors() {
+        let in_rect = |x, y, w, h| {
+            Value::Array(vec![
+                Value::Int(10),
+                Value::Int(x),
+                Value::Int(y),
+                Value::Int(w),
+                Value::Int(h),
+            ])
+        };
+        let ocf = Value::Array(vec![Value::Int(21), Value::Int(16)]);
+        let at_rect = Value::Array(vec![
+            Value::Int(12),
+            Value::Int(60),
+            Value::Int(60),
+            Value::Int(10),
+            Value::Int(10),
+        ]);
+
+        // C4FindObjectAnd constructor (C4FindObject.cpp:411-434): intersect
+        // the bounded children; boundless children are skipped.
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(2),
+                in_rect(0, 0, 100, 100),
+                ocf.clone(),
+                in_rect(50, 40, 100, 100),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(50, 40, 50, 60), false))
+        );
+        // A shapes child replaces any accumulated intersection and stops the
+        // walk ("do not intersect an atpoint bound with an rect bound",
+        // C4FindObject.cpp:417-425).
+        assert_eq!(
+            parsed_condition(vec![Value::Int(2), in_rect(0, 0, 100, 100), at_rect.clone()])
+                .bounds(),
+            Some((DefinitionRect::new(60, 60, 10, 10), true))
+        );
+
+        // C4FindObjectOr constructor (C4FindObject.cpp:477-496): union of
+        // the child bounds; any boundless or shapes child kills the bounds.
+        assert_eq!(
+            parsed_condition(vec![
+                Value::Int(3),
+                in_rect(0, 0, 20, 20),
+                in_rect(80, 90, 20, 20),
+            ])
+            .bounds(),
+            Some((DefinitionRect::new(0, 0, 100, 110), false))
+        );
+        assert_eq!(
+            parsed_condition(vec![Value::Int(3), in_rect(0, 0, 20, 20), ocf]).bounds(),
+            None,
+            "boundless child → no Or bounds (C4FindObject.cpp:481)"
+        );
+        assert_eq!(
+            parsed_condition(vec![Value::Int(3), in_rect(0, 0, 20, 20), at_rect]).bounds(),
+            None,
+            "shapes child → no Or bounds (C4FindObject.cpp:482-488)"
         );
     }
 
