@@ -611,6 +611,17 @@ impl Engine {
                 self.init_create_object(id, 50, 50, 0);
             }
         }
+        // InitRules immediately calls UpdateRules. The latter derives the
+        // construction-material flag from the actual surviving CNMT object,
+        // not from the obsolete Scenario.txt realism field
+        // (C4Game.cpp:4016-4025,4038-4044).
+        if self.objects.iter().any(|object| {
+            object.definition_id == "CNMT"
+                && !object.destroyed
+                && object.state.status.is_active()
+        }) {
+            self.set_construction_needs_material(true);
+        }
 
         // InitGoals (C4Game.cpp:4010-4018).
         for (id, count) in &placement.goals {
