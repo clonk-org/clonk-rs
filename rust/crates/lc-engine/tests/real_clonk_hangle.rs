@@ -97,6 +97,49 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
             .command_names(),
         vec!["Enter".to_string()]
     );
+
+    engine.tick().expect("first entrance command frame");
+    assert_eq!(
+        engine
+            .object_snapshot(clonk)
+            .expect("CLNK while the door opens")
+            .container,
+        None,
+        "C4Command::Enter waits outside a closed entrance (C4Command.cpp:600-609)"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(hut.id)
+            .expect("HUT2 while opening")
+            .action
+            .name,
+        "OpenDoor",
+        "the closed entrance calls ActivateEntrance before entering"
+    );
+
+    for _ in 0..20 {
+        if engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.container == Some(hut.id))
+        {
+            break;
+        }
+        engine.tick().expect("door-opening frame");
+    }
+    let clonk_after_open = engine
+        .object_snapshot(clonk)
+        .expect("CLNK after the door opens");
+    let hut_after_open = engine
+        .object_snapshot(hut.id)
+        .expect("HUT2 after opening frames");
+    assert_eq!(
+        clonk_after_open.container,
+        Some(hut.id),
+        "C4Command::Enter enters once EntranceStatus becomes nonzero; hut action={:?}, clonk position={:?}, commands={:?}",
+        hut_after_open.action,
+        clonk_after_open.position,
+        clonk_after_open.command_stack.command_names(),
+    );
 }
 
 #[test]

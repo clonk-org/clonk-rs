@@ -24392,6 +24392,10 @@ impl EffectHostContext {
                     ocf: scope
                         .map(|scope| scope.staged_ocf(object.ocf))
                         .unwrap_or(object.ocf),
+                    entrance_status: scope
+                        .and_then(|scope| scope.pending_update.entrance_status)
+                        .or_else(|| object.full_state().map(|state| state.entrance_status))
+                        .unwrap_or(false),
                     collectible: object.collectible,
                     contact,
                     action_time: scope

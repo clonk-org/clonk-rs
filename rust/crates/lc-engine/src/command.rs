@@ -48,6 +48,9 @@ pub struct CommandObjectSnapshot {
     pub contents: Vec<ObjectId>,
     pub line_connect: u32,
     pub ocf: u32,
+    /// C4Object::EntranceStatus, consulted separately from OCF_Entrance by
+    /// C4Command::Enter (C4Command.cpp:600-609).
+    pub entrance_status: bool,
     pub collectible: bool,
     /// Live vertex-contact bits (C4Object::t_contact equivalent; CNAT_*).
     pub contact: u32,
@@ -266,6 +269,7 @@ mod tests {
             contents: Vec::new(),
             line_connect: 0,
             ocf: ocf::AVAILABLE,
+            entrance_status: false,
             collectible: false,
         }
     }
@@ -2182,6 +2186,7 @@ mod tests {
         // the target's absolute shape (C4Command.cpp:586-588).
         target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
         target.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+        target.entrance_status = true;
         target.category = CATEGORY_STRUCTURE;
 
         let mut objects = HashMap::new();
@@ -8438,6 +8443,18 @@ impl EnterState {
         // C4Command.cpp:586-588).
         if target_snapshot.at_point(ctx.position.x, ctx.position.y) {
             let mut update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+            if !target_snapshot.entrance_status {
+                let event = CommandEvent::CallObjectFunction {
+                    object_id: self.target,
+                    function: "ActivateEntrance".into(),
+                    caller: ctx.object.id,
+                    tx: None,
+                    ty: None,
+                    target2: None,
+                    on_result: None,
+                };
+                return CommandStepResult::running(Some(update)).with_events(vec![event]);
+            }
             update.container = Some(Some(self.target));
             update.position = Some(target_snapshot.position);
             update.velocity = Some(Vector2::ZERO);

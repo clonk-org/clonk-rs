@@ -2504,6 +2504,9 @@ impl ObjectState {
         if let Some(alive) = delta.alive {
             self.alive = alive;
         }
+        if let Some(entrance_status) = delta.entrance_status {
+            self.entrance_status = entrance_status;
+        }
         if let Some(status) = delta.status {
             self.status = status;
         }
@@ -2607,6 +2610,7 @@ struct ObjectDelta {
     selected: Option<bool>,
     crew_disabled: Option<bool>,
     alive: Option<bool>,
+    entrance_status: Option<bool>,
     container: Option<Option<ObjectId>>,
     /// Direct overwrite of the current `C4Object::Shape` vertex list. Unlike
     /// `vertices`, this does not enable `fOwnVertices` or replace the
@@ -2718,6 +2722,9 @@ impl ObjectDelta {
         if let Some(alive) = update.alive {
             self.alive = Some(alive);
         }
+        if let Some(entrance_status) = update.entrance_status {
+            self.entrance_status = Some(entrance_status);
+        }
         if let Some(container) = update.container {
             self.container = Some(container);
         }
@@ -2794,6 +2801,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             solid_mask_override: update.solid_mask_override,
             menu: update.menu,
             alive: update.alive,
+            entrance_status: update.entrance_status,
             container: update.container,
             live_vertices: update.live_vertices,
             vertices: update.vertices,
@@ -3173,6 +3181,7 @@ impl ObjectUpdate {
             && self.crew_member.is_none()
             && self.selected.is_none()
             && self.alive.is_none()
+            && self.entrance_status.is_none()
             && self.container.is_none()
             && self.live_vertices.is_none()
             && self.vertices.is_none()
@@ -15935,6 +15944,7 @@ impl Engine {
             contents: object.state.contents.clone(),
             line_connect,
             ocf: object.state.ocf,
+            entrance_status: object.state.entrance_status,
             collectible,
         }
     }
@@ -16176,6 +16186,7 @@ impl Engine {
                     contents: object.state.contents.clone(),
                     line_connect,
                     ocf,
+                    entrance_status: object.state.entrance_status,
                     collectible,
                 },
             );
@@ -17226,6 +17237,7 @@ impl Engine {
                     contents: self.objects[idx].state.contents.clone(),
                     line_connect,
                     ocf,
+                    entrance_status: self.objects[idx].state.entrance_status,
                     collectible,
                 },
             );
