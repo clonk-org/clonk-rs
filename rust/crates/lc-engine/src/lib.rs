@@ -9176,6 +9176,7 @@ impl ScenarioScript {
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
         network_game: bool,
         engine_next_object_id: u64,
+        scenario_script_counter: i32,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng, Option<EngineError>), EngineError> {
         if !self.has_initialize {
             return Ok((ScenarioBatch::default(), audio, rng, None));
@@ -9202,6 +9203,7 @@ impl ScenarioScript {
             definition_metadata,
             network_game,
             engine_next_object_id,
+            scenario_script_counter,
         )
     }
 
@@ -9221,6 +9223,7 @@ impl ScenarioScript {
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
         network_game: bool,
         engine_next_object_id: u64,
+        scenario_script_counter: i32,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_step {
             return Ok((ScenarioBatch::default(), audio, rng));
@@ -9249,6 +9252,7 @@ impl ScenarioScript {
             definition_metadata,
             network_game,
             engine_next_object_id,
+            scenario_script_counter,
         ) {
             Ok((batch, audio, rng, None)) => Ok((batch, audio, rng)),
             // Strict wrappers surface the script error (fixtures assert
@@ -9279,6 +9283,7 @@ impl ScenarioScript {
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
         network_game: bool,
         engine_next_object_id: u64,
+        scenario_script_counter: i32,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng, Option<EngineError>), EngineError> {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
@@ -9298,7 +9303,8 @@ impl ScenarioScript {
             .with_definition_metadata(definition_metadata)
             .with_particle_defs(particle_defs)
             .with_definition_scripts(definition_scripts)
-            .with_network_game(network_game);
+            .with_network_game(network_game)
+            .with_scenario_script_counter(scenario_script_counter);
         let next_object_id = world.next_object_id().max(engine_next_object_id);
         let world = world.with_next_object_id(next_object_id);
         let audio_guard = enter_audio_context(audio);
@@ -13066,6 +13072,7 @@ impl Engine {
                 .map(ScenarioScript::script_arc),
         )
         .with_network_game(self.network_game)
+        .with_scenario_script_counter(self.scenario_script_counter)
         .with_command_settings(self.frame, self.base_buy_enabled, self.base_sell_enabled)
         .with_structures_need_energy(self.structures_need_energy)
         .with_crew_name_sources(
@@ -13238,6 +13245,7 @@ impl Engine {
         let definition_metadata_table = self.definition_metadata_table();
         let network_game = self.network_game;
         let next_object_id = self.next_object_id;
+        let scenario_script_counter = self.scenario_script_counter;
         let Some(script) = self.scenario_script.as_mut() else {
             return Ok(Vec::new());
         };
@@ -13254,6 +13262,7 @@ impl Engine {
             definition_metadata_table,
             network_game,
             next_object_id,
+            scenario_script_counter,
         )?;
         // Initialize is a game call: a script error logs and the scenario
         // still runs WITH its script installed (C++ fail-safe exec,
@@ -13358,6 +13367,7 @@ impl Engine {
         let definition_metadata_for_call = self.definition_metadata_table();
         let network_game = self.network_game;
         let engine_next_object_id = self.next_object_id;
+        let scenario_script_counter = self.scenario_script_counter;
         let script = match self.scenario_script.as_mut() {
             Some(script) if script.has_function(function) => script,
             Some(_) => return Ok(()),
@@ -13378,6 +13388,7 @@ impl Engine {
             definition_metadata_for_call,
             network_game,
             engine_next_object_id,
+            scenario_script_counter,
         )?;
         self.rng = new_rng;
         self.audio_registry = audio_state;
@@ -15575,6 +15586,7 @@ impl Engine {
             let definition_metadata_table = self.definition_metadata_table();
             let network_game = self.network_game;
             let engine_next_object_id = self.next_object_id;
+            let scenario_script_counter = self.scenario_script_counter;
             let (batch, audio_state, new_rng) = {
                 let definition_scripts = self.definition_script_table();
                 let script = self
@@ -15595,6 +15607,7 @@ impl Engine {
                     definition_metadata_table.clone(),
                     network_game,
                     engine_next_object_id,
+                    scenario_script_counter,
                 )?
             };
             self.rng = new_rng;

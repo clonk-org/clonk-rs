@@ -551,6 +551,9 @@ pub(crate) struct HostWorldContext {
     /// `Game.NetworkActive` session during parameter setup
     /// (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// Live `Game.Script.Counter`. C4GameScriptHost::Execute increments it
+    /// before entering ScriptN, and ScriptCounter() observes that increment.
+    scenario_script_counter: i32,
     /// C4RULE_StructuresNeedEnergy (Game.Rules; FnEnergyCheck gates on
     /// it, C4Script.cpp:1845-1856).
     structures_need_energy: bool,
@@ -603,6 +606,7 @@ impl Default for HostWorldContext {
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
             network_game: false,
+            scenario_script_counter: 0,
             structures_need_energy: false,
             standard_name_newlines: 0,
             idle_crew_counts: RefCell::new(HashMap::new()),
@@ -757,6 +761,7 @@ impl HostWorldContext {
             next_object_id,
             team_home_base_rule,
             network_game: false,
+            scenario_script_counter: 0,
             structures_need_energy: false,
             standard_name_newlines: 0,
             idle_crew_counts: RefCell::new(HashMap::new()),
@@ -780,6 +785,15 @@ impl HostWorldContext {
     pub(crate) fn with_network_game(mut self, network_game: bool) -> Self {
         self.network_game = network_game;
         self
+    }
+
+    pub(crate) fn with_scenario_script_counter(mut self, counter: i32) -> Self {
+        self.scenario_script_counter = counter;
+        self
+    }
+
+    pub(crate) fn scenario_script_counter(&self) -> i32 {
+        self.scenario_script_counter
     }
 
     pub(crate) fn network_game(&self) -> bool {
@@ -5606,6 +5620,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DigFreeRect", dig_free_rect);
     script.register_host_function("FreeRect", free_rect);
     script.register_host_function("ScriptGo", script_go);
+    script.register_host_function("ScriptCounter", script_counter);
     script.register_host_function("goto", script_goto);
     script.register_host_function("BlastFree", blast_free);
     script.register_host_function("BlastObject", blast_object);
@@ -13992,6 +14007,24 @@ fn script_go(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnScriptCounter (C4Script.cpp:3616-3619): zero-argument getter for the
+/// live scenario counter. C4GameScriptHost::Execute has already incremented
+/// it before entering ScriptN (C4ScriptHost.cpp:222-232), and a preceding
+/// goto() in this same VM call is immediately visible.
+fn script_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Int(0));
+        };
+        Ok(Value::Int(
+            context
+                .script_counter_request
+                .unwrap_or(context.scenario_script_counter),
+        ))
+    })
+}
+
 /// Fn_goto (C4Script.cpp:225-229): synchronously replaces
 /// `Game.Script.Counter` and returns the assigned integer. The current
 /// C4GameScriptHost pulse has already post-incremented the counter before it
@@ -21727,6 +21760,7 @@ struct EffectHostContext {
     next_object_id: u64,
     trigger_game_over: bool,
     script_go_request: Option<bool>,
+    scenario_script_counter: i32,
     script_counter_request: Option<i32>,
     game_over_triggered: bool,
     /// Saved `object` scopes of in-flight nested calls, one per nesting
@@ -21758,6 +21792,7 @@ impl EffectHostContext {
         game_over_triggered: bool,
     ) -> Self {
         let team_home_base_rule = world.team_home_base_rule();
+        let scenario_script_counter = world.scenario_script_counter();
         let mut object = object.map(|ctx| {
             let HostObjectContext {
                 id,
@@ -21885,6 +21920,7 @@ impl EffectHostContext {
             next_object_id,
             trigger_game_over: false,
             script_go_request: None,
+            scenario_script_counter,
             script_counter_request: None,
             game_over_triggered,
             dormant_scopes: Vec::new(),
@@ -24540,6 +24576,7 @@ mod tests {
         "ResetGamma",
         "ResetPhysical",
         "SEqual",
+        "ScriptCounter",
         "ScriptGo",
         "SelectMenuItem",
         "SetAction",
