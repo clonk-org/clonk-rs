@@ -9146,6 +9146,7 @@ impl GameApp {
             match action {
                 OptionsDlgAction::Back => self.close_options_menu(),
                 OptionsDlgAction::SheetChanged(_) => self.play_ui_sound("Command"),
+                OptionsDlgAction::ShowLogTimestampsChanged(_) => {}
             }
         }
         Ok(())

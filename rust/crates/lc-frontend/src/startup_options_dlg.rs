@@ -721,6 +721,8 @@ pub enum OptionsDlgAction {
     Back,
     /// User-selected tab (`Tabular::SelectionChanged(true)`).
     SheetChanged(OptionsSheet),
+    /// `BoolConfig::OnCheckChange` updated `Config.General.ShowLogTimestamps`.
+    ShowLogTimestampsChanged(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
