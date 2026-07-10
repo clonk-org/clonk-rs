@@ -35,7 +35,7 @@ const DETAIL_FONT_SIZE: f32 = 14.0;
 const MODE_HINT: &str = "Press ←/→ to switch menus";
 const CLASSIC_ITEM_SIZE: i32 = 35;
 const CLASSIC_FRAME_WIDTH: i32 = 2;
-const CLASSIC_COMMAND_HEIGHT: i32 = 16;
+const CLASSIC_COMMAND_HEIGHT: i32 = CLASSIC_ITEM_SIZE;
 const CLASSIC_TITLE_HEIGHT: i32 = 23;
 const CLASSIC_BG_ALPHA: u8 = 255 - 0x5f;
 const CLASSIC_SELECTION_COLOR: Color = Color::opaque(0xc8, 0, 0);
@@ -1980,6 +1980,32 @@ mod tests {
             ..IngameMenuGraphics::default()
         };
         let icons = vec![None, None];
+        // DrawMenuControls reserves one full C4MN_SymbolSize (35px) below
+        // the item grid (src/C4Menu.h:35,262), and C4Menu::DrawElement uses
+        // that complete strip for its square command cells
+        // (src/C4Menu.cpp:843-880). InitSize includes the strip in the menu
+        // bounds before bottom alignment (src/C4Menu.cpp:755-777).
+        let layout = engine_script_menu_layout(
+            Rect::new(0, 0, 640, 480),
+            hud_font.line_height(),
+            &menu,
+            true,
+        );
+        assert_eq!(CLASSIC_COMMAND_HEIGHT, CLASSIC_ITEM_SIZE);
+        assert_eq!(layout.bounds, Rect::new(391, 350, 179, 95));
+        assert_eq!(layout.item_rect(0), Some(Rect::new(393, 373, 35, 35)));
+        assert_eq!(
+            engine_script_menu_pointer_target(
+                Rect::new(0, 0, 640, 480),
+                hud_font.line_height(),
+                &menu,
+                true,
+                true,
+                GuiPoint::new(411.0, 374.0),
+            ),
+            Some(EngineScriptMenuPointerTarget::Item(0)),
+            "pointer hit cells must move with the C++-sized command strip"
+        );
         let mut surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
         render_engine_script_menu(
             &mut surface,
@@ -1996,18 +2022,19 @@ mod tests {
         );
 
         // Normal style is always a five-column 35px icon grid. With the
-        // 23px wooden title, 16px command bar and 2px frame, this two-item
-        // menu is 179x76 and aligns Right|Bottom at (391,369) in 640x480
-        // (C4Menu.cpp:642-762). Item 1 starts at client (428,392), and the
+        // 23px wooden title, 35px command bar and 2px frame, this two-item
+        // menu is 179x95 and aligns Right|Bottom at (391,350) in 640x480
+        // (C4Menu.h:262; C4Menu.cpp:642-777). Item 1 starts at client
+        // (428,373), and the
         // selected cell is filled with palette CRed (#c80000) before its
         // icon is drawn (C4Menu.cpp:147-154).
         assert_eq!(
-            surface.get_pixel(429, 393).expect("selected cell pixel"),
+            surface.get_pixel(429, 374).expect("selected cell pixel"),
             Color::opaque(0xc8, 0, 0),
             "script menus must use the C++ five-column icon-grid geometry"
         );
         assert_eq!(
-            surface.get_pixel(558, 381).expect("close icon pixel"),
+            surface.get_pixel(558, 362).expect("close icon pixel"),
             Color::opaque(17, 238, 51),
             "mouse-controlled C4Menu title bars show Ico_Close at their top-right corner"
         );
@@ -2018,7 +2045,7 @@ mod tests {
                 &menu,
                 true,
                 true,
-                GuiPoint::new(558.0, 381.0),
+                GuiPoint::new(558.0, 362.0),
             ),
             Some(EngineScriptMenuPointerTarget::Close)
         );
