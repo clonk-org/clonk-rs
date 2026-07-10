@@ -942,7 +942,7 @@ impl Scenario {
             // C4Weather::Init runs at the END of C4Game::InitGame after
             // Landscape.ScenarioInit's Gravity draw and the placements
             // (C4Game.cpp:2507).
-            engine.apply_weather_init(weather_init);
+            engine.apply_weather_init(weather_init)?;
         }
 
         // C4Game::Init tail: SyncClearance + Synchronize AFTER InitGame,

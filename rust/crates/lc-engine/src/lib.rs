@@ -24670,8 +24670,8 @@ impl Engine {
     /// synced-RNG init draws in exact order — Season, YearSpeed, Climate
     /// (100 - value - 50), Wind (= TargetWind), the NoInitialize-gated
     /// rain block (the gate Rain.Evaluate plus per-cloud
-    /// Random(320)/Random(GBackWdt)/Rain.Evaluate; LaunchCloud object
-    /// creation is NOT modeled yet), Lightning, then the Disasters
+    /// Random(320)/Random(GBackWdt)/Rain.Evaluate and LaunchCloud),
+    /// Lightning, then the Disasters
     /// (Meteorite/Volcano/Earthquake). Replaying these keeps the whole
     /// ledger aligned with C++ from frame 0.
     /// C4Landscape::ScenarioInit's Gravity draw (C4Landscape.cpp:66):
@@ -24684,11 +24684,27 @@ impl Engine {
         gravity.evaluate(&mut self.rng)
     }
 
-    pub(crate) fn apply_weather_init(&mut self, init: &crate::scenario::LegacyWeatherInit) {
+    pub(crate) fn apply_weather_init(
+        &mut self,
+        init: &crate::scenario::LegacyWeatherInit,
+    ) -> Result<(), EngineError> {
         let season = init.season.evaluate(&mut self.rng);
         let year_speed = init.year_speed.evaluate(&mut self.rng);
         let climate = 100 - init.climate.evaluate(&mut self.rng) - 50;
         let wind = init.wind.evaluate(&mut self.rng);
+        // Evaluate already applies the scenario C4SVal bounds; C++ stores
+        // those results directly without another hard-coded clamp.
+        // These assignments precede LaunchCloud in C++ and are observable
+        // from FXP1's synchronous Activate -> Movement callback through
+        // GetWind/GetTemperature (C4Weather.cpp:40-48,55-58).
+        self.environment.season = season;
+        self.environment.season_min = init.season.min;
+        self.environment.season_max = init.season.max;
+        self.environment.year_speed = year_speed;
+        self.environment.climate = climate;
+        self.environment.temperature = climate;
+        self.environment.wind = wind;
+        self.environment.wind_target = wind;
         if !init.no_initialize {
             let rain = init.rain.evaluate(&mut self.rng);
             if rain != 0 {
@@ -24699,16 +24715,17 @@ impl Engine {
                     .unwrap_or(0);
                 let clouds = (width / 500).min(5);
                 for _ in 0..clouds.max(0) {
-                    let _width = width / 15 + self.rng.random(320);
-                    let _x = self.rng.random(width.max(1));
-                    let _strength = init.rain.evaluate(&mut self.rng);
-                    // LaunchCloud (C4Weather.cpp:104+) is not modeled —
-                    // only its ledger draws are replayed.
+                    let cloud_width = width / 15 + self.rng.random(320);
+                    let x = self.rng.random(width.max(1));
+                    let strength = init.rain.evaluate(&mut self.rng);
+                    let _ = self.launch_cloud(
+                        x,
+                        -1,
+                        cloud_width,
+                        strength,
+                        &init.precipitation,
+                    )?;
                 }
-                tracing::warn!(
-                    clouds,
-                    "weather-init rain clouds: ledger draws replayed, LaunchCloud objects not modeled"
-                );
             }
             self.environment.precipitation = rain.clamp(0, 100) as u8 as i32;
         }
@@ -24717,21 +24734,52 @@ impl Engine {
         let volcano = init.volcano.evaluate(&mut self.rng);
         let earthquake = init.earthquake.evaluate(&mut self.rng);
 
-        // C4Weather::Init (C4Weather.cpp:41) assigns the Evaluate result
-        // directly — StartSeason.Evaluate() is already bounded by the
-        // scenario C4SVal Min/Max, and those bounds drive Execute's wrap.
-        self.environment.season = season;
-        self.environment.season_min = init.season.min;
-        self.environment.season_max = init.season.max;
-        self.environment.year_speed = year_speed;
-        self.environment.climate = climate;
-        self.environment.temperature = climate;
-        self.environment.wind = wind;
-        self.environment.wind_target = wind;
         self.environment.lightning = lightning;
         self.environment.meteorite = meteorite;
         self.environment.volcano = volcano;
         self.environment.earthquake = earthquake;
+        Ok(())
+    }
+
+    /// C4Weather::LaunchCloud (C4Weather.cpp:205-215): resolve the
+    /// precipitation material before object creation, create FXP1 with
+    /// NO_OWNER at the requested point, and call Activate(mat,width,strength).
+    /// The object remains alive even when Activate is missing or false.
+    fn launch_cloud(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: i32,
+        strength: i32,
+        precipitation: &str,
+    ) -> Result<bool, EngineError> {
+        const PRECIPITATION_DEFINITION: &str = "FXP1";
+        let Some(material) = self.materials.id_of(precipitation) else {
+            return Ok(false);
+        };
+        if !self.definitions.contains_key(PRECIPITATION_DEFINITION) {
+            return Ok(false);
+        }
+        let cloud_id = self.spawn_object(
+            SpawnConfig::new(PRECIPITATION_DEFINITION)
+                .with_position(Vector2::new(x, y))
+                .with_owner(OWNER_NONE),
+        )?;
+        let Some(index) = self.find_object_index(cloud_id) else {
+            return Ok(false);
+        };
+        let value = tolerate_script_error(self.call_object_function(
+            index,
+            "Activate",
+            vec![
+                Value::Int(material.index() as i32),
+                Value::Int(width),
+                Value::Int(strength),
+            ],
+        ))?;
+        Ok(value
+            .as_ref()
+            .is_some_and(compat::value_raw_truthy))
     }
 
     /// Debug/test helper: (definition, action name, phase, position, fix)
@@ -42808,7 +42856,9 @@ protected func Activity() { SetActionTargets(); return(1); }
             earthquake: flat(0),
             no_initialize: true,
         };
-        engine.apply_weather_init(&init);
+        engine
+            .apply_weather_init(&init)
+            .expect("weather init applies");
         assert_eq!(engine.environment.season, 120);
         assert_eq!(
             (
@@ -42817,6 +42867,172 @@ protected func Activity() { SetActionTargets(); return(1); }
             ),
             (110, 130)
         );
+    }
+
+    fn test_precipitation_definition() -> Definition {
+        let script = r#"#strict
+local iMat, iLength, iStrength, iMovement;
+
+func Movement()
+{
+    iMovement++;
+    SetXDir(BoundBy(GetWind(0, 3), -100, 100));
+    if (GetX() > LandscapeWidth() - 20) SetPosition(25, -1);
+    if (GetX() < 20) SetPosition(LandscapeWidth() - 25, -1);
+}
+
+func Activate(inMat, inLength, inStrength)
+{
+    SetAction("Process");
+    iMat = inMat;
+    iLength = inLength;
+    iStrength = inStrength;
+    return(1);
+}
+"#;
+        let mut definition =
+            Definition::from_script("FXP1", "Precipitation", script).expect("cloud compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_category(CATEGORY_VEHICLE);
+        definition.set_mass(1);
+        definition.set_shape_rect(Some(DefinitionRect::new(-50, 0, 100, 1)));
+        definition.configure_actions(
+            None,
+            HashMap::from([(
+                "Process".to_string(),
+                ActionSpec::default()
+                    .with_procedure("FLOAT")
+                    .with_length(15)
+                    .with_delay(2)
+                    .with_next("Process")
+                    .with_start_call("Movement"),
+            )]),
+        );
+        definition
+    }
+
+    fn fixed_weather_init(
+        rain: i32,
+        wind: i32,
+        precipitation: &str,
+    ) -> crate::scenario::LegacyWeatherInit {
+        let flat = |value: i32| crate::scenario::LegacyC4SVal::new(value, 0, -100, 100);
+        crate::scenario::LegacyWeatherInit {
+            season: flat(50),
+            year_speed: flat(0),
+            climate: flat(50),
+            wind: flat(wind),
+            rain: flat(rain),
+            precipitation: precipitation.to_string(),
+            lightning: flat(0),
+            meteorite: flat(0),
+            volcano: flat(0),
+            earthquake: flat(0),
+            no_initialize: false,
+        }
+    }
+
+    #[test]
+    fn weather_init_launches_cpp_precipitation_objects_in_draw_order() {
+        // C4Weather::Init evaluates Rain once as a gate, then for every
+        // min(GBackWdt/500, 5) cloud draws Random(320), Random(GBackWdt),
+        // and Rain.Evaluate before LaunchCloud (C4Weather.cpp:48-58).
+        // LaunchCloud creates FXP1 at (x,-1), NO_OWNER/full-con, then calls
+        // Activate(material,width,strength) (:205-214). FXP1 Activate sets
+        // Process synchronously; its StartCall Movement sets xdir before
+        // the three locals are assigned (Precipitation.c4d Script.c/ActMap).
+        let materials = MaterialSet::from_resource_library(
+            &MaterialLibrary::parse("[Material]\nName=Water\nDensity=50\n")
+                .expect("water parses"),
+        );
+        let water = materials.id_of("Water").expect("water exists");
+        let mut engine = Engine::with_seed(17);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat(1_100, 100));
+        engine
+            .register_definition(test_precipitation_definition())
+            .expect("cloud registers");
+        let init = fixed_weather_init(77, 37, "Water");
+
+        let mut mirror = engine.rng.clone();
+        let _season = init.season.evaluate(&mut mirror);
+        let _year_speed = init.year_speed.evaluate(&mut mirror);
+        let _climate = init.climate.evaluate(&mut mirror);
+        let _wind = init.wind.evaluate(&mut mirror);
+        let _rain_gate = init.rain.evaluate(&mut mirror);
+        let mut expected = Vec::new();
+        for _ in 0..2 {
+            let width = 1_100 / 15 + mirror.random(320);
+            let x = mirror.random(1_100);
+            let strength = init.rain.evaluate(&mut mirror);
+            expected.push((x, width, strength));
+        }
+        let _lightning = init.lightning.evaluate(&mut mirror);
+        let _meteorite = init.meteorite.evaluate(&mut mirror);
+        let _volcano = init.volcano.evaluate(&mut mirror);
+        let _earthquake = init.earthquake.evaluate(&mut mirror);
+
+        engine
+            .apply_weather_init(&init)
+            .expect("weather init applies");
+
+        assert_eq!(engine.rng, mirror, "LaunchCloud adds no RNG draws");
+        let clouds: Vec<_> = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "FXP1")
+            .collect();
+        assert_eq!(clouds.len(), 2, "GBackWdt 1100 launches two clouds");
+        for (cloud, (x, width, strength)) in clouds.into_iter().zip(expected) {
+            assert_eq!(cloud.state.position, Vector2::new(x, -2));
+            assert_eq!(cloud.state.owner, OWNER_NONE);
+            assert_eq!(cloud.state.controller, OWNER_NONE);
+            assert_eq!(cloud.state.category, CATEGORY_VEHICLE);
+            assert_eq!(cloud.state.construction, FULL_CON);
+            assert_eq!(cloud.state.status, ObjectStatus::Normal);
+            assert_eq!(cloud.state.action.name, "Process");
+            assert_eq!((cloud.state.action.phase, cloud.state.action.ticks), (0, 0));
+            assert_eq!(
+                cloud.state.local_vars.get("iMat"),
+                Some(&Value::Int(water.index() as i32))
+            );
+            assert_eq!(
+                cloud.state.local_vars.get("iLength"),
+                Some(&Value::Int(width))
+            );
+            assert_eq!(
+                cloud.state.local_vars.get("iStrength"),
+                Some(&Value::Int(strength))
+            );
+            assert_eq!(
+                cloud.state.local_vars.get("iMovement"),
+                Some(&Value::Int(1))
+            );
+            assert_eq!(cloud.fixed_velocity.x, math::fixed10(37));
+            assert_eq!(cloud.fixed_velocity.y, C4Fixed::ZERO);
+            assert!(cloud.state.mobile, "SetXDir mobilizes the cloud");
+        }
+    }
+
+    #[test]
+    fn weather_init_missing_precipitation_material_consumes_draws_without_spawning() {
+        // LaunchCloud resolves the material before CreateObject and returns
+        // false for MNone (C4Weather.cpp:205-208). Its argument draws have
+        // already happened, but no object number is consumed.
+        let mut engine = Engine::with_seed(17);
+        engine.set_landscape(Landscape::flat(1_100, 100));
+        engine
+            .register_definition(test_precipitation_definition())
+            .expect("cloud registers");
+        let init = fixed_weather_init(77, 37, "MissingRain");
+        let before_number = engine.next_object_id;
+
+        engine
+            .apply_weather_init(&init)
+            .expect("weather init applies");
+
+        assert!(engine.objects.is_empty());
+        assert_eq!(engine.next_object_id, before_number);
     }
 
     #[test]
