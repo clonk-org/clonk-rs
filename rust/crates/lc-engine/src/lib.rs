@@ -26012,6 +26012,7 @@ impl Engine {
         // Loaded objects (Objects.txt / savegame) skip both: C4GameObjects::Load
         // (C4GameObjects.cpp:535-618) never fires construction callbacks.
         if !loaded
+            && !initialized
             && self
                 .definitions
                 .get(&definition_id)
@@ -40135,6 +40136,364 @@ func Trigger() {
             "RemoveEffect right after CreateObject killed it - and \
              materialization must NOT re-run Initialize (no second Life)"
         );
+    }
+
+    #[test]
+    fn cast_objects_matches_cpp_rng_spawn_state_and_completion_order() {
+        // FnCastObjects -> C4Game::CastObjects (C4Script.cpp:2476-2480,
+        // C4Game.cpp:1727-1739): each object draws rdir, ydir, xdir, then
+        // rotation before CreateObject runs its synchronous callbacks.
+        let caller_script = r#"#strict
+local result;
+func Burst() {
+    result = CastObjects(SPRK, 2, 7, 3, -4);
+    return(1);
+}
+"#;
+        let spark_script = r#"#strict
+local iConstructed, iCompleted, pConstructedBy;
+local iConstructionCon, iConstructionY, bConstructionAlive;
+local iCompletionCon, iCompletionY, iCompletionR, iCompletionRDir;
+local iInitialized;
+protected func Construction(object pCreator) {
+    iConstructed++;
+    pConstructedBy = pCreator;
+    iConstructionCon = GetCon();
+    iConstructionY = GetY();
+    bConstructionAlive = GetAlive();
+    return(1);
+}
+protected func Completion() {
+    iCompletionCon = GetCon();
+    iCompletionY = GetY();
+    iCompletionR = GetR();
+    iCompletionRDir = GetRDir(100);
+    iCompleted = Random(100);
+    SetAction("Sparkle");
+    return(1);
+}
+protected func Initialize() {
+    iInitialized = 1;
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let mut spark =
+            Definition::from_script("SPRK", "Spark", spark_script).expect("spark compiles");
+        spark.set_shape_rect(Some(DefinitionRect::new(-2, -2, 5, 5)));
+        spark.set_stretch_growth(true);
+        spark.configure_actions(
+            None,
+            HashMap::from([(
+                "Sparkle".to_string(),
+                ActionSpec::default().with_delay(1),
+            )]),
+        );
+        engine.register_definition(spark).expect("spark registers");
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(100, 200))
+                    .with_owner(2)
+                    .with_controller(3),
+            )
+            .expect("caller spawns");
+
+        let mut mirror = engine.rng.clone();
+        let mut expected = Vec::new();
+        for _ in 0..2 {
+            let _sampled_rdir = math::itofix(mirror.random(3) + 1);
+            let ydir = math::fixed10(mirror.random(15) - 7);
+            let xdir = math::fixed10(mirror.random(15) - 7);
+            let _sampled_rotation = mirror.random(360);
+            let completion_random = mirror.random(100);
+            expected.push((xdir, ydir, completion_random));
+        }
+
+        let index = engine.find_object_index(caller).expect("caller exists");
+        engine
+            .call_object_function(index, "Burst", Vec::new())
+            .expect("cast runs");
+
+        assert_eq!(engine.rng, mirror, "callbacks interleave with cast draws");
+        assert_eq!(
+            engine.object_snapshot(caller).expect("caller remains").local_vars["result"],
+            Value::Nil,
+            "void FnCastObjects returns nil"
+        );
+        let mut sparks: Vec<&Object> = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "SPRK")
+            .collect();
+        sparks.sort_by_key(|object| object.id);
+        assert_eq!(sparks.len(), 2);
+        for (spark, (xdir, ydir, completion_random)) in sparks.into_iter().zip(expected) {
+            assert_eq!(spark.state.position, Vector2::new(103, 193));
+            assert_eq!(
+                spark.fixed_position,
+                FixedVec2::from_ints(103, 193),
+                "Completion's SetAction resyncs fix_y to the adjusted integer y"
+            );
+            assert_eq!(spark.state.owner, 2);
+            assert_eq!(spark.state.controller, 3);
+            assert_eq!(spark.state.rotation, 0, "non-rotateable Init clears r");
+            assert_eq!(spark.fixed_velocity, FixedVec2::new(xdir, ydir));
+            assert_eq!(
+                spark.rotation_velocity,
+                C4Fixed::ZERO,
+                "non-rotateable Init clears rdir"
+            );
+            assert_eq!(spark.state.action.name, "Sparkle");
+            assert_eq!(
+                spark.state.local_vars.get("iConstructed"),
+                Some(&Value::Int(1)),
+                "Construction runs once, synchronously"
+            );
+            assert_eq!(
+                spark.state.local_vars.get("pConstructedBy"),
+                Some(&Value::Object(caller.as_u64())),
+                "Construction receives the creator"
+            );
+            assert_eq!(
+                spark.state.local_vars.get("iConstructionCon"),
+                Some(&Value::Int(0)),
+                "Construction runs before initial DoCon"
+            );
+            assert_eq!(
+                spark.state.local_vars.get("iConstructionY"),
+                Some(&Value::Int(196)),
+                "Construction sees the raw Init center"
+            );
+            assert_eq!(
+                spark.state.local_vars.get("bConstructionAlive"),
+                Some(&Value::Bool(false)),
+                "Init only marks living definitions alive"
+            );
+            assert_eq!(
+                spark.state.local_vars.get("iCompletionCon"),
+                Some(&Value::Int(100)),
+                "Completion follows initial DoCon"
+            );
+            assert_eq!(
+                spark.state.local_vars.get("iCompletionY"),
+                Some(&Value::Int(193)),
+                "Completion sees the bottom-adjusted center"
+            );
+            assert_eq!(
+                spark.state.local_vars.get("iCompletionR"),
+                Some(&Value::Int(0)),
+                "Completion observes the post-Init rotation"
+            );
+            assert_eq!(
+                spark.state.local_vars.get("iCompletionRDir"),
+                Some(&Value::Int(0)),
+                "Completion observes the post-Init rdir"
+            );
+            assert_eq!(
+                spark.state.local_vars.get("iCompleted"),
+                Some(&Value::Int(completion_random))
+            );
+            assert_eq!(
+                spark.state.local_vars.get("iInitialized"),
+                Some(&Value::Int(1)),
+                "Initialize follows Completion exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn cast_objects_missing_definition_consumes_draws_but_no_object_number() {
+        // C4Game::CastObjects draws before CreateObject performs C4Id2Def
+        // (C4Game.cpp:1727-1739; C4Game.cpp:1142-1148). Zero amount is an
+        // empty loop; failed attempts consume RNG but no enumeration id.
+        let script = r#"#strict
+func Burst() {
+    CastObjects(MISS, 0, 5);
+    CastObjects(MISS, 2, 5);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(29);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let next_object_id = engine.next_object_id;
+        let mut mirror = engine.rng.clone();
+        for _ in 0..2 {
+            let _ = mirror.random(3);
+            let _ = mirror.random(11);
+            let _ = mirror.random(11);
+            let _ = mirror.random(360);
+        }
+
+        let index = engine.find_object_index(caller).expect("caller exists");
+        engine
+            .call_object_function(index, "Burst", Vec::new())
+            .expect("failed casts remain silent");
+
+        assert_eq!(engine.rng, mirror);
+        assert_eq!(engine.next_object_id, next_object_id);
+        assert_eq!(engine.objects.len(), 1);
+    }
+
+    #[test]
+    fn cast_objects_rotateable_definition_uses_sampled_rotation_and_rdir() {
+        // C4Game::CastObjects passes all four sampled values into CreateObject;
+        // C4Object::Init preserves r/rdir when Rotateable is set
+        // (C4Game.cpp:1727-1739; C4Object.cpp:169-174).
+        let script = r#"#strict
+func Burst() {
+    CastObjects(ROTA, 1, 4, 0, 0);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(41);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let mut cast = Definition::from_script("ROTA", "Rotating", "").expect("cast compiles");
+        cast.set_rotateable(1);
+        engine.register_definition(cast).expect("cast registers");
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 20)),
+            )
+            .expect("caller spawns");
+        let mut mirror = engine.rng.clone();
+        let rdir = math::itofix(mirror.random(3) + 1);
+        let ydir = math::fixed10(mirror.random(9) - 4);
+        let xdir = math::fixed10(mirror.random(9) - 4);
+        let rotation = mirror.random(360);
+
+        let index = engine.find_object_index(caller).expect("caller exists");
+        engine
+            .call_object_function(index, "Burst", Vec::new())
+            .expect("cast runs");
+
+        let object = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "ROTA")
+            .expect("cast object exists");
+        assert_eq!(engine.rng, mirror);
+        assert_eq!(object.state.position, Vector2::new(10, 20));
+        assert_eq!(object.fixed_velocity, FixedVec2::new(xdir, ydir));
+        assert_eq!(object.state.rotation, rotation);
+        assert_eq!(object.rotation_velocity, rdir);
+    }
+
+    #[test]
+    fn cast_objects_initial_docon_preserves_fixed_position_without_resync() {
+        // Initial DoCon changes integer y after bottom growth but not fix_y
+        // (C4Object.cpp:1489-1495). No callback here performs a later
+        // SetAction/ForcePosition resync.
+        let script = r#"#strict
+func Burst() {
+    CastObjects(GROW, 1, 0, 3, -4);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(43);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let mut grow = Definition::from_script("GROW", "Growing", "").expect("grow compiles");
+        grow.set_shape_rect(Some(DefinitionRect::new(-2, -2, 5, 5)));
+        grow.set_stretch_growth(true);
+        engine.register_definition(grow).expect("grow registers");
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(100, 200)),
+            )
+            .expect("caller spawns");
+
+        let index = engine.find_object_index(caller).expect("caller exists");
+        engine
+            .call_object_function(index, "Burst", Vec::new())
+            .expect("cast runs");
+
+        let object = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GROW")
+            .expect("cast object exists");
+        assert_eq!(object.state.position, Vector2::new(103, 193));
+        assert_eq!(object.fixed_position, FixedVec2::from_ints(103, 196));
+    }
+
+    #[test]
+    fn cast_objects_completion_removal_suppresses_initialize() {
+        // Completion may remove the new object; the following Initialize
+        // dispatch then fails the C4Object::Call Status guard and consumes no
+        // RNG (C4Object.cpp:1506-1511, 2224-2227).
+        let caller_script = r#"#strict
+func Burst() {
+    CastObjects(GONE, 1, 0, 0, 0);
+    return(1);
+}
+"#;
+        let removed_script = r#"#strict
+protected func Completion() {
+    RemoveObject();
+    return(1);
+}
+protected func Initialize() {
+    Random(100);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(47);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("GONE", "Removed", removed_script)
+                    .expect("removed compiles"),
+            )
+            .expect("removed registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let next_object_id = engine.next_object_id;
+        let mut mirror = engine.rng.clone();
+        let _ = mirror.random(3);
+        let _ = mirror.random(1);
+        let _ = mirror.random(1);
+        let _ = mirror.random(360);
+
+        let index = engine.find_object_index(caller).expect("caller exists");
+        engine
+            .call_object_function(index, "Burst", Vec::new())
+            .expect("cast runs");
+
+        assert_eq!(engine.rng, mirror, "Initialize did not draw");
+        assert_eq!(engine.next_object_id, next_object_id + 1);
+        assert_eq!(engine.objects.len(), 1, "removed spawn never materializes");
     }
 
     // FnGetController (C4Script.cpp:1316-1320) reads C4Object::Controller,

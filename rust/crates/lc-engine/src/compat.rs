@@ -9,7 +9,9 @@ use crate::command::{
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::material::MaterialSet;
-use crate::math::{fixed100, fixtoi_prec, integer_distance, itofix, itofix_prec, C4Fixed, FixedVec2};
+use crate::math::{
+    fixed10, fixed100, fixtoi_prec, integer_distance, itofix, itofix_prec, C4Fixed, FixedVec2,
+};
 use crate::message::{
     MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_MULTIPLE,
     HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
@@ -4655,6 +4657,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetID", get_id);
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
+    script.register_host_function("CastObjects", cast_objects);
     script.register_host_function("CreateConstruction", create_construction);
     // FnFindConstructionSite (C4Script.cpp:1958-1981) — the caller-Var
     // staging seam behind the System.c4g FindConstructionSiteX wrapper.
@@ -14091,6 +14094,351 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
     created
 }
 
+fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
+    // FnCastObjects -> C4Game::CastObjects (C4Script.cpp:2476-2480,
+    // C4Game.cpp:1727-1739): every attempt draws rdir, ydir, xdir and
+    // rotation in that order, then creates the object synchronously.
+    if args.len() > 5 {
+        return Err(RuntimeError::new(
+            "CastObjects: additional arguments are not supported",
+        ));
+    }
+
+    let definition = match args.first().unwrap_or(&Value::Nil) {
+        Value::String(name) | Value::C4Id(name) if !name.is_empty() => Some(name.clone()),
+        Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => None,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "CastObjects: expected id for definition, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let amount = args
+        .get(1)
+        .map(|value| value_to_i32(value, "CastObjects", "amount"))
+        .transpose()?
+        .unwrap_or(0);
+    let level = args
+        .get(2)
+        .map(|value| value_to_i32(value, "CastObjects", "level"))
+        .transpose()?
+        .unwrap_or(0);
+    let x_offset = args
+        .get(3)
+        .map(|value| value_to_i32(value, "CastObjects", "x"))
+        .transpose()?
+        .unwrap_or(0);
+    let y_offset = args
+        .get(4)
+        .map(|value| value_to_i32(value, "CastObjects", "y"))
+        .transpose()?
+        .unwrap_or(0);
+
+    let (creator, base_position, owner, controller) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("CastObjects requires an active engine context"))?;
+        let creator = context.object_context().map(ObjectScopeContext::id);
+        let base_position = context
+            .object_context()
+            .map(ObjectScopeContext::effective_position)
+            .unwrap_or(Vector2::ZERO);
+        let owner = context
+            .object_context()
+            .map(ObjectScopeContext::owner)
+            .unwrap_or(OWNER_NONE);
+        let controller = context
+            .object_context()
+            .map(ObjectScopeContext::controller)
+            .unwrap_or(OWNER_NONE);
+        Ok((creator, base_position, owner, controller))
+    })?;
+
+    let spread = level.wrapping_mul(2).wrapping_add(1);
+    for _ in 0..amount {
+        // Force the C++ argument-evaluation order. Definition lookup happens
+        // only after these draws, so missing ids consume the same ledger.
+        let sampled_rdir = itofix(draw_context_random(3)? + 1);
+        let ydir = fixed10(draw_context_random(spread)?.wrapping_sub(level));
+        let xdir = fixed10(draw_context_random(spread)?.wrapping_sub(level));
+        let sampled_rotation = draw_context_random(360)?;
+
+        let Some(definition) = definition.as_ref() else {
+            continue;
+        };
+        let target = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let context = borrow.as_mut().ok_or_else(|| {
+                RuntimeError::new("CastObjects requires an active engine context")
+            })?;
+            if context.world.definition_known(definition) == Some(false) {
+                return Ok(None);
+            }
+
+            let metadata = context
+                .definition_metadata(definition)
+                .cloned()
+                .unwrap_or_else(|| DefinitionMetadata {
+                    name: String::new(),
+                    category: context
+                        .definition_category(definition)
+                        .unwrap_or(DEFAULT_CATEGORY),
+                    blit_mode: 0,
+                    ocf_base: ocf::NORMAL,
+                    crew_member: false,
+                    action_library: ActionLibrary::default(),
+                    value: 0,
+                    mass: 0,
+                    constructable: false,
+                    shape: None,
+                    construction_offset: 0,
+                    basement: 0,
+                    physical: PhysicalInfo::default(),
+                    components: Vec::new(),
+                    line_connect: 0,
+                    clonk_name_newlines: None,
+                    stretch_growth: false,
+                    rotateable: 0,
+                    line: 0,
+                    vertices: Vec::new(),
+                });
+            // C4Object::Init discards sampled rotation/rdir for definitions
+            // without Rotateable, after the synced draws already happened.
+            let (rotation, rdir) = if metadata.rotateable == 0 {
+                (0, C4Fixed::ZERO)
+            } else {
+                (sampled_rotation, sampled_rdir)
+            };
+            let fixed_velocity = FixedVec2::new(xdir, ydir);
+            let initial_controller = if controller > OWNER_NONE {
+                controller
+            } else {
+                owner
+            };
+            // Init reads pCreator->pLayer for every object; an earlier
+            // synchronous callback may have changed the creator's layer.
+            let creator_layer = creator.and_then(|id| context.object_layer(id));
+            let raw_position = Vector2::new(
+                base_position.x.saturating_add(x_offset),
+                base_position.y.saturating_add(y_offset),
+            );
+            let position = Vector2::new(
+                raw_position.x,
+                crate::docon_initial_center_y(
+                    metadata.shape,
+                    metadata.stretch_growth,
+                    metadata.line,
+                    crate::FULL_CON,
+                    raw_position.y,
+                ),
+            );
+            let id = context.allocate_object_id();
+            let mut spawn = SpawnConfig::new(definition.clone())
+                .with_position(position)
+                .with_fixed_velocity(fixed_velocity)
+                .with_rotation(rotation)
+                .with_rotation_velocity(rdir)
+                .with_owner(owner)
+                .with_controller(controller)
+                .with_category(metadata.category)
+                .with_id(id);
+            if let Some(layer) = creator_layer {
+                spawn = spawn.with_layer(layer);
+            }
+            // NewObject callbacks run below while this host call is live.
+            spawn.initialized = true;
+            spawn.position_adjusted = true;
+            if position.y != raw_position.y {
+                spawn.fixed_position = Some(FixedVec2::from_ints(raw_position.x, raw_position.y));
+            }
+
+            let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
+            let preview_ocf = ocf::compute(
+                metadata.ocf_base,
+                metadata.crew_member,
+                initial_alive,
+                ObjectStatus::Normal,
+                false,
+                0,
+            );
+            let preview_velocity = Vector2::new(fixed_velocity.int_x(), fixed_velocity.int_y());
+            let preview = HostWorldObject::with_category(
+                id,
+                definition.clone(),
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                owner,
+                metadata.category,
+                if initial_alive {
+                    metadata.physical.energy
+                } else {
+                    0
+                },
+                0,
+                0,
+                raw_position,
+                preview_velocity,
+                rotation,
+                metadata.vertices.clone(),
+                0,
+                0,
+                0,
+                None,
+                None,
+            )
+            .with_alive(initial_alive)
+            .with_ocf(preview_ocf)
+            .with_full_state(Rc::new({
+                let mut state = crate::preview_spawn_state(
+                    raw_position,
+                    owner,
+                    initial_controller,
+                    metadata.category,
+                    0,
+                    metadata.vertices,
+                );
+                state.velocity = preview_velocity;
+                state.script_fixed_velocity = Some(fixed_velocity);
+                state.rotation = rotation;
+                state.alive = initial_alive;
+                state.energy = if initial_alive {
+                    metadata.physical.energy
+                } else {
+                    0
+                };
+                state.crew_member = metadata.crew_member;
+                state.layer = creator_layer;
+                state.blit_mode = metadata.blit_mode;
+                state.mobile = metadata.category != crate::CATEGORY_STATIC_BACK
+                    && (fixed_velocity != FixedVec2::ZERO || rdir.is_nonzero());
+                state
+            }));
+            context.register_spawn(spawn, preview);
+            // Seed exact fixed dirs into the pending object's live scope so
+            // its synchronous callbacks observe the Init values.
+            if context.ensure_object_scope(id) {
+                if let Some(scope) = context.object_scope_mut(id) {
+                    scope.current_fixed_velocity = fixed_velocity;
+                    scope.pending_update.rotation_velocity = Some(rdir);
+                }
+            }
+            Ok(Some((
+                id,
+                metadata.shape,
+                metadata.stretch_growth,
+                metadata.line,
+            )))
+        })?;
+        let Some((target, shape, stretch_growth, line)) = target else {
+            continue;
+        };
+
+        let creator_arg = creator.map(object_reference_value).unwrap_or(Value::Nil);
+        if let Some(Err(error)) =
+            call_world_object_own_function(target, "Construction", &[creator_arg])
+        {
+            tracing::warn!(
+                id = target.as_u64(),
+                callback = "Construction",
+                %error,
+                "creation callback failed; continuing like C++ fail-safe Call"
+            );
+        }
+        let removed = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| context.nested_object_destroyed(target))
+                .unwrap_or(false)
+        });
+        if removed {
+            continue;
+        }
+
+        // NewObject calls Construction while Con is still zero, then its
+        // initial DoCon grows to FullCon, moves the straight shape's bottom,
+        // and only on that transition calls Completion then Initialize
+        // (C4Game.cpp:1117-1127; C4Object.cpp:1506-1511).
+        let crossed_full_con = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return false;
+            };
+            let (was_full, pre_growth_position, adjusted_position) = {
+                let Some(scope) = context.object_scope_mut(target) else {
+                    return false;
+                };
+                let was_full = scope.construction() >= FULL_CON;
+                let pre_growth_position = scope.effective_position();
+                let adjusted_position = Vector2::new(
+                    pre_growth_position.x,
+                    crate::docon_initial_center_y(
+                        shape,
+                        stretch_growth,
+                        line,
+                        FULL_CON,
+                        pre_growth_position.y,
+                    ),
+                );
+                // Fold the pre-insertion Construction writes into the spawn
+                // itself. Completion must see the adjusted integer y, but
+                // initial DoCon leaves fix_y at the pre-growth center.
+                scope.current_construction = FULL_CON;
+                scope.pending_update.construction = None;
+                scope.current_position = adjusted_position;
+                scope.pending_update.position = None;
+                (was_full, pre_growth_position, adjusted_position)
+            };
+            if let Some(spawn) = context
+                .pending_spawns
+                .iter_mut()
+                .find(|spawn| spawn.id == Some(target))
+            {
+                spawn.position = adjusted_position;
+                spawn.construction = FULL_CON;
+                spawn.fixed_position = (adjusted_position != pre_growth_position).then_some(
+                    FixedVec2::from_ints(pre_growth_position.x, pre_growth_position.y),
+                );
+            }
+            !was_full
+        });
+        if crossed_full_con {
+            if let Some(Err(error)) = call_world_object_own_function(target, "Completion", &[]) {
+                tracing::warn!(
+                    id = target.as_u64(),
+                    callback = "Completion",
+                    %error,
+                    "creation callback failed; continuing like C++ fail-safe Call"
+                );
+            }
+            let removed = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .map(|context| context.nested_object_destroyed(target))
+                    .unwrap_or(false)
+            });
+            if !removed {
+                if let Some(Err(error)) =
+                    call_world_object_own_function(target, "Initialize", &[])
+                {
+                    tracing::warn!(
+                        id = target.as_u64(),
+                        callback = "Initialize",
+                        %error,
+                        "creation callback failed; continuing like C++ fail-safe Call"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(Value::Nil)
+}
+
 fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
     // FnCreateConstruction takes a C4ID (C4Script.cpp:1911-1912); our
     // resources address definitions by their id string, so id values and
@@ -19919,6 +20267,7 @@ mod tests {
         "C4Id",
         "Call",
         "CastBackParticles",
+        "CastObjects",
         "CastParticles",
         "ChangeDef",
         "ClearParticles",
