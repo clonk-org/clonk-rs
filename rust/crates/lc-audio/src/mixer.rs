@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::decoder::{decode_audio, AudioDecodeError, DecodedAudio};
+use crate::decoder::{decode_audio, decode_audio_for_output, AudioDecodeError, DecodedAudio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChannelId(pub usize);
@@ -401,7 +401,7 @@ impl AudioMixer {
     }
 
     pub(crate) fn load_music(&self, data: &[u8]) -> Result<MusicId, AudioError> {
-        let decoded = decode_audio(data)?;
+        let decoded = decode_audio_for_output(data, self.sample_rate)?;
         let clip = self.prepare_clip(decoded);
         let mut state = self.state.lock().unwrap();
         let id = MusicId(state.next_music_id);

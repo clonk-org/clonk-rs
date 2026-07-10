@@ -1,6 +1,8 @@
 mod decoder;
 #[cfg(feature = "ffi")]
 pub mod ffi;
+mod fluidsynth;
+mod midi;
 mod mixer;
 
 pub use decoder::{decode_audio, AudioDecodeError, AudioFormat};

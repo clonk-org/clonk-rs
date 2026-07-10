@@ -88,8 +88,9 @@ and a recorded new first mismatch.
 
 ## Open presentation gaps
 
-- Renderer/audio: transforms, GL/shaders, landscape, panning, MIDI decoding, and
-  playlist advancement. Scenario music already excludes WAV/definition effects.
+- Renderer/audio: transforms, GL/shaders, landscape, panning, playlist
+  advancement, and exact/looped/streamed MIDI. SMF 0/1 and RMID playback exists;
+  scenario music excludes WAV/definition effects.
 - GUI/particles: generic layout/text/portraits and Particle.txt graphics/procedures.
 - Launcher: player/update/first-start/search/CanOpen, icons/files/mission access,
   FolderMap, and long-list scrolling.
@@ -159,7 +160,9 @@ LC_RUST_ENGINE_RUNTIME=1 LC_PIN_SEED=424242 \
 - Map replay: `LC_DEBUG_MAP=1`, then `LC_RUST_ENGINE_MAP_SEED=<n>`; standalone
   runs may need `LC_RUST_ENGINE_RANDOM_SEED` and `LC_RUST_ENGINE_STARTUP_PLAYERS`.
 
-Harness limits: MIDI needs `SDL_SOUNDFONTS`; `lc-app` exits instead of fail-safe
-on tick script errors; FLNT `Hit` errors headlessly; xtasks skip player join;
-Goldrush Talker consumes controls for ~1000 frames; `lc-network`'s
-`control_sync_and_reconnect_smoke` has a rerunnable TCP timing flake.
+Harness limits: MIDI needs FluidSynth 2.x and a trusted SF2/SF3
+(`LC_FLUIDSYNTH_LIBRARY`/`SDL_SOUNDFONTS`; upgrade to 2.5.6+); eager decode caps
+at 8 MiB/15 minutes/1M events. `lc-app` exits instead of fail-safe on tick script
+errors; FLNT `Hit` errors headlessly; xtasks skip player join; Goldrush Talker
+consumes controls for ~1000 frames; `lc-network`'s `control_sync_and_reconnect_smoke`
+has a rerunnable TCP timing flake.
