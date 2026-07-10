@@ -5056,7 +5056,10 @@ fn get_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         }
 
-        Ok(Value::String(filtered[idx].clone()))
+        // FnGetPlrKnowledge's indexed form is a typed C4ID, not a string
+        // (C4Script.cpp:2659-2666). Definition-call syntax (`id->Func`)
+        // depends on preserving that type.
+        Ok(Value::C4Id(filtered[idx].clone()))
     })
 }
 
@@ -6728,6 +6731,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetBase", get_base);
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
+    script.register_host_function("CastAny", cast_any);
     script.register_host_function("CastObjects", cast_objects);
     script.register_host_function("CastPXS", cast_pxs);
     script.register_host_function("PlaceAnimal", place_animal);
@@ -6782,6 +6786,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CreateContents", create_contents);
     script.register_host_function("GetActMapVal", get_act_map_val);
     script.register_host_function("GetObjectVal", get_object_val);
+    // System.c4g/GetXVal.c:78-79 wrappers. The Rust loader does not yet
+    // compile the engine-wide planet/System.c4g.
+    script.register_host_function("GetObjWidth", get_obj_width);
+    script.register_host_function("GetObjHeight", get_obj_height);
     script.register_host_function("SetEntrance", set_entrance);
     script.register_host_function("SetColorDw", set_color_dw);
     script.register_host_function("SetShape", set_shape);
@@ -7579,6 +7587,19 @@ fn get_type(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     Ok(Value::Int(type_code))
+}
+
+/// `C4AulDefCastFunc<C4V_Any, C4V_Any>` (C4Script.cpp:6184-6194,
+/// 7043-7046). AddMenuItem serializes an untyped nil parameter as
+/// `CastAny(0)` so its generated command can reconstruct C4V_Any/null.
+fn cast_any(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new("CastAny expects at most 1 argument"));
+    }
+    Ok(match args.first().cloned().unwrap_or(Value::Nil) {
+        Value::Int(0) | Value::Bool(false) | Value::Nil => Value::Nil,
+        value => value,
+    })
 }
 
 fn create_array(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -11285,16 +11306,24 @@ fn get_physical(args: &[Value]) -> Result<Value, RuntimeError> {
                     .unwrap_or(Value::Nil));
             }
         }
-        let Some(object) = context.object_context() else {
+        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
             return Ok(Value::Nil);
         };
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Nil);
-            }
+        if let Some(object) = context.object_scope(target) {
+            return Ok(object
+                .get_physical(&name, mode)
+                .map(Value::Int)
+                .unwrap_or(Value::Nil));
         }
-        Ok(object
-            .get_physical(&name, mode)
+        // An explicit pObj is not constrained to cthr->Obj: FnGetPhysical
+        // dereferences that live object directly (C4Script.cpp:638-688).
+        // Build the same read-only scope used for nested object calls so
+        // crew info and temporary physicals retain their normal precedence.
+        Ok(context
+            .get_world_object(target)
+            .and_then(|object| context.nested_scope_for(&object))
+            .and_then(|(object, _)| object.get_physical(&name, mode))
             .map(Value::Int)
             .unwrap_or(Value::Nil))
     })
@@ -21969,6 +21998,18 @@ fn get_object_val(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
 
+        if matches!(entry.as_str(), "Width" | "Height") {
+            return Ok(live_object_shape(context, target)
+                .map(|shape| {
+                    Value::Int(if entry == "Width" {
+                        shape.width
+                    } else {
+                        shape.height
+                    })
+                })
+                .unwrap_or(Value::Nil));
+        }
+
         if Some(target) == self_id {
             if let Some(object) = context.object_context() {
                 match entry.as_str() {
@@ -21989,20 +22030,78 @@ fn get_object_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "Category" => Value::Int(world_object.category),
             "Energy" => Value::Int(world_object.energy),
             "Damage" => Value::Int(world_object.damage),
-            "Width" | "Height" => context
-                .definition_metadata(world_object.definition_id())
-                .and_then(|metadata| metadata.shape)
-                .map(|shape| {
-                    Value::Int(if entry == "Width" {
-                        shape.width
-                    } else {
-                        shape.height
-                    })
-                })
-                .unwrap_or(Value::Nil),
             _ => Value::Nil,
         })
     })
+}
+
+/// The live `C4Object::Shape` reflected by GetObjectVal. Same-call SetShape
+/// and persisted shape overrides win over the definition-derived shape.
+fn live_object_shape(context: &EffectHostContext, target: ObjectId) -> Option<DefinitionRect> {
+    if let Some(shape) = context
+        .object_scope(target)
+        .and_then(|scope| scope.pending_update.shape_override)
+        .or_else(|| {
+            context
+                .get_world_object(target)
+                .and_then(|object| object.full_state().and_then(|state| state.shape_override))
+        })
+    {
+        return Some(shape);
+    }
+
+    let scope = context.object_scope(target);
+    let world_object = context.get_world_object(target);
+    let definition = scope
+        .and_then(|scope| {
+            scope
+                .pending_update
+                .change_def
+                .clone()
+                .or_else(|| scope.definition_id.clone())
+        })
+        .or_else(|| {
+            world_object
+                .as_ref()
+                .map(|object| object.definition_id().to_string())
+        })?;
+    let metadata = context.definition_metadata(&definition)?;
+    if metadata.line != 0 {
+        return metadata.shape;
+    }
+    let construction = scope
+        .map(ObjectScopeContext::construction)
+        .or_else(|| world_object.as_ref().map(HostWorldObject::construction))
+        .unwrap_or(FULL_CON);
+    let rotation = scope
+        .map(ObjectScopeContext::rotation)
+        .or_else(|| world_object.as_ref().map(|object| object.rotation))
+        .unwrap_or(0);
+    crate::transformed_shape_rect(
+        metadata.shape,
+        construction,
+        metadata.stretch_growth,
+        metadata.rotateable,
+        rotation,
+    )
+}
+
+/// Engine System.c4g wrappers (GetXVal.c:78-79). Nil forwards into
+/// FnGetObjectVal and therefore defaults to the calling object.
+fn get_obj_width(args: &[Value]) -> Result<Value, RuntimeError> {
+    get_obj_dimension(args.first(), "Width")
+}
+
+fn get_obj_height(args: &[Value]) -> Result<Value, RuntimeError> {
+    get_obj_dimension(args.first(), "Height")
+}
+
+fn get_obj_dimension(target: Option<&Value>, entry: &str) -> Result<Value, RuntimeError> {
+    get_object_val(&[
+        Value::String(entry.to_string()),
+        Value::Nil,
+        target.cloned().unwrap_or(Value::Nil),
+    ])
 }
 
 /// FnSetEntrance (C4Script.cpp:690-695): toggle the object's EntranceStatus.
@@ -26857,6 +26956,7 @@ mod tests {
         "Bubble",
         "C4Id",
         "Call",
+        "CastAny",
         "CastBackParticles",
         "CastObjects",
         "CastPXS",
@@ -26976,6 +27076,8 @@ mod tests {
         "GetMenuSelection",
         "GetName",
         "GetOCF",
+        "GetObjHeight",
+        "GetObjWidth",
         "GetObjectBlitMode",
         "GetObjectLayer",
         "GetObjectStatus",
@@ -28303,6 +28405,17 @@ func Trigger(object pOther)
         assert_eq!(
             get_type(&[Value::Proplist(map)]).expect("GetType succeeds"),
             Value::Int(C4V_MAP)
+        );
+    }
+
+    #[test]
+    fn cast_any_reconstructs_add_menu_item_nil_parameters() {
+        // AddMenuItem writes an untyped null as CastAny(0)
+        // (C4Script.cpp:1513-1546); executing that generated command must
+        // recover C4V_Any/null rather than fail on an unknown helper.
+        assert_eq!(
+            cast_any(&[Value::Int(0)]).expect("CastAny succeeds"),
+            Value::Nil
         );
     }
 
@@ -30538,7 +30651,7 @@ func ProbeBadIndex(id) {
 
         assert_eq!(
             result.expect("GetPlrKnowledge succeeds"),
-            Value::String("STON".into())
+            Value::C4Id("STON".into())
         );
     }
 
@@ -33017,6 +33130,74 @@ func Missing() { return ComponentAll(nil, WOOD); }
         assert_eq!(
             get_def_bottom(&[]).expect("context-free call runs"),
             Value::Nil
+        );
+    }
+
+    #[test]
+    fn get_obj_dimensions_reflect_the_calling_objects_live_shape() {
+        // System.c4g forwards GetObjWidth/Height to GetObjectVal
+        // (planet/System.c4g/GetXVal.c:73-79). FnGetObjectVal reflects the
+        // live object serialization (C4Script.cpp:4185-4195), where Shape
+        // is inline (C4Object.cpp:2795) and exposes Width/Height
+        // (C4Shape.cpp:496-502). Same-call SetShape is visible immediately.
+        let mut script = lc_script::Engine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                #strict 2
+                func Probe()
+                {
+                    var before_wdt = GetObjWidth();
+                    var before_hgt = GetObjHeight();
+                    SetShape(-3, -4, 27, 41);
+                    return [before_wdt, before_hgt, GetObjWidth(), GetObjHeight()];
+                }
+                "#,
+            )
+            .expect("dimension probe compiles");
+        let definitions = Rc::new(HashMap::from([(
+            DefinitionId::from("SELF"),
+            DefinitionMetadata {
+                shape: Some(DefinitionRect::new(-10, -15, 20, 30)),
+                ..DefinitionMetadata::default()
+            },
+        )]));
+        let world = HostWorldContext::default().with_definition_metadata(definitions);
+        let object = HostObjectContext::new(
+            ObjectId::new(1),
+            None,
+            ObjectStatus::Normal,
+            0,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        )
+        .with_definition_id("SELF");
+        let (result, _) = with_effect_context(Some(object), &[], world, 1, || {
+            script.call("Probe", &[])
+        });
+
+        assert_eq!(
+            result.expect("GetObjWidth/Height succeed"),
+            Value::Array(vec![
+                Value::Int(20),
+                Value::Int(30),
+                Value::Int(27),
+                Value::Int(41),
+            ])
         );
     }
 
@@ -36073,6 +36254,66 @@ func Missing() { return ComponentAll(nil, WOOD); }
         assert_eq!(physicals.info, None);
         assert_eq!(physicals.temporary, None);
         assert_eq!(physicals.changes, Vec::<(String, i32)>::new());
+    }
+
+    #[test]
+    fn get_physical_reads_an_explicit_foreign_crew_object() {
+        // FnGetPhysical dereferences its explicit pObj without requiring it
+        // to equal cthr->Obj (C4Script.cpp:638-688). CNKT::Activate relies on
+        // this exact form to check the containing clonk's CanConstruct before
+        // opening CXCN (Objects/.../Conkit.c4d/Script.c:5-21).
+        let clonk = ObjectId::new(2);
+        let physical = PhysicalInfo {
+            can_construct: 1,
+            ..PhysicalInfo::default()
+        };
+        let mut state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            crate::CATEGORY_LIVING,
+            FULL_CON,
+            Vec::new(),
+        );
+        state.crew_member = true;
+        state.info_physical = Some(physical);
+        let world = HostWorldContext::from_objects([HostWorldObject::new(
+            clonk,
+            "CLNK",
+            ObjectStatus::Normal,
+            "Walk",
+            None,
+            None,
+            Some("WALK".to_string()),
+            OWNER_NONE,
+            100,
+            FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(state))])
+        .with_definition_metadata(Rc::new(HashMap::from([(
+            DefinitionId::from("CLNK"),
+            DefinitionMetadata {
+                crew_member: true,
+                physical,
+                ..DefinitionMetadata::default()
+            },
+        )])));
+
+        let (result, _) = with_object_host_context_with_world(world, || {
+            get_physical(&[
+                Value::String("CanConstruct".to_string()),
+                Value::Int(PHYS_CURRENT),
+                object_reference_value(clonk),
+            ])
+        });
+
+        assert_eq!(result.expect("foreign physical read succeeds"), Value::Int(1));
     }
 
     #[test]

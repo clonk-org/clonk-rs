@@ -2,7 +2,9 @@ use std::env;
 use std::path::PathBuf;
 
 use lc_engine::scenario::LegacyDefinitionResolver;
-use lc_engine::{Engine, JoinPlayerConfig, Scenario, ScenarioError, COM_DOWN};
+use lc_engine::{
+    CommandDirection, Engine, JoinPlayerConfig, Scenario, ScenarioError, COM_DOWN, COM_UP,
+};
 use lc_resources::Group;
 
 struct ContentResolver {
@@ -142,11 +144,14 @@ fn tutorial02_ready_crew_exits_the_first_base() {
 }
 
 #[test]
-fn tutorial02_ready_objects_exit_then_the_clonk_grabs_the_real_balloon() {
+fn tutorial02_ready_objects_exit_then_the_clonk_controls_the_real_balloon_up() {
     // The first Tutorial02 lesson requires the normal classic-control route:
     // a repeated Down becomes COM_Down_D and queues Grab
     // (C4Player.cpp:1532-1533; C4ObjectCom.cpp:573-588), then the completed
-    // Grab switches the CLNK to Push (C4ObjectCom.cpp:247-259).
+    // Grab switches the CLNK to Push (C4ObjectCom.cpp:247-259). The Push
+    // procedure gives the target first refusal on Up
+    // (C4Object.cpp:3520-3537); BALN::ControlUp then selects COMD_Up
+    // (Objects.c4d/Vehicles.c4d/Balloon.c4d/Script.c:14-29).
     let (mut engine, player) = load_tutorial(2);
     let clonk = engine
         .crew_cursor(player)
@@ -195,4 +200,16 @@ fn tutorial02_ready_objects_exit_then_the_clonk_grabs_the_real_balloon() {
     let pushing = engine.object_snapshot(clonk).expect("CLNK survives Grab");
     assert_eq!(pushing.action.name, "Push");
     assert_eq!(pushing.action.target, Some(balloon));
+
+    engine
+        .player_in_com(player, COM_UP, 0)
+        .expect("normal Up while pushing BALN");
+    assert_eq!(
+        engine
+            .object_snapshot(balloon)
+            .expect("BALN after ControlUp")
+            .command_direction,
+        CommandDirection::Up,
+        "BALN::ControlUp must complete instead of aborting at GetObjHeight"
+    );
 }

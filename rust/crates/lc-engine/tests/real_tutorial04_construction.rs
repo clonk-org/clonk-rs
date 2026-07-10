@@ -1,0 +1,107 @@
+use std::env;
+use std::path::PathBuf;
+
+use lc_engine::scenario::LegacyDefinitionResolver;
+use lc_engine::{Engine, JoinPlayerConfig, ObjectUpdate, Scenario, ScenarioError, COM_DIG};
+use lc_resources::Group;
+use lc_script::Value;
+
+struct ContentResolver {
+    root: PathBuf,
+}
+
+impl LegacyDefinitionResolver for ContentResolver {
+    fn resolve_definition_groups(
+        &self,
+        _scenario: &Group,
+        identifier: &str,
+    ) -> Result<Vec<Group>, ScenarioError> {
+        Group::open(self.root.join(identifier.replace('\\', "/")))
+            .map(|group| vec![group])
+            .map_err(ScenarioError::Resources)
+    }
+}
+
+fn load_tutorial04() -> (Engine, i32) {
+    let content = env::var_os("LC_CONTENT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../content"));
+    let resolver = ContentResolver {
+        root: content.clone(),
+    };
+    let scenario = Scenario::load_from_path_with(
+        content.join("Tutorial.c4f/Tutorial04.c4s"),
+        &resolver,
+    )
+    .expect("Tutorial04 loads");
+    let mut engine = Engine::with_seed(0);
+    scenario.apply(&mut engine).expect("Tutorial04 applies");
+    let player = engine
+        .join_player(JoinPlayerConfig {
+            name: "Tutorial04 construction".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0xff_00_00,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        })
+        .expect("Tutorial04 player joins");
+    (engine, player.number)
+}
+
+#[test]
+fn tutorial04_conkit_opens_the_real_elevator_construction_menu() {
+    // CNKT::Activate creates CXCN on its containing clonk and fills it from
+    // GetPlrKnowledge (Objects/.../Conkit.c4d/Script.c:5-21). Classic double
+    // Dig activates the first carried object (C4ObjectCom.cpp:531-539).
+    let (mut engine, player) = load_tutorial04();
+    let clonk = engine
+        .crew_cursor(player)
+        .expect("Tutorial04 joins one selected CLNK");
+    let conkit = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .find(|object| object.definition_id == "CNKT")
+        .expect("Tutorial04 supplies a construction kit")
+        .id;
+
+    for _ in 0..160 {
+        if engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.container.is_none() && object.action.name == "Walk")
+        {
+            break;
+        }
+        engine.tick().expect("ready crew Exit frame");
+    }
+    engine
+        .apply_object_update(conkit, ObjectUpdate::new().with_container(clonk))
+        .expect("take the real tutorial construction kit");
+
+    engine
+        .player_in_com(player, COM_DIG, 0)
+        .expect("first Dig press");
+    engine
+        .player_in_com(player, COM_DIG, 0)
+        .expect("second Dig press");
+
+    let clonk_after_activation = engine.object_snapshot(clonk).expect("CLNK survives");
+    let conkit_after_activation = engine.object_snapshot(conkit).expect("CNKT survives");
+    let (_, menu) = engine.cursor_object_menu(player).unwrap_or_else(|| {
+        panic!(
+            "CNKT activation opens its script menu; clonk={clonk_after_activation:?}; \
+             conkit={conkit_after_activation:?}"
+        )
+    });
+    assert_eq!(menu.identification, Value::C4Id("CXCN".to_string()));
+    assert_eq!(menu.items.len(), 1, "Tutorial04 knows only ELEV");
+    assert_eq!(menu.items[0].item_id, "ELEV");
+    assert_eq!(menu.selection, 0);
+}
