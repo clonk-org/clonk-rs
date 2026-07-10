@@ -2,7 +2,7 @@ use lc_core::std_config::Config;
 use lc_platform::AppPaths;
 use std::io::ErrorKind;
 
-const DEFAULT_MAX_CHANNELS: usize = 32;
+const DEFAULT_MAX_CHANNELS: usize = 1024;
 const MAX_CHANNELS_LIMIT: usize = 1024;
 // C++ resolution defaults (C4Config.cpp:440-441).
 const DEFAULT_RES_X: u32 = 800;
@@ -148,6 +148,13 @@ impl DisplayMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_options_default_channel_count_matches_cpp() {
+        // C4AudioSystem::MaxChannels is 1024, and C4ConfigSound::CompileFunc
+        // uses it as the default (C4AudioSystem.h:103; C4Config.cpp:516).
+        assert_eq!(AudioOptions::default().max_channels, 1024);
+    }
 
     #[test]
     fn display_options_apply_config_parses_values() {
