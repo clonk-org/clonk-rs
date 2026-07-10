@@ -134,6 +134,8 @@ pub(crate) struct HostWorldObject {
 /// System.c4g's DoExplosion/BlastObjectsShockwaveCheck read (GetXVal.c).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DefinitionFireMetadata {
+    /// C4Shape::FireTop, reflected through GetDefCoreVal.
+    pub fire_top: i32,
     /// BlastIncinerate threshold (0 = off).
     pub blast_incinerate: i32,
     /// BurnTurnTo changedef target (C4Effect.cpp:579-585).
@@ -4528,6 +4530,7 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "Width" => Value::Int(shape.width),
             "Height" => Value::Int(shape.height),
             "Offset" => Value::Int(if entry_index == 0 { shape.x } else { shape.y }),
+            "FireTop" => Value::Int(metadata.fire.fire_top),
             "Value" => Value::Int(metadata.value),
             "Mass" => Value::Int(metadata.mass),
             // The blast-chain entries System.c4g reads through the GetXVal

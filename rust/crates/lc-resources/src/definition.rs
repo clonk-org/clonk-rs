@@ -222,6 +222,8 @@ pub struct DefCore {
     /// Definition-default C4Object::BlitMode (DefCore `BlitMode`).
     pub blit_mode: u32,
     pub shape: Option<PictureRect>,
+    /// Shape-relative fire emission offset (C4Shape::FireTop).
+    pub fire_top: i32,
     pub solid_mask: Option<TargetRect>,
     pub vertices: Vec<DefVertex>,
     pub contact_density: i32,
@@ -555,6 +557,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut shape_width: Option<i32> = None;
     let mut shape_height: Option<i32> = None;
     let mut shape_offset: Option<(i32, i32)> = None;
+    let mut fire_top: i32 = 0;
     let mut solid_mask: Option<TargetRect> = None;
     let mut vertex_count: usize = 0;
     let mut vertex_x = [0i32; C4D_MAX_VERTEX];
@@ -700,6 +703,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
                     parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
                 ));
+            }
+            "firetop" => {
+                fire_top = parse_i32(value).unwrap_or(0);
             }
             "solidmask" => {
                 solid_mask =
@@ -926,6 +932,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 },
             )
         }),
+        fire_top,
         solid_mask,
         vertices,
         contact_density,
@@ -2464,6 +2471,19 @@ NextAction=Dup
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
         assert_eq!(parsed.blast_incinerate, 0, "default: no blast incinerate");
+    }
+
+    #[test]
+    fn parse_def_core_fire_top_and_default() {
+        // C4Shape::CompileFunc compiles FireTop directly into DefCore with
+        // default zero (C4Shape.cpp:496-510; C4Def.cpp:300-302).
+        let parsed = parse_def_core(b"[DefCore]\nid=WMPF\nFireTop=10\n")
+            .expect("def core parses");
+        assert_eq!(parsed.fire_top, 10);
+
+        let defaulted =
+            parse_def_core(b"[DefCore]\nid=NONE\n").expect("default def core parses");
+        assert_eq!(defaulted.fire_top, 0);
     }
 
     #[test]

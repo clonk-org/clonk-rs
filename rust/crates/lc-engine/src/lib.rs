@@ -6001,6 +6001,8 @@ pub struct Definition {
     sprite_image: Option<DefinitionSpriteImage>,
     sprite_variants: HashMap<String, DefinitionSpriteImage>,
     shape: Option<DefinitionRect>,
+    /// C4Shape::FireTop (C4Shape.cpp:509).
+    fire_top: i32,
     solid_mask: Option<DefinitionTargetRect>,
     shape_vertices: Vec<ObjectVertex>,
     contact_density: i32,
@@ -6201,6 +6203,7 @@ impl Definition {
             sprite_image: None,
             sprite_variants: HashMap::new(),
             shape: None,
+            fire_top: 0,
             solid_mask: None,
             shape_vertices: Vec::new(),
             contact_density: CONTACT_DENSITY_SOLID,
@@ -6366,6 +6369,7 @@ impl Definition {
             definition.set_sprite_variants(variants);
         }
         definition.set_shape_rect(resource.core.shape.map(DefinitionRect::from));
+        definition.set_fire_top(resource.core.fire_top);
         definition.set_shape_vertices(
             resource
                 .core
@@ -7127,6 +7131,14 @@ impl Definition {
 
     pub fn collection_rect(&self) -> Option<DefinitionRect> {
         self.collection_rect
+    }
+
+    pub fn fire_top(&self) -> i32 {
+        self.fire_top
+    }
+
+    pub fn set_fire_top(&mut self, fire_top: i32) {
+        self.fire_top = fire_top;
     }
 
     pub fn set_collection_rect(&mut self, rect: Option<DefinitionRect>) {
@@ -13290,6 +13302,7 @@ impl Engine {
                                 .clonk_names()
                                 .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32),
                             fire: compat::DefinitionFireMetadata {
+                                fire_top: definition.fire_top(),
                                 blast_incinerate: definition.blast_incinerate(),
                                 burn_turn_to: definition.burn_turn_to().map(str::to_string),
                                 incomplete_activity: definition.incomplete_activity(),
@@ -25562,6 +25575,7 @@ impl Engine {
         definition.set_picture(core.picture.map(DefinitionPicture::from));
         definition.set_solid_mask(core.solid_mask.map(DefinitionTargetRect::from));
         definition.set_shape_rect(core.shape.map(DefinitionRect::from));
+        definition.set_fire_top(core.fire_top);
         definition.set_shape_vertices(
             core.vertices
                 .iter()
@@ -49230,6 +49244,47 @@ func Probe() {
         assert_eq!(locals.get("iShield"), Some(&Value::Int(1)));
         assert_eq!(locals.get("iBlast"), Some(&Value::Int(50)));
         assert_eq!(locals.get("iContact"), Some(&Value::Int(10)));
+    }
+
+    #[test]
+    fn get_def_core_val_reflects_fire_top_from_def_core() -> Result<(), EngineError> {
+        // FnGetDefCoreVal reflects the named C4Def compiler entry
+        // (C4Script.cpp:4171-4182); C4Shape::CompileFunc exposes FireTop in
+        // DefCore with default zero (C4Shape.cpp:496-510).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Wampfruit.c4d");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=WMPF\nName=Wampfruit\nCategory=C4D_Object\nFireTop=10\n",
+        )
+        .expect("write def core");
+        std::fs::write(
+            def_dir.join("Script.c"),
+            br#"#strict
+local iFireTop;
+func Probe() {
+    iFireTop = GetDefCoreVal("FireTop", "DefCore", WMPF);
+    return(1);
+}
+"#,
+        )
+        .expect("write script");
+
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load definition");
+        let definition = Definition::from_resource(&resource)?;
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(definition)?;
+        let id = engine.spawn_object(SpawnConfig::new("WMPF"))?;
+        let index = engine.find_object_index(id).expect("object exists");
+        engine.call_object_function(index, "Probe", Vec::new())?;
+
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("iFireTop"),
+            Some(&Value::Int(10))
+        );
+        Ok(())
     }
 
     // C4SortObject::CompareGetValue returns int32_t (C4FindObject.h:430):
