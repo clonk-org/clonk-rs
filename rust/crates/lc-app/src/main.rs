@@ -10810,6 +10810,7 @@ impl GameApp {
         );
 
         let mut engine = Engine::new();
+        engine.set_network_game(self.network.is_some());
         self.apply_material_library_to(&mut engine);
 
         if let Err(err) = scenario_data.apply_before_players(&mut engine) {
@@ -10913,6 +10914,7 @@ impl GameApp {
         self.finish_recording();
         self.loading_state = None;
         self.engine = Engine::new();
+        self.engine.set_network_game(self.network.is_some());
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.ingame_pointer = None;
@@ -10990,6 +10992,7 @@ impl GameApp {
 
         self.finish_recording();
         self.engine = Engine::new();
+        self.engine.set_network_game(self.network.is_some());
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.ingame_pointer = None;

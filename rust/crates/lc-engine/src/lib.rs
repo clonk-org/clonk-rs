@@ -9156,6 +9156,7 @@ impl ScenarioScript {
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
+        network_game: bool,
         engine_next_object_id: u64,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng, Option<EngineError>), EngineError> {
         if !self.has_initialize {
@@ -9181,6 +9182,7 @@ impl ScenarioScript {
             particle_defs,
             definition_scripts,
             definition_metadata,
+            network_game,
             engine_next_object_id,
         )
     }
@@ -9199,6 +9201,7 @@ impl ScenarioScript {
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
+        network_game: bool,
         engine_next_object_id: u64,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_step {
@@ -9226,6 +9229,7 @@ impl ScenarioScript {
             particle_defs,
             definition_scripts,
             definition_metadata,
+            network_game,
             engine_next_object_id,
         ) {
             Ok((batch, audio, rng, None)) => Ok((batch, audio, rng)),
@@ -9255,6 +9259,7 @@ impl ScenarioScript {
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
+        network_game: bool,
         engine_next_object_id: u64,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng, Option<EngineError>), EngineError> {
         let physics_guard = enter_physics_context(physics);
@@ -9274,7 +9279,8 @@ impl ScenarioScript {
         let world = host_world_context_from_snapshot(snapshot)
             .with_definition_metadata(definition_metadata)
             .with_particle_defs(particle_defs)
-            .with_definition_scripts(definition_scripts);
+            .with_definition_scripts(definition_scripts)
+            .with_network_game(network_game);
         let next_object_id = world.next_object_id().max(engine_next_object_id);
         let world = world.with_next_object_id(next_object_id);
         let audio_guard = enter_audio_context(audio);
@@ -9663,6 +9669,10 @@ pub struct Engine {
     /// Game.Parameters.RandomSeed - kept for the game-start re-fix
     /// (C4Game::Synchronize, C4Game.cpp:3695).
     random_seed: u64,
+    /// `Game.Parameters.IsNetworkGame`, derived from the app's active
+    /// network session just as C++ copies `Game.NetworkActive` during
+    /// parameter setup (C4GameParameters.cpp:429-434).
+    network_game: bool,
     /// The C++ master object list (`::Objects`) kept in EXEC order:
     /// C4Game::ExecObjects walks the list from the BACK (C4Game.cpp:1582),
     /// so this vec is the C4ObjectList REVERSED — index 0 executes first.
@@ -11329,6 +11339,7 @@ impl Engine {
             scenario_script_go: false,
             scenario_script_counter: 0,
             random_seed: seed,
+            network_game: false,
             exec_list: Vec::new(),
             pending_object_order_commands: Vec::new(),
             exec_cursor: None,
@@ -12837,6 +12848,10 @@ impl Engine {
         }
     }
 
+    pub fn set_network_game(&mut self, network_game: bool) {
+        self.network_game = network_game;
+    }
+
     pub fn environment(&self) -> EnvironmentSettings {
         self.environment
     }
@@ -13016,6 +13031,7 @@ impl Engine {
                 .as_ref()
                 .map(ScenarioScript::script_arc),
         )
+        .with_network_game(self.network_game)
         .with_structures_need_energy(self.structures_need_energy)
         .with_crew_name_sources(
             self.standard_names
@@ -13185,6 +13201,7 @@ impl Engine {
         let particle_defs = self.particle_system.def_names();
         let definition_scripts = self.definition_script_table();
         let definition_metadata_table = self.definition_metadata_table();
+        let network_game = self.network_game;
         let next_object_id = self.next_object_id;
         let Some(script) = self.scenario_script.as_mut() else {
             return Ok(Vec::new());
@@ -13200,6 +13217,7 @@ impl Engine {
             particle_defs,
             definition_scripts,
             definition_metadata_table,
+            network_game,
             next_object_id,
         )?;
         // Initialize is a game call: a script error logs and the scenario
@@ -13303,6 +13321,7 @@ impl Engine {
         let particle_defs = self.particle_system.def_names();
         let definition_scripts = self.definition_script_table();
         let definition_metadata_for_call = self.definition_metadata_table();
+        let network_game = self.network_game;
         let engine_next_object_id = self.next_object_id;
         let script = match self.scenario_script.as_mut() {
             Some(script) if script.has_function(function) => script,
@@ -13322,6 +13341,7 @@ impl Engine {
             particle_defs,
             definition_scripts,
             definition_metadata_for_call,
+            network_game,
             engine_next_object_id,
         )?;
         self.rng = new_rng;
@@ -15406,6 +15426,7 @@ impl Engine {
             let global_effects = self.global_effects.clone();
             let particle_defs = self.particle_system.def_names();
             let definition_metadata_table = self.definition_metadata_table();
+            let network_game = self.network_game;
             let engine_next_object_id = self.next_object_id;
             let (batch, audio_state, new_rng) = {
                 let definition_scripts = self.definition_script_table();
@@ -15425,6 +15446,7 @@ impl Engine {
                     particle_defs,
                     definition_scripts,
                     definition_metadata_table.clone(),
+                    network_game,
                     engine_next_object_id,
                 )?
             };
@@ -55033,6 +55055,31 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
                 description: "Play again".to_string(),
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn is_network_reads_the_active_engine_session_like_cpp() -> Result<(), EngineError> {
+        // FnIsNetwork returns Game.Parameters.IsNetworkGame
+        // (C4Script.cpp:3554), which normal parameter setup copies from the
+        // active Game.NetworkActive session (C4GameParameters.cpp:429-434).
+        const SCRIPT: &str = r#"
+            #strict
+            func Initialize() {
+                if (IsNetwork()) SetGravity(77);
+                else SetGravity(23);
+            }
+        "#;
+
+        let mut local = Engine::with_seed(0);
+        local.set_network_game(false);
+        local.install_scenario_script_with_convention("Script.c", SCRIPT, true)?;
+        assert_eq!(local.physics().gravity, 23);
+
+        let mut network = Engine::with_seed(0);
+        network.set_network_game(true);
+        network.install_scenario_script_with_convention("Script.c", SCRIPT, true)?;
+        assert_eq!(network.physics().gravity, 77);
         Ok(())
     }
 

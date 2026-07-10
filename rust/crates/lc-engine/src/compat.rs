@@ -524,6 +524,10 @@ pub(crate) struct HostWorldContext {
     crew_selection: Rc<HashMap<i32, CrewSelectionState>>,
     next_object_id: u64,
     team_home_base_rule: bool,
+    /// `Game.Parameters.IsNetworkGame`, copied from the active
+    /// `Game.NetworkActive` session during parameter setup
+    /// (C4GameParameters.cpp:429-434).
+    network_game: bool,
     /// C4RULE_StructuresNeedEnergy (Game.Rules; FnEnergyCheck gates on
     /// it, C4Script.cpp:1845-1856).
     structures_need_energy: bool,
@@ -572,6 +576,7 @@ impl Default for HostWorldContext {
             player_order: Rc::new(Vec::new()),
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
+            network_game: false,
             structures_need_energy: false,
             standard_name_newlines: 0,
             idle_crew_counts: RefCell::new(HashMap::new()),
@@ -710,6 +715,7 @@ impl HostWorldContext {
             crew_selection: Rc::new(crew_selection),
             next_object_id,
             team_home_base_rule,
+            network_game: false,
             structures_need_energy: false,
             standard_name_newlines: 0,
             idle_crew_counts: RefCell::new(HashMap::new()),
@@ -725,6 +731,15 @@ impl HostWorldContext {
     pub(crate) fn with_scenario_script(mut self, script: Option<Arc<ScriptEngine>>) -> Self {
         self.scenario_script = script;
         self
+    }
+
+    pub(crate) fn with_network_game(mut self, network_game: bool) -> Self {
+        self.network_game = network_game;
+        self
+    }
+
+    pub(crate) fn network_game(&self) -> bool {
+        self.network_game
     }
 
     pub(crate) fn scenario_script(&self) -> Option<&Arc<ScriptEngine>> {
@@ -1498,6 +1513,19 @@ fn get_player_count(args: &[Value]) -> Result<Value, RuntimeError> {
             })
             .count();
         Ok(Value::Int(truncate_to_i32(count as u64)))
+    })
+}
+
+/// `FnIsNetwork` reads `Game.Parameters.IsNetworkGame`
+/// (C4Script.cpp:3554). Parameter setup copies that flag from the active
+/// `Game.NetworkActive` session (C4GameParameters.cpp:429-434).
+fn is_network(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        Ok(Value::Bool(
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|context| context.world.network_game()),
+        ))
     })
 }
 
@@ -5337,6 +5365,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("EffectCall", effect_call);
     script.register_host_function("WildcardMatch", wildcard_match);
     script.register_host_function("EffectVar", effect_var);
+    script.register_host_function("IsNetwork", is_network);
     script.register_host_function("GetPlayerCount", get_player_count);
     script.register_host_function("GetPlayerByIndex", get_player_by_index);
     script.register_host_function("GetPlayerName", get_player_name);
@@ -23259,6 +23288,7 @@ mod tests {
         "IncinerateLandscape",
         "InsertMaterial",
         "Inside",
+        "IsNetwork",
         "Jump",
         "LandscapeHeight",
         "LandscapeWidth",
