@@ -4030,6 +4030,8 @@ struct LegacyObjectRecord {
     energy: Option<i32>,
     /// C4Object::NeedEnergy (`NeedEnergy=`, C4Object.cpp:2805).
     need_energy: Option<bool>,
+    /// C4Object::Select (`Selected=`, C4Object.cpp:2800).
+    selected: Option<bool>,
     /// C4Object::MagicEnergy (`MagicEnergy=`, C4Object.cpp:2768).
     magic_energy: Option<i32>,
     construction: Option<i32>,
@@ -4254,6 +4256,15 @@ impl LegacyObjectRecord {
                     ))
                 })?;
                 self.need_energy = Some(need_energy);
+            }
+            "selected" => {
+                let selected = parse_bool(trimmed_value).ok_or_else(|| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Selected `{}`",
+                        self.line, trimmed_value
+                    ))
+                })?;
+                self.selected = Some(selected);
             }
             // C4Object::MagicEnergy compiles verbatim with default 0
             // (C4Object.cpp:2768) — Drachenfels' wizards carry it.
@@ -4481,6 +4492,7 @@ impl LegacyObjectRecord {
             vertex_friction,
             energy,
             need_energy,
+            selected,
             magic_energy,
             construction,
             alive,
@@ -4633,6 +4645,9 @@ impl LegacyObjectRecord {
         }
         if let Some(need_energy) = need_energy {
             config = config.with_need_energy(need_energy);
+        }
+        if let Some(selected) = selected {
+            config = config.with_selected(selected);
         }
         if let Some(magic_energy) = magic_energy {
             config = config.with_magic_energy(magic_energy);
@@ -10438,7 +10453,7 @@ public func ActualizePhase(pClonk)
             scenario_dir.join("Objects.txt"),
             // XDir/YDir are float-bit C4Fixed like real saves write them
             // (Fixed.h:247-266): f-1063256064 = -5.0, f1077936128 = 3.0.
-            "[Object]\nid=BOX1\nNumber=100\nName=Scroll: Alchemist's bag\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nName=\"ScriptWipf\"\nStatus=1\nCategory=0\nLayer=100\nBlitMode=132\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nNeedEnergy=1\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
+            "[Object]\nid=BOX1\nNumber=100\nName=Scroll: Alchemist's bag\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nName=\"ScriptWipf\"\nStatus=1\nCategory=0\nLayer=100\nBlitMode=132\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nNeedEnergy=1\nSelected=1\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
         )
         .expect("write objects");
 
@@ -10475,6 +10490,7 @@ public func ActualizePhase(pClonk)
         assert_eq!(second.config.velocity, Vector2::new(-5, 3));
         assert_eq!(second.config.energy, Some(77));
         assert_eq!(second.config.need_energy, Some(true));
+        assert_eq!(second.config.selected, Some(true));
         // MagicEnergy compiles verbatim (C4Object.cpp:2768) — the
         // Drachenfels wizards carry six-digit stores.
         assert_eq!(second.config.magic_energy, Some(192_000));
@@ -10523,6 +10539,7 @@ public func ActualizePhase(pClonk)
         assert_eq!(gem_snapshot.velocity, Vector2::new(-5, 3));
         assert_eq!(gem_snapshot.energy, 77);
         assert!(gem_snapshot.need_energy);
+        assert!(gem_snapshot.selected);
         assert_eq!(gem_snapshot.magic_energy, 192_000);
         assert!(!gem_snapshot.alive);
         assert_eq!(gem_snapshot.container, Some(ObjectId::new(100)));

@@ -1154,6 +1154,19 @@ unsafe fn make_snapshot(
         };
         crew_selection_map.insert(entry.owner, CrewSelectionState { selected, cursor });
     }
+    // The bridge already exports C4Object::Select through each player's
+    // selected-id list. Rehydrate the canonical per-object bit without an
+    // ABI change, while retaining the legacy projection for comparisons.
+    for (&owner, selection) in &crew_selection_map {
+        for &id in &selection.selected {
+            if let Some(object) = snapshots
+                .iter_mut()
+                .find(|object| object.id == id && object.owner == owner)
+            {
+                object.selected = true;
+            }
+        }
+    }
 
     let crew_roles_slice: &[LcEngineCrewRoleSnapshot] = if crew_roles_len == 0 {
         &[]
@@ -3029,6 +3042,14 @@ global func Step(state, frame, random)
             interval: 2,
             timer: 1,
         };
+        let selected = [42u64];
+        let crew_selection = LcEngineCrewSelectionSnapshot {
+            owner: -1,
+            selected: selected.as_ptr(),
+            selected_count: selected.len(),
+            has_cursor: false,
+            cursor: 0,
+        };
 
         let object = LcEngineObjectSnapshot {
             id: 42,
@@ -3090,8 +3111,8 @@ global func Step(state, frame, random)
                 0,
                 ptr::null(),
                 0,
-                ptr::null(),
-                0,
+                &crew_selection,
+                1,
                 ptr::null(),
                 0,
                 ptr::null(),
@@ -3110,6 +3131,10 @@ global func Step(state, frame, random)
         assert_eq!(recorded.effects.len(), 1);
         assert_eq!(recorded.owner, -1);
         assert!(recorded.crew_member);
+        assert!(
+            recorded.selected,
+            "the existing selected-id ABI projects onto C4Object::Select"
+        );
         // C4Action::CompileFunc transports Action.Dir as an unrestricted
         // int32 (C4Action.cpp:45-54); the bridge must not collapse it to 0/1.
         assert_eq!(recorded.direction.to_script_value(), 13);

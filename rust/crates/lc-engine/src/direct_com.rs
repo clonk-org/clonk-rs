@@ -322,18 +322,14 @@ impl Engine {
     fn object_do_select(
         &mut self,
         index: usize,
-        owner: i32,
+        _owner: i32,
         cursor_only: bool,
     ) -> Result<(), EngineError> {
         if self.objects[index].state.crew_disabled {
             return Ok(());
         }
         if !cursor_only {
-            let id = self.objects[index].id;
-            let selection = self.crew_selection.entry(owner).or_default();
-            if !selection.selected.contains(&id) {
-                selection.selected.push(id);
-            }
+            self.objects[index].state.selected = true;
         }
         self.contained_call(
             index,
@@ -347,14 +343,11 @@ impl Engine {
     fn object_un_select(
         &mut self,
         index: usize,
-        owner: i32,
+        _owner: i32,
         cursor_only: bool,
     ) -> Result<(), EngineError> {
         if !cursor_only {
-            let id = self.objects[index].id;
-            if let Some(selection) = self.crew_selection.get_mut(&owner) {
-                selection.selected.retain(|candidate| *candidate != id);
-            }
+            self.objects[index].state.selected = false;
         }
         self.contained_call(
             index,
@@ -415,11 +408,7 @@ impl Engine {
     /// the crew-info rank model every member ranks -1, so the FIRST
     /// eligible roster entry wins the strict `iRank > iHighestRank` race.
     fn player_hi_rank_active_crew(&self, owner: i32, select_only: bool) -> Option<ObjectId> {
-        let selected = self
-            .crew_selection
-            .get(&owner)
-            .map(|selection| selection.selected.clone())
-            .unwrap_or_default();
+        let selected = self.selected_crew(owner);
         self.player_crew_roster(owner)
             .into_iter()
             .filter(|id| {
@@ -551,10 +540,8 @@ impl Engine {
             // Selection mode: toggle cursor select (:1323-1327).
             if let Some(cursor) = self.crew_cursor(owner) {
                 let selected = self
-                    .crew_selection
-                    .get(&owner)
-                    .map(|selection| selection.selected.contains(&cursor))
-                    .unwrap_or(false);
+                    .find_object_index(cursor)
+                    .is_some_and(|index| self.objects[index].state.selected);
                 if let Some(index) = self.find_object_index(cursor) {
                     if selected {
                         self.object_un_select(index, owner, false)?;
@@ -575,11 +562,7 @@ impl Engine {
                 if self.objects[index].state.crew_disabled {
                     continue;
                 }
-                let selected = self
-                    .crew_selection
-                    .get(&owner)
-                    .map(|selection| selection.selected.contains(&id))
-                    .unwrap_or(false);
+                let selected = self.objects[index].state.selected;
                 if selected {
                     self.object_un_select(index, owner, false)?;
                 } else {
@@ -1983,11 +1966,7 @@ impl Engine {
         let cursor_position = cursor
             .and_then(|id| self.find_object_index(id))
             .map(|index| self.objects[index].state.position);
-        let selected: Vec<ObjectId> = self
-            .crew_selection
-            .get(&owner)
-            .map(|selection| selection.selected().to_vec())
-            .unwrap_or_default();
+        let selected = self.selected_crew(owner);
         let mut cursor_processed = false;
         for crew_id in selected {
             if Some(crew_id) == cursor {

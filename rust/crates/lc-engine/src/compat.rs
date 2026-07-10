@@ -586,6 +586,8 @@ pub(crate) struct HostWorldContext {
     player_order: Rc<Vec<i32>>,
     teams: Rc<Vec<TeamInfo>>,
     local_players: Rc<HashSet<i32>>,
+    /// Legacy selection projection retained only for fixture/FFI contexts
+    /// that name crew ids without providing corresponding world objects.
     crew_selection: Rc<HashMap<i32, CrewSelectionState>>,
     next_object_id: u64,
     team_home_base_rule: bool,
@@ -794,6 +796,18 @@ impl HostWorldContext {
             let id = object.id;
             order.push(id);
             lookup.insert(id, object);
+        }
+        // Fixture/FFI compatibility: older callers carry selection only in
+        // CrewSelectionState. Project that legacy view onto the canonical
+        // C4Object::Select bit before host queries run.
+        for (&owner, selection) in &crew_selection {
+            for &id in &selection.selected {
+                if let Some(object) = lookup.get_mut(&id) {
+                    if object.owner == owner {
+                        object.selected = true;
+                    }
+                }
+            }
         }
         let order = Rc::new(order);
         let mut player_ids: Vec<_> = players.keys().copied().collect();
@@ -1095,9 +1109,6 @@ impl HostWorldContext {
         self.players.get(&id)
     }
 
-    pub(crate) fn crew_selection(&self, id: i32) -> Option<&CrewSelectionState> {
-        self.crew_selection.get(&id)
-    }
 }
 
 fn build_host_sector_map<'a, I>(
@@ -4576,19 +4587,22 @@ fn get_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil));
         }
-        let selection = context.world.crew_selection(player_id);
-        let Some(selection) = selection else {
-            return Ok(Value::Nil);
-        };
-        if selection.selected.is_empty() {
-            return Ok(Value::Nil);
-        }
         let mut remaining = index as usize;
         for crew_id in &player.crew {
             if player.cursor == Some(*crew_id) {
                 continue;
             }
-            if !selection.selected.contains(crew_id) {
+            let selected = context
+                .get_world_object(*crew_id)
+                .map(|object| object.selected)
+                .unwrap_or_else(|| {
+                    context
+                        .world
+                        .crew_selection
+                        .get(&player_id)
+                        .is_some_and(|selection| selection.selected.contains(crew_id))
+                });
+            if !selected {
                 continue;
             }
             remaining -= 1;
@@ -4634,12 +4648,26 @@ fn get_select_count(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        let selection = context
-            .world
-            .crew_selection(player_id)
-            .map(|state| state.selected.len())
-            .unwrap_or(0);
-        Ok(Value::Int(truncate_to_i32(selection as u64)))
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        let count = player
+            .crew
+            .iter()
+            .filter(|id| {
+                context
+                    .get_world_object(**id)
+                    .map(|object| object.selected)
+                    .unwrap_or_else(|| {
+                        context
+                            .world
+                            .crew_selection
+                            .get(&player_id)
+                            .is_some_and(|selection| selection.selected.contains(id))
+                    })
+            })
+            .count();
+        Ok(Value::Int(truncate_to_i32(count as u64)))
     })
 }
 
@@ -23145,11 +23173,7 @@ impl EffectHostContext {
                         )
                 });
                 let owner = scope.map(ObjectScopeContext::owner).unwrap_or(object.owner);
-                let selected = self
-                    .world
-                    .crew_selection
-                    .get(&owner)
-                    .is_some_and(|selection| selection.selected.contains(&id));
+                let selected = object.selected;
                 let snapshot = CommandObjectSnapshot {
                     id,
                     definition_id: object.definition_id.clone(),

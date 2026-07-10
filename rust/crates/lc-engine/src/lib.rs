@@ -3262,69 +3262,24 @@ impl QueuedCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct CrewSelection {
-    selected: Vec<ObjectId>,
     cursor: Option<ObjectId>,
 }
 
 impl CrewSelection {
-    fn select(&mut self, id: ObjectId) {
-        if !self.selected.contains(&id) {
-            self.selected.push(id);
-        }
-        if self.cursor.is_none() {
-            self.cursor = Some(id);
-        }
-    }
-
-    fn deselect(&mut self, id: ObjectId) {
-        let mut removed = false;
-        self.selected.retain(|candidate| {
-            if *candidate == id {
-                removed = true;
-                false
-            } else {
-                true
-            }
-        });
-        if self.cursor == Some(id) {
-            if removed {
-                self.cursor = self.selected.last().copied();
-            } else if !self.selected.contains(&id) {
-                self.cursor = self.selected.last().copied();
-            }
-        }
-        if self.selected.is_empty() {
-            self.cursor = None;
-        }
-    }
-
-    fn clear(&mut self) {
-        self.selected.clear();
-        self.cursor = None;
-    }
-
     fn prune(&mut self, alive: &HashSet<ObjectId>) {
-        self.selected.retain(|id| alive.contains(id));
         if let Some(cursor) = self.cursor {
             if !alive.contains(&cursor) {
-                self.cursor = self.selected.last().copied();
+                self.cursor = None;
             }
-        }
-        if self.selected.is_empty() {
-            self.cursor = None;
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.selected.is_empty() && self.cursor.is_none()
+        self.cursor.is_none()
     }
 
     fn cursor(&self) -> Option<ObjectId> {
         self.cursor
-    }
-
-    fn selected(&self) -> &[ObjectId] {
-        &self.selected
     }
 
     fn set_cursor(&mut self, cursor: Option<ObjectId>) {
@@ -3340,21 +3295,9 @@ pub struct CrewSelectionState {
     pub cursor: Option<ObjectId>,
 }
 
-impl From<&CrewSelection> for CrewSelectionState {
-    fn from(selection: &CrewSelection) -> Self {
-        Self {
-            selected: selection.selected.clone(),
-            cursor: selection.cursor,
-        }
-    }
-}
-
 impl From<CrewSelectionState> for CrewSelection {
     fn from(state: CrewSelectionState) -> Self {
-        Self {
-            selected: state.selected,
-            cursor: state.cursor,
-        }
+        Self { cursor: state.cursor }
     }
 }
 
@@ -11818,10 +11761,12 @@ impl Engine {
                 }
             }
             if let Some((cursor, _)) = hi_rank {
+                if let Some(index) = self.find_object_index(cursor) {
+                    self.objects[index].state.selected = true;
+                }
                 self.crew_selection.insert(
                     number,
                     CrewSelection {
-                        selected: vec![cursor],
                         cursor: Some(cursor),
                     },
                 );
@@ -13287,11 +13232,7 @@ impl Engine {
             .map_or_else(|| players.keys().copied().collect(), |players| {
                 players.iter().copied().collect()
             });
-        let crew_selection: HashMap<i32, CrewSelectionState> = self
-            .crew_selection
-            .iter()
-            .map(|(&owner, selection)| (owner, CrewSelectionState::from(selection)))
-            .collect();
+        let crew_selection = self.crew_selection_states();
         let sky_adjustment = self
             .sky
             .as_ref()
@@ -14040,10 +13981,47 @@ impl Engine {
     }
 
     pub fn selected_crew(&self, owner: i32) -> Vec<ObjectId> {
-        self.crew_selection
+        // GetCursor(index) scans C4Player::Crew in its stored list order
+        // (C4Script.cpp:2905-2928). Object numbers are not an ordering key:
+        // loaded games may assign arbitrary ids, so follow the player's
+        // actual roster and only fall back to object insertion order in the
+        // playerless engine fixtures.
+        let roster = self
+            .players
             .get(&owner)
-            .map(|selection| selection.selected().to_vec())
-            .unwrap_or_default()
+            .map(|player| player.crew().to_vec())
+            .unwrap_or_else(|| self.crew_members(owner));
+        roster
+            .into_iter()
+            .filter(|id| {
+                self.find_object_index(*id)
+                    .is_some_and(|index| self.objects[index].state.selected)
+            })
+            .collect()
+    }
+
+    fn crew_selection_state(&self, owner: i32) -> CrewSelectionState {
+        CrewSelectionState {
+            selected: self.selected_crew(owner),
+            cursor: self.crew_cursor(owner),
+        }
+    }
+
+    fn crew_selection_states(&self) -> HashMap<i32, CrewSelectionState> {
+        let mut owners: HashSet<i32> = self.crew_selection.keys().copied().collect();
+        owners.extend(
+            self.objects
+                .iter()
+                .filter(|object| object.state.selected)
+                .map(|object| object.state.owner),
+        );
+        owners
+            .into_iter()
+            .filter_map(|owner| {
+                let state = self.crew_selection_state(owner);
+                (!state.selected.is_empty() || state.cursor.is_some()).then_some((owner, state))
+            })
+            .collect()
     }
 
     pub fn crew_cursor(&self, owner: i32) -> Option<ObjectId> {
@@ -14088,9 +14066,15 @@ impl Engine {
             return Ok(());
         }
 
-        let selection = self.crew_selection.entry(owner).or_default();
+        let first = validated.first().copied();
         for id in validated {
-            selection.select(id);
+            if let Some(index) = self.find_object_index(id) {
+                self.objects[index].state.selected = true;
+            }
+        }
+        let selection = self.crew_selection.entry(owner).or_default();
+        if selection.cursor.is_none() {
+            selection.cursor = first;
         }
         // Crew selection flashes the select marks (C4Player::SelectCrew,
         // C4Player.cpp:1846 / SelectSingleByCursor, :1317).
@@ -14105,20 +14089,38 @@ impl Engine {
     where
         I: IntoIterator<Item = ObjectId>,
     {
-        if let Some(selection) = self.crew_selection.get_mut(&owner) {
-            for id in crew {
-                selection.deselect(id);
+        let ids: Vec<_> = crew.into_iter().collect();
+        for id in &ids {
+            if let Some(index) = self.find_object_index(*id) {
+                if self.objects[index].state.owner == owner {
+                    self.objects[index].state.selected = false;
+                }
             }
-            if selection.is_empty() {
-                self.crew_selection.remove(&owner);
+        }
+        let cursor_was_deselected = self
+            .crew_cursor(owner)
+            .is_some_and(|cursor| ids.contains(&cursor));
+        if cursor_was_deselected {
+            let replacement = self.selected_crew(owner).last().copied();
+            if let Some(selection) = self.crew_selection.get_mut(&owner) {
+                selection.cursor = replacement;
             }
+        }
+        if self
+            .crew_selection
+            .get(&owner)
+            .is_some_and(CrewSelection::is_empty)
+        {
+            self.crew_selection.remove(&owner);
         }
         self.sync_player_cursor(owner);
     }
 
     pub fn clear_crew_selection(&mut self, owner: i32) {
-        if let Some(selection) = self.crew_selection.get_mut(&owner) {
-            selection.clear();
+        for object in &mut self.objects {
+            if object.state.owner == owner && object.state.crew_member {
+                object.state.selected = false;
+            }
         }
         self.crew_selection.remove(&owner);
         self.sync_player_cursor(owner);
@@ -14154,8 +14156,10 @@ impl Engine {
                         detail: format!("object {} is not active", id),
                     });
                 }
+                if let Some(index) = self.find_object_index(id) {
+                    self.objects[index].state.selected = true;
+                }
                 let selection = self.crew_selection.entry(owner).or_default();
-                selection.select(id);
                 selection.set_cursor(Some(id));
                 // Cursor changes flash the cursor arrow (C4Player::SetCursor
                 // with fSelectArrow, C4Player.cpp:1836-1845).
@@ -14164,12 +14168,7 @@ impl Engine {
                 }
             }
             None => {
-                if let Some(selection) = self.crew_selection.get_mut(&owner) {
-                    selection.set_cursor(None);
-                    if selection.selected().is_empty() {
-                        self.crew_selection.remove(&owner);
-                    }
-                }
+                self.crew_selection.remove(&owner);
             }
         }
 
@@ -15711,7 +15710,6 @@ impl Engine {
     fn live_command_snapshot(
         &self,
         index: usize,
-        selected_objects: &HashSet<ObjectId>,
     ) -> CommandObjectSnapshot {
         let object = &self.objects[index];
         let (procedure, line_connect, collectible) = self
@@ -15758,7 +15756,7 @@ impl Engine {
             physical: self.object_physical(index),
             owner: object.state.owner,
             crew_member: object.state.crew_member,
-            selected: selected_objects.contains(&object.id),
+            selected: object.state.selected,
             alive: object.state.alive,
             contents: object.state.contents.clone(),
             line_connect,
@@ -15772,17 +15770,6 @@ impl Engine {
     /// Throw). It shares the retained-front callback/clear tail with the
     /// ordinary object tick.
     fn execute_object_command_now(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
-        let selected_objects = self
-            .crew_selection
-            .values()
-            .flat_map(|selection| {
-                selection
-                    .selected()
-                    .iter()
-                    .copied()
-                    .chain(selection.cursor())
-            })
-            .collect::<HashSet<_>>();
         let command_snapshots = self
             .objects
             .iter()
@@ -15790,7 +15777,7 @@ impl Engine {
             .map(|(index, object)| {
                 (
                     object.id,
-                    self.live_command_snapshot(index, &selected_objects),
+                    self.live_command_snapshot(index),
                 )
             })
             .collect::<HashMap<_, _>>();
@@ -15937,15 +15924,12 @@ impl Engine {
             self.apply_scenario_batch(batch)?;
         }
         let mut spawn_requests = Vec::new();
-        let mut selected_objects = HashSet::new();
-        for selection in self.crew_selection.values() {
-            for id in selection.selected() {
-                selected_objects.insert(*id);
-            }
-            if let Some(cursor) = selection.cursor() {
-                selected_objects.insert(cursor);
-            }
-        }
+        let selected_objects: HashSet<_> = self
+            .objects
+            .iter()
+            .filter(|object| object.state.selected)
+            .map(|object| object.id)
+            .collect();
 
         let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
             HashMap::with_capacity(self.objects.len());
@@ -16190,7 +16174,7 @@ impl Engine {
             self.refresh_object_ocf(idx);
             command_snapshots
                 .entry(current_id)
-                .or_insert_with(|| self.live_command_snapshot(idx, &selected_objects));
+                .or_insert_with(|| self.live_command_snapshot(idx));
             let definition_id = self.objects[idx].definition_id.clone();
             let previous_action_state = self.objects[idx].state.action.clone();
             let previous_action_name = previous_action_state.name.clone();
@@ -17056,7 +17040,7 @@ impl Engine {
                     physical: self.object_physical(idx),
                     owner: self.objects[idx].state.owner,
                     crew_member: self.objects[idx].state.crew_member,
-                    selected: selected_objects.contains(&object_id),
+                    selected: self.objects[idx].state.selected,
                     alive: self.objects[idx].state.alive,
                     contents: self.objects[idx].state.contents.clone(),
                     line_connect,
@@ -18248,11 +18232,7 @@ impl Engine {
                 .iter()
                 .map(system_particle_snapshot),
         );
-        let crew_selection = self
-            .crew_selection
-            .iter()
-            .map(|(&owner, selection)| (owner, CrewSelectionState::from(selection)))
-            .collect();
+        let crew_selection = self.crew_selection_states();
         let crew_roles = self.crew_roles.clone();
         let mut known_crew_owners: Vec<_> = self.known_crew_owners.iter().cloned().collect();
         known_crew_owners.sort_unstable();
@@ -18589,11 +18569,7 @@ impl Engine {
             })
             .collect();
 
-        let crew_selection = self
-            .crew_selection
-            .iter()
-            .map(|(&owner, selection)| (owner, CrewSelectionState::from(selection)))
-            .collect();
+        let crew_selection = self.crew_selection_states();
 
         let crew_roles = self
             .crew_roles
@@ -18887,6 +18863,22 @@ impl Engine {
             self.insert_into_exec_list(restored_id, true);
             if let Some(container) = snapshot.container {
                 container_assignments.push((snapshot.id, container));
+            }
+        }
+        // Backward compatibility for states written before ObjectSnapshot
+        // carried C4Object::Select: project the legacy per-player list onto
+        // the now-authoritative object bits. New states serialize both views
+        // consistently, so this OR is idempotent.
+        for (&owner, selection) in &state.crew_selection {
+            for &id in &selection.selected {
+                if let Some(object) = self.objects.iter_mut().find(|object| {
+                    object.id == id
+                        && object.state.owner == owner
+                        && object.state.crew_member
+                        && object.state.status.is_active()
+                }) {
+                    object.state.selected = true;
+                }
             }
         }
         if !state.object_order.is_empty() {
@@ -19816,11 +19808,21 @@ impl Engine {
     }
 
     fn remove_from_selection(&mut self, owner: i32, object_id: ObjectId) {
-        if let Some(selection) = self.crew_selection.get_mut(&owner) {
-            selection.deselect(object_id);
-            if selection.is_empty() {
-                self.crew_selection.remove(&owner);
+        if let Some(object) = self.objects.iter_mut().find(|object| object.id == object_id) {
+            object.state.selected = false;
+        }
+        if self.crew_cursor(owner) == Some(object_id) {
+            let replacement = self.selected_crew(owner).last().copied();
+            if let Some(selection) = self.crew_selection.get_mut(&owner) {
+                selection.cursor = replacement;
             }
+        }
+        if self
+            .crew_selection
+            .get(&owner)
+            .is_some_and(CrewSelection::is_empty)
+        {
+            self.crew_selection.remove(&owner);
         }
         self.sync_player_cursor(owner);
     }
@@ -19907,8 +19909,10 @@ impl Engine {
                         selection.cursor = object;
                         if select_crew {
                             if let Some(id) = object {
-                                if !selection.selected.contains(&id) {
-                                    selection.selected.push(id);
+                                if let Some(target) =
+                                    self.objects.iter_mut().find(|target| target.id == id)
+                                {
+                                    target.state.selected = true;
                                 }
                             }
                         }
@@ -20013,8 +20017,10 @@ impl Engine {
 
     fn prune_selection(&mut self) {
         self.prune_roles();
-        if self.crew_selection.is_empty() {
-            return;
+        for object in &mut self.objects {
+            if !object.state.crew_member || !object.state.status.is_active() {
+                object.state.selected = false;
+            }
         }
 
         let alive: HashSet<ObjectId> = self
@@ -44562,6 +44568,61 @@ func Activate(inMat, inLength, inStrength)
     }
 
     #[test]
+    fn selected_is_persisted_on_the_object_like_cpp() -> Result<(), EngineError> {
+        // C4Object::Select is object-owned state and CompileFunc writes it
+        // as `Selected`, independently of C4Player::Cursor
+        // (C4Object.h:153; C4Object.cpp:2800).
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine.register_definition(definition)?;
+        engine.register_player(PlayerConfig::new(1, "Selector"))?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("Test")
+                .with_alive(true)
+                .with_owner(1),
+        )?;
+        engine.select_crew(1, [crew])?;
+
+        let encoded = serde_json::to_value(engine.capture_state())
+            .expect("engine state serializes to a JSON value");
+        assert_eq!(
+            encoded["objects"][0]["snapshot"]["selected"].as_bool(),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selected_crew_follows_player_roster_not_object_number() -> Result<(), EngineError> {
+        // FnGetCursor walks C4Player::Crew link order and tests each object's
+        // Select bit (C4Script.cpp:2905-2928). Object Number is unrelated to
+        // that ordering in loaded games.
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine.register_definition(definition)?;
+        engine.register_player(PlayerConfig::new(1, "Roster"))?;
+        let high = engine.spawn_object(
+            SpawnConfig::new("Test")
+                .with_id(ObjectId::new(500))
+                .with_alive(true)
+                .with_owner(1),
+        )?;
+        let low = engine.spawn_object(
+            SpawnConfig::new("Test")
+                .with_id(ObjectId::new(7))
+                .with_alive(true)
+                .with_owner(1),
+        )?;
+        engine.select_crew(1, [high, low])?;
+
+        assert_eq!(engine.selected_crew(1), engine.player(1).unwrap().crew());
+        assert_eq!(engine.selected_crew(1), vec![low, high]);
+        Ok(())
+    }
+
+    #[test]
     fn register_player_populates_snapshot_state() -> Result<(), EngineError> {
         let mut engine = Engine::new();
         engine.register_player(PlayerConfig::new(1, "Alice").with_wealth(75))?;
@@ -45306,7 +45367,16 @@ func Activate(inMat, inLength, inStrength)
             .set_crew_cursor(1, Some(second))
             .expect("cursor assignment succeeds");
 
-        let state = engine.capture_state();
+        let mut state = engine.capture_state();
+        assert!(
+            state.objects.iter().all(|object| object.snapshot.selected),
+            "C4Object::Select is persisted on every selected object"
+        );
+        // Simulate a pre-object-bit state: the old per-player selection list
+        // remains a supported import projection.
+        for object in &mut state.objects {
+            object.snapshot.selected = false;
+        }
 
         let mut restored = Engine::with_seed(5);
         let mut definition = build_definition();
