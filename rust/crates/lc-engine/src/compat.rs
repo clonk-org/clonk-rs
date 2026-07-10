@@ -219,6 +219,9 @@ pub(crate) enum PlayerCommand {
     },
     /// `FnSetWealth` (C4Script.cpp:2761-2766), already clamped.
     SetWealth { player_id: i32, value: i32 },
+    /// `FnSetFoW` (C4Script.cpp:3671-3678): persist the explicit fog of
+    /// war setting and its forced override on the validated player.
+    SetFogOfWar { player_id: i32, enabled: bool },
     /// `FnSetPlrExtraData` (C4Script.cpp:4692-4732): a validated named
     /// slot write on C4Player::ExtraData.
     SetExtraData {
@@ -1665,6 +1668,41 @@ fn set_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
             value: clamped,
         });
         Ok(Value::Bool(true))
+    })
+}
+
+/// `FnSetFoW` (C4Script.cpp:3671-3678): validate the player, immediately
+/// persist the requested flag through `C4Player::SetFoW`, and return an
+/// integer success value. C4Aul nil-fills both omitted parameters.
+fn set_fow(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "SetFoW expects at most 2 arguments: enabled, player",
+        ));
+    }
+    let enabled = value_to_bool(
+        args.first().unwrap_or(&Value::Nil),
+        "SetFoW",
+        "enabled",
+    )?;
+    let player_id = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetFoW",
+        "player",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Int(0));
+        };
+        let Some(player) = context.player_state_mut(player_id) else {
+            return Ok(Value::Int(0));
+        };
+        player.fog_of_war = enabled;
+        player.force_fog_of_war = true;
+        context.record_player_command(PlayerCommand::SetFogOfWar { player_id, enabled });
+        Ok(Value::Int(1))
     })
 }
 
@@ -4998,6 +5036,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerID", get_player_id);
     script.register_host_function("GetWealth", get_wealth);
     script.register_host_function("SetWealth", set_wealth);
+    script.register_host_function("SetFoW", set_fow);
     // Fn[Get/Set]PlrExtraData (C4Script.cpp:4692-4747, AddFunc
     // :6666-6667) — MagiClonk's Recruitment combo preference.
     script.register_host_function("GetPlrExtraData", get_plr_extra_data);
@@ -22649,6 +22688,7 @@ mod tests {
         "SetCursor",
         "SetDir",
         "SetEntrance",
+        "SetFoW",
         "SetGamma",
         "SetGraphics",
         "SetGravity",
@@ -24096,6 +24136,78 @@ func Trigger(object pOther)
                 value: 100_000,
             }]
         ));
+    }
+
+    #[test]
+    fn set_fow_nil_fills_arguments_and_updates_eliminated_players() {
+        // FnSetFoW (C4Script.cpp:3671-3678) accepts the ordinary two
+        // nil-filled C4Aul parameter slots, validates only that the player
+        // exists, and immediately calls C4Player::SetFoW. SetFoW persists
+        // both FogOfWar and ForceFogOfWar (C4Player.cpp:815-824,
+        // 1580-1581), even for an eliminated player.
+        let player = PlayerState {
+            id: 0,
+            status: crate::PlayerStatus::Eliminated,
+            fog_of_war: true,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            // No arguments means SetFoW(nil, nil): disable player zero.
+            assert_eq!(set_fow(&[])?, Value::Int(1));
+            let disabled = HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let player = borrow
+                    .as_ref()
+                    .and_then(|context| context.player_state(0))
+                    .expect("player zero remains visible in the callback");
+                (player.fog_of_war, player.force_fog_of_war)
+            });
+            assert_eq!(disabled, (false, true));
+
+            // A single argument nil-fills the player slot with zero.
+            assert_eq!(set_fow(&[Value::Int(1)])?, Value::Int(1));
+            let enabled = HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let player = borrow
+                    .as_ref()
+                    .and_then(|context| context.player_state(0))
+                    .expect("player zero remains visible in the callback");
+                (player.fog_of_war, player.force_fog_of_war)
+            });
+            assert_eq!(enabled, (true, true));
+
+            // Missing players return integer false and record no write.
+            assert_eq!(
+                set_fow(&[Value::Bool(true), Value::Int(99)])?,
+                Value::Int(0)
+            );
+            assert!(set_fow(&[Value::Bool(true), Value::Int(0), Value::Nil]).is_err());
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+        result.expect("SetFoW calls succeed");
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [
+                PlayerCommand::SetFogOfWar {
+                    player_id: 0,
+                    enabled: false,
+                },
+                PlayerCommand::SetFogOfWar {
+                    player_id: 0,
+                    enabled: true,
+                }
+            ]
+        ));
+
+        assert_eq!(
+            set_fow(&[Value::Bool(true), Value::Int(0)])
+                .expect("a missing host context is not a script error"),
+            Value::Int(0)
+        );
     }
 
     #[test]

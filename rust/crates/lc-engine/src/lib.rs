@@ -19050,6 +19050,11 @@ impl Engine {
                         player.set_wealth(value);
                     }
                 }
+                PlayerCommand::SetFogOfWar { player_id, enabled } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.set_fog_of_war(enabled);
+                    }
+                }
                 // FnSetPlrExtraData (C4Script.cpp:4712-4730): update in
                 // place, or append preserving the names-list order.
                 PlayerCommand::SetExtraData {
@@ -48860,6 +48865,57 @@ func FxProbeTimer(pThis, iNumber) {
             EffectVarValue::Int(4),
             "the timer keeps firing on every elapsed interval"
         );
+    }
+
+    #[test]
+    fn scheduled_global_set_fow_kills_after_one_tick_and_persists_flags() {
+        // Dragon Rock's Helpers.c Schedule path is an interval-1 global
+        // IntSchedule effect. Its callback kills the effect after the
+        // scheduled SetFoW succeeds; an unknown host call instead takes the
+        // fail-safe error path and leaves the effect alive every frame.
+        // FnSetFoW/C4Player::SetFoW: C4Script.cpp:3671-3678 and
+        // C4Player.cpp:815-824.
+        let script = r#"
+        global func Initialize(state, random) {
+            var effect = AddEffect("IntSchedule", nil, 200, 1);
+            EffectVar(0, nil, effect) = "SetFoW(true, 0)";
+            return nil;
+        }
+
+        global func FxIntScheduleTimer(target, number, time) {
+            eval(EffectVar(0, target, number));
+            return -1;
+        }
+
+        global func Step(state, frame, random) { return nil; }
+        "#;
+
+        let definition =
+            Definition::from_script("ELEV", "Elevator", script).expect("script compiles");
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_player(PlayerConfig::new(0, "Player"))
+            .expect("player registers");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .spawn_object(SpawnConfig::new("ELEV"))
+            .expect("spawn succeeds");
+        assert_eq!(engine.global_effects().len(), 1);
+
+        engine.tick().expect("scheduled callback succeeds");
+
+        assert!(
+            engine.global_effects().is_empty(),
+            "the successful one-shot callback removes its schedule effect"
+        );
+        let player = engine.player(0).expect("player remains registered");
+        assert!(player.fog_of_war());
+        assert!(player.force_fog_of_war());
+        let persisted = player.to_state();
+        assert!(persisted.fog_of_war);
+        assert!(persisted.force_fog_of_war);
     }
 
     #[test]

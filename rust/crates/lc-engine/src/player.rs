@@ -98,6 +98,13 @@ pub struct PlayerState {
     pub production_unit: u32,
     #[serde(default)]
     pub color: Option<RgbColor>,
+    /// Saved `C4Player::fFogOfWar` setting (C4Player.cpp:1580).
+    #[serde(default)]
+    pub fog_of_war: bool,
+    /// Whether fog of war was explicitly forced instead of selected by mouse
+    /// control (C4Player::bForceFogOfWar, C4Player.cpp:1581).
+    #[serde(default)]
+    pub force_fog_of_war: bool,
     /// Players this player declared hostility against (C4Player::Hostility,
     /// queried by C4PlayerList::Hostile, C4PlayerList.cpp:82-92). Sorted for
     /// deterministic serialization.
@@ -187,6 +194,8 @@ pub struct Player {
     production_delay: u32,
     production_unit: u32,
     color: Option<RgbColor>,
+    fog_of_war: bool,
+    force_fog_of_war: bool,
     hostility: HashSet<i32>,
     /// The indexed player color chosen at ScenarioInit
     /// (C4Player.cpp:678-685; C4PlayerList::ColorTaken scans it). -1 until
@@ -226,6 +235,8 @@ impl Player {
             production_delay: 0,
             production_unit: 0,
             color: None,
+            fog_of_war: false,
+            force_fog_of_war: false,
             hostility: HashSet::new(),
             color_index: -1,
             position_index: -1,
@@ -281,6 +292,8 @@ impl Player {
             production_delay,
             production_unit,
             color,
+            fog_of_war: false,
+            force_fog_of_war: false,
             hostility: HashSet::new(),
             color_index: -1,
             position_index: -1,
@@ -315,6 +328,8 @@ impl Player {
             production_delay,
             production_unit,
             color,
+            fog_of_war,
+            force_fog_of_war,
             hostility,
             control,
             extra_data,
@@ -342,6 +357,8 @@ impl Player {
             production_delay,
             production_unit,
             color,
+            fog_of_war,
+            force_fog_of_war,
             hostility: hostility.into_iter().collect(),
             color_index: -1,
             position_index: -1,
@@ -378,6 +395,8 @@ impl Player {
             production_delay: self.production_delay,
             production_unit: self.production_unit,
             color: self.color,
+            fog_of_war: self.fog_of_war,
+            force_fog_of_war: self.force_fog_of_war,
             hostility: {
                 let mut hostility: Vec<i32> = self.hostility.iter().copied().collect();
                 hostility.sort_unstable();
@@ -431,6 +450,21 @@ impl Player {
 
     pub fn set_team(&mut self, team: Option<i32>) {
         self.team = team;
+    }
+
+    pub fn fog_of_war(&self) -> bool {
+        self.fog_of_war
+    }
+
+    pub fn force_fog_of_war(&self) -> bool {
+        self.force_fog_of_war
+    }
+
+    /// Explicitly enable or disable fog of war. Unlike automatic mouse-control
+    /// selection, either value forces the setting (C4Player.cpp:815-824).
+    pub fn set_fog_of_war(&mut self, enabled: bool) {
+        self.fog_of_war = enabled;
+        self.force_fog_of_war = true;
     }
 
     pub fn surrendered(&self) -> bool {
@@ -892,5 +926,43 @@ impl PlayerConfig {
 
     pub fn build(self) -> Player {
         Player::from_config(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_fog_of_war_forces_override_and_persists_both_flags() {
+        // C4Player::SetFoW (C4Player.cpp:815-824) always forces the setting,
+        // including when disabling fog of war; CompileFunc persists both flags
+        // as FogOfWar and ForceFogOfWar (C4Player.cpp:1580-1581).
+        let mut player = Player::new(1, "Player");
+        assert!(!player.fog_of_war());
+        assert!(!player.force_fog_of_war());
+        let configured = PlayerConfig::new(2, "Configured").build();
+        assert!(!configured.fog_of_war());
+        assert!(!configured.force_fog_of_war());
+
+        player.set_fog_of_war(true);
+        let enabled = player.to_state();
+        assert!(enabled.fog_of_war);
+        assert!(enabled.force_fog_of_war);
+
+        let mut restored = Player::from_state(enabled);
+        restored.set_fog_of_war(false);
+        let disabled = restored.to_state();
+        assert!(!disabled.fog_of_war);
+        assert!(disabled.force_fog_of_war);
+    }
+
+    #[test]
+    fn persisted_fog_of_war_flags_default_to_false_when_absent() {
+        let state: PlayerState = serde_json::from_str(r#"{"id":2}"#)
+            .unwrap_or_else(|error| panic!("valid legacy player state: {error}"));
+
+        assert!(!state.fog_of_war);
+        assert!(!state.force_fog_of_war);
     }
 }
