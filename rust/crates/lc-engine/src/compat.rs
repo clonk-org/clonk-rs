@@ -5606,6 +5606,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DigFreeRect", dig_free_rect);
     script.register_host_function("FreeRect", free_rect);
     script.register_host_function("ScriptGo", script_go);
+    script.register_host_function("goto", script_goto);
     script.register_host_function("BlastFree", blast_free);
     script.register_host_function("BlastObject", blast_object);
     script.register_host_function("ShakeFree", shake_free);
@@ -13969,6 +13970,24 @@ fn script_go(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         context.script_go_request = Some(go);
         Ok(Value::Bool(true))
+    })
+}
+
+/// Fn_goto (C4Script.cpp:225-229): synchronously replaces
+/// `Game.Script.Counter` and returns the assigned integer. The current
+/// C4GameScriptHost pulse has already post-incremented the counter before it
+/// calls Script%d (C4ScriptHost.cpp:222-232), so this redirects the next pulse.
+fn script_goto(args: &[Value]) -> Result<Value, RuntimeError> {
+    let counter = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "goto",
+        "counter",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.script_counter_request = Some(counter);
+        }
+        Ok(Value::Int(counter))
     })
 }
 
@@ -24503,6 +24522,7 @@ mod tests {
         "Sum",
         "TrainPhysical",
         "WildcardMatch",
+        "goto",
     ];
 
     #[test]
