@@ -267,10 +267,11 @@ impl SkyState {
     /// FnSetSkyAdjust -> C4Sky::SetModulation (C4Sky.cpp:238-244):
     /// `Modulation = dwWithClr; BackClr = dwBackClr; BackClrEnabled =
     /// (Modulation >> 24) != 0` — the `Option` on back_color models the
-    /// enable flag (C++ keeps a disabled BackClr around, but scripts
-    /// always set both in one call).
+    /// enable flag while `back_color_raw` retains the independently readable
+    /// and persisted value.
     pub fn apply_modulation(&mut self, modulation: u32, back_color: u32) {
         self.settings.modulation = Some(modulation);
+        self.settings.back_color_raw = back_color;
         self.settings.back_color = (modulation >> 24 != 0).then_some(back_color);
     }
 
@@ -443,6 +444,10 @@ mod tests {
         assert_eq!(
             frame.settings.back_color, None,
             "alpha-less modulation disables the back fill"
+        );
+        assert_eq!(
+            frame.settings.back_color_raw, 0x123456,
+            "disabled BackClr remains readable and persisted"
         );
     }
 

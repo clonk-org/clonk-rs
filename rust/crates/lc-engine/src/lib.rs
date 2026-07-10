@@ -26664,9 +26664,9 @@ impl Engine {
                 } => {
                     // FnSetSkyAdjust -> C4Sky::SetModulation
                     // (C4Sky.cpp:238-244).
-                    if let Some(sky) = &mut self.sky {
-                        sky.apply_modulation(modulation, back_color);
-                    }
+                    self.sky
+                        .get_or_insert_with(|| SkyState::new(SkySettings::default()))
+                        .apply_modulation(modulation, back_color);
                 }
                 LandscapeOperation::SkyParallax {
                     mode,
@@ -58265,6 +58265,85 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
         let mut restored = Engine::with_seed(9);
         restored.restore_state(&state)?;
         assert_eq!(restored.snapshot().sky, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn get_sky_adjust_reads_live_raw_values_and_survives_save_restore() -> Result<(), EngineError> {
+        // FnGetSkyAdjust returns Modulation or BackClr according to the bool
+        // parameter (C4Script.cpp:4632-4636). SetModulation writes both raw
+        // values immediately, even when its alpha byte disables BackClr, and
+        // C4Sky::CompileFunc persists all three fields independently
+        // (C4Sky.cpp:238-258).
+        let script = r#"#strict
+local iInitialMod, iInitialBack, iAlphaMod, iAlphaBack;
+local iDisabledMod, iDisabledBack, iStringBack, iArrayBack, iNilMod, iExtraBack;
+local iRestoredMod, iRestoredBack;
+
+func ProbeSky() {
+    iInitialMod = GetSkyAdjust();
+    iInitialBack = GetSkyAdjust(1);
+    SetSkyAdjust(-2130706433, 1193046);
+    iAlphaMod = GetSkyAdjust();
+    iAlphaBack = GetSkyAdjust(1);
+    SetSkyAdjust(11259375, 6636321);
+    iDisabledMod = GetSkyAdjust(false);
+    iDisabledBack = GetSkyAdjust(true);
+    iStringBack = GetSkyAdjust("");
+    iArrayBack = GetSkyAdjust([]);
+    iNilMod = GetSkyAdjust(nil);
+    iExtraBack = GetSkyAdjust(1, 0);
+    return(1);
+}
+
+func ReadRestoredSky() {
+    iRestoredMod = GetSkyAdjust();
+    iRestoredBack = GetSkyAdjust(1);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(
+            Definition::from_script("SKYP", "Sky probe", script).expect("probe compiles"),
+        )?;
+        let object_id = engine.spawn_object(SpawnConfig::new("SKYP"))?;
+        let object_index = engine.find_object_index(object_id).expect("probe exists");
+        engine.call_object_function(object_index, "ProbeSky", Vec::new())?;
+
+        let locals = &engine.object_snapshot(object_id).expect("probe remains").local_vars;
+        assert_eq!(locals.get("iInitialMod"), Some(&Value::Int(0x00ff_ffff)));
+        assert_eq!(locals.get("iInitialBack"), Some(&Value::Int(0)));
+        assert_eq!(locals.get("iAlphaMod"), Some(&Value::Int(-2_130_706_433)));
+        assert_eq!(locals.get("iAlphaBack"), Some(&Value::Int(0x12_3456)));
+        assert_eq!(locals.get("iDisabledMod"), Some(&Value::Int(0x00ab_cdef)));
+        assert_eq!(locals.get("iDisabledBack"), Some(&Value::Int(0x65_4321)));
+        assert_eq!(locals.get("iStringBack"), Some(&Value::Int(0x65_4321)));
+        assert_eq!(locals.get("iArrayBack"), Some(&Value::Int(0x65_4321)));
+        assert_eq!(locals.get("iNilMod"), Some(&Value::Int(0x00ab_cdef)));
+        assert_eq!(locals.get("iExtraBack"), Some(&Value::Int(0x65_4321)));
+
+        let state_json = serde_json::to_string(&engine.capture_state()).expect("state encodes");
+        let state: EngineState = serde_json::from_str(&state_json).expect("state decodes");
+        let sky = state.sky.as_ref().expect("SetSkyAdjust materializes C4Sky state");
+        assert_eq!(sky.settings.modulation, Some(0x00ab_cdef));
+        assert_eq!(sky.settings.back_color, None, "alpha byte disables fill");
+        assert_eq!(sky.settings.back_color_raw, 0x65_4321);
+
+        let mut restored = Engine::with_seed(1);
+        restored.register_definition(
+            Definition::from_script("SKYP", "Sky probe", script).expect("probe compiles"),
+        )?;
+        restored.restore_state(&state)?;
+        let object_index = restored
+            .find_object_index(object_id)
+            .expect("restored probe exists");
+        restored.call_object_function(object_index, "ReadRestoredSky", Vec::new())?;
+        let locals = &restored
+            .object_snapshot(object_id)
+            .expect("restored probe remains")
+            .local_vars;
+        assert_eq!(locals.get("iRestoredMod"), Some(&Value::Int(0x00ab_cdef)));
+        assert_eq!(locals.get("iRestoredBack"), Some(&Value::Int(0x65_4321)));
         Ok(())
     }
 

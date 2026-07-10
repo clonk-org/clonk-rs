@@ -5880,6 +5880,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ShakeFree", shake_free);
     script.register_host_function("SetSkyParallax", set_sky_parallax);
     script.register_host_function("SetSkyAdjust", set_sky_adjust);
+    script.register_host_function("GetSkyAdjust", get_sky_adjust);
     script.register_host_function("SetGamma", set_gamma);
     script.register_host_function("ResetGamma", reset_gamma);
     script.register_host_function("GBackSolid", g_back_solid);
@@ -7812,7 +7813,7 @@ pub(crate) enum LandscapeOperation {
         position: Vector2,
         amount: i32,
     },
-    /// FnSetSkyAdjust (C4Script.cpp:4626-4630) -> C4Sky::SetModulation
+    /// FnSetSkyAdjust (C4Script.cpp:4620-4624) -> C4Sky::SetModulation
     /// (C4Sky.cpp:238-244).
     SkyAdjust { modulation: u32, back_color: u32 },
     /// FnSetSkyParallax (C4Script.cpp:4955-4970) — Sky is a C4Landscape
@@ -14230,7 +14231,7 @@ fn reset_gamma(_args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Nil)
 }
 
-/// FnSetSkyAdjust (C4Script.cpp:4626-4630) -> C4Sky::SetModulation: sky
+/// FnSetSkyAdjust (C4Script.cpp:4620-4624) -> C4Sky::SetModulation: sky
 /// blit modulation plus the alpha-gated background fill color.
 fn set_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
     let modulation =
@@ -14246,11 +14247,34 @@ fn set_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetSkyAdjust requires an active engine context"))?;
+        context.sky_adjustment = SkyAdjustment {
+            modulation,
+            back_color,
+        };
         context.register_landscape_operation(LandscapeOperation::SkyAdjust {
             modulation,
             back_color,
         });
         Ok(Value::Nil)
+    })
+}
+
+/// FnGetSkyAdjust (C4Script.cpp:4632-4636) returns the raw sky modulation,
+/// or the raw background color when its bool argument is truthy. The latter
+/// is independent of `BackClrEnabled` (C4Sky.h:43-46).
+fn get_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
+    let back_color = args.first().is_some_and(Value::as_bool);
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("GetSkyAdjust requires an active engine context"))?;
+        let raw = if back_color {
+            context.sky_adjustment.back_color
+        } else {
+            context.sky_adjustment.modulation
+        };
+        Ok(Value::Int(raw as i32))
     })
 }
 
@@ -24914,6 +24938,7 @@ mod tests {
         "GetScore",
         "GetSeason",
         "GetSelectCount",
+        "GetSkyAdjust",
         "GetTemperature",
         "GetType",
         "GetValues",
