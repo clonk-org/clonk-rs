@@ -6627,6 +6627,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetY", get_y);
     script.register_host_function("GetDefBottom", get_def_bottom);
     script.register_host_function("GetID", get_id);
+    script.register_host_function("GetBase", get_base);
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
     script.register_host_function("CastObjects", cast_objects);
@@ -18327,6 +18328,35 @@ fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetBase (C4Script.cpp:1406-1410): read C4Object::Base from the
+/// explicit object, or from the calling object when the argument is nil;
+/// without either object C4ValueInt returns NO_OWNER.
+fn get_base(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetBase expects at most 1 argument: target object",
+        ));
+    }
+    let target = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "GetBase", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Int(OWNER_NONE));
+        };
+        let target = target.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let base = target
+            .and_then(|id| context.get_world_object(id))
+            .and_then(|object| object.full_state().map(|state| state.base))
+            .unwrap_or(OWNER_NONE);
+        Ok(Value::Int(base))
+    })
+}
+
 fn apply_position_bounds(
     desired: Vector2,
     vertices: &[ObjectVertex],
@@ -26723,6 +26753,7 @@ mod tests {
         "GetActionData",
         "GetActionTarget",
         "GetAlive",
+        "GetBase",
         "GetBreath",
         "GetCategory",
         "GetChar",
@@ -36964,6 +36995,46 @@ public func SeedFull()
             call(vec![Value::Int(7)]),
             Value::Nil,
             "FnFindBase rejects a player absent from Game.Players"
+        );
+    }
+
+    #[test]
+    fn get_base_reads_the_target_objects_stored_base() {
+        // FnGetBase returns pObj->Base and falls back to the calling object;
+        // without either object it returns NO_OWNER (C4Script.cpp:1406-1410).
+        // Tutorial01 Script120 calls this global form with FindObject(HUT2).
+        let definition = crate::Definition::from_script("HUT1", "Hut", "#strict\n")
+            .expect("definition compiles");
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Player"))
+            .expect("player registers");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let hut = engine
+            .spawn_object(crate::SpawnConfig::new("HUT1"))
+            .expect("hut spawns");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 0;
+
+        let world = engine.host_world_context();
+        let (result, _) = with_effect_context(None, &[], world, 2, || {
+            let mut script = lc_script::Engine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    "global func Probe(pObj) { return [GetBase(pObj), GetBase()]; }",
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call("Probe", &[object_reference_value(hut)])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(
+            result.expect("GetBase succeeds"),
+            Value::Array(vec![Value::Int(0), Value::Int(OWNER_NONE)])
         );
     }
 
