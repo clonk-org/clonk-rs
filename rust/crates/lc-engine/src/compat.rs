@@ -1932,6 +1932,44 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetPlayerInfoCoreVal (C4Script.cpp:4266-4280): reflect a saved
+/// C4PlayerInfoCore field. Only the control-style preference is represented
+/// in PlayerState today; it is the path used by Hazard's weapon recharge.
+fn get_player_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(entry) =
+        parse_optional_string(args.first(), "GetPlayerInfoCoreVal", "entry")?
+    else {
+        return Ok(Value::Nil);
+    };
+    let section = parse_optional_string(args.get(1), "GetPlayerInfoCoreVal", "section")?
+        .filter(|section| !section.is_empty());
+    let player_id = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "GetPlayerInfoCoreVal",
+        "player",
+    )?;
+    let entry_index = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "GetPlayerInfoCoreVal",
+        "entry_nr",
+    )?;
+    if entry_index != 0
+        || entry != "AutoStopControl"
+        || !matches!(section.as_deref(), None | Some("Preferences"))
+    {
+        return Ok(Value::Nil);
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        Ok(borrow
+            .as_ref()
+            .and_then(|context| context.player_state(player_id))
+            .map(|player| Value::Int(i32::from(player.control.control_style)))
+            .unwrap_or(Value::Nil))
+    })
+}
+
 fn get_player_id(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -6296,6 +6334,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerName", get_player_name);
     script.register_host_function("GetTaggedPlayerName", get_tagged_player_name);
     script.register_host_function("GetPlayerVal", get_player_val);
+    script.register_host_function("GetPlayerInfoCoreVal", get_player_info_core_val);
     script.register_host_function("GetPlayerTeam", get_player_team);
     script.register_host_function("GetTeamCount", get_team_count);
     script.register_host_function("GetTeamByIndex", get_team_by_index);
@@ -25976,6 +26015,7 @@ mod tests {
         "GetPlayerByIndex",
         "GetPlayerCount",
         "GetPlayerID",
+        "GetPlayerInfoCoreVal",
         "GetPlayerName",
         "GetPlayerTeam",
         "GetPlayerType",
@@ -28230,6 +28270,67 @@ func Trigger(object pOther)
         assert_eq!(
             result.expect("GetPlayerVal misses remain nil"),
             Value::Array(vec![Value::Nil; 4])
+        );
+    }
+
+    #[test]
+    fn get_player_info_core_val_drives_hazard_recharge_control_style() {
+        // FnGetPlayerInfoCoreVal reflects C4PlayerInfoCore and rejects invalid
+        // players before lookup (C4Script.cpp:4266-4280). The saved
+        // [Preferences] AutoStopControl entry is PrefControlStyle
+        // (C4InfoCore.cpp:165-171), which GetPlrCoreJumpAndRunControl exposes
+        // to Hazard's FxRechargeStop (planet/System.c4g/GetXVal.c:167).
+        let mut player = PlayerState {
+            id: 7,
+            ..PlayerState::default()
+        };
+        player.control.control_style = true;
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let mut script = lc_script::Engine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    r#"
+                    global func GetPlrCoreJumpAndRunControl(int plr)
+                    {
+                        return GetPlayerInfoCoreVal("AutoStopControl", "Preferences", plr);
+                    }
+
+                    global func FxRechargeStop(int controller)
+                    {
+                        if (GetPlrCoreJumpAndRunControl(controller)) return 1;
+                        return 0;
+                    }
+
+                    global func Probe()
+                    {
+                        return [
+                            FxRechargeStop(7),
+                            GetPlayerInfoCoreVal("AutoStopControl", "Preferences", 99),
+                            GetPlayerInfoCoreVal("AutoStopControl", "Player", 7),
+                            GetPlayerInfoCoreVal("AutoStopControl", "Preferences", 7, 1)
+                        ];
+                    }
+                    "#,
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call("Probe", &[])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(
+            result.expect("GetPlayerInfoCoreVal runs"),
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+            ])
         );
     }
 
