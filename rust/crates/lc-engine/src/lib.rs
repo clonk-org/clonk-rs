@@ -2147,6 +2147,11 @@ pub struct ObjectState {
     pub category: i32,
     #[serde(default)]
     pub crew_member: bool,
+    /// C4Object::Select: the authoritative crew-selection bit persisted as
+    /// `Selected` independently of C4Player::Cursor (C4Object.h:153;
+    /// C4Object.cpp:2800).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub selected: bool,
     /// C4Object::CrewDisabled (FnSetCrewEnabled, C4Script.cpp:4814-4836).
     #[serde(default)]
     pub crew_disabled: bool,
@@ -2343,6 +2348,7 @@ pub(crate) fn preview_spawn_state(
         controller,
         category,
         crew_member: false,
+        selected: false,
         crew_disabled: false,
         alive: true,
         base_graphics: None,
@@ -2480,6 +2486,9 @@ impl ObjectState {
         if let Some(crew_member) = delta.crew_member {
             self.crew_member = crew_member;
         }
+        if let Some(selected) = delta.selected {
+            self.selected = selected;
+        }
         if let Some(crew_disabled) = delta.crew_disabled {
             self.crew_disabled = crew_disabled;
         }
@@ -2595,6 +2604,7 @@ struct ObjectDelta {
     category: Option<i32>,
     own_mass: Option<i32>,
     crew_member: Option<bool>,
+    selected: Option<bool>,
     crew_disabled: Option<bool>,
     alive: Option<bool>,
     container: Option<Option<ObjectId>>,
@@ -2684,6 +2694,9 @@ impl ObjectDelta {
         if let Some(crew_member) = update.crew_member {
             self.crew_member = Some(crew_member);
         }
+        if let Some(selected) = update.selected {
+            self.selected = Some(selected);
+        }
         if let Some(crew_disabled) = update.crew_disabled {
             self.crew_disabled = Some(crew_disabled);
         }
@@ -2767,6 +2780,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             controller: update.controller,
             category: update.category,
             crew_member: update.crew_member,
+            selected: update.selected,
             crew_disabled: update.crew_disabled,
             portrait_source: update.portrait_source,
             solid_mask_override: update.solid_mask_override,
@@ -2886,6 +2900,9 @@ pub struct ObjectUpdate {
     pub own_mass: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
+    /// C4Object::Select overwrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected: Option<bool>,
     pub crew_disabled: Option<bool>,
     #[serde(default)]
     pub alive: Option<bool>,
@@ -3102,6 +3119,11 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_selected(mut self, selected: bool) -> Self {
+        self.selected = Some(selected);
+        self
+    }
+
     pub fn with_alive(mut self, alive: bool) -> Self {
         self.alive = Some(alive);
         self
@@ -3134,6 +3156,7 @@ impl ObjectUpdate {
             && self.controller.is_none()
             && self.category.is_none()
             && self.crew_member.is_none()
+            && self.selected.is_none()
             && self.alive.is_none()
             && self.container.is_none()
             && self.vertices.is_none()
@@ -4415,6 +4438,7 @@ impl Object {
             controller: self.state.controller,
             category: self.state.category,
             crew_member: self.state.crew_member,
+            selected: self.state.selected,
             alive: self.state.alive,
             base_graphics: self.state.base_graphics.clone(),
             graphics_overlays: self.state.graphics_overlays.clone(),
@@ -4939,6 +4963,9 @@ pub struct SpawnConfig {
     pub controller: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
+    /// Saved C4Object::Select bit (`Selected=` in Objects.txt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected: Option<bool>,
     #[serde(default)]
     pub status: Option<ObjectStatus>,
     #[serde(default)]
@@ -5024,6 +5051,7 @@ impl SpawnConfig {
             owner: OWNER_NONE,
             controller: None,
             crew_member: None,
+            selected: None,
             status: None,
             container: None,
             layer: None,
@@ -5199,6 +5227,11 @@ impl SpawnConfig {
         self
     }
 
+    pub fn with_selected(mut self, selected: bool) -> Self {
+        self.selected = Some(selected);
+        self
+    }
+
     pub fn with_alive(mut self, alive: bool) -> Self {
         self.alive = Some(alive);
         self
@@ -5282,6 +5315,10 @@ pub struct ObjectSnapshot {
     pub category: i32,
     #[serde(default)]
     pub crew_member: bool,
+    /// C4Object::Select, persisted independently of the player's cursor
+    /// (C4Object.cpp:2800).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub selected: bool,
     #[serde(default = "default_alive")]
     pub alive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -13296,6 +13333,7 @@ impl Engine {
                     object.state.container,
                     object.state.draw_transform,
                 ).with_direction(object.state.direction.to_script_value())
+                .with_selected(object.state.selected)
                 .with_contents(object.state.contents.clone())
                 .with_alive(object.state.alive)
                 .with_need_energy(object.state.need_energy)
@@ -18791,6 +18829,7 @@ impl Engine {
                     controller: snapshot.controller,
                     category: snapshot.category,
                     crew_member: snapshot.crew_member,
+                    selected: snapshot.selected,
                     crew_disabled: false,
                     alive: snapshot.alive,
                     base_graphics: snapshot.base_graphics.clone(),
@@ -29016,6 +29055,7 @@ impl Engine {
             owner,
             controller,
             crew_member,
+            selected,
             status,
             container,
             layer,
@@ -29207,6 +29247,7 @@ impl Engine {
                 controller: initial_controller,
                 category: initial_category,
                 crew_member: initial_crew_member,
+                selected: selected.unwrap_or(false),
                 crew_disabled: false,
                 // C4Object::Init sets Alive only for C4D_Living categories
                 // (C4Object.cpp:191); loaded objects compile it with default
@@ -30090,6 +30131,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         controller: snapshot.controller,
         category: snapshot.category,
         crew_member: snapshot.crew_member,
+        selected: snapshot.selected,
         crew_disabled: false,
         alive: snapshot.alive,
         base_graphics: snapshot.base_graphics.clone(),

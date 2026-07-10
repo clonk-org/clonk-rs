@@ -87,6 +87,8 @@ pub(crate) struct HostWorldObject {
     pub action_target2: Option<ObjectId>,
     pub action_procedure: Option<String>,
     pub owner: i32,
+    /// C4Object::Select at call entry, overlaid from active scopes.
+    pub selected: bool,
     pub category: i32,
     pub collectible: bool,
     pub energy: i32,
@@ -366,6 +368,7 @@ impl HostWorldObject {
             action_target2,
             action_procedure,
             owner,
+            selected: false,
             category,
             collectible: false,
             energy,
@@ -402,6 +405,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_alive(mut self, alive: bool) -> Self {
         self.alive = alive;
+        self
+    }
+
+    pub(crate) fn with_selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
         self
     }
 
@@ -22883,6 +22891,9 @@ impl EffectHostContext {
                 scope.walk_rotation = walk_rotation;
                 scope.current_magic_energy = magic_energy;
                 scope.current_need_energy = need_energy;
+                scope.current_selected = world
+                    .get(scope.id())
+                    .is_some_and(|object| object.selected);
                 // Seed the TRUE fixed dirs when the caller provided them —
                 // GetXDir must see a 0.4 px/f drift as 4 at precision 10
                 // like C++ reading pObj->xdir (C4Script.cpp:1167).
@@ -23024,6 +23035,7 @@ impl EffectHostContext {
             object.action_data = scope.current_action_data;
             object.damage = scope.current_damage;
             object.need_energy = scope.need_energy();
+            object.selected = scope.selected();
             object.direction = scope.current_direction.to_script_value();
             object.owner = scope.owner();
             // Staged dir writes surface at whole-pixel grain (the foreign
@@ -23590,6 +23602,7 @@ impl EffectHostContext {
             .restore_from_snapshot(&object.command_stack);
         scope.current_magic_energy = state.magic_energy;
         scope.current_need_energy = state.need_energy;
+        scope.current_selected = state.selected;
         // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358) —
         // nested scopes carry the snapshot mask like outer scopes do, not
         // the preview-grade recompute.
@@ -24282,6 +24295,9 @@ struct ObjectScopeContext {
     current_in_liquid: bool,
     current_own_mass: i32,
     current_owner: i32,
+    /// C4Object::Select, staged synchronously so nested calls and later host
+    /// reads in the same script call observe the write.
+    current_selected: bool,
     /// C4Object::Controller (C4Object.h:127) — cause tracing.
     current_controller: i32,
     current_category: i32,
@@ -24385,6 +24401,7 @@ impl ObjectScopeContext {
             current_in_liquid: in_liquid,
             current_own_mass: own_mass,
             current_owner: owner,
+            current_selected: false,
             current_controller: controller,
             current_category: category,
             ocf_base,
@@ -24602,6 +24619,10 @@ impl ObjectScopeContext {
 
     fn owner(&self) -> i32 {
         self.pending_update.owner.unwrap_or(self.current_owner)
+    }
+
+    fn selected(&self) -> bool {
+        self.pending_update.selected.unwrap_or(self.current_selected)
     }
 
     fn set_owner(&mut self, owner: i32) {

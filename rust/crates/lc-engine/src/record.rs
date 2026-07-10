@@ -456,6 +456,7 @@ mod tests {
                 controller: OWNER_NONE,
                 category: crate::DEFAULT_CATEGORY,
                 crew_member: false,
+                selected: false,
                 alive: true,
                 base_graphics: None,
                 graphics_overlays: Vec::new(),

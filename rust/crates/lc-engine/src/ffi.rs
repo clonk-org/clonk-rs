@@ -1014,6 +1014,9 @@ unsafe fn make_snapshot(
             owner: entry.owner,
             category: entry.category,
             crew_member: entry.crew_member,
+            // Projected from the existing crew-selection ABI below; adding
+            // a field to LcEngineObjectSnapshot would break the C++ layout.
+            selected: false,
             alive: entry.alive,
             base_graphics,
             graphics_overlays: Vec::new(),
