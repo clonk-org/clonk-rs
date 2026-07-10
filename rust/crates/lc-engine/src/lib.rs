@@ -5716,14 +5716,24 @@ pub struct DefinitionPictureImage {
     width: u32,
     height: u32,
     pixels: Arc<[u8]>,
+    color_mask: Option<Arc<[u8]>>,
 }
 
 impl DefinitionPictureImage {
-    fn from_resource(image: &lc_resources::GraphicsImage) -> Self {
+    fn from_resource(
+        image: &lc_resources::GraphicsImage,
+        mask: Option<&lc_resources::ColorByOwnerMask>,
+    ) -> Self {
+        let color_mask = mask.and_then(|mask| {
+            ((mask.width, mask.height) == (image.width(), image.height())
+                && mask.pixels.iter().any(|value| *value != 0))
+            .then(|| Arc::from(mask.pixels.clone().into_boxed_slice()))
+        });
         Self {
             width: image.width(),
             height: image.height(),
             pixels: image.clone_pixels(),
+            color_mask,
         }
     }
 
@@ -5741,6 +5751,10 @@ impl DefinitionPictureImage {
 
     pub fn into_pixels(self) -> Arc<[u8]> {
         self.pixels
+    }
+
+    pub fn color_mask(&self) -> Option<Arc<[u8]>> {
+        self.color_mask.as_ref().map(Arc::clone)
     }
 }
 
@@ -6199,13 +6213,17 @@ impl Definition {
         definition.set_picture(resource.core.picture.map(DefinitionPicture::from));
         definition.set_solid_mask(resource.core.solid_mask.map(DefinitionTargetRect::from));
         if let Some(image) = resource.picture_image.as_ref() {
-            definition.set_picture_image(Some(DefinitionPictureImage::from_resource(image)));
+            definition.set_picture_image(Some(DefinitionPictureImage::from_resource(
+                image,
+                resource.picture_color_by_owner_mask.as_ref(),
+            )));
         }
         if let Some(image) = resource.portrait_image.as_ref() {
-            definition.set_portrait_image(Some(DefinitionPictureImage::from_resource(image)));
+            definition.set_portrait_image(Some(DefinitionPictureImage::from_resource(image, None)));
         }
         if let Some(image) = resource.rank_symbols_image.as_ref() {
-            definition.set_rank_symbols_image(Some(DefinitionPictureImage::from_resource(image)));
+            definition
+                .set_rank_symbols_image(Some(DefinitionPictureImage::from_resource(image, None)));
         }
         if let Some(image) = resource.graphics_image.as_ref() {
             let mask = resource.color_by_owner_mask.as_ref();

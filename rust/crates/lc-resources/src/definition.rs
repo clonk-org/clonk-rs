@@ -15,6 +15,10 @@ pub struct Definition {
     pub script: DefinitionScript,
     pub action_map: Option<ActionMap>,
     pub picture_image: Option<GraphicsImage>,
+    /// ColorByOwner mask cropped to `picture_image`'s `Picture` facet.
+    /// C++ obtains both through `Graphics.GetBitmap(color)` in
+    /// `C4Def::Picture2Facet` (src/C4Def.cpp:1374-1378).
+    pub picture_color_by_owner_mask: Option<ColorByOwnerMask>,
     pub graphics_image: Option<GraphicsImage>,
     pub color_by_owner_mask: Option<ColorByOwnerMask>,
     pub additional_graphics: HashMap<String, DefinitionGraphicsVariant>,
@@ -59,6 +63,11 @@ impl Definition {
         let picture_image = load_definition_picture(group, &core);
         let (graphics_image, color_by_owner_mask, additional_graphics) =
             load_definition_graphics(group, core.color_by_owner);
+        let picture_color_by_owner_mask = crop_definition_picture_mask(
+            &core,
+            picture_image.as_ref(),
+            color_by_owner_mask.as_ref(),
+        );
         let portrait_image = load_plain_image(group, "Portrait1.png");
         let rank_symbols_image = load_plain_image(group, "Rank.png");
 
@@ -67,6 +76,7 @@ impl Definition {
             script,
             action_map,
             picture_image,
+            picture_color_by_owner_mask,
             graphics_image,
             color_by_owner_mask,
             additional_graphics,
@@ -1284,6 +1294,38 @@ fn load_definition_picture(group: &Group, core: &DefCore) -> Option<GraphicsImag
     Some(GraphicsImage::new(crop_w, crop_h, pixels))
 }
 
+fn crop_definition_picture_mask(
+    core: &DefCore,
+    picture: Option<&GraphicsImage>,
+    mask: Option<&ColorByOwnerMask>,
+) -> Option<ColorByOwnerMask> {
+    let picture = picture?;
+    let mask = mask?;
+    let (crop_x, crop_y, crop_w, crop_h) = match core.picture {
+        Some(rect) => normalize_crop(rect, mask.width, mask.height)
+            .unwrap_or((0, 0, mask.width, mask.height)),
+        None => (0, 0, mask.width, mask.height),
+    };
+    if (crop_w, crop_h) != (picture.width(), picture.height()) {
+        return None;
+    }
+
+    let mut pixels = Vec::with_capacity((crop_w * crop_h) as usize);
+    for row in crop_y..crop_y + crop_h {
+        let start = (row * mask.width + crop_x) as usize;
+        let end = start + crop_w as usize;
+        pixels.extend_from_slice(&mask.pixels[start..end]);
+    }
+    pixels
+        .iter()
+        .any(|value| *value != 0)
+        .then_some(ColorByOwnerMask {
+            width: crop_w,
+            height: crop_h,
+            pixels,
+        })
+}
+
 fn find_picture_entry(group: &Group) -> Result<Option<PathBuf>, GroupError> {
     const PRIORITY_FILES: [&str; 4] = ["Graphics32.png", "Graphics.png", "Picture.png", "Icon.png"];
     for candidate in PRIORITY_FILES {
@@ -2014,6 +2056,42 @@ mod tests {
         // keyed-out background) nor touch the base.
         assert_eq!(base.get_pixel(1, 0), &image::Rgba([80, 50, 20, 255]));
         assert_eq!(mask.pixels[1], 0);
+    }
+
+    #[test]
+    fn definition_picture_carries_its_cropped_color_by_owner_mask() {
+        // C4Def::Picture2Facet takes PictureRect from the definition's
+        // ColorByOwner-aware Graphics.GetBitmap(color) surface
+        // (src/C4Def.cpp:1374-1378). LoadGraphics keeps Overlay.png as the
+        // owner-color surface (src/C4DefGraphics.cpp:73-98), so the picture
+        // crop must retain the matching mask instead of freezing its raw
+        // Graphics.png colors.
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Mage.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=MAGE\nColorByOwner=1\nPicture=1,0,1,1\n",
+        )
+        .expect("DefCore");
+
+        let base = image::RgbaImage::from_pixel(3, 1, image::Rgba([0, 0, 0, 0]));
+        base.save(def_dir.join("Graphics.png")).expect("base png");
+        let mut overlay = image::RgbaImage::from_pixel(3, 1, image::Rgba([0, 0, 0, 0]));
+        overlay.put_pixel(1, 0, image::Rgba([136, 136, 136, 255]));
+        overlay
+            .save(def_dir.join("Overlay.png"))
+            .expect("overlay png");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let definition = Definition::load(&group).expect("load definition");
+        let picture = definition.picture_image.expect("picture crop");
+        assert_eq!((picture.width(), picture.height()), (1, 1));
+        let mask = definition
+            .picture_color_by_owner_mask
+            .expect("picture must retain owner-color mask");
+        assert_eq!((mask.width, mask.height), (1, 1));
+        assert_eq!(mask.pixels, vec![136]);
     }
 
     #[test]
