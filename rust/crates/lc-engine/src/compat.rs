@@ -6042,6 +6042,23 @@ fn extract_message_text(formatted: &str) -> String {
     formatted.split('$').next().unwrap_or("").to_string()
 }
 
+/// Convert the native `C4ID idDeco` parameter of `FnCustomMessage`
+/// (C4Script.cpp:5995). C++ accepts nil/falsy zero, direct C4ID values, and
+/// integer IDs in `0..=9999`; String -> C4ID is always invalid
+/// (C4Value.cpp:469-478,550-561).
+fn parse_custom_message_decoration(value: Option<&Value>) -> Result<Option<String>, RuntimeError> {
+    match value {
+        None | Some(Value::Nil) | Some(Value::Int(0)) | Some(Value::Bool(false)) => Ok(None),
+        Some(Value::C4Id(id)) if id.is_empty() || id == "NONE" || id == "0000" => Ok(None),
+        Some(Value::C4Id(id)) => Ok(Some(id.clone())),
+        Some(Value::Int(raw @ 1..=9999)) => Ok(Some(format!("{raw:04}"))),
+        Some(other) => Err(RuntimeError::new(format!(
+            "CustomMessage: expected C4ID or nil for decoration, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
         return Ok(Value::Bool(false));
@@ -6084,16 +6101,21 @@ fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(value) => Some(value_to_i32(value, "CustomMessage", "color")? as u32),
     };
 
-    let decoration = match args.get(6) {
-        Some(Value::Nil) | None => None,
-        Some(Value::String(id)) if !id.is_empty() => Some(id.clone()),
-        Some(other) => {
-            return Err(RuntimeError::new(format!(
-                "CustomMessage: expected string or nil for decoration, got {}",
-                other.type_name()
-            )))
+    let decoration = parse_custom_message_decoration(args.get(6))?;
+    if let Some(id) = decoration.as_deref() {
+        let known = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref().ok_or_else(|| {
+                RuntimeError::new("CustomMessage requires an active engine context")
+            })?;
+            Ok(context.world.definition_known(id))
+        })?;
+        // `FnCustomMessage` returns false before creating a message when
+        // `idDeco && !C4Id2Def(idDeco)` (C4Script.cpp:6002).
+        if known == Some(false) {
+            return Ok(Value::Bool(false));
         }
-    };
+    }
 
     let portrait = match args.get(7) {
         Some(Value::Nil) | None => None,
@@ -23935,6 +23957,82 @@ func Trigger(object pOther)
                 assert!(spec.player.is_none());
             }
         }
+    }
+
+    #[test]
+    fn custom_message_c4id_decoration_matches_tutorial_call() {
+        // FnCustomMessage's decoration parameter is C4ID and succeeds only
+        // when C4Id2Def resolves it (C4Script.cpp:5995-6002). Tutorial.c
+        // passes the literal DECO, which reaches the Rust VM as Value::C4Id.
+        let world = HostWorldContext::default().with_definition_metadata(Rc::new(
+            HashMap::from([("DECO".into(), DefinitionMetadata::default())]),
+        ));
+        let args = [
+            Value::String("Welcome".into()),
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::C4Id("DECO".into()),
+            Value::String("Portrait:SCLK::".into()),
+            Value::Nil,
+            Value::Nil,
+        ];
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || custom_message(&args));
+
+        assert_eq!(result.expect("CustomMessage succeeds"), Value::Bool(true));
+        assert_eq!(outcome.messages.len(), 1);
+        match &outcome.messages[0] {
+            MessageCommand::Add(spec) => {
+                assert_eq!(spec.decoration.as_deref(), Some("DECO"));
+                assert_eq!(spec.portrait.as_deref(), Some("Portrait:SCLK::"));
+            }
+        }
+    }
+
+    #[test]
+    fn custom_message_c4id_decoration_must_resolve_like_cpp() {
+        // C++ returns false before creating a message when idDeco is nonzero
+        // but C4Id2Def cannot resolve it (C4Script.cpp:6002).
+        let world = HostWorldContext::default().with_definition_metadata(Rc::new(
+            HashMap::from([("DECO".into(), DefinitionMetadata::default())]),
+        ));
+        let args = [
+            Value::String("Welcome".into()),
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::C4Id("NOPE".into()),
+        ];
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || custom_message(&args));
+
+        assert_eq!(result.expect("unknown decoration is not an error"), Value::Bool(false));
+        assert!(outcome.messages.is_empty());
+    }
+
+    #[test]
+    fn custom_message_rejects_string_in_c4id_decoration_slot() {
+        // String -> C4ID is an unconditional conversion error in the C++
+        // conversion table (C4Value.cpp:550-561), even for old syntax.
+        let args = [
+            Value::String("Welcome".into()),
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::String("DECO".into()),
+        ];
+        let (result, outcome) = with_object_host_context(|| custom_message(&args));
+
+        let error = result.expect_err("string decoration must not coerce to C4ID");
+        assert!(error.message().contains("expected C4ID"));
+        assert!(outcome.messages.is_empty());
     }
 
     #[test]
