@@ -611,6 +611,7 @@ impl Engine {
             target: None,
             volume: 100,
             looped: false,
+            multiple: false,
             custom_falloff: None,
         });
         Ok(())
@@ -1696,6 +1697,7 @@ impl Engine {
                     target: Some(container_id),
                     volume: 100,
                     looped: false,
+                    multiple: false,
                     custom_falloff: None,
                 });
             }

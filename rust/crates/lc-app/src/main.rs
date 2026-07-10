@@ -1931,6 +1931,7 @@ impl AudioContext {
                     target,
                     volume,
                     looped,
+                    multiple: _,
                     custom_falloff,
                 } => {
                     if !self.options.sound_enabled {

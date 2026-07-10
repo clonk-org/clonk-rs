@@ -22991,6 +22991,7 @@ impl AudioRegistry {
             target,
             volume,
             looped,
+            multiple,
             custom_falloff,
         });
     }

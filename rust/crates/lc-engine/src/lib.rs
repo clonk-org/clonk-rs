@@ -9729,6 +9729,8 @@ pub enum AudioCommand {
         volume: u8,
         looped: bool,
         #[serde(default)]
+        multiple: bool,
+        #[serde(default)]
         custom_falloff: Option<i32>,
     },
     StopSound {
@@ -24556,6 +24558,7 @@ impl Engine {
                                 target: Some(base_id),
                                 volume: 100,
                                 looped: false,
+                                multiple: false,
                                 custom_falloff: None,
                             });
                             self.apply_object_update(
