@@ -5570,6 +5570,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetClimate", get_climate);
     script.register_host_function("SetSeason", set_season);
     script.register_host_function("GetSeason", get_season);
+    script.register_host_function("Music", music);
+    script.register_host_function("MusicLevel", music_level);
     script.register_host_function("Sound", sound);
     script.register_host_function("SoundLevel", sound_level);
 }
@@ -8419,6 +8421,45 @@ fn random(args: &[Value]) -> Result<Value, RuntimeError> {
         let value = rng.random(range);
         Ok(Value::Int(value))
     })
+}
+
+fn music(args: &[Value]) -> Result<Value, RuntimeError> {
+    let song = match args.first().unwrap_or(&Value::Nil) {
+        Value::String(name) => Some(name.clone()),
+        Value::Nil | Value::Int(0) => None,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Music: expected string, nil, or 0 for song name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let looped = args.get(1).is_some_and(Value::as_bool);
+
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            match song {
+                Some(name) => context.audio_mut().play_music(name, looped),
+                None => context.audio_mut().stop_music(),
+            }
+        }
+    });
+    Ok(Value::Nil)
+}
+
+fn music_level(args: &[Value]) -> Result<Value, RuntimeError> {
+    let level = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "MusicLevel",
+        "level",
+    )?;
+    let level = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.audio_mut().set_music_level(level))
+            .unwrap_or(level.clamp(0, 100) as u8)
+    });
+    Ok(Value::Int(i32::from(level)))
 }
 
 fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -20425,6 +20466,20 @@ impl AudioRegistry {
     pub fn take_events(&mut self) -> Vec<AudioCommand> {
         mem::take(&mut self.events)
     }
+
+    pub fn play_music(&mut self, name: String, looped: bool) {
+        self.events.push(AudioCommand::PlayMusic { name, looped });
+    }
+
+    pub fn stop_music(&mut self) {
+        self.events.push(AudioCommand::StopMusic);
+    }
+
+    pub fn set_music_level(&mut self, level: i32) -> u8 {
+        let level = level.clamp(0, 100) as u8;
+        self.events.push(AudioCommand::SetMusicLevel { level });
+        level
+    }
 }
 
 impl Default for AudioOutcome {
@@ -23117,6 +23172,8 @@ mod tests {
         "Min",
         "Mod",
         "Mul",
+        "Music",
+        "MusicLevel",
         "NoContainer",
         "Not",
         "Object",
@@ -23769,6 +23826,47 @@ func Trigger(object pOther)
             }
             other => panic!("expected PlaySound, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tutorial_music_hosts_emit_play_level_and_stop_like_cpp() {
+        // FnMusic plays/stops immediately; FnMusicLevel clamps to 0..100 and
+        // returns the stored level (C4Script.cpp:2329-2346; C4Game.cpp:
+        // 4385-4389). Excess parameters are ignored after the parser warning
+        // (C4AulParse.cpp:2339-2344), and bool arguments use C4Value truthiness.
+        let (result, outcome) = with_object_host_context(|| {
+            let mut script = lc_script::Engine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    r#"
+                    #strict
+                    func Probe() {
+                        Music("Frontend", "loop", "ignored");
+                        var level = MusicLevel(130);
+                        Music(0);
+                        return level;
+                    }
+                    "#,
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call("Probe", &[])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(result.expect("tutorial music hosts run"), Value::Int(100));
+        assert_eq!(
+            outcome.audio.events,
+            vec![
+                AudioCommand::PlayMusic {
+                    name: "Frontend".to_string(),
+                    looped: true,
+                },
+                AudioCommand::SetMusicLevel { level: 100 },
+                AudioCommand::StopMusic,
+            ]
+        );
     }
 
     #[test]

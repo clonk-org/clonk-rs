@@ -1965,6 +1965,29 @@ impl AudioContext {
                         viewport_center,
                     );
                 }
+                AudioCommand::PlayMusic { name, looped } => {
+                    let result = if name.is_empty() {
+                        self.load_default_music().and_then(|data| {
+                            let Some(data) = data else {
+                                return Ok(false);
+                            };
+                            self.play_music(&data, *looped)
+                                .context("failed to play default music")?;
+                            Ok(true)
+                        })
+                    } else {
+                        self.play_named_music(name, *looped)
+                    };
+                    match result {
+                        Ok(true) => {}
+                        Ok(false) => tracing::warn!(music = %name, "missing music asset; keeping current playback"),
+                        Err(error) => tracing::warn!(music = %name, %error, "failed to play script music"),
+                    }
+                }
+                AudioCommand::StopMusic => self.stop_music(),
+                AudioCommand::SetMusicLevel { level } => {
+                    self.set_scenario_music_level(Some(*level));
+                }
             }
         }
     }

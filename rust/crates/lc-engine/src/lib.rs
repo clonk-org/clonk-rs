@@ -9523,6 +9523,14 @@ pub enum AudioCommand {
         target: Option<ObjectId>,
         volume: u8,
     },
+    PlayMusic {
+        name: String,
+        looped: bool,
+    },
+    StopMusic,
+    SetMusicLevel {
+        level: u8,
+    },
 }
 
 #[derive(Debug, Default)]
