@@ -6,9 +6,9 @@ slices are recorded in `git log -- rust/ parity/`.
 ## Gate
 
 Workspace nextest, strict clippy, snapshots, and parity are green. Scenario
-load/apply is 93/93; activation is 92/93 because CTF_DeepSea's delayed animals
-match C++; Tutorials 01–10 are warning-free for 1,200 ticks. The next live
-comparator divergence after Goldrush frame 410 is not yet pinned.
+load/apply and activation are 93/93; Tutorials 01–10 are warning-free for 1,200
+ticks. The pinned Goldrush comparator first diverges at frame 1077 (object 642:
+Rust `Breeze`, C++ `Still`).
 
 ```sh
 cargo nextest run --workspace
