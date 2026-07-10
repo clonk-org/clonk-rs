@@ -567,6 +567,7 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control_options::format_key_label;
 
     #[test]
     fn default_bindings_cover_basic_controls() {
@@ -623,6 +624,58 @@ mod tests {
         ] {
             assert_eq!(bindings.event_for_key(key, ElementState::Pressed), None);
         }
+    }
+
+    #[test]
+    fn default_tutorial_guide_labels_follow_cpp_control_order() {
+        // C4Viewport::DrawPlayerControls indexes the first ten CON_* slots
+        // (C4Viewport.cpp:1394-1441). The Rust overlay follows this exact
+        // ControlBindingId::ALL order before formatting each configured key.
+        let bindings = KeyboardBindings::default_bindings();
+        let labels: Vec<_> = ControlBindingId::ALL
+            .iter()
+            .take(10)
+            .map(|binding| {
+                bindings
+                    .key_for(*binding)
+                    .map(format_key_label)
+                    .unwrap_or_default()
+            })
+            .collect();
+        let expected: Vec<_> = ["Q", "W", "E", "A", "S", "D", "Z", "X", "C", "R"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(labels, expected);
+
+        let movement: Vec<_> = [
+            ControlBindingId::Left,
+            ControlBindingId::Up,
+            ControlBindingId::Down,
+            ControlBindingId::Right,
+        ]
+        .into_iter()
+        .map(|binding| {
+            format_key_label(
+                bindings
+                    .key_for(binding)
+                    .expect("default movement binding"),
+            )
+        })
+        .collect();
+        assert_eq!(movement, ["Z", "S", "X", "C"]);
+        assert!(labels.iter().all(|label| !label.contains("Arrow")));
+
+        let fallback_movement: Vec<_> = [
+            ControlBindingId::Left,
+            ControlBindingId::Up,
+            ControlBindingId::Down,
+            ControlBindingId::Right,
+        ]
+        .into_iter()
+        .map(|binding| format_key_label(binding.default_key()))
+        .collect();
+        assert_eq!(fallback_movement, movement);
     }
 
     #[test]
