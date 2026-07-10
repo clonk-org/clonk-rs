@@ -2027,6 +2027,22 @@ impl AudioContext {
         let Some((handle, sample_key)) = self.ensure_sound_with_key(name)? else {
             return Ok(());
         };
+        // C4SoundSystem caps non-looping instances per resolved sample before
+        // channel allocation (C4SoundSystem.cpp:337-338).
+        const MAX_SOUND_INSTANCES: usize = 20;
+        if !looped
+            && self
+                .active_channels
+                .values()
+                .filter(|info| {
+                    info.sample_key == sample_key
+                        && self.system.channel_is_playing(info.channel)
+                })
+                .count()
+                >= MAX_SOUND_INSTANCES
+        {
+            return Ok(());
+        }
         // NewInstance rejects another instance of the resolved sample within
         // NearSoundRadius, including global/global pairs, even when FnSound's
         // fMultiple flag bypassed its exact-object check
@@ -14293,6 +14309,52 @@ mod tests {
                 left.position,
             )
             .expect("nearby horse reuses the sample instance");
+    }
+
+    #[test]
+    fn one_shot_sample_stops_at_the_cpp_twenty_instance_limit() {
+        // NewInstance refuses a 21st non-looping instance of one resolved
+        // sample before it asks SDL_mixer for another channel
+        // (C4SoundSystem.cpp:337-338; C4SoundSystem.h:130).
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Goldrush.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("HorseWalk1.wav"), silent_pcm_wav(10_000))
+            .expect("write horse sound");
+
+        let options = AudioOptions {
+            max_channels: 20,
+            ..AudioOptions::default()
+        };
+        let mut audio = AudioContext::try_new(options).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+
+        let horses: Vec<_> = (0..21)
+            .map(|index| {
+                make_object(
+                    index + 1,
+                    "HORS",
+                    Vector2::new(i32::try_from(index).expect("index fits") * 51, 100),
+                )
+            })
+            .collect();
+        let snapshot = make_snapshot(horses.clone(), Vec::new());
+        for horse in &horses {
+            audio
+                .start_sound(
+                    "HorseWalk*",
+                    Some(horse.id),
+                    100,
+                    false,
+                    true,
+                    None,
+                    &snapshot,
+                    horses.first(),
+                    horses[0].position,
+                )
+                .expect("C++ silently rejects the sample after twenty instances");
+        }
+        assert_eq!(audio.active_channels.len(), 20);
     }
 
     #[test]
