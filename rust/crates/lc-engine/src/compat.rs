@@ -18761,7 +18761,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
+    let registration = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut().ok_or_else(|| {
             RuntimeError::new("CreateConstruction requires an active engine context")
@@ -18769,7 +18769,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
 
         // C4Id2Def failure: no site, silent nullptr (C4Game.cpp:1183).
         if context.world.definition_known(&definition) == Some(false) {
-            return Ok(Value::Nil);
+            return Ok(None);
         }
 
         let metadata = context
@@ -18803,10 +18803,8 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 fire: DefinitionFireMetadata::default(),
             });
         let definition_category = metadata.category;
-        let creator_layer = context
-            .object_context()
-            .map(ObjectScopeContext::id)
-            .and_then(|creator| context.object_layer(creator));
+        let creator = context.object_context().map(ObjectScopeContext::id);
+        let creator_layer = creator.and_then(|creator| context.object_layer(creator));
 
         let base_position = context
             .object_context()
@@ -18828,7 +18826,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             .clamp(0, i64::from(FULL_CON)) as i32;
 
         if check_site && !construction_check(context, &definition, &metadata, position)? {
-            return Ok(Value::Nil);
+            return Ok(None);
         }
 
         let id = context.allocate_object_id();
@@ -18837,7 +18835,9 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_position(position)
             .with_owner(owner)
             .with_category(definition_category)
-            .with_construction(construction_value)
+            // C4Game::NewObject inserts the object at Con=0, calls
+            // Construction, and only then applies the requested iCon.
+            .with_construction(0)
             .with_id(id);
         if let Some(layer) = creator_layer {
             spawn = spawn.with_layer(layer);
@@ -18851,14 +18851,19 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(controller) = creator_controller {
             spawn = spawn.with_controller(controller);
         }
+        // The lifecycle below runs while this host call is live; the later
+        // copy-out spawn must not repeat callbacks or the initial DoCon.
+        spawn.initialized = true;
+        spawn.position_adjusted = true;
 
+        let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
         let preview_ocf = ocf::compute(
             metadata.ocf_base,
             metadata.crew_member,
-            true,
+            initial_alive,
             ObjectStatus::Normal,
             false,
-            construction_value,
+            0,
             metadata.category,
         );
         let preview = HostWorldObject::with_category(
@@ -18871,8 +18876,12 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             None,
             owner,
             definition_category,
+            if initial_alive {
+                metadata.physical.energy
+            } else {
+                0
+            },
             0,
-            construction_value,
             0,
             position,
             Vector2::ZERO,
@@ -18884,6 +18893,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             None,
             None,
         )
+        .with_alive(initial_alive)
         .with_ocf(preview_ocf)
         .with_full_state(Rc::new({
             let mut state = crate::preview_spawn_state(
@@ -18891,16 +18901,179 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 owner,
                 creator_controller.unwrap_or(owner),
                 definition_category,
-                construction_value,
+                0,
                 metadata.vertices.clone(),
             );
+            state.alive = initial_alive;
+            state.energy = if initial_alive {
+                metadata.physical.energy
+            } else {
+                0
+            };
+            state.crew_member = metadata.crew_member;
             state.layer = creator_layer;
             state.blit_mode = metadata.blit_mode;
             state
         }));
 
         context.register_spawn(spawn, preview);
-        Ok(object_reference_value(id))
+        Ok(Some((
+            id,
+            creator,
+            construction_value,
+            metadata.shape,
+            metadata.stretch_growth,
+            metadata.line,
+            metadata.ocf_base,
+            metadata.crew_member,
+            metadata.category,
+            initial_alive,
+        )))
+    })?;
+    let Some((
+        target,
+        creator,
+        construction_value,
+        shape,
+        stretch_growth,
+        line,
+        ocf_base,
+        crew_member,
+        category,
+        alive,
+    )) = registration
+    else {
+        return Ok(Value::Nil);
+    };
+
+    // C4Game::NewObject exposes the inserted object to scripts before
+    // running PSF_Construction, passing the creator as its sole argument
+    // (C4Game.cpp:1110-1121).
+    let creator_arg = creator.map(object_reference_value).unwrap_or(Value::Nil);
+    if let Some(Err(error)) =
+        call_world_object_own_function(target, "Construction", &[creator_arg])
+    {
+        tracing::warn!(
+            id = target.as_u64(),
+            callback = "Construction",
+            %error,
+            "creation callback failed; continuing like C++ fail-safe Call"
+        );
+    }
+    let removed = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| context.nested_object_destroyed(target))
+            .unwrap_or(false)
+    });
+    if removed {
+        return Ok(Value::Nil);
+    }
+
+    // Initial DoCon adds iCon to whatever Construction left behind, keeps
+    // the old shape bottom fixed in integer coordinates, and leaves fix_y
+    // at the pre-growth position (C4Object.cpp:1432-1500).
+    let (crossed_full_con, final_construction) = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return (false, 0);
+        };
+        if !context.ensure_object_scope(target) {
+            return (false, 0);
+        }
+        let (was_full, final_construction, pre_growth_position, adjusted_position) = {
+            let Some(scope) = context.object_scope_mut(target) else {
+                return (false, 0);
+            };
+            let was_full = scope.construction() >= FULL_CON;
+            let final_construction = scope
+                .construction()
+                .saturating_add(construction_value)
+                .clamp(0, FULL_CON);
+            let pre_growth_position = scope.effective_position();
+            let adjusted_position = Vector2::new(
+                pre_growth_position.x,
+                crate::docon_initial_center_y(
+                    shape,
+                    stretch_growth,
+                    line,
+                    final_construction,
+                    pre_growth_position.y,
+                ),
+            );
+            scope.current_construction = final_construction;
+            scope.pending_update.construction = None;
+            scope.current_position = adjusted_position;
+            scope.pending_update.position = None;
+            scope.cached_ocf = Some(ocf::compute(
+                ocf_base,
+                crew_member,
+                alive,
+                ObjectStatus::Normal,
+                false,
+                final_construction,
+                category,
+            ));
+            (
+                was_full,
+                final_construction,
+                pre_growth_position,
+                adjusted_position,
+            )
+        };
+        if let Some(spawn) = context
+            .pending_spawns
+            .iter_mut()
+            .find(|spawn| spawn.id == Some(target))
+        {
+            spawn.position = adjusted_position;
+            spawn.construction = final_construction;
+            spawn.fixed_position = (adjusted_position != pre_growth_position)
+                .then_some(FixedVec2::from_ints(
+                    pre_growth_position.x,
+                    pre_growth_position.y,
+                ));
+        }
+        (!was_full && final_construction >= FULL_CON, final_construction)
+    });
+
+    // DoCon(0) removes a zero-construction object, and NewObject returns
+    // nullptr after its status re-check (C4Object.cpp:1513-1517;
+    // C4Game.cpp:1122-1128).
+    if final_construction <= 0 {
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                context.cancel_pending_spawn(target);
+                context.nested_objects.remove(&target);
+                context.nested_order.retain(|id| *id != target);
+            }
+        });
+        return Ok(Value::Nil);
+    }
+
+    if crossed_full_con {
+        for callback in ["Completion", "Initialize"] {
+            if let Some(Err(error)) = call_world_object_own_function(target, callback, &[]) {
+                tracing::warn!(
+                    id = target.as_u64(),
+                    callback,
+                    %error,
+                    "creation callback failed; continuing like C++ fail-safe Call"
+                );
+            }
+        }
+    }
+
+    let removed = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| context.nested_object_destroyed(target))
+            .unwrap_or(false)
+    });
+    Ok(if removed {
+        Value::Nil
+    } else {
+        object_reference_value(target)
     })
 }
 
@@ -33582,12 +33755,12 @@ public func SeedFull()
             Value::Int(32),
             Value::Int(50),
             Value::Int(1),
-            Value::Int(0),
+            Value::Int(50),
             Value::Bool(false),
             Value::Bool(true),
         ];
         let (result, outcome) =
-            with_object_host_context_with_world(world, || create_construction(&args));
+            with_effect_context(None, &[], world, 1, || create_construction(&args));
         let value = result.expect("CreateConstruction succeeds");
         assert_eq!(value, object_reference_value(ObjectId::new(1)));
         assert_eq!(outcome.spawns.len(), 1);
@@ -33595,9 +33768,49 @@ public func SeedFull()
         assert_eq!(spawn.definition_id, "Workshop");
         assert_eq!(spawn.position, Vector2::new(32, 50));
         assert_eq!(spawn.owner, 1);
-        assert_eq!(spawn.construction, 0);
+        assert_eq!(spawn.construction, crate::FULL_CON / 2);
         assert_eq!(spawn.category, Some(crate::CATEGORY_STRUCTURE));
         assert_eq!(outcome.next_object_id, 2);
+    }
+
+    #[test]
+    fn create_construction_zero_completion_is_removed_before_return() {
+        // NewObject starts at Con=0, then DoCon(iCon, true). With iCon=0,
+        // DoCon calls AssignRemoval and NewObject returns nullptr after its
+        // status re-check (C4Game.cpp:1110-1129; C4Object.cpp:1513-1517).
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            None,
+            HashMap::from([(
+                DefinitionId::from("Workshop"),
+                DefinitionMetadata {
+                    category: crate::CATEGORY_STRUCTURE,
+                    constructable: true,
+                    ..DefinitionMetadata::default()
+                },
+            )]),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let args = [
+            Value::String("Workshop".into()),
+            Value::Int(32),
+            Value::Int(50),
+            Value::Int(1),
+            Value::Int(0),
+        ];
+        let (result, outcome) =
+            with_effect_context(None, &[], world, 1, || create_construction(&args));
+
+        assert_eq!(
+            result.expect("CreateConstruction completes"),
+            Value::Nil
+        );
+        assert!(outcome.spawns.is_empty());
+        assert_eq!(outcome.next_object_id, 2, "removed object consumed its id");
     }
 
     #[test]

@@ -39797,6 +39797,82 @@ func Trigger() {
         );
     }
 
+    #[test]
+    fn create_construction_finishes_new_object_lifecycle_before_return() {
+        // FnCreateConstruction calls C4Game::CreateObjectConstruction, which
+        // enters C4Game::NewObject: Construction runs at Con=0 and the supplied
+        // bottom position, initial DoCon keeps that bottom fixed, then a FullCon
+        // transition calls Completion and Initialize before the host function
+        // returns (C4Script.cpp:1911-1934; C4Game.cpp:1180-1212,1110-1129;
+        // C4Object.cpp:1432-1518). LastWill immediately reads the basement local
+        // created by CST3's inherited Construction callback.
+        let site_script = r#"#strict
+local child, construction_y, completion_y, initialize_y;
+func Construction(object creator) {
+    construction_y = GetY();
+    child = CreateObject(CHLD, 0, 8, GetOwner());
+    return true;
+}
+func Completion() { completion_y = GetY(); return true; }
+func Initialize() { initialize_y = GetY(); return true; }
+func Probe() {
+    return [GetCon(), GetY(), construction_y, completion_y, initialize_y, child, GetY(child)];
+}
+"#;
+        let caller_script = r#"#strict
+local result;
+func Trigger() {
+    var site = CreateConstruction(SITE, 100, 200, -1, 100, false, false);
+    result = site->Probe();
+    return true;
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut site =
+            Definition::from_script("SITE", "Site", site_script).expect("site compiles");
+        site.set_shape_rect(Some(DefinitionRect::new(-10, -20, 20, 40)));
+        engine.register_definition(site).expect("site registers");
+        engine
+            .register_definition(
+                Definition::from_script("CHLD", "Child", "#strict\n")
+                    .expect("child compiles"),
+            )
+            .expect("child registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        engine
+            .call_object_function(caller_index, "Trigger", Vec::new())
+            .expect("construction trigger runs");
+
+        let child = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "CHLD")
+            .expect("Construction synchronously creates its child");
+        let caller = engine.object_snapshot(caller).expect("caller remains");
+        assert_eq!(
+            caller.local_vars.get("result"),
+            Some(&Value::Array(vec![
+                Value::Int(100),
+                Value::Int(180),
+                Value::Int(200),
+                Value::Int(180),
+                Value::Int(180),
+                Value::Object(child.id.as_u64()),
+                Value::Int(208),
+            ]))
+        );
+    }
+
     // C4Id2Def failure means NO object and a silent nullptr return:
     // C4Game::CreateObject (C4Game.cpp:1146), CreateObjectConstruction
     // (C4Game.cpp:1183). Goldrush's explosion chain hits it - FXB1 is
