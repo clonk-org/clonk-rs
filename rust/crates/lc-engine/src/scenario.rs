@@ -3390,61 +3390,9 @@ fn classified_landscape(
         &classifier.state.shapes,
     )
     .into_bytes();
-    let density_of = |byte: u8| classifier.state.densities[(byte & 127) as usize];
-
-    let mut surfaces = Vec::with_capacity(plane_width);
-    for x in 0..plane_width {
-        let surface_world = (0..world_height)
-            .find(|&y| density_of(bytes[y as usize * plane_width + x]) >= 50)
-            .unwrap_or(world_height);
-        surfaces.push(surface_world);
-    }
-
-    let mut landscape = Landscape::new(final_width, surfaces)
+    let mut landscape = Landscape::new(final_width, vec![world_height; plane_width])
         .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
     landscape.set_world_height(world_height);
-
-    for x in 0..plane_width {
-        let mut segments = Vec::new();
-        let mut tunnel_ranges = Vec::new();
-        let mut run_start: Option<i32> = None;
-        let mut tunnel_start: Option<i32> = None;
-        for y in 0..=world_height {
-            let pixel = (y < world_height).then(|| bytes[y as usize * plane_width + x]);
-            let density = pixel.map(density_of).unwrap_or(0);
-            let liquid = (25..50).contains(&density);
-            match (liquid, run_start) {
-                (true, None) => run_start = Some(y),
-                (false, Some(start)) => {
-                    segments.push(crate::landscape::LiquidSegment {
-                        top: start,
-                        bottom: y - 1,
-                        material: None,
-                    });
-                    run_start = None;
-                }
-                _ => {}
-            }
-            let tunnel = pixel
-                .map(|p| p & lc_resources::texmap::IFT_BIT != 0)
-                .unwrap_or(false);
-            match (tunnel, tunnel_start) {
-                (true, None) => tunnel_start = Some(y),
-                (false, Some(start)) => {
-                    tunnel_ranges.push((start, y - 1));
-                    tunnel_start = None;
-                }
-                _ => {}
-            }
-        }
-        if !segments.is_empty() {
-            landscape.set_liquid_column(x as u32, segments);
-        }
-        if !tunnel_ranges.is_empty() {
-            landscape.set_tunnel_column(x as u32, tunnel_ranges);
-        }
-    }
-
     landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
         final_width,
         world_height.max(0) as u32,
@@ -3453,6 +3401,7 @@ fn classified_landscape(
         classifier.state.material_names.clone(),
         classifier.state.texture_names.clone(),
     ));
+    landscape.refresh_all_raster_columns();
     landscape.set_raster_state(LandscapeRasterState::new(
         zoom,
         map_seed,

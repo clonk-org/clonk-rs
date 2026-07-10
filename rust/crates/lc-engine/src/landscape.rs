@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::mem;
+use std::ops::Range;
 
 use crate::material::TemperatureDirection;
 use crate::{EnvironmentSettings, MaterialId, MaterialSet, Vector2};
@@ -186,6 +187,33 @@ impl PixelGrid {
             .collect();
     }
 
+    /// Keep the pixel lookup tables aligned with the mutable runtime texmap.
+    /// Existing resolved material ids follow their material NAME to newly
+    /// allocated texture slots; no pixel byte or render revision changes.
+    fn sync_runtime_texmap(&mut self, texmap: &RuntimeTexMapState) {
+        let old_materials = self
+            .material_names
+            .iter()
+            .zip(&self.materials)
+            .filter_map(|(name, material)| Some((name.as_deref()?, (*material)?)))
+            .collect::<Vec<_>>();
+        self.materials = texmap
+            .material_names
+            .iter()
+            .map(|name| {
+                name.as_deref().and_then(|name| {
+                    old_materials
+                        .iter()
+                        .find(|(old_name, _)| old_name.eq_ignore_ascii_case(name))
+                        .map(|(_, material)| *material)
+                })
+            })
+            .collect();
+        self.densities.clone_from(&texmap.densities);
+        self.material_names.clone_from(&texmap.material_names);
+        self.texture_names.clone_from(&texmap.texture_names);
+    }
+
     /// The first texmap index carrying the given material (the
     /// Mat2PixColDefault stand-in for grid writes).
     fn byte_for_material(&self, material: MaterialId) -> Option<u8> {
@@ -249,6 +277,71 @@ impl PixelGrid {
     fn clear_band(&mut self, x: i32, from_y: i32, to_y: i32) {
         self.fill_band(x, from_y, to_y, 0);
     }
+
+    fn derived_column(&self, x: usize) -> Option<RasterColumnSummary> {
+        if x >= self.width as usize {
+            return None;
+        }
+        let height = self.height as i32;
+        let width = self.width as usize;
+        let byte_at = |y: i32| self.bytes[y as usize * width + x];
+        let surface = (0..height)
+            .find(|&y| self.density_of(byte_at(y)) >= C4M_SOLID)
+            .unwrap_or(height);
+        let mut liquid_segments = Vec::new();
+        let mut tunnel_ranges = Vec::new();
+        let mut liquid_run = None;
+        let mut tunnel_start = None;
+        for y in 0..=height {
+            let pixel = (y < height).then(|| byte_at(y));
+            let liquid_material = pixel.and_then(|byte| {
+                (C4M_LIQUID..C4M_SOLID)
+                    .contains(&self.density_of(byte))
+                    .then(|| {
+                        self.materials
+                            .get((byte & 0x7f) as usize)
+                            .copied()
+                            .flatten()
+                    })
+            });
+            match (liquid_material, liquid_run) {
+                (Some(material), None) => liquid_run = Some((y, material)),
+                (Some(material), Some((start, previous))) if material != previous => {
+                    liquid_segments.push(LiquidSegment::with_material(
+                        start,
+                        y - 1,
+                        previous,
+                    ));
+                    liquid_run = Some((y, material));
+                }
+                (None, Some((start, material))) => {
+                    liquid_segments.push(LiquidSegment::with_material(start, y - 1, material));
+                    liquid_run = None;
+                }
+                _ => {}
+            }
+            let tunnel = pixel.map(|byte| byte & 0x80 != 0).unwrap_or(false);
+            match (tunnel, tunnel_start) {
+                (true, None) => tunnel_start = Some(y),
+                (false, Some(start)) => {
+                    tunnel_ranges.push((start, y - 1));
+                    tunnel_start = None;
+                }
+                _ => {}
+            }
+        }
+        Some(RasterColumnSummary {
+            surface,
+            liquid_segments,
+            tunnel_ranges,
+        })
+    }
+}
+
+struct RasterColumnSummary {
+    surface: i32,
+    liquid_segments: Vec<LiquidSegment>,
+    tunnel_ranges: Vec<(i32, i32)>,
 }
 
 /// The material properties needed when a runtime landscape operation adds a
@@ -355,6 +448,62 @@ impl LandscapeRasterState {
         creator: Option<crate::map_creator_s2::MapCreatorS2State>,
     ) {
         self.map_creator = creator;
+    }
+}
+
+/// A half-open landscape change rectangle, matching `C4Rect`'s x/y +
+/// width/height convention used by PrepareChange/FinishChange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RasterChangeRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl RasterChangeRect {
+    pub(crate) const fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn clipped_to(self, width: i32, height: i32) -> Option<Self> {
+        if self.width <= 0 || self.height <= 0 || width <= 0 || height <= 0 {
+            return None;
+        }
+        let x0 = i64::from(self.x).clamp(0, i64::from(width));
+        let y0 = i64::from(self.y).clamp(0, i64::from(height));
+        let x1 = (i64::from(self.x) + i64::from(self.width)).clamp(0, i64::from(width));
+        let y1 = (i64::from(self.y) + i64::from(self.height)).clamp(0, i64::from(height));
+        (x1 > x0 && y1 > y0).then(|| Self::new(
+            x0 as i32,
+            y0 as i32,
+            (x1 - x0) as i32,
+            (y1 - y0) as i32,
+        ))
+    }
+
+    fn columns(self) -> Range<usize> {
+        self.x as usize..(self.x + self.width) as usize
+    }
+
+    fn intersection(self, x: i32, y: i32, width: i32, height: i32) -> Option<Self> {
+        let x0 = i64::from(self.x).max(i64::from(x));
+        let y0 = i64::from(self.y).max(i64::from(y));
+        let x1 = (i64::from(self.x) + i64::from(self.width))
+            .min(i64::from(x) + i64::from(width));
+        let y1 = (i64::from(self.y) + i64::from(self.height))
+            .min(i64::from(y) + i64::from(height));
+        (x1 > x0 && y1 > y0).then(|| Self::new(
+            x0 as i32,
+            y0 as i32,
+            (x1 - x0) as i32,
+            (y1 - y0) as i32,
+        ))
     }
 }
 
@@ -651,6 +800,63 @@ impl Landscape {
 
     pub(crate) fn raster_state_mut(&mut self) -> Option<&mut LandscapeRasterState> {
         self.raster_state.as_mut()
+    }
+
+    /// Rebuild the Rust column approximation from the authoritative Surface8
+    /// plane. Scenario activation uses this once; runtime transactions use the
+    /// affected columns only.
+    pub(crate) fn refresh_all_raster_columns(&mut self) {
+        let width = self
+            .pixels
+            .as_ref()
+            .map(|grid| grid.width as usize)
+            .unwrap_or(0);
+        self.refresh_raster_columns(0..width);
+    }
+
+    fn refresh_raster_columns(&mut self, columns: Range<usize>) {
+        let end = columns.end.min(self.surface.len());
+        let start = columns.start.min(end);
+        self.ensure_liquid_capacity();
+        for x in start..end {
+            let Some(summary) = self
+                .pixels
+                .as_ref()
+                .and_then(|grid| grid.derived_column(x))
+            else {
+                continue;
+            };
+            self.surface[x] = summary.surface;
+            self.liquids[x] = LiquidColumn::from_segments(summary.liquid_segments);
+            if summary.tunnel_ranges.is_empty() {
+                self.tunnels.remove(&(x as u32));
+            } else {
+                self.tunnels.insert(x as u32, summary.tunnel_ranges);
+            }
+        }
+    }
+
+    /// Group an authoritative landscape raster edit like C++
+    /// PrepareChange/FinishChange: expose the pixel plane and retained raster
+    /// state together, synchronize any newly allocated texmap slots, then
+    /// refresh only the affected derived columns. Raw solid-mask writes keep
+    /// using [`Self::grid_write_byte`] and intentionally bypass this seam.
+    pub(crate) fn raster_transaction<R>(
+        &mut self,
+        bounds: RasterChangeRect,
+        change: impl FnOnce(&mut PixelGrid, &mut LandscapeRasterState) -> R,
+    ) -> Option<R> {
+        let (width, height) = self.grid_dimensions()?;
+        let bounds = bounds.clipped_to(width, height)?;
+        let result = {
+            let pixels = self.pixels.as_mut()?;
+            let state = self.raster_state.as_mut()?;
+            let result = change(pixels, state);
+            pixels.sync_runtime_texmap(state.texmap());
+            result
+        };
+        self.refresh_raster_columns(bounds.columns());
+        Some(result)
     }
 
     /// Resolve the grid's Pix2Mat table once the engine materials exist
@@ -2451,6 +2657,85 @@ impl Landscape {
     }
 }
 
+impl crate::Engine {
+    /// Engine-level half of a raster change: temporarily expose the saved
+    /// background under intersecting solid masks, run the landscape change,
+    /// then record the changed background and put the masks back. This is the
+    /// C4SolidMask RemoveTemporary/Repair ordering used by
+    /// C4Landscape::PrepareChange/FinishChange (C4Landscape.cpp:2851-2880).
+    pub(crate) fn landscape_raster_transaction<R>(
+        &mut self,
+        bounds: RasterChangeRect,
+        change: impl FnOnce(&mut PixelGrid, &mut LandscapeRasterState) -> R,
+    ) -> Option<R> {
+        let (width, height) = self.landscape.as_ref()?.grid_dimensions()?;
+        let bounds = bounds.clipped_to(width, height)?;
+        let vehicle = self.landscape.as_ref()?.grid_vehicle_byte();
+        let mask_indices = vehicle
+            .map(|_| {
+                self.objects
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, object)| {
+                        let bake = object.solid_mask_bake.as_ref()?;
+                        bounds
+                            .intersection(bake.x, bake.y, bake.width, bake.height)
+                            .map(|_| index)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        // C4SolidMask::Last -> Prev (newest to oldest), so overlapping mask
+        // marker bytes uncover the one real saved background exactly once.
+        if let Some(vehicle) = vehicle {
+            for &index in mask_indices.iter().rev() {
+                let bake = self.objects[index].solid_mask_bake.clone()?;
+                let overlap = bounds.intersection(bake.x, bake.y, bake.width, bake.height)?;
+                let landscape = self.landscape.as_mut()?;
+                for y in overlap.y..overlap.y + overlap.height {
+                    for x in overlap.x..overlap.x + overlap.width {
+                        let buffer_index = ((y - bake.y) * bake.width + (x - bake.x)) as usize;
+                        let saved = bake.buffer[buffer_index];
+                        if saved == vehicle {
+                            continue;
+                        }
+                        debug_assert_eq!(landscape.grid_byte_at(x, y), Some(vehicle));
+                        landscape.grid_write_byte(x, y, saved);
+                    }
+                }
+            }
+        }
+
+        let result = self
+            .landscape
+            .as_mut()?
+            .raster_transaction(bounds, change);
+
+        // C4SolidMask::First -> Next (oldest to newest). Repair updates the
+        // saved background before restoring MCVehic.
+        if let Some(vehicle) = vehicle {
+            for &index in &mask_indices {
+                let (objects, landscape) = (&mut self.objects, &mut self.landscape);
+                let bake = objects[index].solid_mask_bake.as_mut()?;
+                let overlap = bounds.intersection(bake.x, bake.y, bake.width, bake.height)?;
+                let landscape = landscape.as_mut()?;
+                for y in overlap.y..overlap.y + overlap.height {
+                    for x in overlap.x..overlap.x + overlap.width {
+                        let buffer_index = ((y - bake.y) * bake.width + (x - bake.x)) as usize;
+                        if bake.buffer[buffer_index] == vehicle {
+                            continue;
+                        }
+                        bake.buffer[buffer_index] = landscape.grid_byte_at(x, y).unwrap_or(0);
+                        landscape.grid_write_byte(x, y, vehicle);
+                    }
+                }
+            }
+        }
+        result
+    }
+}
+
 impl LandscapeCommand {
     pub fn apply(&self, landscape: &mut Landscape) {
         match *self {
@@ -2864,6 +3149,222 @@ mod tests {
         assert_eq!(state.map_seed(), 31337);
         assert_eq!(state.texmap().default_material_entry("earth"), Some(7));
         assert!(state.map_creator().is_none());
+    }
+
+    fn raster_grid_landscape(width: u32, height: u32, bytes: Vec<u8>) -> Landscape {
+        let densities = vec![0, 100, 100, 25];
+        let material_names = vec![
+            None,
+            Some("Earth".to_string()),
+            Some("Vehicle".to_string()),
+            Some("Water".to_string()),
+        ];
+        let texture_names = vec![None; 4];
+        let grid = PixelGrid::new(
+            width,
+            height,
+            bytes,
+            densities.clone(),
+            material_names.clone(),
+            texture_names.clone(),
+        );
+        let texmap = RuntimeTexMapState {
+            densities,
+            material_names,
+            texture_names: texture_names.clone(),
+            match_texture_names: texture_names,
+            shapes: vec![None; 4],
+            materials: Vec::new(),
+            texture_inventory: Vec::new(),
+            default_material_entries: Vec::new(),
+        };
+        let mut landscape = Landscape::new(width, vec![height as i32; width as usize])
+            .expect("landscape builds");
+        landscape.set_world_height(height as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_raster_state(LandscapeRasterState::new(1, 0, texmap));
+        landscape.refresh_all_raster_columns();
+        landscape
+    }
+
+    #[test]
+    fn raster_refresh_preserves_adjacent_liquid_materials() {
+        // UpdatePixMaps keeps a separate Pix2Mat entry for every texture-map
+        // byte (C4Landscape.cpp:2819-2826). Derived liquid runs must retain
+        // that identity: reaction/extraction code may distinguish adjacent
+        // liquids even though both satisfy the same density classification.
+        let water = MaterialId::new(3).expect("water id");
+        let acid = MaterialId::new(4).expect("acid id");
+        let mut grid = PixelGrid::new(
+            1,
+            4,
+            vec![0, 3, 4, 1],
+            vec![0, 100, 100, 25, 25],
+            vec![
+                None,
+                Some("Earth".to_string()),
+                Some("Vehicle".to_string()),
+                Some("Water".to_string()),
+                Some("Acid".to_string()),
+            ],
+            vec![None; 5],
+        );
+        grid.resolve_materials(|name| match name {
+            "Water" => Some(water),
+            "Acid" => Some(acid),
+            _ => None,
+        });
+        let mut landscape = Landscape::new(1, vec![4]).expect("landscape builds");
+        landscape.set_world_height(4);
+        landscape.set_pixel_grid(grid);
+
+        landscape.refresh_all_raster_columns();
+
+        assert_eq!(
+            landscape.liquids()[0].segments(),
+            &[
+                LiquidSegment::with_material(1, 1, Some(water)),
+                LiquidSegment::with_material(2, 2, Some(acid)),
+            ]
+        );
+    }
+
+    #[test]
+    fn raster_transaction_refreshes_derived_columns_without_rewriting_pixels() {
+        // DrawQuad encloses its Surface8 polygon write in PrepareChange /
+        // FinishChange (C4Landscape.cpp:2448-2467). FinishChange refreshes
+        // derived bookkeeping but never rewrites Surface8 (:2864-2880), so
+        // Rust's column approximation must follow the changed pixels while
+        // the pixel bytes and revision remain exactly those written.
+        let mut landscape = raster_grid_landscape(
+            3,
+            5,
+            vec![
+                0, 0, 0, // y=0
+                1, 0, 1, // y=1
+                1, 3, 1, // y=2
+                1, 3 | 0x80, 1, // y=3
+                1, 1, 1, // y=4
+            ],
+        );
+        assert_eq!(landscape.surface(), &[1, 4, 1]);
+        assert_eq!(
+            landscape.liquids()[1].segments(),
+            &[LiquidSegment::new(2, 3)]
+        );
+        assert!(landscape.is_tunnel_at(1, 3));
+        let revision = landscape.pixel_grid().expect("grid").revision();
+
+        landscape
+            .raster_transaction(RasterChangeRect::new(1, 0, 1, 5), |grid, _state| {
+                grid.write_byte(1, 0, 1);
+                grid.write_byte(1, 2, 0);
+                grid.write_byte(1, 3, 3);
+                grid.write_byte(1, 4, 0);
+            })
+            .expect("raster transaction runs");
+
+        assert_eq!(landscape.surface(), &[1, 0, 1]);
+        assert_eq!(
+            landscape.liquids()[1].segments(),
+            &[LiquidSegment::new(3, 3)]
+        );
+        assert!(!landscape.is_tunnel_at(1, 3));
+        let grid = landscape.pixel_grid().expect("grid");
+        assert_eq!(grid.byte_at(1, 0), Some(1));
+        assert_eq!(grid.byte_at(1, 2), Some(0));
+        assert_eq!(grid.byte_at(1, 3), Some(3));
+        assert_eq!(grid.byte_at(1, 4), Some(0));
+        assert_eq!(grid.revision(), revision + 4);
+    }
+
+    #[test]
+    fn raw_solid_mask_grid_write_does_not_enter_derived_columns() {
+        // C4SolidMask puts MCVehic with raw _SBackPix and later restores the
+        // saved background (C4SolidMask.cpp:323-363). Those temporary mask
+        // bytes are collision truth while put, but are not a landscape
+        // change: the Rust-only surface/liquid/IFT summaries stay untouched.
+        let mut landscape = raster_grid_landscape(
+            1,
+            4,
+            vec![0, 0, 3 | 0x80, 1],
+        );
+        let surface = landscape.surface().to_vec();
+        let liquids = landscape.liquids().to_vec();
+        let was_tunnel = landscape.is_tunnel_at(0, 2);
+        let revision = landscape.pixel_grid().expect("grid").revision();
+
+        landscape.grid_write_byte(0, 0, 2);
+
+        assert_eq!(landscape.grid_byte_at(0, 0), Some(2));
+        assert_eq!(landscape.surface(), surface);
+        assert_eq!(landscape.liquids(), liquids);
+        assert_eq!(landscape.is_tunnel_at(0, 2), was_tunnel);
+        assert_eq!(
+            landscape.pixel_grid().expect("grid").revision(),
+            revision + 1
+        );
+    }
+
+    #[test]
+    fn engine_raster_transaction_repairs_solid_mask_over_changed_background() {
+        // PrepareChange removes intersecting masks temporarily and
+        // FinishChange repairs them (C4Landscape.cpp:2851-2880).
+        // C4SolidMask::Repair records the changed background before putting
+        // MCVehic back (C4SolidMask.cpp:365-383), so removing the mask later
+        // must reveal the new water+IFT byte, not the old sky.
+        let mut definition = crate::Definition::from_script("MASK", "Mask", "")
+            .expect("definition compiles");
+        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
+        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+
+        let mut engine = crate::Engine::with_seed(7);
+        engine.set_landscape(raster_grid_landscape(4, 4, vec![0; 16]));
+        engine.register_definition(definition).expect("definition registers");
+        let id = engine
+            .spawn_object(crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1)))
+            .expect("mask spawns");
+        let index = engine.find_object_index(id).expect("mask exists");
+        assert!(engine.solid_mask_grid_mode());
+        assert!(engine.solid_mask_spec(index).is_some());
+        engine.update_solid_mask(index);
+        let (mask_x, mask_y) = engine.objects[index]
+            .solid_mask_bake
+            .as_ref()
+            .map(|bake| (bake.x, bake.y))
+            .expect("mask is put");
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(mask_x, mask_y)),
+            Some(2)
+        );
+
+        engine
+            .landscape_raster_transaction(
+                RasterChangeRect::new(mask_x, mask_y, 1, 1),
+                |grid, _state| grid.write_byte(mask_x, mask_y, 3 | 0x80),
+            )
+            .expect("transaction runs");
+
+        let landscape = engine.landscape().expect("landscape");
+        assert_eq!(
+            landscape.grid_byte_at(mask_x, mask_y),
+            Some(2),
+            "mask is repaired"
+        );
+        assert_eq!(landscape.surface_height(mask_x), Some(4));
+        assert!(landscape.liquids()[mask_x as usize].contains(mask_y));
+        assert!(landscape.is_tunnel_at(mask_x, mask_y));
+
+        engine.remove_solid_mask(index);
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(mask_x, mask_y)),
+            Some(3 | 0x80),
+            "removing the mask reveals the changed background"
+        );
     }
 
     #[test]
