@@ -6589,6 +6589,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("FindObjectOwner", find_object_owner);
     script.register_host_function("FindObject2", find_object2);
     script.register_host_function("FindObjects", find_objects_dispatch);
+    script.register_host_function("ObjectNumber", object_number);
     script.register_host_function("Object", object_by_number);
     script.register_host_function("ObjectCount2", object_count2);
     script.register_host_function("ObjectCount", object_count);
@@ -16730,6 +16731,35 @@ fn object_count(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnObjectNumber (C4Script.cpp:3321-3325): return C4Object::Number, defaulting
+/// a nil/omitted object to the current script object. Number is the immutable
+/// C4Game::ObjectEnumerationIndex allocation, not an index into either object
+/// list; therefore object status and list membership do not affect this read.
+fn object_number(args: &[Value]) -> Result<Value, RuntimeError> {
+    let explicit = match args.first() {
+        Some(Value::Object(0)) | Some(Value::Nil) | None => None,
+        Some(Value::Object(number)) => Some(*number),
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "ObjectNumber: expected object or nil for object, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let number = explicit.or_else(|| {
+        HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(EffectHostContext::object_context)
+                .map(|object| object.id().as_u64())
+        })
+    });
+
+    Ok(number.map_or(Value::Nil, |number| {
+        Value::Int(truncate_to_i32(number))
+    }))
+}
+
 /// FnObject (C4Script.cpp:3327-3330): resolve an exact saved object Number.
 /// SafeObjectPointer rejects only deleted status; inactive objects remain
 /// addressable (C4ObjectList.cpp:544-557, C4GameObjects.cpp:270-276).
@@ -26404,6 +26434,7 @@ mod tests {
         "ObjectCount",
         "ObjectCount2",
         "ObjectDistance",
+        "ObjectNumber",
         "ObjectSetAction",
         "OnFire",
         "Or",
@@ -33142,6 +33173,192 @@ func ProbeBadIndex(id) {
         );
         assert_eq!(lookup(Some(ObjectStatus::Deleted)), Value::Nil);
         assert_eq!(lookup(None), Value::Nil);
+    }
+
+    #[test]
+    fn object_number_returns_the_cpp_enumeration_number_for_every_object_status() {
+        // FnObjectNumber returns pObj->Number directly after defaulting a null
+        // argument to cthr->Obj; unlike FnObject/ObjectPointer it performs no
+        // active/inactive-list or Status check (C4Script.cpp:3321-3325).
+        // Real content relies on the stable number in deferred command strings,
+        // e.g. MagicBow.c4d/Script.c:114 and NoCamping.c4d/Script.c:50.
+        let caller = ObjectId::new(37);
+        let normal = ObjectId::new(811);
+        let inactive = ObjectId::new(409);
+        let deleted = ObjectId::new(1_203);
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                normal,
+                "NORM",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                crate::FULL_CON,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                inactive,
+                "INAC",
+                ObjectStatus::Inactive,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                crate::FULL_CON,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                deleted,
+                "DEAD",
+                ObjectStatus::Deleted,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                crate::FULL_CON,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+        ]);
+        let context = HostObjectContext::new(
+            caller,
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+        let (result, _) = with_effect_context(Some(context), &[], world, 1_204, || {
+            let mut script = lc_script::Engine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    "func Probe(a, b, c) { return [ObjectNumber(), ObjectNumber(nil), ObjectNumber(a), ObjectNumber(b), ObjectNumber(c), Format(\"Object(%d)\", ObjectNumber(a))]; }",
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call(
+                    "Probe",
+                    &[
+                        object_reference_value(normal),
+                        object_reference_value(inactive),
+                        object_reference_value(deleted),
+                    ],
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(
+            result.expect("ObjectNumber calls succeed"),
+            Value::Array(vec![
+                Value::Int(37),
+                Value::Int(37),
+                Value::Int(811),
+                Value::Int(409),
+                Value::Int(1_203),
+                Value::String("Object(811)".into()),
+            ]),
+            "object numbers are enumeration values, not list positions"
+        );
+    }
+
+    #[test]
+    fn object_number_without_an_object_context_is_nil() {
+        // FnObjectNumber returns an empty optional when both pObj and
+        // cthr->Obj are null (C4Script.cpp:3321-3325).
+        let mut script = lc_script::Engine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script("global func Probe() { return ObjectNumber(); }")
+            .expect("ObjectNumber probe compiles");
+
+        assert_eq!(
+            script.call("Probe", &[]).expect("ObjectNumber call succeeds"),
+            Value::Nil
+        );
+    }
+
+    #[test]
+    fn object_number_keeps_a_deleted_callers_number() {
+        // AssignRemoval changes Status before the running script unwinds, but
+        // cthr->Obj remains the same pointer and FnObjectNumber reads Number
+        // without consulting Status (C4Object.cpp:281-315;
+        // C4Script.cpp:3321-3325).
+        let deleted_caller = ObjectId::new(73);
+        let context = HostObjectContext::new(
+            deleted_caller,
+            None,
+            ObjectStatus::Deleted,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+        let (result, _) = with_effect_context(
+            Some(context),
+            &[],
+            HostWorldContext::default(),
+            74,
+            || {
+                let mut script = lc_script::Engine::new();
+                register_host_functions(&mut script);
+                script
+                    .load_script("func Probe() { return ObjectNumber(); }")
+                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                script
+                    .call("Probe", &[])
+                    .map_err(|error| RuntimeError::new(error.to_string()))
+            },
+        );
+
+        assert_eq!(result.expect("ObjectNumber call succeeds"), Value::Int(73));
     }
 
     #[test]
