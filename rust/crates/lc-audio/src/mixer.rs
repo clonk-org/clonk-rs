@@ -351,7 +351,7 @@ struct FadeState {
 struct MusicPlayback {
     clip: Arc<AudioClip>,
     position: usize,
-    looping: bool,
+    remaining_repeats: Option<u32>,
     volume: f32,
     fade_out: Option<FadeState>,
 }
@@ -493,7 +493,7 @@ impl AudioMixer {
         state.active_music = Some(MusicPlayback {
             clip,
             position: 0,
-            looping: looped,
+            remaining_repeats: (!looped).then_some(1),
             volume: 1.0,
             fade_out: None,
         });
@@ -654,10 +654,13 @@ impl AudioMixer {
                         finished_music = true;
                     } else {
                         if music.position >= frames_len {
-                            if music.looping {
-                                music.position = 0;
-                            } else {
-                                finished_music = true;
+                            match music.remaining_repeats.as_mut() {
+                                Some(0) => finished_music = true,
+                                Some(remaining) => {
+                                    *remaining -= 1;
+                                    music.position = 0;
+                                }
+                                None => music.position = 0,
                             }
                         }
                         if !finished_music {
@@ -860,6 +863,24 @@ mod tests {
         assert!(mixer.channel_is_playing(channel));
         mixer.halt_channel(channel);
         assert!(!mixer.channel_is_playing(channel));
+    }
+
+    #[test]
+    fn non_looping_music_plays_twice_before_finishing() {
+        // C4AudioSystemSdl.cpp:212-214 passes 1 to Mix_PlayMusic when loop is false;
+        // SDL_mixer defines that as one additional play after the first.
+        let data = generate_sine_wave(10, 440.0, 1_000);
+        let mixer = AudioMixer::new(1_000, 2);
+        let music_id = mixer.load_music(&data).unwrap();
+        mixer.play_music(music_id, false).unwrap();
+
+        let mut first_pass_and_one_frame = vec![0i16; 11 * 2];
+        mixer.mix_i16(&mut first_pass_and_one_frame);
+        assert!(mixer.music_is_playing());
+
+        let mut rest_of_second_pass = vec![0i16; 10 * 2];
+        mixer.mix_i16(&mut rest_of_second_pass);
+        assert!(!mixer.music_is_playing());
     }
 
     #[test]
