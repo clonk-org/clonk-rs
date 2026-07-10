@@ -27194,6 +27194,28 @@ func Trigger(object pOther)
     }
 
     #[test]
+    fn sound_threads_the_cpp_multiple_flag_to_playback() {
+        // FnSound passes fMultiple through the sound-system decision after its
+        // exact-object IsSoundPlaying check (C4Script.cpp:2297, 2317-2322).
+        let args = [
+            Value::String("HorseWalk*".into()),
+            Value::Bool(false),
+            Value::Nil,
+            Value::Int(100),
+            Value::Nil,
+            Value::Int(0),
+            Value::Bool(true),
+        ];
+        let (result, outcome) = with_object_host_context(|| sound(&args));
+
+        assert_eq!(result.expect("Sound succeeds"), Value::Bool(true));
+        assert!(matches!(
+            outcome.audio.events.as_slice(),
+            [AudioCommand::PlaySound { multiple: true, .. }]
+        ));
+    }
+
+    #[test]
     fn tutorial_music_hosts_emit_play_level_and_stop_like_cpp() {
         // FnMusic plays/stops immediately; FnMusicLevel clamps to 0..100 and
         // returns the stored level (C4Script.cpp:2329-2346; C4Game.cpp:
