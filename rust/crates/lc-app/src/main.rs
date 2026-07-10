@@ -2179,7 +2179,11 @@ impl SoundResolver {
         }
 
         self.scenario = match new_root.as_ref() {
-            Some(root) => collect_sound_libraries_for_path(root),
+            Some(root) => {
+                let mut libraries = collect_sound_libraries_for_path(root);
+                libraries.extend(collect_local_definition_folder_root_sounds(root));
+                libraries
+            }
             None => Vec::new(),
         };
         self.scenario_root = new_root;
@@ -2456,6 +2460,50 @@ fn collect_sound_libraries_for_path(path: &Path) -> Vec<SoundLibrary> {
         .map(|s| s.to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
     collect_sound_libraries_from_group(&group, label)
+}
+
+fn collect_local_definition_folder_root_sounds(scenario_path: &Path) -> Vec<SoundLibrary> {
+    let mut libraries = Vec::new();
+    let mut parent = scenario_path.parent();
+    while let Some(folder_path) = parent {
+        if has_extension(folder_path, "c4f") {
+            match collect_local_definition_folder_root_sound(folder_path) {
+                Ok(Some(library)) => libraries.push(library),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    path = %folder_path.display(),
+                    %error,
+                    "failed to inspect local definition folder sounds"
+                ),
+            }
+        }
+        parent = folder_path.parent();
+    }
+    libraries
+}
+
+fn collect_local_definition_folder_root_sound(
+    folder_path: &Path,
+) -> Result<Option<SoundLibrary>, lc_resources::GroupError> {
+    let group = Group::open(folder_path)?;
+    let entries = group.entries()?;
+    if !entries
+        .iter()
+        .any(|entry| has_extension(&entry.relative_path, "c4d"))
+    {
+        return Ok(None);
+    }
+
+    let source = Arc::new(group);
+    let label = format!("folder::{}", folder_path.display());
+    let mut library = SoundLibrary::new(label, source);
+    for entry in entries
+        .into_iter()
+        .filter(|entry| !entry.is_directory && is_audio_path(&entry.relative_path))
+    {
+        library.add_entry(entry.relative_path);
+    }
+    Ok((!library.is_empty()).then_some(library))
 }
 
 fn collect_sound_libraries_from_group(group: &Group, label: String) -> Vec<SoundLibrary> {
@@ -13851,6 +13899,48 @@ mod tests {
         let terms = SoundSearchTerms::new("Sound*");
         assert_eq!(terms.wildcard_pattern.as_deref(), Some("sound*.wav"));
         assert!(terms.search_names.is_empty());
+    }
+
+    #[test]
+    fn scenario_sound_resolver_loads_local_definition_folder_root_only() {
+        // C4Game::FoldersWithLocalsDefs adds each .c4f ancestor containing a
+        // direct *.c4d child as a definition resource (C4Game.cpp:3961-3994).
+        // C4DefList::Load first tries that resource root, and even though it
+        // has no DefCore, C4Def::Load still loads its direct sound effects
+        // (C4Def.cpp:927-950, 591-596). It never descends into sibling .c4s
+        // groups, because the recursive definition scan accepts only *.c4d.
+        let dir = tempdir().expect("tempdir");
+        let folder = dir.path().join("Tutorial.c4f");
+        let definitions = folder.join("Objects.c4d");
+        let scenario = folder.join("Tutorial01.c4s");
+        let sibling = folder.join("Tutorial02.c4s");
+        fs::create_dir_all(&definitions).expect("create local definitions");
+        fs::create_dir_all(&scenario).expect("create scenario");
+        fs::create_dir_all(&sibling).expect("create sibling scenario");
+        fs::write(folder.join("Drop.wav"), b"parent drop").expect("write parent sound");
+        fs::write(sibling.join("Sibling.wav"), b"sibling sound")
+            .expect("write sibling sound");
+
+        let mut resolver = SoundResolver {
+            global: Vec::new(),
+            scenario: Vec::new(),
+            scenario_root: None,
+            registered_definitions: HashSet::new(),
+        };
+        assert!(resolver.configure_scenario(Some(&scenario)));
+
+        assert_eq!(
+            resolver
+                .resolve_entry("Drop")
+                .expect("parent-folder root sound")
+                .load_audio()
+                .expect("read parent-folder sound"),
+            b"parent drop"
+        );
+        assert!(
+            resolver.resolve_entry("Sibling").is_none(),
+            "sibling scenario sounds are not definition-folder root sounds"
+        );
     }
 
     #[test]
