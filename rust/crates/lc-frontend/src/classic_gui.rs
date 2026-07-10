@@ -156,8 +156,66 @@ pub fn draw_bar(
     gamma: Option<&GammaRamp>,
 ) {
     let h = image.height();
+    if h == 0 || rect.w <= 0 || rect.h <= 0 || border == 0 || image.width() < 2 * border {
+        return;
+    }
     let mid_w = image.width().saturating_sub(2 * border);
     let bar_w = rect.w;
+    if rect.h != h as i32 {
+        let zoom = rect.h as f32 / h as f32;
+        let begin_w = (zoom * border as f32) as i32;
+        let middle_w = (zoom * mid_w as f32) as i32;
+        let right_show = border / 3;
+        draw_facet_stretch(
+            surface,
+            image,
+            (0.0, 0.0, border as f32, h as f32),
+            (rect.x as f32, rect.y as f32, begin_w as f32, rect.h as f32),
+            gamma,
+        );
+        if middle_w > 0 {
+            let mut ix = begin_w;
+            while (ix as f32) < bar_w as f32 - zoom * right_show as f32 {
+                let width = middle_w.min(bar_w - (zoom * right_show as f32) as i32 - ix);
+                let source_width = (width as f32 / zoom) as i32;
+                if width <= 0 || source_width <= 0 {
+                    break;
+                }
+                draw_facet_stretch(
+                    surface,
+                    image,
+                    (border as f32, 0.0, source_width as f32, h as f32),
+                    (
+                        (rect.x + ix) as f32,
+                        rect.y as f32,
+                        width as f32,
+                        rect.h as f32,
+                    ),
+                    gamma,
+                );
+                ix += middle_w;
+            }
+        }
+        let end_w = (zoom * border as f32) as i32;
+        draw_facet_stretch(
+            surface,
+            image,
+            (
+                (image.width() - border) as f32,
+                0.0,
+                border as f32,
+                h as f32,
+            ),
+            (
+                (rect.x + bar_w - end_w) as f32,
+                rect.y as f32,
+                end_w as f32,
+                rect.h as f32,
+            ),
+            gamma,
+        );
+        return;
+    }
     let end_show = (border / 3) as i32;
 
     let begin_w = (border as i32).clamp(0, bar_w.max(0)) as u32;
@@ -195,6 +253,155 @@ pub fn draw_bar(
         h,
         gamma,
     );
+}
+
+/// Stretch-blits an image subregion like `CStdDDraw::Blit`: one quad per C++
+/// texture tile, GL_LINEAR sampling and fragment gamma before alpha blending
+/// (`StdDDraw2.cpp:637-786`, `C4Surface.cpp:166-189,1102-1103`).
+fn draw_facet_stretch(
+    surface: &mut Surface,
+    image: &ImageData,
+    source: (f32, f32, f32, f32),
+    destination: (f32, f32, f32, f32),
+    gamma: Option<&GammaRamp>,
+) {
+    let (source_x, source_y, source_width, source_height) = source;
+    let (target_x, target_y, target_width, target_height) = destination;
+    if source_width <= 0.0 || source_height <= 0.0 || target_width <= 0.0 || target_height <= 0.0 {
+        return;
+    }
+    let scale_x = target_width / source_width;
+    let scale_y = target_height / source_height;
+    let tile_size = cpp_texture_size(image.width(), image.height()) as i32;
+    let image_tiles_x = (image.width() as i32 - 1) / tile_size + 1;
+    let image_tiles_y = (image.height() as i32 - 1) / tile_size + 1;
+    let first_tile_x = ((source_x / tile_size as f32) as i32).max(0);
+    let first_tile_y = ((source_y / tile_size as f32) as i32).max(0);
+    let last_tile_x = (((source_x + source_width - 1.0) as i32) / tile_size + 1).min(image_tiles_x);
+    let last_tile_y =
+        (((source_y + source_height - 1.0) as i32) / tile_size + 1).min(image_tiles_y);
+
+    for tile_y in first_tile_y..last_tile_y {
+        for tile_x in first_tile_x..last_tile_x {
+            let (tile_origin_x, tile_origin_y) = (tile_x * tile_size, tile_y * tile_size);
+            let source_left = (source_x - tile_origin_x as f32).max(0.0);
+            let source_top = (source_y - tile_origin_y as f32).max(0.0);
+            let source_right =
+                (source_x + source_width - tile_origin_x as f32).min(tile_size as f32);
+            let source_bottom =
+                (source_y + source_height - tile_origin_y as f32).min(tile_size as f32);
+            let target_left = (source_left + tile_origin_x as f32 - source_x) * scale_x + target_x;
+            let target_top = (source_top + tile_origin_y as f32 - source_y) * scale_y + target_y;
+            let target_right =
+                (source_right + tile_origin_x as f32 - source_x) * scale_x + target_x;
+            let target_bottom =
+                (source_bottom + tile_origin_y as f32 - source_y) * scale_y + target_y;
+            let first_pixel_x = (target_left - 0.5).ceil() as i32;
+            let first_pixel_y = (target_top - 0.5).ceil() as i32;
+
+            for pixel_y in first_pixel_y.max(0)..surface.height() as i32 {
+                if pixel_y as f32 + 0.5 >= target_bottom {
+                    break;
+                }
+                for pixel_x in first_pixel_x.max(0)..surface.width() as i32 {
+                    if pixel_x as f32 + 0.5 >= target_right {
+                        break;
+                    }
+                    let sample_x = source_x - tile_origin_x as f32
+                        + (pixel_x as f32 + 0.5 - target_x) / scale_x
+                        - 0.5;
+                    let sample_y = source_y - tile_origin_y as f32
+                        + (pixel_y as f32 + 0.5 - target_y) / scale_y
+                        - 0.5;
+                    let sample = bilinear_sample_tile(
+                        image,
+                        tile_origin_x,
+                        tile_origin_y,
+                        tile_size,
+                        sample_x,
+                        sample_y,
+                    );
+                    if sample[3] <= 0.0 {
+                        continue;
+                    }
+                    let alpha = (sample[3] / 255.0).clamp(0.0, 1.0);
+                    let destination = surface
+                        .get_pixel(pixel_x as u32, pixel_y as u32)
+                        .unwrap_or_default();
+                    let blend = |source: f32, destination: u8| {
+                        (encode_filtered_channel(gamma, source) * alpha
+                            + f32::from(destination) * (1.0 - alpha))
+                            .round()
+                            .clamp(0.0, 255.0) as u8
+                    };
+                    let _ = surface.set_pixel(
+                        pixel_x as u32,
+                        pixel_y as u32,
+                        Color::new(
+                            blend(sample[0], destination.r),
+                            blend(sample[1], destination.g),
+                            blend(sample[2], destination.b),
+                            255,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn cpp_texture_size(width: u32, height: u32) -> u32 {
+    let required = width.min(height).max(1);
+    let mut size = 1u32;
+    while size < required {
+        size <<= 1;
+    }
+    size.min(4096)
+}
+
+fn bilinear_sample_tile(
+    image: &ImageData,
+    tile_x: i32,
+    tile_y: i32,
+    tile_size: i32,
+    sample_x: f32,
+    sample_y: f32,
+) -> [f32; 4] {
+    let texel = |relative_x: i32, relative_y: i32| -> [f32; 4] {
+        let x = tile_x + relative_x.clamp(0, tile_size - 1);
+        let y = tile_y + relative_y.clamp(0, tile_size - 1);
+        if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 {
+            return [0.0; 4];
+        }
+        let index = ((y as u32 * image.width() + x as u32) * 4) as usize;
+        image
+            .pixels()
+            .get(index..index + 4)
+            .map(|pixel| {
+                [
+                    pixel[0] as f32,
+                    pixel[1] as f32,
+                    pixel[2] as f32,
+                    pixel[3] as f32,
+                ]
+            })
+            .unwrap_or([0.0; 4])
+    };
+    let (x0, y0) = (sample_x.floor() as i32, sample_y.floor() as i32);
+    let (fraction_x, fraction_y) = (sample_x - x0 as f32, sample_y - y0 as f32);
+    let (top_left, top_right) = (texel(x0, y0), texel(x0 + 1, y0));
+    let (bottom_left, bottom_right) = (texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));
+    std::array::from_fn(|channel| {
+        let top = top_left[channel] * (1.0 - fraction_x) + top_right[channel] * fraction_x;
+        let bottom = bottom_left[channel] * (1.0 - fraction_x) + bottom_right[channel] * fraction_x;
+        top * (1.0 - fraction_y) + bottom * fraction_y
+    })
+}
+
+fn encode_filtered_channel(gamma: Option<&GammaRamp>, channel: f32) -> f32 {
+    gamma
+        .map(|ramp| f32::from(ramp.encode_float(channel)))
+        .unwrap_or_else(|| channel.round().clamp(0.0, 255.0))
 }
 
 /// `CStdDDraw::DrawBoxDw`: inclusive coordinates and engine AARRGGBB color
@@ -424,6 +631,31 @@ mod tests {
             None,
         );
         assert_eq!(column_values(&surface, 0, 1), vec![80]);
+    }
+
+    // GameOver's ComponentAligner yields 44px-tall buttons while GUIButton is
+    // 32px high. DrawBar must take its zoomed branch and cover the last row
+    // (`C4GameOverDlg.cpp:146-157,232-258`; `C4Gui.cpp:313-329`).
+    #[test]
+    fn zoomed_button_bar_covers_full_game_over_height() {
+        let image = ImageData::new(96, 32, [0, 120, 0, 255].repeat(96 * 32));
+        let background = Color::opaque(11, 22, 33);
+        let mut surface = Surface::new(120, 50, PixelFormat::Rgba8888);
+        surface.fill(background);
+        draw_bar(
+            &mut surface,
+            IntRect {
+                x: 4,
+                y: 3,
+                w: 100,
+                h: 44,
+            },
+            &image,
+            32,
+            None,
+        );
+
+        assert_eq!(surface.get_pixel(50, 46), Some(Color::opaque(0, 120, 0)));
     }
 
     // `DrawBoxDw` covers inclusive corners and treats engine alpha as

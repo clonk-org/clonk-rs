@@ -47,7 +47,10 @@ use clap::Parser;
 use control_options::{
     binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
 };
-use game_over::{GameOverAction, GameOverEntry, GameOverOutcome, GameOverState, NextMissionButton};
+use game_over::{
+    GameOverAction, GameOverClassicResources, GameOverEntry, GameOverOutcome, GameOverState,
+    NextMissionButton,
+};
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
 use ingame_menu::{
     DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
@@ -356,6 +359,9 @@ struct FrontendAssets {
     /// GUIButtonHighlight.png — additive focus/hover overlay for GUI buttons
     /// (C4GraphicsResource.cpp:1089-1093, C4GuiButton.cpp:94-98).
     button_highlight: Option<ImageData>,
+    /// GUIButtonHighlight with transparent RGB cleared once for bilinear
+    /// classic in-game dialogs; raw startup consumers retain their asset.
+    game_over_button_highlight: Option<ImageData>,
     /// Graphics.c4g images used by the startup dialog parity renderers,
     /// keyed by file name (see `STARTUP_DIALOG_IMAGES`).
     startup_dialog_images: HashMap<String, ImageData>,
@@ -456,6 +462,10 @@ impl FrontendAssets {
             }
         }
 
+        let game_over_button_highlight = startup_dialog_images
+            .get("GUIButtonHighlight.png")
+            .map(lc_frontend::classic_gui::blacken_transparent_pixels);
+
         Self {
             font,
             clonk_fonts,
@@ -466,6 +476,7 @@ impl FrontendAssets {
             logo,
             button_textures,
             button_highlight,
+            game_over_button_highlight,
             startup_dialog_images,
             book_fonts,
             options_book_fonts,
@@ -635,6 +646,23 @@ impl FrontendAssets {
 
     fn dialog_image(&self, name: &str) -> Option<ImageData> {
         self.startup_dialog_images.get(name).cloned()
+    }
+
+    fn game_over_classic_resources(&self) -> Option<GameOverClassicResources<'_>> {
+        let caption = self.startup_dialog_images.get("GUICaption.png")?;
+        let button = self.startup_dialog_images.get("GUIButton.png")?;
+        let button_down = self.startup_dialog_images.get("GUIButtonDown.png")?;
+        let button_highlight = self.game_over_button_highlight.as_ref()?;
+        let fonts = self.clonk_fonts.as_deref()?;
+        Some(GameOverClassicResources::new(
+            lc_frontend::classic_gui::ClassicGuiSkin::new(
+                caption,
+                button,
+                button_down,
+                Some(button_highlight),
+            ),
+            fonts,
+        ))
     }
 
     fn about_dlg_assets(&self) -> Option<lc_frontend::startup_about_dlg::AboutDlgAssets> {
@@ -8307,18 +8335,19 @@ impl GameApp {
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
         if self.game_over_dialog.is_some() {
-            if button_state == ElementState::Released {
-                let (width, height) = {
-                    let surface = self.graphics.surface();
-                    (surface.width(), surface.height())
-                };
-                let action = self
-                    .game_over_dialog
-                    .as_ref()
-                    .and_then(|dialog| dialog.activate_pointer_position(width, height));
-                if let Some(action) = action {
-                    self.handle_game_over_action(action)?;
+            let (width, height) = {
+                let surface = self.graphics.surface();
+                (surface.width(), surface.height())
+            };
+            let action = self.game_over_dialog.as_mut().and_then(|dialog| match button_state {
+                ElementState::Pressed => {
+                    dialog.handle_pointer_down(width, height);
+                    None
                 }
+                ElementState::Released => dialog.handle_pointer_up(width, height),
+            });
+            if let Some(action) = action {
+                self.handle_game_over_action(action)?;
             }
             return Ok(());
         }
@@ -8537,11 +8566,15 @@ impl GameApp {
                     dialog.handle_pointer_move(position.x, position.y, width, height);
                 }
             }
-            if phase == TouchPhase::Ended {
+            if phase == TouchPhase::Started {
+                if let Some(dialog) = self.game_over_dialog.as_mut() {
+                    dialog.handle_pointer_down(width, height);
+                }
+            } else if phase == TouchPhase::Ended {
                 let action = self
                     .game_over_dialog
-                    .as_ref()
-                    .and_then(|dialog| dialog.activate_pointer_position(width, height));
+                    .as_mut()
+                    .and_then(|dialog| dialog.handle_pointer_up(width, height));
                 if let Some(action) = action {
                     self.handle_game_over_action(action)?;
                 }
@@ -9837,12 +9870,13 @@ impl GameApp {
             label: next_mission.text.clone(),
             description: next_mission.description.clone(),
         });
-        let dialog = GameOverState::with_next_mission(
+        let mut dialog = GameOverState::with_next_mission(
             scenario_title.clone(),
             entries,
             self.graphics.surface().width(),
             next_mission,
         );
+        dialog.configure_classic_fonts(self.assets.clonk_fonts.as_deref());
         let status_message = if dialog.subtitle().is_empty() {
             format!("{scenario_title} complete")
         } else {
@@ -10418,7 +10452,8 @@ impl GameApp {
 
         if let Some(dialog) = self.game_over_dialog.as_ref() {
             let font = self.assets.font_arc();
-            dialog.render(self.graphics.surface_mut(), font.as_ref());
+            let classic = self.assets.game_over_classic_resources();
+            dialog.render(self.graphics.surface_mut(), font.as_ref(), classic);
         }
 
         let surface = self.graphics.surface();
@@ -11933,7 +11968,11 @@ fn render_startup_frame(
         }
         if let Some(dialog) = game_over {
             let font = assets.font_arc();
-            dialog.render(surface, font.as_ref());
+            dialog.render(
+                surface,
+                font.as_ref(),
+                assets.game_over_classic_resources(),
+            );
         }
 
         draw_startup_status(surface, assets, status_text);
