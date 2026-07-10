@@ -6551,6 +6551,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DigFree", dig_free);
     script.register_host_function("DigFreeRect", dig_free_rect);
     script.register_host_function("FreeRect", free_rect);
+    script.register_host_function("DrawMaterialQuad", draw_material_quad);
     script.register_host_function("ScriptGo", script_go);
     script.register_host_function("ScriptCounter", script_counter);
     script.register_host_function("goto", script_goto);
@@ -8469,6 +8470,13 @@ pub(crate) enum LandscapeOperation {
         origin: Vector2,
         width: i32,
         height: i32,
+    },
+    /// FnDrawMaterialQuad -> C4Landscape::DrawQuad
+    /// (C4Script.cpp:5111-5115; C4Landscape.cpp:2448-2468).
+    DrawMaterialQuad {
+        material_texture: String,
+        vertices: [Vector2; 4],
+        ift: bool,
     },
     BlastCircle {
         center: Vector2,
@@ -15391,6 +15399,55 @@ fn script_goto(args: &[Value]) -> Result<Value, RuntimeError> {
             context.script_counter_request = Some(counter);
         }
         Ok(Value::Int(counter))
+    })
+}
+
+/// FnDrawMaterialQuad (C4Script.cpp:5111-5115): all coordinates are GLOBAL
+/// (there is no cthr->Obj offset), and the bool is the Surface8 IFT bit.
+/// GetIndexMatTex runs synchronously so an unresolved material returns false
+/// without queuing a landscape change (C4Landscape.cpp:2448-2452).
+fn draw_material_quad(args: &[Value]) -> Result<Value, RuntimeError> {
+    let material_texture = parse_optional_string(
+        args.first(),
+        "DrawMaterialQuad",
+        "material-texture",
+    )?
+    .unwrap_or_default();
+    let coordinate_names = ["x1", "y1", "x2", "y2", "x3", "y3", "x4", "y4"];
+    let mut coordinates = [0; 8];
+    for (index, coordinate) in coordinates.iter_mut().enumerate() {
+        *coordinate = value_to_i32(
+            args.get(index + 1).unwrap_or(&Value::Nil),
+            "DrawMaterialQuad",
+            coordinate_names[index],
+        )?;
+    }
+    let ift = value_to_bool(
+        args.get(9).unwrap_or(&Value::Nil),
+        "DrawMaterialQuad",
+        "sub",
+    )?;
+    let vertices = [
+        Vector2::new(coordinates[0], coordinates[1]),
+        Vector2::new(coordinates[2], coordinates[3]),
+        Vector2::new(coordinates[4], coordinates[5]),
+        Vector2::new(coordinates[6], coordinates[7]),
+    ];
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.resolve_runtime_material_texture(&material_texture) {
+            return Ok(Value::Bool(false));
+        }
+        context.register_landscape_operation(LandscapeOperation::DrawMaterialQuad {
+            material_texture,
+            vertices,
+            ift,
+        });
+        Ok(Value::Bool(true))
     })
 }
 
@@ -23539,6 +23596,11 @@ struct EffectHostContext {
     pending_messages: Vec<MessageCommand>,
     pending_menu_requests: Vec<crate::MenuRequest>,
     pending_landscape_ops: Vec<LandscapeOperation>,
+    /// Live C4TextureMap preview for synchronous GetIndexMatTex return
+    /// values. DrawMaterialQuad operations still fold into the real engine,
+    /// but later calls in this same VM session must see slots allocated by
+    /// earlier calls (C4Texture.cpp:319-369).
+    runtime_texmap: Option<crate::landscape::RuntimeTexMapState>,
     /// Live script-visible sky values. Host writes update this before their
     /// deferred landscape operation is folded into the engine.
     sky_adjustment: SkyAdjustment,
@@ -23580,6 +23642,10 @@ impl EffectHostContext {
         let team_home_base_rule = world.team_home_base_rule();
         let scenario_script_counter = world.scenario_script_counter();
         let sky_adjustment = world.sky_adjustment();
+        let runtime_texmap = world
+            .landscape_ref()
+            .and_then(Landscape::raster_state)
+            .map(|state| state.texmap().clone());
         let mut object = object.map(|ctx| {
             let HostObjectContext {
                 id,
@@ -23708,6 +23774,7 @@ impl EffectHostContext {
             pending_messages: Vec::new(),
             pending_menu_requests: Vec::new(),
             pending_landscape_ops: Vec::new(),
+            runtime_texmap,
             sky_adjustment,
             audio,
             next_object_id,
@@ -23777,6 +23844,12 @@ impl EffectHostContext {
 
     fn register_landscape_operation(&mut self, operation: LandscapeOperation) {
         self.pending_landscape_ops.push(operation);
+    }
+
+    fn resolve_runtime_material_texture(&mut self, material_texture: &str) -> bool {
+        self.runtime_texmap
+            .as_mut()
+            .is_some_and(|texmap| texmap.get_index_mat_tex(material_texture, None) != 0)
     }
 
     fn get_world_object(&self, id: ObjectId) -> Option<HostWorldObject> {
@@ -26269,6 +26342,7 @@ mod tests {
         "DoHomebaseProduction",
         "DoMagicEnergy",
         "DoScoreboardShow",
+        "DrawMaterialQuad",
         "EffectCall",
         "EffectVar",
         "EnergyCheck",
@@ -27981,6 +28055,137 @@ func Trigger(object pOther)
             result.expect("GetMaterial with object succeeds"),
             Value::Int(material.index() as i32)
         );
+    }
+
+    fn draw_material_quad_world() -> HostWorldContext {
+        let mut densities = vec![0; 128];
+        densities[1] = 100;
+        densities[2] = 100;
+        densities[3] = 25;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Earth".to_string());
+        material_names[2] = Some("Vehicle".to_string());
+        material_names[3] = Some("Water".to_string());
+        let texture_names = vec![None; 128];
+        let mut texmap = crate::landscape::RuntimeTexMapState {
+            densities: densities.clone(),
+            material_names: material_names.clone(),
+            texture_names: texture_names.clone(),
+            match_texture_names: texture_names.clone(),
+            shapes: vec![None; 128],
+            materials: vec![crate::landscape::RuntimeTexMapMaterial {
+                name: "Water".to_string(),
+                density: 25,
+                shape: crate::chunky::ChunkShape::Flat,
+            }],
+            texture_inventory: Vec::new(),
+            default_material_entries: Vec::new(),
+        };
+        texmap.set_default_material_entry("Water", 3);
+        let mut landscape = Landscape::new(6, vec![6; 6]).expect("landscape builds");
+        landscape.set_world_height(6);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            6,
+            6,
+            vec![0; 36],
+            densities,
+            material_names,
+            texture_names,
+        ));
+        landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
+        landscape.refresh_all_raster_columns();
+        HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+    }
+
+    #[test]
+    fn draw_material_quad_resolves_and_queues_global_vertices() {
+        // FnDrawMaterialQuad passes its material string, four GLOBAL points,
+        // and fSub straight to C4Landscape::DrawQuad (C4Script.cpp:5111-5115).
+        // DrawQuad resolves GetIndexMatTex before entering PrepareChange
+        // (C4Landscape.cpp:2448-2466), so the host can return true now and
+        // defer the same resolved operation to the engine fold.
+        let args = [
+            Value::String("Water".to_string()),
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(4),
+            Value::Int(2),
+            Value::Int(4),
+            Value::Int(5),
+            Value::Int(1),
+            Value::Int(5),
+            Value::Bool(true),
+        ];
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            draw_material_quad_world(),
+            1,
+            || draw_material_quad(&args),
+        );
+
+        assert_eq!(result.expect("DrawMaterialQuad succeeds"), Value::Bool(true));
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::DrawMaterialQuad {
+                material_texture,
+                vertices,
+                ift,
+            } => {
+                assert_eq!(material_texture, "Water");
+                assert_eq!(
+                    *vertices,
+                    [
+                        Vector2::new(1, 2),
+                        Vector2::new(4, 2),
+                        Vector2::new(4, 5),
+                        Vector2::new(1, 5),
+                    ]
+                );
+                assert!(*ift);
+            }
+            other => panic!("unexpected landscape operation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_material_quad_returns_false_for_unresolved_material() {
+        // After an explicit pair fails, GetIndexMatTex checks the ORIGINAL
+        // full string as a material name (C4Texture.cpp:346-369), so
+        // `Water-Missing` does not fall back to Water's DefaultMatTex.
+        // DrawQuad returns false before PrepareChange (C4Landscape.cpp:
+        // 2450-2452), so no deferred write may be queued.
+        let args = [
+            Value::String("Water-Missing".to_string()),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(1),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Bool(false),
+        ];
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            draw_material_quad_world(),
+            1,
+            || draw_material_quad(&args),
+        );
+
+        assert_eq!(result.expect("invalid material is not an error"), Value::Bool(false));
+        assert!(outcome.landscape.is_empty());
     }
 
     #[test]

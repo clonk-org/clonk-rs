@@ -218,6 +218,23 @@ impl PixelGrid {
         self.texture_names.clone_from(&texmap.texture_names);
     }
 
+    /// CSurface8::Polygon on the authoritative plane. The shared chunky-map
+    /// rasterizer is already a line-faithful port of StdSurface8.cpp:306-404;
+    /// move the byte plane through it without cloning a full landscape.
+    fn draw_polygon(&mut self, vertices: &[(i32, i32)], byte: u8) {
+        let bytes = mem::take(&mut self.bytes);
+        let mut surface = crate::chunky::Surface8::from_bytes(
+            self.width as i32,
+            self.height as i32,
+            bytes,
+        );
+        crate::chunky::polygon(&mut surface, vertices, byte);
+        self.bytes = surface.into_bytes();
+        // The renderer only needs a changed cache key; C++ Surface8 itself
+        // has no revision counter, so one bump per polygon is sufficient.
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     /// The first texmap index carrying the given material (the
     /// Mat2PixColDefault stand-in for grid writes).
     fn byte_for_material(&self, material: MaterialId) -> Option<u8> {
@@ -441,8 +458,11 @@ impl RuntimeTexMapState {
         slot as u8
     }
 
-    /// C4TextureMap::GetIndexMatTex (C4Texture.cpp:346-367), with the
-    /// activation classifier's pre-relocation fallback behavior unchanged.
+    /// C4TextureMap::GetIndexMatTex (C4Texture.cpp:346-369). An explicit
+    /// `Material-Texture` first tries/allocates that pair. If it fails and
+    /// there is no caller-supplied default texture, C++ looks up the ORIGINAL
+    /// full string as a material name; therefore `Water-Missing` does not
+    /// silently fall back to Water's default entry.
     pub(crate) fn get_index_mat_tex(
         &mut self,
         material_texture: &str,
@@ -464,7 +484,7 @@ impl RuntimeTexMapState {
                 return index;
             }
         }
-        self.default_material_entry(material).unwrap_or(0)
+        self.default_material_entry(material_texture).unwrap_or(0)
     }
 
     pub(crate) fn set_default_material_entry(&mut self, name: &str, slot: u8) {
@@ -944,6 +964,31 @@ impl Landscape {
         };
         self.refresh_raster_columns(bounds.columns());
         Some(result)
+    }
+
+    /// Resolve (and, for an explicit valid texture pair, allocate) the live
+    /// texmap slot before DrawQuad enters PrepareChange. A newly allocated
+    /// slot immediately updates the pixel lookup tables just like
+    /// C4TextureMap::AddEntry -> HandleTexMapUpdate
+    /// (C4Texture.cpp:116-135).
+    fn resolve_runtime_material_texture(&mut self, material_texture: &str) -> u8 {
+        let Self {
+            pixels,
+            raster_state,
+            ..
+        } = self;
+        let Some(state) = raster_state.as_mut() else {
+            return 0;
+        };
+        let slot = state
+            .texmap_mut()
+            .get_index_mat_tex(material_texture, None);
+        if slot != 0 {
+            if let Some(pixels) = pixels {
+                pixels.sync_runtime_texmap(state.texmap());
+            }
+        }
+        slot
     }
 
     /// Resolve the grid's Pix2Mat table once the engine materials exist
@@ -2821,6 +2866,46 @@ impl crate::Engine {
         }
         result
     }
+
+    /// FnDrawMaterialQuad/C4Landscape::DrawQuad
+    /// (C4Script.cpp:5111-5115; C4Landscape.cpp:2448-2468): resolve the live
+    /// material-texture slot, compute the inclusive vertex bounds, and run
+    /// the exact Surface8 polygon through PrepareChange/FinishChange's Rust
+    /// transaction seam.
+    pub(crate) fn draw_material_quad(
+        &mut self,
+        material_texture: &str,
+        vertices: [Vector2; 4],
+        ift: bool,
+    ) -> bool {
+        let slot = self
+            .landscape
+            .as_mut()
+            .map(|landscape| landscape.resolve_runtime_material_texture(material_texture))
+            .unwrap_or(0);
+        if slot == 0 {
+            return false;
+        }
+
+        let min_x = vertices.iter().map(|point| point.x).min().unwrap_or(0);
+        let max_x = vertices.iter().map(|point| point.x).max().unwrap_or(0);
+        let min_y = vertices.iter().map(|point| point.y).min().unwrap_or(0);
+        let max_y = vertices.iter().map(|point| point.y).max().unwrap_or(0);
+        let bounds = RasterChangeRect::new(
+            min_x,
+            min_y,
+            max_x.saturating_sub(min_x).saturating_add(1),
+            max_y.saturating_sub(min_y).saturating_add(1),
+        );
+        let polygon = vertices.map(|point| (point.x, point.y));
+        let byte = slot | if ift { 0x80 } else { 0 };
+        let _ = self.landscape_raster_transaction(bounds, |grid, _state| {
+            grid.draw_polygon(&polygon, byte);
+        });
+        // Once GetIndexMatTex resolved, C++ returns true even when Surface8
+        // clipping leaves the polygon wholly outside the landscape.
+        true
+    }
 }
 
 impl LandscapeCommand {
@@ -3239,14 +3324,15 @@ mod tests {
     }
 
     fn raster_grid_landscape(width: u32, height: u32, bytes: Vec<u8>) -> Landscape {
-        let densities = vec![0, 100, 100, 25];
-        let material_names = vec![
-            None,
-            Some("Earth".to_string()),
-            Some("Vehicle".to_string()),
-            Some("Water".to_string()),
-        ];
-        let texture_names = vec![None; 4];
+        let mut densities = vec![0; 128];
+        densities[1] = 100;
+        densities[2] = 100;
+        densities[3] = 25;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Earth".to_string());
+        material_names[2] = Some("Vehicle".to_string());
+        material_names[3] = Some("Water".to_string());
+        let texture_names = vec![None; 128];
         let grid = PixelGrid::new(
             width,
             height,
@@ -3255,16 +3341,35 @@ mod tests {
             material_names.clone(),
             texture_names.clone(),
         );
-        let texmap = RuntimeTexMapState {
+        let mut texmap = RuntimeTexMapState {
             densities,
             material_names,
             texture_names: texture_names.clone(),
             match_texture_names: texture_names,
-            shapes: vec![None; 4],
-            materials: Vec::new(),
+            shapes: vec![None; 128],
+            materials: vec![
+                RuntimeTexMapMaterial {
+                    name: "Earth".to_string(),
+                    density: 100,
+                    shape: crate::chunky::ChunkShape::Flat,
+                },
+                RuntimeTexMapMaterial {
+                    name: "Vehicle".to_string(),
+                    density: 100,
+                    shape: crate::chunky::ChunkShape::Flat,
+                },
+                RuntimeTexMapMaterial {
+                    name: "Water".to_string(),
+                    density: 25,
+                    shape: crate::chunky::ChunkShape::Flat,
+                },
+            ],
             texture_inventory: Vec::new(),
             default_material_entries: Vec::new(),
         };
+        texmap.set_default_material_entry("Earth", 1);
+        texmap.set_default_material_entry("Vehicle", 2);
+        texmap.set_default_material_entry("Water", 3);
         let mut landscape = Landscape::new(width, vec![height as i32; width as usize])
             .expect("landscape builds");
         landscape.set_world_height(height as i32);
@@ -3366,6 +3471,92 @@ mod tests {
     }
 
     #[test]
+    fn draw_material_quad_uses_cpp_polygon_and_inclusive_change_bounds() {
+        // FnDrawMaterialQuad forwards the four GLOBAL vertices and IFT flag
+        // verbatim (C4Script.cpp:5111-5115). C4Landscape::DrawQuad builds
+        // its change box from four 1x1 vertex rects, then calls Surface8's
+        // polygon with MatTex2PixCol+IFT (C4Landscape.cpp:2448-2468).
+        // The Allegro fill includes the right edge and excludes the bottom
+        // scanline (StdSurface8.cpp:306-404), so this quad paints x=1..4,
+        // y=1..3; x=4 also proves the derived-column refresh used the
+        // INCLUSIVE vertex bounding box.
+        let mut engine = crate::Engine::with_seed(9);
+        engine.set_landscape(raster_grid_landscape(6, 6, vec![0; 36]));
+
+        assert!(engine.draw_material_quad(
+            "Water",
+            [
+                Vector2::new(1, 1),
+                Vector2::new(4, 1),
+                Vector2::new(4, 4),
+                Vector2::new(1, 4),
+            ],
+            true,
+        ));
+
+        let landscape = engine.landscape().expect("landscape remains");
+        for y in 0..6 {
+            for x in 0..6 {
+                let expected = if (1..=4).contains(&x) && (1..=3).contains(&y) {
+                    3 | 0x80
+                } else {
+                    0
+                };
+                assert_eq!(landscape.grid_byte_at(x, y), Some(expected), "({x},{y})");
+            }
+        }
+        for x in 1..=4 {
+            assert_eq!(
+                landscape.liquids()[x as usize].segments(),
+                &[LiquidSegment::new(1, 3)],
+                "liquid column {x} follows Surface8"
+            );
+            assert!(landscape.is_tunnel_at(x, 1));
+            assert!(landscape.is_tunnel_at(x, 3));
+            assert!(!landscape.is_tunnel_at(x, 4));
+        }
+        assert_eq!(landscape.surface(), &[6; 6]);
+    }
+
+    #[test]
+    fn draw_material_quad_rejects_unresolved_material_without_writes() {
+        // GetIndexMatTex returns zero for an invalid material and DrawQuad
+        // returns false before PrepareChange or Surface8::Polygon
+        // (C4Texture.cpp:346-369; C4Landscape.cpp:2450-2452).
+        let mut engine = crate::Engine::with_seed(10);
+        engine.set_landscape(raster_grid_landscape(3, 3, vec![0; 9]));
+        let revision = engine
+            .landscape()
+            .and_then(Landscape::pixel_grid)
+            .expect("pixel grid")
+            .revision();
+
+        assert!(!engine.draw_material_quad(
+            "Water-Missing",
+            [
+                Vector2::new(0, 0),
+                Vector2::new(2, 0),
+                Vector2::new(2, 2),
+                Vector2::new(0, 2),
+            ],
+            false,
+        ));
+
+        let landscape = engine.landscape().expect("landscape remains");
+        for y in 0..3 {
+            for x in 0..3 {
+                assert_eq!(landscape.grid_byte_at(x, y), Some(0));
+            }
+        }
+        assert_eq!(landscape.surface(), &[3; 3]);
+        assert_eq!(
+            landscape.pixel_grid().expect("pixel grid").revision(),
+            revision,
+            "failed resolution never enters PrepareChange"
+        );
+    }
+
+    #[test]
     fn raw_solid_mask_grid_write_does_not_enter_derived_columns() {
         // C4SolidMask puts MCVehic with raw _SBackPix and later restores the
         // saved background (C4SolidMask.cpp:323-363). Those temporary mask
@@ -3394,7 +3585,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_raster_transaction_repairs_solid_mask_over_changed_background() {
+    fn draw_material_quad_repairs_solid_mask_over_changed_background() {
         // PrepareChange removes intersecting masks temporarily and
         // FinishChange repairs them (C4Landscape.cpp:2851-2880).
         // C4SolidMask::Repair records the changed background before putting
@@ -3427,12 +3618,16 @@ mod tests {
             Some(2)
         );
 
-        engine
-            .landscape_raster_transaction(
-                RasterChangeRect::new(mask_x, mask_y, 1, 1),
-                |grid, _state| grid.write_byte(mask_x, mask_y, 3 | 0x80),
-            )
-            .expect("transaction runs");
+        assert!(engine.draw_material_quad(
+            "Water",
+            [
+                Vector2::new(mask_x, mask_y),
+                Vector2::new(mask_x + 1, mask_y),
+                Vector2::new(mask_x + 1, mask_y + 1),
+                Vector2::new(mask_x, mask_y + 1),
+            ],
+            true,
+        ));
 
         let landscape = engine.landscape().expect("landscape");
         assert_eq!(

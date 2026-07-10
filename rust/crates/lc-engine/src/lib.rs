@@ -27043,6 +27043,13 @@ impl Engine {
                     width,
                     height,
                 } => self.execute_clear_rect_operation(origin, width, height),
+                LandscapeOperation::DrawMaterialQuad {
+                    material_texture,
+                    vertices,
+                    ift,
+                } => {
+                    let _ = self.draw_material_quad(&material_texture, vertices, ift);
+                }
                 LandscapeOperation::BlastCircle {
                     center,
                     radius,
