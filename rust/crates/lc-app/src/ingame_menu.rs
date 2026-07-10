@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use lc_engine::{CommandKind, ControlCommand};
-use lc_frontend::hud::HudFont;
+use lc_frontend::{hud::HudFont, HudGraphics};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, Rect, Surface};
 use lc_gui::ImageData;
@@ -998,6 +998,10 @@ struct MenuLayout {
 /// to text-only rendering (headless tests without game data).
 #[derive(Default)]
 pub struct IngameMenuGraphics {
+    /// Shared HUD facets used by composite object-menu symbols.
+    pub hud: HudGraphics,
+    /// Runtime player colors keyed by C4Player number.
+    pub owner_colors: HashMap<i32, Color>,
     /// Menu.png (35x35 phases, C4GraphicsResource.cpp:219).
     pub menu: Option<ImageData>,
     /// Options.png (35x35 phases, C4GraphicsResource.cpp:224).

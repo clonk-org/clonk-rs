@@ -695,7 +695,7 @@ fn draw_command_key_cell(
 
 /// The image cell of a command (src/C4Object.cpp:4050-4068 plus the
 /// caller-drawn composites).
-fn draw_command_image_cell(
+pub fn draw_command_image_cell(
     surface: &mut Surface,
     hud: &HudGraphics,
     cell: SurfaceRect,

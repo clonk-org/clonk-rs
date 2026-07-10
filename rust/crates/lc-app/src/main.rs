@@ -7636,6 +7636,8 @@ impl GameApp {
                 .map(format_key_label)
                 .unwrap_or_default();
             self.ingame_menu_gfx = Some(IngameMenuGraphics {
+                hud: self.assets.hud_graphics().as_ref().clone(),
+                owner_colors: HashMap::new(),
                 menu: self.assets.dialog_image("Menu.png"),
                 options: self.assets.dialog_image("Options.png"),
                 control: self.assets.dialog_image("Control.png"),
