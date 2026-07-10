@@ -5650,6 +5650,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
     script.register_host_function("CastObjects", cast_objects);
+    script.register_host_function("CastPXS", cast_pxs);
     script.register_host_function("PlaceVegetation", place_vegetation);
     script.register_host_function("CreateConstruction", create_construction);
     // FnFindConstructionSite (C4Script.cpp:1958-1981) — the caller-Var
@@ -7520,6 +7521,13 @@ pub(crate) enum LandscapeOperation {
         material: i32,
         position: Vector2,
         velocity: Vector2,
+    },
+    /// FnCastPXS samples its synced velocities during the script call, then
+    /// the engine fold inserts them into the real C4PXSSystem in call order.
+    CastPxs {
+        material: crate::MaterialId,
+        position: Vector2,
+        velocities: Vec<FixedVec2>,
     },
     /// FnExtractMaterialAmount (C4Script.cpp:2264-2273): the count was
     /// simulated at call time; the apply reruns the REAL loop.
@@ -17305,6 +17313,80 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Nil)
 }
 
+fn cast_pxs(args: &[Value]) -> Result<Value, RuntimeError> {
+    // FnCastPXS -> C4PXSSystem::Cast (C4Script.cpp:2470-2474,
+    // C4PXS.cpp:309-321): resolve the material once, offset local x/y by
+    // the caller, then consume r2/r1 for every attempt even when the
+    // material lookup failed. The engine function is void.
+    let material_name = parse_optional_string(args.first(), "CastPXS", "material")?
+        .unwrap_or_default();
+    let amount = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "CastPXS",
+        "amount",
+    )?;
+    let level = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "CastPXS",
+        "level",
+    )?;
+    let x_offset = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "CastPXS", "x")?;
+    let y_offset = value_to_i32(args.get(4).unwrap_or(&Value::Nil), "CastPXS", "y")?;
+
+    let (material, position) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("CastPXS requires an active engine context"))?;
+        let material = context
+            .world
+            .materials()
+            .and_then(|materials| materials.id_of(&material_name));
+        let base = context
+            .object_context()
+            .map(ObjectScopeContext::effective_position)
+            .unwrap_or(Vector2::ZERO);
+        Ok((
+            material,
+            Vector2::new(
+                base.x.saturating_add(x_offset),
+                base.y.saturating_add(y_offset),
+            ),
+        ))
+    })?;
+
+    let velocities = RANDOM_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("random context unavailable"))?
+            .clone();
+        let mut rng = context.rng.borrow_mut();
+        Ok::<_, RuntimeError>(
+            (0..amount)
+                .map(|_| crate::pxs::PxsSystem::sample_cast_velocity(&mut rng, level))
+                .collect::<Vec<_>>(),
+        )
+    })?;
+
+    if let Some(material) = material {
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let context = borrow
+                .as_mut()
+                .ok_or_else(|| RuntimeError::new("CastPXS requires an active engine context"))?;
+            context.register_landscape_operation(LandscapeOperation::CastPxs {
+                material,
+                position,
+                velocities,
+            });
+            Ok::<_, RuntimeError>(())
+        })?;
+    }
+
+    Ok(Value::Nil)
+}
+
 fn placement_find_liquid_height(
     landscape: &Landscape,
     x: i32,
@@ -24262,6 +24344,7 @@ mod tests {
         "Call",
         "CastBackParticles",
         "CastObjects",
+        "CastPXS",
         "CastParticles",
         "ChangeDef",
         "ClearParticles",

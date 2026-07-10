@@ -26560,6 +26560,24 @@ impl Engine {
                         );
                     }
                 }
+                LandscapeOperation::CastPxs {
+                    material,
+                    position,
+                    velocities,
+                } => {
+                    // FnCastPXS already consumed the synced r2/r1 draws
+                    // while the VM call was live; preserve their order as
+                    // PXS slots are allocated (C4PXS.cpp:309-321).
+                    for velocity in velocities {
+                        self.pxs_system.create(
+                            material,
+                            math::itofix(position.x),
+                            math::itofix(position.y),
+                            velocity.x,
+                            velocity.y,
+                        );
+                    }
+                }
             }
         }
     }
@@ -45477,6 +45495,128 @@ func Trigger() {
             "RemoveEffect right after CreateObject killed it - and \
              materialization must NOT re-run Initialize (no second Life)"
         );
+    }
+
+    #[test]
+    fn cast_pxs_matches_cpp_relative_position_rng_order_and_void_result() {
+        // FnCastPXS offsets by the caller before C4PXSSystem::Cast; Cast
+        // draws r2 (ydir) before r1 (xdir) for each particle and returns
+        // void (C4Script.cpp:2470-2474; C4PXS.cpp:309-321).
+        let script = r#"#strict
+local cast_result;
+func Burst() {
+    cast_result = CastPXS("Water", 2, 20, 3, -4);
+    return(Random(100));
+}
+"#;
+        let library = MaterialLibrary::parse("[Material]\nName=Water\nDensity=50\n")
+            .expect("water material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water material exists");
+        let mut engine = Engine::with_seed(17);
+        engine.set_materials(materials);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(100, 200)),
+            )
+            .expect("caller spawns");
+
+        let mut mirror = engine.rng.clone();
+        let expected = (0..2)
+            .map(|_| {
+                let r2 = mirror.random(21);
+                let r1 = mirror.random(21);
+                (
+                    C4Fixed::from_raw(math::itofix(r1 - 10).val() / 10),
+                    C4Fixed::from_raw(math::itofix(r2 - 20).val() / 10),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected_return = mirror.random(100);
+
+        let index = engine.find_object_index(caller).expect("caller exists");
+        let result = engine
+            .call_object_function(index, "Burst", Vec::new())
+            .expect("cast runs");
+
+        assert_eq!(result, Value::Int(expected_return));
+        assert_eq!(engine.rng, mirror);
+        assert_eq!(
+            engine.object_snapshot(caller).expect("caller remains").local_vars["cast_result"],
+            Value::Nil,
+            "void FnCastPXS returns nil"
+        );
+        let particles = engine.pxs_system.iter().collect::<Vec<_>>();
+        assert_eq!(particles.len(), 2);
+        for (particle, (xdir, ydir)) in particles.into_iter().zip(expected) {
+            assert_eq!(particle.mat, water);
+            assert_eq!(particle.x, math::itofix(103));
+            assert_eq!(particle.y, math::itofix(196));
+            assert_eq!(particle.xdir, xdir);
+            assert_eq!(particle.ydir, ydir);
+        }
+    }
+
+    #[test]
+    fn cast_pxs_failed_material_and_nonpositive_amount_match_cpp_draws() {
+        // Material lookup happens before Cast, but invalid MNone attempts
+        // still run Cast's r2/r1 loop; zero/negative amounts do not enter
+        // it, and level zero uses Random(1) twice (C4Script.cpp:2470-2474;
+        // C4PXS.cpp:207-216,309-321).
+        let script = r#"#strict
+func Burst() {
+    CastPXS("Missing", 2, 0);
+    CastPXS("Water", 0, 20);
+    CastPXS("Water", -3, 20);
+    CastPXS("Water", 1, 0);
+    return(1);
+}
+"#;
+        let library = MaterialLibrary::parse("[Material]\nName=Water\nDensity=50\n")
+            .expect("water material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water material exists");
+        let mut engine = Engine::with_seed(29);
+        engine.set_materials(materials);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(4, 5)),
+            )
+            .expect("caller spawns");
+
+        let mut mirror = engine.rng.clone();
+        for _ in 0..3 {
+            let _ = mirror.random(1);
+            let _ = mirror.random(1);
+        }
+
+        let index = engine.find_object_index(caller).expect("caller exists");
+        engine
+            .call_object_function(index, "Burst", Vec::new())
+            .expect("casts run");
+
+        assert_eq!(engine.rng, mirror);
+        let particles = engine.pxs_system.iter().collect::<Vec<_>>();
+        assert_eq!(particles.len(), 1, "only the final valid cast creates PXS");
+        assert_eq!(particles[0].mat, water);
+        assert_eq!(particles[0].x, math::itofix(4));
+        assert_eq!(particles[0].y, math::itofix(5));
+        assert_eq!(particles[0].xdir, C4Fixed::ZERO);
+        assert_eq!(particles[0].ydir, C4Fixed::ZERO);
     }
 
     #[test]
