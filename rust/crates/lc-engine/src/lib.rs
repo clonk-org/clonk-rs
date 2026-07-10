@@ -3884,6 +3884,7 @@ impl Object {
 
         let mut no_attach = false;
         let mut any_contact = false;
+        let mut contact_cnat = CNAT_NONE;
         let mut solid_mask_removed = false;
         let mut first_step = true;
         while first_step || self.state.position.x != target_x || self.state.position.y != target_y {
@@ -3930,6 +3931,7 @@ impl Object {
                     ));
                 }
                 any_contact = true;
+                contact_cnat |= contact.contact_cnat;
                 on_contact(self, contact.contact_cnat)?;
                 self.fixed_position =
                     FixedVec2::from_ints(self.state.position.x, self.state.position.y);
@@ -3987,7 +3989,7 @@ impl Object {
         Ok(MovementStepOutcome {
             no_attach,
             any_contact,
-            contact_cnat: 0,
+            contact_cnat,
             solid_mask_removed,
         })
     }
@@ -4689,6 +4691,48 @@ fn fair_crew_rank(experience: i32) -> i32 {
         } else {
             return rank;
         }
+    }
+}
+
+/// Native field updates in `C4PhysicalInfo::PromotionUpdate`
+/// (C4InfoCore.cpp:207-222), before its optional definition-script
+/// `GetFairCrewPhysical` overrides. Fair crew additionally trains Scale,
+/// Hangle, Swim and Fight linearly toward `C4MaxPhysical` by rank 20.
+fn promotion_updated_physical(
+    mut physical: PhysicalInfo,
+    rank: i32,
+    training_definition: Option<PhysicalInfo>,
+) -> PhysicalInfo {
+    if rank >= 0 {
+        physical.can_dig = 1;
+        physical.can_chop = 1;
+        physical.can_construct = 1;
+        physical.can_scale = 1;
+        physical.can_hangle = 1;
+    }
+    physical.energy = physical
+        .energy
+        .max((50 + 5 * rank.clamp(0, 10)) * (C4_MAX_PHYSICAL / 100));
+    if let Some(definition) = training_definition {
+        let train_rank = rank.clamp(0, 20);
+        let train = |value: i32| value + (C4_MAX_PHYSICAL - value) * train_rank / 20;
+        physical.scale = train(definition.scale);
+        physical.hangle = train(definition.hangle);
+        physical.swim = train(definition.swim);
+        physical.fight = train(definition.fight);
+    }
+    physical
+}
+
+/// Resolves the info physicals installed on a joined/recruited crew member.
+/// With the LegacyClonk default fair-crew configuration, the info rank is
+/// ignored in favor of RankByExperience(FairCrewStrength).
+pub(crate) fn crew_info_physical(definition: PhysicalInfo, info_rank: i32) -> PhysicalInfo {
+    if USE_FAIR_CREW {
+        let rank = fair_crew_rank(FAIR_CREW_STRENGTH);
+        promotion_updated_physical(definition, rank, Some(definition))
+    } else {
+        promotion_updated_physical(definition, info_rank, None)
     }
 }
 
@@ -11965,24 +12009,15 @@ impl Engine {
         // 1000 — live-oracle probe read UseFairCrew=1) the def's
         // fair-crew physicals apply instead, promoted to
         // RankByExperience(strength) (C4Def.cpp:860-874); otherwise the
-        // info physicals promote by the info rank. Both share
-        // C4PhysicalInfo::PromotionUpdate: Energy = max(def, (50 + 5 *
-        // BoundBy(rank,0,10)) * C4MaxPhysical/100 (C4InfoCore.cpp:
-        // 207-213, 420-423). Only Energy is modeled; the Can*/training
-        // physicals have no Rust counterpart yet.
-        let rank = if USE_FAIR_CREW {
-            fair_crew_rank(FAIR_CREW_STRENGTH)
-        } else {
-            info.rank
-        };
-        let mut promoted = self
+        // info physicals promote by the info rank. In both cases,
+        // C4PhysicalInfo::PromotionUpdate applies the capability flags,
+        // Energy floor, and fair-crew training (C4InfoCore.cpp:207-222).
+        let definition_physical = self
             .definitions
             .get(&definition_id)
             .map(|definition| *definition.physical())
             .unwrap_or_default();
-        promoted.energy = promoted
-            .energy
-            .max((50 + 5 * rank.clamp(0, 10)) * (C4_MAX_PHYSICAL / 100));
+        let promoted = crew_info_physical(definition_physical, info.rank);
         if let Some(index) = self.find_object_index(id) {
             self.objects[index].state.info_physical = Some(promoted);
             // Init: `if (Alive) Energy = GetPhysical()->Energy`
@@ -40276,6 +40311,88 @@ func Trigger() {
             .info_physical
             .expect("at-limit Tick5 training clones the physicals");
         assert_eq!(trained.scale, 30_001);
+    }
+
+    #[test]
+    fn attached_scaler_hangles_when_up_hits_the_ceiling_like_cpp() {
+        // C4Movement::DoMovement accumulates the ceiling vertex's CNAT_Top
+        // even on the attached-shape path (C4Movement.cpp:337-372). The
+        // ensuing ContactAction changes a left-facing scaler pressing Up to
+        // Hangle facing Right (C4Object.cpp:4369-4390).
+        let mut climber = Definition::from_script("Climber", "Climber", "#strict\n")
+            .expect("definition compiles");
+        climber.set_shape_vertices(vec![
+            ObjectVertex::new(-1, 0).with_cnat(CNAT_LEFT),
+            ObjectVertex::new(0, -1).with_cnat(CNAT_TOP),
+        ]);
+        climber.set_contact_density(50);
+        climber.set_physical(PhysicalInfo {
+            scale: 30_000,
+            hangle: 30_000,
+            can_hangle: 1,
+            ..PhysicalInfo::default()
+        });
+        climber.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Scale".to_string(),
+                    ActionSpec::default().with_procedure("SCALE"),
+                ),
+                (
+                    "Hangle".to_string(),
+                    ActionSpec::default().with_procedure("HANGLE"),
+                ),
+            ]),
+        );
+
+        // Keep the left attachment at x=8 and put the top vertex into the
+        // ceiling at (10,9). Starting from an exact pixel, Scale's first
+        // -0.5 y step still rounds to y=10, matching the C++ oracle fixture.
+        let mut pixels = vec![0_u8; 20 * 20];
+        pixels[10 * 20 + 8] = 1;
+        pixels[9 * 20 + 10] = 1;
+        let grid = landscape::PixelGrid::new(
+            20,
+            20,
+            pixels,
+            vec![0, 100],
+            vec![None, Some("Earth".to_string())],
+            vec![None; 2],
+        );
+        let mut landscape = Landscape::new(20, vec![0; 20]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(climber)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Climber")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_action(ActionState::new("Scale"))
+                    .with_direction(Direction::Left)
+                    .with_command_direction(CommandDirection::Up)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("climber spawns");
+
+        engine.tick().expect("tick succeeds");
+        let idx = engine.find_object_index(id).expect("climber exists");
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.action.name, "Hangle");
+        assert_eq!(object.state.direction, Direction::Right);
+        assert_eq!(object.state.command_direction, CommandDirection::Up);
+        assert_eq!(object.state.position, Vector2::new(10, 10));
+        assert_eq!(object.fixed_position, FixedVec2::from_ints(10, 10));
+        assert_eq!(object.fixed_velocity, FixedVec2::ZERO);
+        assert_eq!(object.state.velocity, Vector2::ZERO);
     }
 
     #[test]

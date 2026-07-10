@@ -7437,6 +7437,10 @@ global func Step(state, frame, random)
         clonk.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
         clonk.set_physical(crate::PhysicalInfo {
             energy: 50_000,
+            scale: 30_000,
+            hangle: 30_000,
+            swim: 60_000,
+            fight: 50_000,
             ..crate::PhysicalInfo::default()
         });
         engine.register_definition(clonk).expect("clonk registers");
@@ -7472,9 +7476,21 @@ global func Step(state, frame, random)
             "rank-1 promotion: max(50000, 55*1000) (C4InfoCore.cpp:212)"
         );
         assert_eq!(
-            crew.state.info_physical.map(|physical| physical.energy),
-            Some(55_000),
-            "the info physical carries the promoted value"
+            crew.state.info_physical,
+            Some(crate::PhysicalInfo {
+                energy: 55_000,
+                scale: 33_500,
+                hangle: 33_500,
+                swim: 62_000,
+                fight: 52_500,
+                can_scale: 1,
+                can_hangle: 1,
+                can_dig: 1,
+                can_construct: 1,
+                can_chop: 1,
+                ..crate::PhysicalInfo::default()
+            }),
+            "FairCrewStrength=1000 promotes the full C4PhysicalInfo like C++"
         );
     }
 
