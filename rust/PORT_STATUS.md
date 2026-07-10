@@ -1,20 +1,18 @@
 # Rust Port Status
 
-> C++ (`../src/`) is the bit-exact simulation oracle. History: `git log --
-> rust/ parity/`. Full parity is not reached.
+C++ (`../src/`) is the bit-exact simulation oracle; full parity is not reached.
+History is in `git log -- rust/ parity/`.
 
-## Baseline and gates
+## Baseline
 
-- Motion is signed 16.16 `C4Fixed`; RNG is the shared C++ LCG/draw ledger.
-- Last full gate (`41e49529`): nextest 2,255 green here (2,256 with populated
-  content), workspace clippy/snapshots/parity green. Current engine (`f90a60af`):
-  1,305 green plus clippy/snapshots/parity. Load/apply is 93/93, activation audit
-  92/93 (CTF_DeepSea's delayed animals match C++), Goldrush 1000 headless ticks.
-- The pinned Goldrush frame-410 MONS #582 mismatch is fixed (`b1188cf4`). Run the
-  live comparator again and record the next divergence; no later first mismatch
-  is pinned yet.
+- Signed 16.16 `C4Fixed`, the C++ LCG, and its shared draw ledger are in place.
+- Current full gate: 2,300 nextest tests, workspace clippy, snapshots, and parity
+  green; scenario load/apply 93/93; activation audit 92/93 because CTF_DeepSea's
+  delayed animals match C++; Tutorials 01-10 are warning-free for 1,200 ticks.
+- Goldrush's frame-410 MONS #582 mismatch is fixed. The next live-comparator
+  divergence has not been pinned.
 
-Every completed slice:
+For every completed slice, run:
 
 ```sh
 cargo nextest run --workspace
@@ -23,82 +21,52 @@ cargo xtask engine-snapshots verify
 cargo xtask parity verify
 ```
 
-Also run `scenario-sweep`, `scenario-audit`, relevant `scenario-errors`, and a
-rebuilt/relinked pinned live comparison when behavior changes.
+Behavior changes also require the relevant scenario sweep/audit/error run and,
+when applicable, a rebuilt pinned live comparison.
 
-## Active gaps
+## Remaining gaps
 
 - **Movement/masks:** solid-mask lifetime, rotated attached-mask pushback,
-  non-grid overlays, and removal of non-C++ damping/xdir clamp/post-move collision.
-- **Landscape/material/fire:** scan/RNG interleaving, `PRETTY_TEMP_CONV`, exact
-  DigFree/BlastFree, blast/shake/liquid and seed/player/MapZoom order,
-  Landscape.txt, `PostInitMap`/`KeepMapCreator`, fixture segment removal;
-  checked-fire timing/returns, incineration chain, negative/global effects,
-  detach/extinguish/causes/smoke/explosion helpers.
-- **Commands/controls:** C4PathFinder/Tick35, DFA_FLOAT, contained-target Exit,
-  UpdateInterval/arrival, FlightControl/Acquire/Put-Ty, contained Throw,
-  non-control vehicle commands, linekit connect/dig, auto-sell/snow-dig,
-  version/rank gates and trade UI.
-- **Objects/players:** `InMat`/closed containers, preview OCF/addtop, permanent
-  info, DFA_CONNECT, object-value/no-sort finds, immediate sector registration;
-  base production/value, crew persistence, elimination presentation and
-  script-player/control-sync behavior; protocol/auth/league.
-- **Script/content:** C4Value strict conversion/interning/serialization, named
-  values and loaded multi-direction `Dir`, `Oversize`, numeric ActMap,
-  GetComponents/CalcDefValue/DefCore fields, effect recovery, definition/menu
-  seams, `FnExit` edge cases; `CanConcatPictureWith`, object-info payloads,
-  data-bearing network `MenuSelect`, async text progress, scenario callbacks,
-  AutoContextMenu/CloseCommand/PlayerMenu ordering. Tutorial blockers:
-  `SetPlrShowControl`, `ExecuteCommand`, `PlaceVegetation`, `CheckEnergyNeedChain`,
-  `CastPXS`, `IsNetwork`, C4ID `CustomMessage`; localized omitted
-  `SetNextMission` labels and next-mission UI/launch remain.
-- **Music/audio:** `Music`/`MusicLevel` host calls work; C++ activation order and
-  app/engine enabled state do not. `MusicEnabled`/`MusicLevel`/`PlayList`
-  save/restore, random continuation, streaming/looped MIDI and definition WAVs remain.
-- **Resources/presentation:** sky, control/config/name/locale/group
-  I/O; renderer transforms/GL/shaders/panning; particle graphics; tutorial
-  difficulty/character-choice GUI, HUD/board/player menus; remaining startup,
-  player, network, option, update/mission-access, search/scroll and tooltip flows.
+  non-grid overlays, and removal of non-C++ damping/clamping/collision behavior.
+- **Landscape/fire:** exact scan/RNG ordering, temperature conversion,
+  DigFree/BlastFree, liquids/seeds/MapZoom/Landscape.txt, map post-init, fixture
+  removal, fire/effect timing, causes, smoke, and explosion helpers.
+- **Commands:** pathfinding/Tick35, FLOAT, contained Exit/Throw, command arrival
+  and intervals, vehicle/linekit/dig/trade behavior, and version/rank gates.
+- **Objects/players/network:** containers/OCF/sectors/find ordering, permanent
+  crew/base state, elimination/control sync, protocol/auth/league, and
+  data-bearing network menus.
+- **Script/content:** strict C4Value conversion/serialization, named values and
+  multi-direction `Dir`, remaining DefCore/ActMap/effect/menu/callback ordering,
+  object-info payloads, async progress, and localized `SetNextMission` labels.
+- **Audio/presentation/resources:** activation and saved music state, streaming
+  MIDI/definition WAVs, sky/control/config/locale/group I/O, exact renderer and
+  particles, difficulty/character-choice/HUD/player menus, and remaining startup,
+  option, update, mission-access, search/scroll, and tooltip flows.
 
-## Comparator-only divergences
+## Comparator limits
 
-- Parser accepts out-of-context comma expressions; `mrfScript` resolves against
-  scenario rather than global script.
-- Particles use presentation RNG outside `C4ControlSyncCheck`; opt in with
+- Out-of-context comma expressions are accepted; `mrfScript` uses scenario scope.
+- Presentation particles use untracked RNG unless
   `LC_RUST_ENGINE_COMPARE_PARTICLES=1`.
 - Message/render fields compare only when both bridges provide them; HUD crew
   sorting is bridge-only.
-- Same-seed landscape is 99.66% byte-equal: C++ bakes MCVehic masks, Rust overlays.
+- Same-seed landscape is 99.66% byte-equal; C++ bakes MCVehic masks while Rust
+  overlays them.
 
-## Load-bearing invariants
+## Preserve while porting
 
-- Keep integer `x/y/r` apart from probed `fix_x/fix_y/fix_r`, and raw
-  `r/fix_r/rdir` independent. Only SetAction, CopyMotion, ForcePosition, and Exit
-  resync fixed coordinates; DoCon/TargetBounds change integers only.
-- Preserve shared LCG `RandomHold`/`RandomCount`, reverse execution, monotonic IDs,
-  StaticBack→Structure→Vehicle→Living→Object, loaded/runtime same-def order,
-  Line/StaticBack cases, Enter/Exit stability, container-before-content, and
-  newest-first runtime contents.
-- Loaded objects run no callbacks. Fresh: Construction at Con 0, initial DoCon,
-  then Completion→Initialize at FullCon. Only pre-insertion actions defer one
-  Start/Abort pair; otherwise SetAction is synchronous Start→End→Abort. Never
-  requeue `callbacks_dispatched`; phase wrap uses the old action.
-- End-of-ExecAction: WALK/HANGLE `|xdir|*10`, SCALE `|ydir|*14`, SWIM
-  `ValByPhysical(160,Swim)*10`, DIG `ValByPhysical(125,Dig)*40`. WALK faces by raw
-  fixed sign/old action; default Attach zeroes dirs/mobilizes; missing Jump keeps
-  the action.
-- Script order: definition resources, folder/scenario defs, pack System.c4g,
-  scenario Script.c, scenario System.c4g; appends before includes. Numeric-C4ID
-  InitializeDef precedes environment/SyncClearance, scenario Initialize, queued
-  join; save restore skips scenario Initialize.
-- Pixel landscape is authoritative; masks sample active graphics and remain
-  per-object carriers. Init RNG: Gravity→Season→YearSpeed→Climate→Wind (`Random(151)`);
-  preserve omitted C4SVal defaults and C4ID/list order.
-- Unary `!` binds only its operand except committed `!x = y`. Fixtures default
-  StaticBack; movement needs CATEGORY_OBJECT, mobile state, nearest `fixtoi`.
-  Crew is newest-first; GetHiRank keeps the first tie. Effects follow movement
-  before fire/life; Enter's Exit mobilizes/copies motion, Collect does not.
+- Keep integer and fixed `x/y/r` independent; only the C++ synchronization points
+  may copy between them. Preserve shared RNG state, reverse execution, monotonic
+  IDs, category/definition order, sector/content order, and newest-first contents.
+- Loaded objects run no callbacks. Fresh construction, completion, initialization,
+  action start/end/abort, and deferred callbacks must retain C++ order.
+- Preserve exact WALK/HANGLE/SCALE/SWIM/DIG speed rules, attachment behavior, raw
+  facing sign, and missing-Jump behavior.
+- Preserve script-resource/include order, numeric-C4ID initialization order, save
+  restore behavior, authoritative pixel landscape/masks, and scenario-init RNG.
+- Preserve C4Script precedence, category/mobile/rounding movement requirements,
+  crew/find tie order, and effect ordering relative to movement, fire, and life.
 
-`cargo xtask parity record|verify` labels Rust expected/C++ actual and stops at
-the first mismatch. Xtasks skip joins; Goldrush Talker consumes controls for
-about 1000 frames. See xtask help for diagnostic environment variables.
+`cargo xtask parity record|verify` reports Rust expected/C++ actual and stops at
+the first mismatch. Xtasks skip joins; see xtask help for diagnostic variables.
