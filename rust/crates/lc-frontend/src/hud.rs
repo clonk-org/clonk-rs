@@ -17,6 +17,7 @@
 
 use crate::{
     draw_image_bilinear, draw_image_strip, fill_rect, ClonkFontSet, HudGraphics, ImageData,
+    InventoryOverlay,
 };
 use lc_graphics::{clonk_font::TextAlign, Color, Rect as SurfaceRect, Surface, TextFont};
 
@@ -463,6 +464,30 @@ pub fn draw_cursor_info(
     // Name (src/C4ObjectInfo.cpp:353-370) — DEFAULT_MESSAGE_COLOR, left.
     if !name.is_empty() {
         font.draw(surface, cgo.x + ix, cgo.y, name, MESSAGE_COLOR, TextAlign::Left);
+    }
+}
+
+/// The cursor contents row from `C4Viewport::DrawCursorInfo`
+/// (src/C4Viewport.cpp:911-917). `C4ObjectList::DrawIDList` advances through
+/// successive height-square sections of the 7-symbol-wide facet
+/// (src/C4ObjectList.cpp:343-372; src/C4Facet.cpp:44-48).
+pub fn draw_inventory(
+    surface: &mut Surface,
+    viewport: SurfaceRect,
+    inventory: &[InventoryOverlay],
+) {
+    let origin_x = viewport.x + SYMBOL_BORDER;
+    let origin_y = viewport.y + viewport.height as i32 - SYMBOL_BORDER - SYMBOL_SIZE;
+    for (section, item) in inventory.iter().enumerate() {
+        let cell = SurfaceRect::new(
+            origin_x + section as i32 * SYMBOL_SIZE,
+            origin_y,
+            SYMBOL_SIZE as u32,
+            SYMBOL_SIZE as u32,
+        );
+        if let Some(picture) = item.picture.as_ref() {
+            draw_image_aspect(surface, picture, cell);
+        }
     }
 }
 
@@ -1523,6 +1548,41 @@ mod tests {
         // portrait facet is 4*Hgt/3+10 wide, src/C4ObjectInfo.cpp:313-320).
         assert_eq!(target.get_pixel(51, 6), Some(Color::opaque(0, 0, 220)));
         assert_eq!(target.get_pixel(51, 10), Some(Color::opaque(10, 200, 30)));
+    }
+
+    #[test]
+    fn inventory_sections_start_at_cpp_bottom_left_origin_and_advance_by_35() {
+        // DrawCursorInfo sets the contents facet to
+        // (X+5, Y+Hgt-5-35, 7*35, 35), then DrawIDList advances through
+        // successive height-square sections (src/C4Viewport.cpp:911-917;
+        // src/C4ObjectList.cpp:343-372; src/C4Facet.cpp:44-48).
+        let mut target = surface(160, 140);
+        let viewport = SurfaceRect::new(10, 20, 130, 100);
+        let inventory = vec![
+            crate::InventoryOverlay {
+                object_id: lc_engine::ObjectId::new(1),
+                definition_id: "FLAG".to_string(),
+                picture: Some(solid_image(4, 4, [220, 10, 10, 255])),
+                count: 1,
+            },
+            crate::InventoryOverlay {
+                object_id: lc_engine::ObjectId::new(2),
+                definition_id: "ROCK".to_string(),
+                picture: Some(solid_image(4, 4, [10, 220, 10, 255])),
+                count: 1,
+            },
+        ];
+
+        draw_inventory(&mut target, viewport, &inventory);
+
+        // Origin = (10+5, 20+100-5-35) = (15,80); the second section starts
+        // at x=50. Pixels immediately above/left remain untouched.
+        assert_eq!(target.get_pixel(15, 80), Some(Color::opaque(220, 10, 10)));
+        assert_eq!(target.get_pixel(49, 114), Some(Color::opaque(220, 10, 10)));
+        assert_eq!(target.get_pixel(50, 80), Some(Color::opaque(10, 220, 10)));
+        assert_eq!(target.get_pixel(84, 114), Some(Color::opaque(10, 220, 10)));
+        assert_eq!(target.get_pixel(14, 80), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(target.get_pixel(15, 79), Some(Color::opaque(0, 0, 0)));
     }
 
     #[test]
