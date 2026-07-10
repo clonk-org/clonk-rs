@@ -60,9 +60,15 @@ impl Definition {
             Err(error) => return Err(DefinitionError::Resources(error)),
         };
 
-        let picture_image = load_definition_picture(group, &core);
         let (graphics_image, color_by_owner_mask, additional_graphics) =
             load_definition_graphics(group, core.color_by_owner);
+        let picture_image = load_definition_picture(
+            group,
+            &core,
+            color_by_owner_mask
+                .as_ref()
+                .and(graphics_image.as_ref()),
+        );
         let picture_color_by_owner_mask = crop_definition_picture_mask(
             &core,
             picture_image.as_ref(),
@@ -1276,7 +1282,11 @@ fn cross_map_act_map(actions: &mut [(String, ActionDefinition)]) {
     }
 }
 
-fn load_definition_picture(group: &Group, core: &DefCore) -> Option<GraphicsImage> {
+fn load_definition_picture(
+    group: &Group,
+    core: &DefCore,
+    processed_graphics: Option<&GraphicsImage>,
+) -> Option<GraphicsImage> {
     let path = find_picture_entry(group).ok().flatten()?;
     let data = group.read_file(&path).ok()?;
     let image = image::load_from_memory(&data).ok()?.into_rgba8();
@@ -1290,7 +1300,19 @@ fn load_definition_picture(group: &Group, core: &DefCore) -> Option<GraphicsImag
         None => (0, 0, width, height),
     };
 
-    let pixels = extract_rgba_region(&image, crop_x, crop_y, crop_w, crop_h);
+    let pixels = processed_graphics
+        .filter(|graphics| (graphics.width(), graphics.height()) == (width, height))
+        .map(|graphics| {
+            extract_rgba_bytes(
+                graphics.pixels(),
+                width,
+                crop_x,
+                crop_y,
+                crop_w,
+                crop_h,
+            )
+        })
+        .unwrap_or_else(|| extract_rgba_region(&image, crop_x, crop_y, crop_w, crop_h));
     Some(GraphicsImage::new(crop_w, crop_h, pixels))
 }
 
@@ -1794,6 +1816,23 @@ fn extract_rgba_region(
     output
 }
 
+fn extract_rgba_bytes(
+    pixels: &[u8],
+    stride: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let mut output = Vec::with_capacity((width * height * 4) as usize);
+    for row in y..(y + height) {
+        let row_start = ((row * stride) + x) as usize * 4;
+        let row_end = row_start + (width as usize * 4);
+        output.extend_from_slice(&pixels[row_start..row_end]);
+    }
+    output
+}
+
 fn parse_category(value: &str) -> Result<i32, DefinitionError> {
     let mut result: i32 = 0;
     if value.is_empty() {
@@ -2087,6 +2126,11 @@ mod tests {
         let definition = Definition::load(&group).expect("load definition");
         let picture = definition.picture_image.expect("picture crop");
         assert_eq!((picture.width(), picture.height()), (1, 1));
+        assert_eq!(
+            picture.pixels(),
+            &[0, 0, 0, 255],
+            "C++ removes owner-color Overlay pixels from the base surface before Picture2Facet"
+        );
         let mask = definition
             .picture_color_by_owner_mask
             .expect("picture must retain owner-color mask");

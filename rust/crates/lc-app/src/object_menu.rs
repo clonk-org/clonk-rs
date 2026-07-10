@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use lc_engine::{
-    CommandKind, ContextMenuEntry, ControlCommand, Engine, ObjectId, SimulationSnapshot, OWNER_NONE,
+    CommandKind, ContextMenuEntry, ControlCommand, DefinitionPictureImage, Engine, ObjectId,
+    SimulationSnapshot, OWNER_NONE,
 };
-use lc_frontend::hud::HudFont;
+use lc_frontend::{hud::HudFont, GuiPoint};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, Rect, Surface, TextFont};
 use lc_gui::ImageData;
@@ -40,6 +41,7 @@ const CLASSIC_BG_ALPHA: u8 = 255 - 0x5f;
 const CLASSIC_SELECTION_COLOR: Color = Color::opaque(0xc8, 0, 0);
 const CLASSIC_EXTRA_FRAME_COLOR: Color = Color::opaque(0x44, 0, 0);
 const CLASSIC_CAPTION_COLOR: Color = Color::opaque(0xff, 0xff, 0xff);
+const CLASSIC_CLOSE_ICON: u8 = 34;
 /// `C4MN_Item_NoCount` (`src/C4Menu.h:67`): this sentinel suppresses the
 /// count suffix even though it lives in the same field as real counts.
 const MENU_ITEM_NO_COUNT: i32 = 12_345_678;
@@ -184,6 +186,96 @@ impl EngineScriptMenuLayout {
             CLASSIC_ITEM_SIZE as u32,
         ))
     }
+
+    pub fn close_button_rect(self) -> Rect {
+        // Dialog::SetTitle places Ico_Close in the wooden label's 16x16
+        // top-right corner with 4px indents (C4GuiDialogs.cpp:386-421;
+        // Element::GetToprightCornerRect, C4Gui.cpp:363-370).
+        Rect::new(
+            self.title.x + self.title.width as i32 - 20,
+            self.title.y + 4,
+            16,
+            16,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EngineScriptMenuPointerTarget {
+    Close,
+    Item(usize),
+    Background,
+}
+
+fn rect_contains_point(rect: Rect, point: GuiPoint) -> bool {
+    point.x >= rect.x as f32
+        && point.y >= rect.y as f32
+        && point.x < (rect.x + rect.width as i32) as f32
+        && point.y < (rect.y + rect.height as i32) as f32
+}
+
+pub(crate) fn engine_script_menu_pointer_target(
+    area: Rect,
+    font_line_height: i32,
+    menu: &lc_engine::ObjectMenuState,
+    show_commands: bool,
+    show_close_button: bool,
+    point: GuiPoint,
+) -> Option<EngineScriptMenuPointerTarget> {
+    if menu.style != 0 {
+        return None;
+    }
+    let layout = engine_script_menu_layout(area, font_line_height, menu, show_commands);
+    if show_close_button && rect_contains_point(layout.close_button_rect(), point) {
+        return Some(EngineScriptMenuPointerTarget::Close);
+    }
+    let item = menu
+        .items
+        .iter()
+        .enumerate()
+        .skip(layout.first_index)
+        .take(layout.visible)
+        .find_map(|(index, _)| {
+            rect_contains_point(layout.item_rect(index)?, point)
+                .then_some(EngineScriptMenuPointerTarget::Item(index))
+        });
+    item.or_else(|| {
+        rect_contains_point(layout.bounds, point)
+            .then_some(EngineScriptMenuPointerTarget::Background)
+    })
+}
+
+fn apply_default_menu_owner_color(pixels: &mut [u8], mask: &[u8]) {
+    // C4Def::Picture2Facet calls Graphics.GetBitmap(0); C4Surface::SetClr
+    // maps zero to 0xff, the engine's default blue owner color
+    // (C4Def.cpp:1374-1378; C4DefGraphics.h:49; C4Surface.h:110).
+    for (index, mask_value) in mask.iter().copied().enumerate() {
+        let offset = index * 4;
+        let Some(pixel) = pixels.get_mut(offset..offset + 4) else {
+            break;
+        };
+        let mask = u16::from(mask_value);
+        if mask == 0 {
+            continue;
+        }
+        let inverse = 255_u16 - mask;
+        pixel[0] = (u16::from(pixel[0]) * inverse / 255) as u8;
+        pixel[1] = (u16::from(pixel[1]) * inverse / 255) as u8;
+        pixel[2] = ((u16::from(pixel[2]) * inverse + 255 * mask) / 255) as u8;
+    }
+}
+
+pub(crate) fn definition_menu_picture(image: DefinitionPictureImage) -> ImageData {
+    let width = image.width();
+    let height = image.height();
+    let mask = image.color_mask();
+    let pixels = image.into_pixels();
+    let Some(mask) = mask else {
+        return ImageData::from_arc(width, height, pixels);
+    };
+    let mut pixels = pixels.to_vec();
+    apply_default_menu_owner_color(&mut pixels, &mask);
+    ImageData::new(width, height, pixels)
 }
 
 pub(crate) fn engine_script_menu_layout(
@@ -254,6 +346,7 @@ pub fn render_engine_script_menu(
     gfx: &IngameMenuGraphics,
     title_icon: Option<&ImageData>,
     item_icons: &[Option<ImageData>],
+    show_close_button: bool,
     time_on_selection: u32,
 ) {
     if surface.width() == 0 || surface.height() == 0 || area.width == 0 || area.height == 0 {
@@ -274,6 +367,7 @@ pub fn render_engine_script_menu(
             title_icon,
             item_icons,
             selected,
+            show_close_button,
             time_on_selection,
         );
         return;
@@ -300,6 +394,7 @@ fn render_engine_normal_menu(
     title_icon: Option<&ImageData>,
     item_icons: &[Option<ImageData>],
     selected: Option<usize>,
+    show_close_button: bool,
     time_on_selection: u32,
 ) {
     let layout = engine_script_menu_layout(area, font.line_height(), menu, gfx.show_commands);
@@ -341,6 +436,19 @@ fn render_engine_normal_menu(
         CLASSIC_CAPTION_COLOR,
         TextAlign::Left,
     );
+    if show_close_button {
+        if let Some(gui_icons) = gfx.gui_icons.as_ref() {
+            let source_x = i32::from(CLASSIC_CLOSE_ICON % 6) * 40;
+            let source_y = i32::from(CLASSIC_CLOSE_ICON / 6) * 40;
+            draw_image_region_aspect(
+                surface,
+                gui_icons,
+                Rect::new(source_x, source_y, 40, 40),
+                layout.close_button_rect(),
+                false,
+            );
+        }
+    }
 
     let client_x = layout.client_x;
     let client_y = layout.client_y;
@@ -1858,8 +1966,16 @@ mod tests {
 
         let font = lc_graphics::BitmapFont::new();
         let hud_font = HudFont::Fallback(&font);
+        let mut gui_icons = vec![0_u8; 240 * 240 * 4];
+        for y in 200..240 {
+            for x in 160..200 {
+                let offset = (y * 240 + x) * 4;
+                gui_icons[offset..offset + 4].copy_from_slice(&[17, 238, 51, 255]);
+            }
+        }
         let gfx = IngameMenuGraphics {
             show_commands: true,
+            gui_icons: Some(ImageData::new(240, 240, gui_icons)),
             ..IngameMenuGraphics::default()
         };
         let icons = vec![None, None];
@@ -1874,6 +1990,7 @@ mod tests {
             &gfx,
             None,
             &icons,
+            true,
             0,
         );
 
@@ -1888,5 +2005,45 @@ mod tests {
             Color::opaque(0xc8, 0, 0),
             "script menus must use the C++ five-column icon-grid geometry"
         );
+        assert_eq!(
+            surface.get_pixel(558, 381).expect("close icon pixel"),
+            Color::opaque(17, 238, 51),
+            "mouse-controlled C4Menu title bars show Ico_Close at their top-right corner"
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target(
+                Rect::new(0, 0, 640, 480),
+                hud_font.line_height(),
+                &menu,
+                true,
+                true,
+                GuiPoint::new(558.0, 381.0),
+            ),
+            Some(EngineScriptMenuPointerTarget::Close)
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target(
+                Rect::new(0, 0, 640, 480),
+                hud_font.line_height(),
+                &menu,
+                true,
+                true,
+                GuiPoint::new(411.0, 400.0),
+            ),
+            Some(EngineScriptMenuPointerTarget::Item(0)),
+            "even non-selectable cells consume GUI pointer input"
+        );
+    }
+
+    #[test]
+    fn definition_menu_pictures_use_cpp_default_blue_owner_color() {
+        // Graphics.GetBitmap(0) calls SetClr(0), which substitutes 0xff;
+        // that is blue in C4's packed surface color (C4DefGraphics.h:49;
+        // C4Surface.h:110). Dragon Rock's Knight and Mage menu pictures
+        // therefore use blue, not their raw red/black overlay pixels.
+        let mut pixels = vec![0, 0, 0, 255, 100, 50, 10, 255];
+        apply_default_menu_owner_color(&mut pixels, &[136, 0]);
+        assert_eq!(&pixels[..4], &[0, 0, 136, 255]);
+        assert_eq!(&pixels[4..], &[100, 50, 10, 255]);
     }
 }

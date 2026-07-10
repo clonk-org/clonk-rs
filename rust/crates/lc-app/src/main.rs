@@ -88,7 +88,8 @@ use lc_resources::{
 use menu_controls::map_menu_control_event;
 use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
 use object_menu::{
-    render_engine_script_menu, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
+    definition_menu_picture, engine_script_menu_pointer_target, render_engine_script_menu,
+    EngineScriptMenuPointerTarget, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
     ObjectMenuState,
 };
 use pixels::{Pixels, SurfaceTexture};
@@ -7918,6 +7919,13 @@ impl GameApp {
             }
             AppMode::Running => {
                 self.update_ingame_pointer(point);
+                if let Some(EngineScriptMenuPointerTarget::Item(index)) =
+                    self.script_menu_pointer_target(point)
+                {
+                    if self.select_script_menu_pointer_item(index)? {
+                        self.refresh_after_script_menu_pointer();
+                    }
+                }
                 Ok(())
             }
             AppMode::Loading => Ok(()),
@@ -7942,10 +7950,94 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
+        let script_menu_target = self
+            .ingame_pointer
+            .and_then(|pointer| self.script_menu_pointer_target(pointer.screen));
+        if let Some(target) = script_menu_target {
+            self.mouse_state = None;
+            if button_state == ElementState::Released {
+                match target {
+                    EngineScriptMenuPointerTarget::Close => {
+                        self.engine
+                            .player_in_com(self.local_owner, lc_engine::COM_MENU_CLOSE, 0)?;
+                    }
+                    EngineScriptMenuPointerTarget::Item(index) => {
+                        if self.select_script_menu_pointer_item(index)? {
+                            self.engine.player_in_com(
+                                self.local_owner,
+                                lc_engine::COM_MENU_ENTER,
+                                index as i32,
+                            )?;
+                        }
+                    }
+                    EngineScriptMenuPointerTarget::Background => {}
+                }
+                self.refresh_after_script_menu_pointer();
+            }
+            return Ok(());
+        }
         match button_state {
             ElementState::Pressed => self.on_ingame_mouse_down(),
             ElementState::Released => self.on_ingame_mouse_up(),
         }
+    }
+
+    fn script_menu_pointer_target(
+        &self,
+        point: GuiPoint,
+    ) -> Option<EngineScriptMenuPointerTarget> {
+        if !self.mouse_control {
+            return None;
+        }
+        let (_, menu) = self.engine.cursor_object_menu(self.local_owner)?;
+        let fallback = self.assets.font_arc();
+        let font = lc_frontend::hud::HudFont::from_set(
+            self.assets.clonk_fonts.as_deref(),
+            fallback.as_ref(),
+        );
+        let area = self.graphics.viewport_rect(self.local_owner).unwrap_or_else(|| {
+            let surface = self.graphics.surface();
+            Rect::new(0, 0, surface.width(), surface.height())
+        });
+        engine_script_menu_pointer_target(
+            area,
+            font.line_height(),
+            menu,
+            self.display_flags.show_commands,
+            true,
+            point,
+        )
+    }
+
+    fn select_script_menu_pointer_item(&mut self, index: usize) -> Result<bool, EngineError> {
+        let Some((selection, selectable)) = self
+            .engine
+            .cursor_object_menu(self.local_owner)
+            .and_then(|(_, menu)| {
+                menu.items
+                    .get(index)
+                    .map(|item| (menu.selection, item.selectable))
+            })
+        else {
+            return Ok(false);
+        };
+        if !selectable {
+            return Ok(false);
+        }
+        if selection != index as i32 {
+            self.engine.player_in_com(
+                self.local_owner,
+                lc_engine::COM_MENU_SELECT,
+                index as i32,
+            )?;
+        }
+        Ok(true)
+    }
+
+    fn refresh_after_script_menu_pointer(&mut self) {
+        self.snapshot = self.engine.snapshot();
+        self.refresh_object_menu();
+        self.refresh_focus();
     }
 
     fn on_ingame_mouse_down(&mut self) -> Result<(), EngineError> {
@@ -10043,18 +10135,17 @@ impl GameApp {
             } else {
                 &menu.symbol_id
             };
-            let title_icon = self.engine.definition_picture_image(title_id).map(|image| {
-                ImageData::from_arc(image.width(), image.height(), image.pixels())
-            });
+            let title_icon = self
+                .engine
+                .definition_picture_image(title_id)
+                .map(definition_menu_picture);
             let item_icons = menu
                 .items
                 .iter()
                 .map(|item| {
                     self.engine
                         .definition_picture_image(&item.item_id)
-                        .map(|image| {
-                            ImageData::from_arc(image.width(), image.height(), image.pixels())
-                        })
+                        .map(definition_menu_picture)
                 })
                 .collect::<Vec<_>>();
             {
@@ -10087,6 +10178,7 @@ impl GameApp {
                     gfx,
                     title_icon.as_ref(),
                     &item_icons,
+                    self.mouse_control,
                     script_menu_time,
                 );
             }
@@ -15129,19 +15221,8 @@ mod tests {
         app
     }
 
-    #[test]
-    fn engine_script_menu_is_visible_and_consumes_raw_player_controls() {
-        // C4Viewport draws the cursor object's menu (C4Viewport.cpp:
-        // 983-995), while C4Player::InCom converts raw controls before
-        // gameplay (C4Player.cpp:1502-1513). This is the app half of the
-        // mandatory Dragon Rock difficulty/type menu path.
-        lc_core::logging::init();
-        let mut app = new_running_sandbox_app();
-        let cursor = app
-            .engine
-            .crew_cursor(app.local_owner)
-            .expect("sandbox cursor");
-        let menu = lc_engine::ObjectMenuState {
+    fn two_item_script_menu(cursor: ObjectId) -> lc_engine::ObjectMenuState {
+        lc_engine::ObjectMenuState {
             caption: "Choose".to_string(),
             symbol_id: "MENU".to_string(),
             identification: serde_json::from_value(serde_json::json!({ "C4Id": "MENU" }))
@@ -15177,7 +15258,22 @@ mod tests {
             lines: 0,
             text_progress: None,
             decoration: None,
-        };
+        }
+    }
+
+    #[test]
+    fn engine_script_menu_is_visible_and_consumes_raw_player_controls() {
+        // C4Viewport draws the cursor object's menu (C4Viewport.cpp:
+        // 983-995), while C4Player::InCom converts raw controls before
+        // gameplay (C4Player.cpp:1502-1513). This is the app half of the
+        // mandatory Dragon Rock difficulty/type menu path.
+        lc_core::logging::init();
+        let mut app = new_running_sandbox_app();
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let menu = two_item_script_menu(cursor);
 
         let mut baseline = vec![0u8; 320 * 200 * 4];
         app.render(&mut baseline).expect("baseline render");
@@ -15236,6 +15332,94 @@ mod tests {
             kind: CommandKind::Release,
         })
         .expect("enter release");
+        assert_eq!(app.engine.debug_object_menu(cursor.as_u64()), Some(None));
+    }
+
+    #[test]
+    fn engine_script_menu_pointer_selects_enters_and_closes_like_cpp() {
+        // C4MenuItem::MouseEnter selects a selectable item, left-up enters
+        // it, and Dialog's Ico_Close queues COM_MenuClose
+        // (C4Menu.cpp:213-242, 1237-1262; C4ObjectMenu.cpp:461-478).
+        lc_core::logging::init();
+        let mut app = new_running_sandbox_app();
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let menu = two_item_script_menu(cursor);
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu.clone())),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install script menu");
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish viewport layout");
+
+        let (second_item, close_button) = {
+            let fallback = app.assets.font_arc();
+            let font = lc_frontend::hud::HudFont::from_set(
+                app.assets.clonk_fonts.as_deref(),
+                fallback.as_ref(),
+            );
+            let area = app
+                .graphics
+                .viewport_rect(app.local_owner)
+                .expect("local viewport");
+            let layout = object_menu::engine_script_menu_layout(
+                area,
+                font.line_height(),
+                &menu,
+                app.display_flags.show_commands,
+            );
+            (
+                layout.item_rect(1).expect("second item rect"),
+                layout.close_button_rect(),
+            )
+        };
+        let second_point = PhysicalPosition::new(
+            f64::from(second_item.x) + 8.0,
+            f64::from(second_item.y) + 8.0,
+        );
+        app.handle_cursor_moved(second_point)
+            .expect("hover second item");
+        assert_eq!(
+            app.engine
+                .debug_object_menu(cursor.as_u64())
+                .expect("cursor")
+                .expect("menu")
+                .selection,
+            1,
+            "hover must select the item under the pointer"
+        );
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("item mouse down");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("item mouse up");
+        assert_eq!(app.engine.debug_object_menu(cursor.as_u64()), Some(None));
+
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("reinstall script menu");
+        let close_point = PhysicalPosition::new(
+            f64::from(close_button.x) + 8.0,
+            f64::from(close_button.y) + 8.0,
+        );
+        app.handle_cursor_moved(close_point)
+            .expect("hover close button");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("close mouse down");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("close mouse up");
         assert_eq!(app.engine.debug_object_menu(cursor.as_u64()), Some(None));
     }
 
