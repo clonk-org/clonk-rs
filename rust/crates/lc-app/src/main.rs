@@ -8362,7 +8362,7 @@ impl GameApp {
         });
         engine_script_menu_pointer_target(
             area,
-            font.line_height(),
+            &font,
             menu,
             self.display_flags.show_commands,
             true,
@@ -16681,7 +16681,7 @@ mod tests {
                 .expect("local viewport");
             let layout = object_menu::engine_script_menu_layout(
                 area,
-                font.line_height(),
+                &font,
                 &menu,
                 app.display_flags.show_commands,
             );

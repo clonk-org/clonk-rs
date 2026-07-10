@@ -168,6 +168,8 @@ pub(crate) struct EngineScriptMenuLayout {
     pub client_y: i32,
     pub columns: i32,
     pub lines: i32,
+    pub item_width: i32,
+    pub item_height: i32,
     pub first_index: usize,
     pub visible: usize,
 }
@@ -180,10 +182,10 @@ impl EngineScriptMenuLayout {
         }
         let slot = i32::try_from(slot).ok()?;
         Some(Rect::new(
-            self.client_x + (slot % self.columns) * CLASSIC_ITEM_SIZE,
-            self.client_y + (slot / self.columns) * CLASSIC_ITEM_SIZE,
-            CLASSIC_ITEM_SIZE as u32,
-            CLASSIC_ITEM_SIZE as u32,
+            self.client_x + (slot % self.columns) * self.item_width,
+            self.client_y + (slot / self.columns) * self.item_height,
+            self.item_width as u32,
+            self.item_height as u32,
         ))
     }
 
@@ -216,7 +218,7 @@ fn rect_contains_point(rect: Rect, point: GuiPoint) -> bool {
 
 pub(crate) fn engine_script_menu_pointer_target(
     area: Rect,
-    font_line_height: i32,
+    font: &HudFont<'_>,
     menu: &lc_engine::ObjectMenuState,
     show_commands: bool,
     show_close_button: bool,
@@ -225,7 +227,7 @@ pub(crate) fn engine_script_menu_pointer_target(
     if !matches!(menu.style, 0 | 1) {
         return None;
     }
-    let layout = engine_script_menu_layout(area, font_line_height, menu, show_commands);
+    let layout = engine_script_menu_layout(area, font, menu, show_commands);
     if show_close_button && rect_contains_point(layout.close_button_rect(), point) {
         return Some(EngineScriptMenuPointerTarget::Close);
     }
@@ -280,22 +282,39 @@ pub(crate) fn definition_menu_picture(image: DefinitionPictureImage) -> ImageDat
 
 pub(crate) fn engine_script_menu_layout(
     area: Rect,
-    font_line_height: i32,
+    font: &HudFont<'_>,
     menu: &lc_engine::ObjectMenuState,
     show_commands: bool,
 ) -> EngineScriptMenuLayout {
-    // C4MN_Style_Normal is a fixed 35px icon grid; five columns are set
-    // by InitMenu unless SetMenuSize replaced them (C4Menu.cpp:359-365,
-    // 642-648, 715-762).
+    // Normal menus are a fixed 35px icon grid. Context menus are compact
+    // captioned rows: height=max(C4MN_SymbolSize, FontRegular), width is
+    // the widest title/item text plus its square symbol (C4Menu.cpp:
+    // 642-665). InitMenu normally gives Context one column (:359-365).
     let columns = menu.columns.max(1);
+    let (item_width, item_height) = if menu.style == 1 {
+        let item_height = font.line_height().max(CLASSIC_COMMAND_HEIGHT);
+        let title_width = font
+            .text_width(&menu.caption)
+            .saturating_add(item_height)
+            .saturating_add(CLASSIC_COMMAND_HEIGHT);
+        let item_width = menu
+            .items
+            .iter()
+            .map(|item| font.text_width(&item.caption).saturating_add(item_height))
+            .fold(title_width, i32::max)
+            .saturating_add(3);
+        (item_width.max(1), item_height.max(1))
+    } else {
+        (CLASSIC_ITEM_SIZE, CLASSIC_ITEM_SIZE)
+    };
     let item_count = i32::try_from(menu.items.len()).unwrap_or(i32::MAX);
     let natural_lines = (item_count / columns) + i32::from(item_count % columns != 0);
-    let max_lines = ((area.height as i32 - 100) / CLASSIC_ITEM_SIZE).max(1);
+    let max_lines = ((area.height as i32 - 100) / item_height).max(1);
     let lines = natural_lines.max(1).min(max_lines);
-    let title_height = font_line_height.max(CLASSIC_TITLE_HEIGHT);
+    let title_height = font.line_height().max(CLASSIC_TITLE_HEIGHT);
     let command_height = i32::from(show_commands) * CLASSIC_COMMAND_HEIGHT;
-    let width = columns * CLASSIC_ITEM_SIZE + 2 * CLASSIC_FRAME_WIDTH;
-    let height = lines * CLASSIC_ITEM_SIZE
+    let width = columns * item_width + 2 * CLASSIC_FRAME_WIDTH;
+    let height = lines * item_height
         + title_height
         + command_height
         + CLASSIC_FRAME_WIDTH;
@@ -328,6 +347,8 @@ pub(crate) fn engine_script_menu_layout(
         client_y: y + title_height,
         columns,
         lines,
+        item_width,
+        item_height,
         first_index,
         visible,
     }
@@ -397,7 +418,7 @@ fn render_engine_normal_menu(
     show_close_button: bool,
     time_on_selection: u32,
 ) {
-    let layout = engine_script_menu_layout(area, font.line_height(), menu, gfx.show_commands);
+    let layout = engine_script_menu_layout(area, font, menu, gfx.show_commands);
     let bounds = layout.bounds;
     let x = bounds.x;
     let y = bounds.y;
@@ -462,31 +483,51 @@ fn render_engine_normal_menu(
         .take(visible)
         .enumerate()
     {
-        let cell_x = client_x + (slot as i32 % columns) * CLASSIC_ITEM_SIZE;
-        let cell_y = client_y + (slot as i32 / columns) * CLASSIC_ITEM_SIZE;
+        let cell_x = client_x + (slot as i32 % columns) * layout.item_width;
+        let cell_y = client_y + (slot as i32 / columns) * layout.item_height;
         let cell = Rect::new(
             cell_x,
             cell_y,
-            CLASSIC_ITEM_SIZE as u32,
-            CLASSIC_ITEM_SIZE as u32,
+            layout.item_width as u32,
+            layout.item_height as u32,
         );
         if selected == Some(index) && menu.text_progress != Some(0) {
             fill_rect(surface, cell, CLASSIC_SELECTION_COLOR);
         }
+        let symbol_cell = if menu.style == 1 {
+            Rect::new(
+                cell_x,
+                cell_y,
+                layout.item_height as u32,
+                layout.item_height as u32,
+            )
+        } else {
+            cell
+        };
         if let Some(icon) = item_icons.get(index).and_then(Option::as_ref) {
             draw_image_region_aspect(
                 surface,
                 icon,
                 Rect::new(0, 0, icon.width(), icon.height()),
-                cell,
+                symbol_cell,
                 false,
+            );
+        }
+        if menu.style == 1 {
+            font.draw(
+                surface,
+                cell_x + layout.item_height,
+                cell_y,
+                &item.caption,
+                CLASSIC_CAPTION_COLOR,
+                TextAlign::Left,
             );
         }
         if item.count != MENU_ITEM_NO_COUNT {
             font.draw(
                 surface,
-                cell_x + CLASSIC_ITEM_SIZE - 1,
-                cell_y + CLASSIC_ITEM_SIZE - 1 - font.line_height(),
+                cell_x + layout.item_width - 1,
+                cell_y + layout.item_height - 1 - font.line_height(),
                 &format!("{}x", item.count),
                 CLASSIC_CAPTION_COLOR,
                 TextAlign::Right,
@@ -576,8 +617,8 @@ fn render_engine_normal_menu(
             .filter(|(_, item)| !item.info_caption.is_empty())
         {
             let slot = selection.saturating_sub(first_index);
-            let cell_x = client_x + (slot as i32 % columns) * CLASSIC_ITEM_SIZE;
-            let cell_y = client_y + (slot as i32 / columns) * CLASSIC_ITEM_SIZE;
+            let cell_x = client_x + (slot as i32 % columns) * layout.item_width;
+            let cell_y = client_y + (slot as i32 / columns) * layout.item_height;
             draw_tooltip(surface, font, cell_x, cell_y, &item.info_caption);
         }
     }
@@ -1985,14 +2026,22 @@ mod tests {
         let font = lc_graphics::BitmapFont::new();
         let hud_font = HudFont::Fallback(&font);
         let area = Rect::new(0, 0, 640, 480);
-        let layout = engine_script_menu_layout(area, hud_font.line_height(), &menu, false);
+        let layout = engine_script_menu_layout(area, &hud_font, &menu, false);
         let item = layout.item_rect(0).expect("context item is visible");
-        assert_eq!((item.width, item.height), (35, 35));
+        let item_height = hud_font.line_height().max(CLASSIC_COMMAND_HEIGHT);
+        let item_width = (hud_font.text_width("Context") + item_height + 16)
+            .max(hud_font.text_width("Action") + item_height)
+            + 3;
+        assert_eq!(
+            (item.width, item.height),
+            (item_width as u32, item_height as u32)
+        );
+        assert_eq!(layout.bounds.width, (item_width + 2 * CLASSIC_FRAME_WIDTH) as u32);
         let point = GuiPoint::new(item.x as f32 + 1.0, item.y as f32 + 1.0);
         assert_eq!(
             engine_script_menu_pointer_target(
                 area,
-                hud_font.line_height(),
+                &hud_font,
                 &menu,
                 false,
                 true,
@@ -2098,7 +2147,7 @@ mod tests {
         // bounds before bottom alignment (src/C4Menu.cpp:755-777).
         let layout = engine_script_menu_layout(
             Rect::new(0, 0, 640, 480),
-            hud_font.line_height(),
+            &hud_font,
             &menu,
             true,
         );
@@ -2108,7 +2157,7 @@ mod tests {
         assert_eq!(
             engine_script_menu_pointer_target(
                 Rect::new(0, 0, 640, 480),
-                hud_font.line_height(),
+                &hud_font,
                 &menu,
                 true,
                 true,
@@ -2136,7 +2185,7 @@ mod tests {
         narrow_menu.columns = 1;
         let narrow_layout = engine_script_menu_layout(
             Rect::new(0, 0, 640, 480),
-            hud_font.line_height(),
+            &hud_font,
             &narrow_menu,
             true,
         );
@@ -2196,7 +2245,7 @@ mod tests {
         assert_eq!(
             engine_script_menu_pointer_target(
                 Rect::new(0, 0, 640, 480),
-                hud_font.line_height(),
+                &hud_font,
                 &menu,
                 true,
                 true,
@@ -2207,7 +2256,7 @@ mod tests {
         assert_eq!(
             engine_script_menu_pointer_target(
                 Rect::new(0, 0, 640, 480),
-                hud_font.line_height(),
+                &hud_font,
                 &menu,
                 true,
                 true,
