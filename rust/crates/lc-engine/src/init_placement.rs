@@ -349,7 +349,9 @@ impl Engine {
             .with_position(Vector2::new(x, y))
             .with_rotation(rotation)
             .with_owner(OWNER_NONE);
-        self.spawn_object(config).ok()
+        self.spawn_object_with_initial_lifecycle(config, None)
+            .ok()
+            .flatten()
     }
 
     /// `Game.CreateObjectConstruction(id, nullptr, NO_OWNER, x, by, con)`
@@ -368,7 +370,9 @@ impl Engine {
             .with_position(Vector2::new(x, bottom_y))
             .with_owner(OWNER_NONE)
             .with_construction(con);
-        self.spawn_object(config).ok()
+        self.spawn_object_with_initial_lifecycle(config, None)
+            .ok()
+            .flatten()
     }
 
     /// C4Game::PlaceInEarth (C4Game.cpp:2949-2960): 35 cheap tries at a
@@ -614,5 +618,163 @@ impl Engine {
                 self.init_create_object(id, 50, 50, 0);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Definition, DefinitionRect, Value, CATEGORY_OBJECT};
+
+    #[test]
+    fn init_create_object_runs_cpp_new_object_lifecycle() {
+        // C4Game::NewObject inserts the Con=0/raw-position object before
+        // Construction(creator), then DoCon(FullCon, true) bottom-adjusts it
+        // and calls Completion followed by Initialize (C4Game.cpp:1102-1146;
+        // C4Object.cpp:1428-1515). Init placements pass a null creator.
+        let script = r#"#strict
+local construction_creator, construction_con, construction_y, construction_lookup;
+local completion_y, callback_order;
+
+protected func Construction(object creator)
+{
+    construction_creator = creator;
+    construction_con = GetCon();
+    construction_y = GetY();
+    construction_lookup = Object(ObjectNumber());
+    callback_order = 1;
+}
+
+protected func Completion()
+{
+    completion_y = GetY();
+    callback_order = callback_order * 10 + 2;
+}
+
+protected func Initialize()
+{
+    callback_order = callback_order * 10 + 3;
+}
+"#;
+        let mut definition =
+            Definition::from_script("LIFE", "Lifecycle", script).expect("script compiles");
+        definition.set_category(CATEGORY_OBJECT);
+        definition.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
+        definition.set_stretch_growth(true);
+
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let object_id = engine
+            .init_create_object("LIFE", 20, 50, 0)
+            .expect("object survives creation");
+        let object = engine.object_snapshot(object_id).expect("object is live");
+
+        assert_eq!(object.local_vars["construction_creator"], Value::Nil);
+        assert_eq!(object.local_vars["construction_con"], Value::Int(0));
+        assert_eq!(object.local_vars["construction_y"], Value::Int(50));
+        assert_eq!(
+            object.local_vars["construction_lookup"],
+            Value::Object(object_id.as_u64())
+        );
+        assert_eq!(object.construction, FULL_CON);
+        assert_eq!(object.position, Vector2::new(20, 47));
+        assert_eq!(object.local_vars["completion_y"], Value::Int(47));
+        assert_eq!(object.local_vars["callback_order"], Value::Int(123));
+    }
+
+    #[test]
+    fn init_create_object_construction_stops_before_completion_when_partial() {
+        // CreateObjectConstruction still exposes Con=0/raw bottom to
+        // Construction, but a partial initial DoCon does not cross FullCon
+        // and therefore calls neither Completion nor Initialize
+        // (C4Game.cpp:1191-1230; C4Object.cpp:1428-1515).
+        let script = r#"#strict
+local construction_con, construction_y, completion, initialized;
+protected func Construction(object creator)
+{
+    construction_con = GetCon();
+    construction_y = GetY();
+}
+protected func Completion() { completion = 1; }
+protected func Initialize() { initialized = 1; }
+"#;
+        let mut definition =
+            Definition::from_script("PART", "Partial", script).expect("script compiles");
+        definition.set_category(CATEGORY_OBJECT);
+        definition.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
+        definition.set_stretch_growth(true);
+
+        let mut engine = Engine::with_seed(2);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let object_id = engine
+            .init_create_object_construction("PART", 20, 50, FULL_CON / 4)
+            .expect("partial object survives creation");
+        let object = engine.object_snapshot(object_id).expect("object is live");
+
+        assert_eq!(object.local_vars["construction_con"], Value::Int(0));
+        assert_eq!(object.local_vars["construction_y"], Value::Int(50));
+        assert_eq!(object.construction, FULL_CON / 4);
+        assert_eq!(object.position, Vector2::new(20, 49));
+        assert_eq!(object.local_vars["completion"], Value::Nil);
+        assert_eq!(object.local_vars["initialized"], Value::Nil);
+    }
+
+    #[test]
+    fn init_creation_callbacks_are_fail_safe_and_removal_returns_none() {
+        // C4Object::Call defaults to fPassErrors=false, so callback errors do
+        // not abort NewObject; AssignRemoval in Construction does, returning
+        // nullptr while retaining the consumed enumeration number
+        // (C4Game.cpp:1117-1146; C4Object.cpp:2224-2247).
+        let fail_safe_script = r#"#strict
+local callback_order;
+protected func Construction(object creator) { callback_order = 1; MissingConstruction(); }
+protected func Completion() { callback_order = callback_order * 10 + 2; MissingCompletion(); }
+protected func Initialize() { callback_order = callback_order * 10 + 3; }
+"#;
+        let removed_script = r#"#strict
+protected func Construction(object creator) { Random(100); RemoveObject(); }
+protected func Completion() { Random(100); }
+protected func Initialize() { Random(100); }
+"#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("SAFE", "Fail safe", fail_safe_script)
+                    .expect("fail-safe script compiles"),
+            )
+            .expect("fail-safe definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("GONE", "Removed", removed_script)
+                    .expect("removed script compiles"),
+            )
+            .expect("removed definition registers");
+
+        let survivor = engine
+            .init_create_object("SAFE", 10, 10, 0)
+            .expect("callback errors are tolerated");
+        assert_eq!(
+            engine
+                .object_snapshot(survivor)
+                .expect("survivor is live")
+                .local_vars["callback_order"],
+            Value::Int(123)
+        );
+
+        let next_before = engine.capture_state().next_object_id;
+        let mut expected_rng = engine.rng.clone();
+        let _ = expected_rng.random(100);
+        assert_eq!(engine.init_create_object("GONE", 10, 10, 0), None);
+        assert_eq!(engine.rng, expected_rng, "later callbacks were suppressed");
+        assert_eq!(
+            engine.capture_state().next_object_id,
+            next_before + 1,
+            "removed creation still consumes its object number"
+        );
     }
 }

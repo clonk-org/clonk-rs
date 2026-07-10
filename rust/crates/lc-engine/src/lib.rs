@@ -15466,6 +15466,133 @@ impl Engine {
         Ok(id)
     }
 
+    /// `C4Game::NewObject` for engine-owned creation sites which do not run
+    /// inside a script host context (notably the `Init*` placement pass): make
+    /// the raw Con=0 object live, call Construction(creator), apply the initial
+    /// DoCon, then call Completion/Initialize only on a FullCon crossing
+    /// (C4Game.cpp:1102-1146; C4Object.cpp:1428-1515).
+    pub(crate) fn spawn_object_with_initial_lifecycle(
+        &mut self,
+        mut config: SpawnConfig,
+        creator: Option<ObjectId>,
+    ) -> Result<Option<ObjectId>, EngineError> {
+        let initial_construction = config.construction;
+        config.construction = 0;
+        // The callbacks and initial DoCon run below against the now-live
+        // object; spawn materialization must do neither itself.
+        config.initialized = true;
+        config.position_adjusted = true;
+
+        let object_id = self.spawn_object(config)?;
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(None);
+        };
+        let creator = creator
+            .map(|id| Value::Object(id.as_u64()))
+            .unwrap_or(Value::Nil);
+        let construction = self.call_object_function(index, "Construction", vec![creator]);
+        tolerate_script_error(construction)?;
+        if !self.object_survives_creation(index) {
+            return Ok(None);
+        }
+
+        let crossed_full_con = self.do_initial_con(index, initial_construction);
+        if !self.object_survives_creation(index) {
+            return Ok(None);
+        }
+        if crossed_full_con {
+            let completion = self.call_object_function(index, "Completion", Vec::new());
+            tolerate_script_error(completion)?;
+            if self.object_survives_creation(index) {
+                let initialize = self.call_object_function(index, "Initialize", Vec::new());
+                tolerate_script_error(initialize)?;
+            }
+        }
+
+        Ok(self.object_survives_creation(index).then_some(object_id))
+    }
+
+    fn object_survives_creation(&self, index: usize) -> bool {
+        self.objects.get(index).is_some_and(|object| {
+            !object.destroyed && !matches!(object.state.status, ObjectStatus::Deleted)
+        })
+    }
+
+    /// The initial (`fInitial=true`) DoCon half of NewObject. Unlike later
+    /// DoCon calls, it preserves the pre-growth shape bottom even for rotated
+    /// objects and deliberately leaves the fixed position at the raw Init
+    /// coordinates (C4Object.cpp:1428-1515).
+    fn do_initial_con(&mut self, index: usize, change: i32) -> bool {
+        let before = self.objects[index].state.construction;
+        let was_full = before >= FULL_CON;
+        let after = before.saturating_add(change).clamp(0, FULL_CON);
+        let previous_rect = self.objects[index].current_shape_rect();
+        let stale_fixed_position = self.objects[index].fixed_position;
+
+        {
+            let object = &mut self.objects[index];
+            object.state.construction = after;
+            if object.shape_template.line == 0 {
+                object.state.vertices = transformed_shape_vertices(
+                    object.shape_base_vertices(),
+                    after,
+                    object.shape_template.stretch_growth,
+                    object.shape_template.rotateable,
+                    object.state.rotation,
+                );
+                let current_rect = object.current_shape_rect();
+                if let (Some(previous), Some(current)) = (previous_rect, current_rect) {
+                    if previous.height != current.height || previous.y != current.y {
+                        let bottom = object
+                            .state
+                            .position
+                            .y
+                            .saturating_add(previous.y)
+                            .saturating_add(previous.height);
+                        object.state.position.y = bottom
+                            .saturating_sub(current.height)
+                            .saturating_sub(current.y);
+                    }
+                }
+            }
+            object.fixed_position = stale_fixed_position;
+        }
+
+        // ComponentConGain follows the Con update and precedes Completion
+        // (C4Object.cpp:1454-1458,1506-1511).
+        let component_gains = self
+            .definitions
+            .get(&self.objects[index].definition_id)
+            .map(|definition| {
+                definition
+                    .components()
+                    .iter()
+                    .map(|component| {
+                        (
+                            component.id.clone(),
+                            (u64::from(component.count) * after as u64 / FULL_CON as u64) as u32,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (id, count) in component_gains {
+            let component = self.objects[index].state.components.entry(id).or_default();
+            *component = (*component).max(count);
+        }
+
+        self.refresh_object_ocf(index);
+        self.update_sector_for_index(index);
+        self.update_solid_mask(index);
+        if after <= 0 {
+            self.remove_solid_mask(index);
+            self.objects[index].mark_destroyed();
+            self.update_sector_for_index(index);
+        }
+
+        !was_full && after >= FULL_CON
+    }
+
     fn tick_player_systems(&mut self) {
         if self.players.is_empty() {
             return;
