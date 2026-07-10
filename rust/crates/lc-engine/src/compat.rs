@@ -6622,6 +6622,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("FindObject2", find_object2);
     script.register_host_function("FindObjects", find_objects_dispatch);
     script.register_host_function("Find_Category", find_category);
+    script.register_host_function("Find_ID", find_id);
     script.register_host_function("ObjectNumber", object_number);
     script.register_host_function("Object", object_by_number);
     script.register_host_function("ObjectCount2", object_count2);
@@ -16947,6 +16948,23 @@ fn find_category(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Array(vec![Value::Int(22), Value::Int(category)]))
 }
 
+/// `System.c4g/FindObject.c`'s `Find_ID` wrapper: preserve the typed C4ID in
+/// the two-cell criterion consumed by `FindObject2`/`FindObjects`.
+fn find_id(args: &[Value]) -> Result<Value, RuntimeError> {
+    let id = match args.first().unwrap_or(&Value::Nil) {
+        Value::C4Id(id) => Value::C4Id(id.clone()),
+        Value::Nil => Value::Nil,
+        Value::Int(raw @ 0..=9999) => Value::C4Id(render_c4id(*raw)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Find_ID: expected id for definition, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    Ok(Value::Array(vec![Value::Int(20), id]))
+}
+
 fn find_objects(args: &[Value]) -> Result<Value, RuntimeError> {
     let params = FindObjectParams::parse(args)?;
     HOST_CONTEXT.with(|cell| {
@@ -26750,6 +26768,7 @@ mod tests {
         "FindObjects",
         "FindOtherContents",
         "Find_Category",
+        "Find_ID",
         "FinishCommand",
         "Fling",
         "Format",
@@ -27041,6 +27060,52 @@ mod tests {
                 Value::Array(vec![Value::Int(22), Value::Int(0)]),
             ])
         );
+    }
+
+    #[test]
+    fn find_id_builds_the_cpp_system_criterion_with_a_typed_c4id() {
+        // System.c4g/FindObject.c:33-35 returns [C4FO_ID, idDef], preserving
+        // the C4ID-typed definition parameter; C4FO_ID is 20
+        // (C4FindObject.h:26-48).
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script("#strict 2\nfunc Probe() { return Find_ID(_AR1); }")
+            .expect("Find_ID probe compiles");
+
+        assert_eq!(
+            engine.call("Probe", &[]).expect("Find_ID succeeds"),
+            Value::Array(vec![Value::Int(20), Value::C4Id("_AR1".into())])
+        );
+    }
+
+    #[test]
+    fn find_id_applies_the_strict_cpp_id_parameter_conversion() {
+        // C4Value's strict Int -> C4ID conversion accepts exactly 0..=9999;
+        // String -> C4ID is always an error (C4Value.cpp:469-478,502-561).
+        assert_eq!(
+            find_id(&[]).expect("nil id converts"),
+            Value::Array(vec![Value::Int(20), Value::Nil])
+        );
+        for (raw, id) in [
+            (0, "NONE"),
+            (1, "0001"),
+            (1337, "1337"),
+            (9999, "9999"),
+        ] {
+            assert_eq!(
+                find_id(&[Value::Int(raw)]).expect("small integer id converts"),
+                Value::Array(vec![Value::Int(20), Value::C4Id(id.into())])
+            );
+        }
+        for rejected in [
+            Value::Int(-1),
+            Value::Int(10_000),
+            Value::String("FLAG".into()),
+        ] {
+            let error = find_id(&[rejected]).expect_err("strict C4ID conversion rejects value");
+            assert!(error.message().contains("expected id"));
+        }
     }
 
     #[test]
