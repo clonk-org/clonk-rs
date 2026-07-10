@@ -7529,6 +7529,20 @@ global func Step(state, frame, random)
         scenario_dir
     }
 
+    fn write_definition_localization_fixture(
+        dir: &std::path::Path,
+        script: &str,
+        string_table: &str,
+    ) -> std::path::PathBuf {
+        let scenario_dir = write_resilience_fixture(dir, None, "// no script\n");
+        let definition_dir = dir.join("Defs.c4d/Good.c4d");
+        std::fs::write(definition_dir.join("Script.c"), script)
+            .expect("write definition script");
+        std::fs::write(definition_dir.join("StringTblUS.txt"), string_table)
+            .expect("write definition string table");
+        scenario_dir
+    }
+
     fn apply_resilience_fixture(
         dir: &tempfile::TempDir,
         scenario_dir: &std::path::Path,
@@ -7593,23 +7607,16 @@ global func Step(state, frame, random)
         // (C4Def.cpp:625-633; C4ScriptHost.cpp:46-82). Localized context text
         // such as `Put/Get` must not make an otherwise valid definition fail.
         let dir = tempdir().expect("tempdir");
-        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
-        let definition_dir = dir.path().join("Defs.c4d/Good.c4d");
-        std::fs::write(
-            definition_dir.join("Script.c"),
+        let scenario_dir = write_definition_localization_fixture(
+            dir.path(),
             "#strict\n\
              func Label() { return \"$Reloaded$\"; }\n\
              func ContextAction() {\n\
                [$ActionLabel$|Image=GOOD]\n\
                return 1;\n\
              }\n",
-        )
-        .expect("write definition script");
-        std::fs::write(
-            definition_dir.join("StringTblUS.txt"),
             "Reloaded=Reloaded %dx {{%i}}.\nActionLabel=Put/Get\n",
-        )
-        .expect("write definition string table");
+        );
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
         };
