@@ -3151,6 +3151,23 @@ impl ObjectUpdate {
         self
     }
 
+    /// Whether the staged host operations call `C4Object::SetOCF` at the
+    /// mutation site. Plain callback completion and velocity/direction writes
+    /// leave Execute's cached OCF untouched (C4Object.cpp:1082-1093).
+    fn refreshes_ocf_like_cpp(&self) -> bool {
+        self.change_def.is_some()
+            || self.construction.is_some()
+            || self.container.is_some()
+            || self
+                .action
+                .as_ref()
+                .is_some_and(|action| action.name.is_some())
+            || self.category.is_some()
+            || self.alive.is_some()
+            || self.fire.is_some()
+            || self.fire_flag.is_some()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.custom_name.is_none()
             && self.layer.is_none()
@@ -17902,6 +17919,9 @@ impl Engine {
             next_object_id,
             context_locals,
         } = outcome;
+        let refresh_ocf = object_update
+            .as_ref()
+            .is_some_and(ObjectUpdate::refreshes_ocf_like_cpp);
 
         if !host_landscape_ops.is_empty() {
             self.apply_landscape_operations(host_landscape_ops);
@@ -18178,10 +18198,13 @@ impl Engine {
 
         self.apply_nested_object_outcomes(other_objects)?;
 
-        // The C++ host functions behind these outcomes run SetOCF
-        // immediately (SetAlive C4Object.h:361, death C4Object.cpp:1177,
-        // DoCon C4Object.cpp:1417).
-        self.refresh_object_ocf(index);
+        // Only the matching C++ host operations refresh OCF. In particular,
+        // a no-op Contact callback must preserve Execute's pre-movement
+        // HitSpeed cache through the later Splash gate
+        // (C4Movement.cpp:166-182,449-456).
+        if refresh_ocf || energy_died {
+            self.refresh_object_ocf(index);
+        }
 
         Ok(())
     }
@@ -56699,6 +56722,18 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
     #[test]
     fn missing_contact_callback_preserves_liquid_entry_splash_like_cpp() {
         assert_contact_callback_preserves_liquid_entry_splash_like_cpp("", false);
+    }
+
+    #[test]
+    fn no_op_contact_callback_preserves_liquid_entry_splash_like_cpp() {
+        // WIPF #565 at pinned Goldrush frame 1382 runs ContactLeft after
+        // collision has slowed its live velocity, but C++ retains the
+        // Execute-start OCF_HitSpeed2 through the later Splash gate
+        // (C4Object.cpp:1082-1093; C4Movement.cpp:166-182,449-456).
+        assert_contact_callback_preserves_liquid_entry_splash_like_cpp(
+            "protected func ContactBottom() { return 0; }",
+            true,
+        );
     }
 
     #[test]
