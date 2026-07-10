@@ -8918,12 +8918,6 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         "GetEffect",
         "index",
     )?;
-    if desired_index < 0 {
-        return Err(RuntimeError::new(
-            "GetEffect: index argument must be >= 0 when provided",
-        ));
-    }
-    let desired_index = desired_index as usize;
 
     let query = match args.get(3) {
         Some(Value::Int(value)) => *value,
@@ -8956,20 +8950,22 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         // Name/wildcard given: find by name and index
         // (C4Script.cpp:5471-5472 -> C4Effect::Get(szName, iIndex,...),
         // wildcard compare at C4Effect.cpp:229).
-        Some(filter) => effects
-            .iter()
-            .filter(|effect| s_wildcard_match_ex(&effect.name, filter))
-            .filter(|effect| {
-                max_priority
-                    .map(|limit| effect.priority.abs() <= limit)
-                    .unwrap_or(true)
-            })
-            .nth(desired_index),
+        Some(filter) => usize::try_from(desired_index).ok().and_then(|index| {
+            effects
+                .iter()
+                .filter(|effect| s_wildcard_match_ex(&effect.name, filter))
+                .filter(|effect| {
+                    max_priority
+                        .map(|limit| effect.priority.abs() <= limit)
+                        .unwrap_or(true)
+                })
+                .nth(index)
+        }),
         // No name: iIndex is the effect NUMBER (C4Script.cpp:5474-5475 ->
         // C4Effect::Get(iNumber, fIncludeDead=true), C4Effect.cpp:240-256).
         None => effects
             .iter()
-            .find(|effect| effect.number == i32::try_from(desired_index).unwrap_or(i32::MAX))
+            .find(|effect| effect.number == desired_index)
             .filter(|effect| {
                 max_priority
                     .map(|limit| effect.priority.abs() <= limit)
@@ -32366,6 +32362,29 @@ func ProbeBadIndex(id) {
             Value::Int(1),
             "equal-priority effect #2 is list index 0, so bool true selects #1"
         );
+    }
+
+    #[test]
+    fn get_effect_negative_index_returns_nil() {
+        // C4Effect::Get compares with `if (iIndex--) continue`, so a negative
+        // named-effect index simply exhausts the list and returns nullptr
+        // (C4Effect.cpp:215-236). Hazard's Weapon bonus loop deliberately
+        // probes `i - 1` while i is still nil/zero (Weapon.c4d/Script.c:551-554).
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[
+                Value::String("Bonus".into()),
+                state.clone(),
+                Value::Int(100),
+            ])?;
+            get_effect(&[
+                Value::String("Bonus".into()),
+                state,
+                Value::Int(-1),
+            ])
+        });
+
+        assert_eq!(result.expect("negative index is not an error"), Value::Nil);
     }
 
     #[test]
