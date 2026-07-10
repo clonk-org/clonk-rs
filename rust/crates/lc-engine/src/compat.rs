@@ -9387,61 +9387,31 @@ fn abs_func(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn min_func(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 2 {
-        return Err(RuntimeError::new("Min expects 2 arguments: val1, val2"));
-    }
-
-    let val1 = match &args[0] {
-        Value::Int(value) => *value,
-        Value::Nil => 0,
-        other => {
-            return Err(RuntimeError::new(format!(
-                "Min: expected int for first argument, got {}",
-                other.type_name()
-            )))
-        }
-    };
-
-    let val2 = match &args[1] {
-        Value::Int(value) => *value,
-        Value::Nil => 0,
-        other => {
-            return Err(RuntimeError::new(format!(
-                "Min: expected int for second argument, got {}",
-                other.type_name()
-            )))
-        }
-    };
+    let val1 = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "Min",
+        "first argument",
+    )?;
+    let val2 = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "Min",
+        "second argument",
+    )?;
 
     Ok(Value::Int(val1.min(val2)))
 }
 
 fn max_func(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 2 {
-        return Err(RuntimeError::new("Max expects 2 arguments: val1, val2"));
-    }
-
-    let val1 = match &args[0] {
-        Value::Int(value) => *value,
-        Value::Nil => 0,
-        other => {
-            return Err(RuntimeError::new(format!(
-                "Max: expected int for first argument, got {}",
-                other.type_name()
-            )))
-        }
-    };
-
-    let val2 = match &args[1] {
-        Value::Int(value) => *value,
-        Value::Nil => 0,
-        other => {
-            return Err(RuntimeError::new(format!(
-                "Max: expected int for second argument, got {}",
-                other.type_name()
-            )))
-        }
-    };
+    let val1 = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "Max",
+        "first argument",
+    )?;
+    let val2 = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "Max",
+        "second argument",
+    )?;
 
     Ok(Value::Int(val1.max(val2)))
 }
@@ -30682,6 +30652,29 @@ func ProbeBadIndex(id) {
         ] {
             assert!(result.is_ok(), "{name}() must not error: {result:?}");
         }
+    }
+
+    #[test]
+    fn min_max_use_c4valueint_conversion_and_ignore_extra_arguments() {
+        // FnMin/FnMax each expose two C4ValueInt parameters
+        // (C4Script.cpp:3300-3308). C4Aul nil-fills missing slots, converts
+        // bool to 0/1, and ignores surplus call arguments before dispatch
+        // (C4AulExec.cpp:1364-1396).
+        assert_eq!(max_func(&[]).expect("Max()"), Value::Int(0));
+        assert_eq!(
+            max_func(&[Value::Bool(true), Value::Bool(false), Value::Int(99)])
+                .expect("Max ignores surplus args"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            min_func(&[Value::Int(-7)]).expect("Min nil-fills val2"),
+            Value::Int(-7)
+        );
+        assert_eq!(
+            min_func(&[Value::Bool(true), Value::Int(4), Value::Int(-99)])
+                .expect("Min converts bool and ignores surplus args"),
+            Value::Int(1)
+        );
     }
 
     #[test]
