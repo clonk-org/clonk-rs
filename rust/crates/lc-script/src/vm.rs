@@ -251,6 +251,24 @@ pub(crate) enum LValueRef {
     },
 }
 
+/// An opaque live C4Value reference returned across the engine's method
+/// dispatch boundary. The VM alone interprets the underlying lvalue; hosts
+/// may retain and route it without flattening it to a value.
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct ValueReference(LValueRef);
+
+impl ValueReference {
+    pub fn from_cell(cell: ValueCell) -> Self {
+        Self(LValueRef::Cell(cell))
+    }
+
+    #[allow(dead_code)]
+    fn into_lvalue(self) -> LValueRef {
+        self.0
+    }
+}
+
 impl LValueRef {
     fn read(&self) -> Result<Value, RuntimeError> {
         match self {
@@ -474,6 +492,9 @@ pub struct Vm<'a> {
     /// C4AulExec.cpp:1216-1305), registered by the engine. Called with
     /// [target, name, failsafe, args...].
     method_dispatch: Option<&'a HostFunction>,
+    /// Reference-preserving twin of `method_dispatch`, used when an arrow
+    /// call occupies an lvalue position.
+    method_reference_dispatch: Option<&'a crate::engine::MethodReferenceDispatch>,
     /// The engine-global `static` table (GlobalNamed); resolved after
     /// locals, before global constants (C4AulParse.cpp:2836-2839).
     globals_named: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
@@ -503,6 +524,7 @@ impl<'a> Vm<'a> {
             global_functions: None,
             this_value: Value::Nil,
             method_dispatch: None,
+            method_reference_dispatch: None,
             globals_named: None,
             globals_numbered: None,
             globals_consts: None,
@@ -534,6 +556,14 @@ impl<'a> Vm<'a> {
     /// (AB_CALL, C4AulExec.cpp:1216-1305).
     pub fn with_method_dispatch(mut self, dispatch: Option<&'a HostFunction>) -> Self {
         self.method_dispatch = dispatch;
+        self
+    }
+
+    pub fn with_method_reference_dispatch(
+        mut self,
+        dispatch: Option<&'a crate::engine::MethodReferenceDispatch>,
+    ) -> Self {
+        self.method_reference_dispatch = dispatch;
         self
     }
 
@@ -718,6 +748,18 @@ impl<'a> Vm<'a> {
     ) -> Result<Value, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::Value).collect();
         self.invoke_value(name, args, 0, cells.state.clone(), None)
+    }
+
+    /// Reference-returning counterpart to [`Vm::call_with_cells`].
+    pub(crate) fn call_reference_with_cells(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &LocalCells,
+    ) -> Result<ValueReference, RuntimeError> {
+        let args = args.iter().cloned().map(CallArg::Value).collect();
+        self.invoke_reference(name, args, 0, cells.state.clone(), None)
+            .map(ValueReference)
     }
 
     /// Call a function with per-object local variable context
