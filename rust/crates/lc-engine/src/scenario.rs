@@ -3101,58 +3101,125 @@ impl MapPixelClassifier {
     }
 }
 
-/// TexMap.txt + material densities, scenario-local Material.c4g first
-/// (C4Game::InitMaterialTexture loads the scenario's group before the
-/// global one; OverloadMaterials in its TexMap.txt admits the global
-/// material set). `None` when no TexMap.txt is reachable — the loader
-/// then falls back to the sky-pixel heuristic.
+/// TexMap.txt + material densities from the ordered NRT_Material chain.
+/// C4Game::InitMaterialTexture loads the scenario group first, then each
+/// external source admitted by the preceding TexMap's independent
+/// OverloadMaterials/OverloadTextures flags (C4Game.cpp:901-977).
+/// `None` when the first source has no TexMap.txt — the loader then falls
+/// back to the sky-pixel heuristic.
 pub(crate) fn build_map_pixel_classifier(
     group: &Group,
     resolver: &impl LegacyDefinitionResolver,
 ) -> Option<MapPixelClassifier> {
-    let local = group.open_child("Material.c4g").ok();
-    // The resolver lists the scenario-local group first — the GLOBAL one
-    // is the first hit rooted elsewhere.
-    let local_root = local.as_ref().map(|group| group.root().to_path_buf());
-    let global = resolver
+    let mut material_groups = Vec::new();
+    let mut seen_groups = HashSet::new();
+    if let Ok(local) = group.open_child("Material.c4g") {
+        if seen_groups.insert(local.root().to_path_buf()) {
+            material_groups.push(local);
+        }
+    }
+    for candidate in resolver
         .resolve_definition_groups(group, "Material.c4g")
         .ok()
         .into_iter()
         .flatten()
-        .find(|candidate| local_root.as_deref() != Some(candidate.root()));
-    let texmap_source = [local.as_ref(), global.as_ref()]
-        .into_iter()
-        .flatten()
-        .find_map(|group| group.read_file("TexMap.txt").ok())?;
+    {
+        if seen_groups.insert(candidate.root().to_path_buf()) {
+            material_groups.push(candidate);
+        }
+    }
+
+    let texmap_source = material_groups.first()?.read_file("TexMap.txt").ok()?;
     let texmap = lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&texmap_source));
 
-    let local_library = local
-        .as_ref()
-        .and_then(|group| lc_resources::MaterialLibrary::from_group(group).ok());
-    let global_library = (local_library.is_none() || texmap.overload_materials)
-        .then(|| {
-            global
-                .as_ref()
-                .and_then(|group| lc_resources::MaterialLibrary::from_group(group).ok())
-        })
-        .flatten();
+    let mut material_libraries: Vec<lc_resources::MaterialLibrary> = Vec::new();
+    let mut texture_inventory = Vec::new();
+    let mut seen_textures = HashSet::new();
+    let mut load_materials = true;
+    let mut load_textures = true;
+    for (index, material_group) in material_groups.iter().enumerate() {
+        if !load_materials && !load_textures {
+            break;
+        }
 
-    // Collapse the loaded resource libraries into the only material fields
-    // runtime texmap allocation consumes. Scenario-local definitions win
-    // name collisions, matching C4MaterialMap::Get after overloaded loads.
-    let runtime_materials = local_library
+        // The first source supplies the actual table. Later sources only
+        // expose continuation flags through LoadFlags; a missing TexMap at
+        // that point stops both chains before that group's contents load
+        // (C4Game.cpp:940-976).
+        let later_texmap = if index == 0 {
+            None
+        } else {
+            let Ok(source) = material_group.read_file("TexMap.txt") else {
+                break;
+            };
+            Some(lc_resources::texmap::TextureMap::parse(
+                &String::from_utf8_lossy(&source),
+            ))
+        };
+        let flags = later_texmap.as_ref().unwrap_or(&texmap);
+        let mut next_materials = flags.overload_materials;
+        let mut next_textures = flags.overload_textures;
+
+        if load_materials {
+            match lc_resources::MaterialLibrary::from_group(material_group) {
+                Ok(library) => {
+                    // C4MaterialMap::Load counts only names not provided by an
+                    // earlier source. A zero-count load automatically admits
+                    // the next source even without OverloadMaterials.
+                    let loaded_count = library
+                        .iter()
+                        .filter(|definition| {
+                            material_libraries.iter().all(|loaded| {
+                                loaded.get(definition.name()).is_none()
+                            })
+                        })
+                        .count();
+                    if loaded_count == 0 {
+                        next_materials = true;
+                    }
+                    material_libraries.push(library);
+                }
+                Err(_) => next_materials = true,
+            }
+        }
+
+        if load_textures {
+            // C4TextureMap::LoadTextures likewise counts only newly admitted
+            // image basenames; a zero-count load keeps the texture chain open
+            // (C4Texture.cpp:266-310; C4Game.cpp:956-962).
+            let mut loaded_count = 0;
+            for entry in material_group.entries().unwrap_or_default() {
+                let lower = entry.relative_path.to_string_lossy().to_ascii_lowercase();
+                if let Some(stem) = lower
+                    .strip_suffix(".png")
+                    .or_else(|| lower.strip_suffix(".bmp"))
+                {
+                    let stem = stem.to_string();
+                    if seen_textures.insert(stem.clone()) {
+                        texture_inventory.push(stem);
+                        loaded_count += 1;
+                    }
+                }
+            }
+            if loaded_count == 0 {
+                next_textures = true;
+            }
+        }
+
+        load_materials = next_materials;
+        load_textures = next_textures;
+    }
+
+    // Each C4MaterialMap::Load prepends its fresh names, so later/global
+    // uniques precede earlier/local definitions while earlier sources win
+    // collisions (C4Material.cpp:263-299).
+    let material_loads: Vec<_> = material_libraries.iter().collect();
+    let material_library =
+        lc_resources::MaterialLibrary::from_overloaded_loads(&material_loads).ok();
+
+    let runtime_materials = material_library
         .iter()
         .flat_map(|library| library.iter())
-        .chain(
-            global_library
-                .iter()
-                .flat_map(|library| library.iter())
-                .filter(|definition| {
-                    local_library
-                        .as_ref()
-                        .is_none_or(|local| local.get(definition.name()).is_none())
-                }),
-        )
         .map(MapPixelClassifier::runtime_material)
         .collect();
 
@@ -3168,14 +3235,9 @@ pub(crate) fn build_map_pixel_classifier(
             .entry(index as u8)
             .map(|entry| entry.texture.clone());
         let material = texmap.entry(index as u8).and_then(|entry| {
-            local_library
+            material_library
                 .as_ref()
                 .and_then(|library| library.get(&entry.material))
-                .or_else(|| {
-                    global_library
-                        .as_ref()
-                        .and_then(|library| library.get(&entry.material))
-                })
         });
         shapes[index] = material.map(|material| {
             crate::chunky::ChunkShape::from_shape(material.int("Shape").unwrap_or(0))
@@ -3200,36 +3262,11 @@ pub(crate) fn build_map_pixel_classifier(
             .entry(index as u8)
             .map(|entry| entry.texture.clone());
     }
-    // The texture inventory: image basenames in the material groups
-    // (AddEntry validates the texture exists, C4Texture.cpp:116-131).
-    let mut texture_inventory: Vec<String> = Vec::new();
-    for group in [local.as_ref(), global.as_ref()].into_iter().flatten() {
-        for entry in group.entries().unwrap_or_default() {
-            let lower = entry.relative_path.to_string_lossy().to_ascii_lowercase();
-            if let Some(stem) = lower
-                .strip_suffix(".png")
-                .or_else(|| lower.strip_suffix(".bmp"))
-            {
-                texture_inventory.push(stem.to_string());
-            }
-        }
-    }
-
-    // The C++ material-map order: each load PREPENDS new names
-    // (scenario loads first, global after — C4Material.cpp:263-299)
-    // → [global-uniques…, scenario…], scenario winning collisions.
-    // Collected as owned (name, overlay, cross-specs) rows so the loops
-    // below can mutate the classifier slots.
-    let ordered: Vec<(String, Option<String>, Vec<String>)> = global_library
+    // Collected as owned (name, overlay, cross-specs) rows so the loops below
+    // can mutate the classifier slots.
+    let ordered: Vec<(String, Option<String>, Vec<String>)> = material_library
         .iter()
         .flat_map(|library| library.iter())
-        .filter(|definition| {
-            local_library
-                .as_ref()
-                .map(|local| local.get(definition.name()).is_none())
-                .unwrap_or(true)
-        })
-        .chain(local_library.iter().flat_map(|library| library.iter()))
         .map(|material| {
             (
                 material.value("Name").unwrap_or_default().to_string(),
@@ -11769,6 +11806,92 @@ public func ActualizePhase(pClonk)
         assert!(!landscape.is_liquid_at(5, 25));
         // Map column 3: all sky.
         assert!(!landscape.is_solid_at(35, 38), "sky column has no ground");
+    }
+
+    #[test]
+    fn ancestor_texmap_overloads_global_water_material() {
+        // C4Game::InitMaterialTexture walks the ordered NRT_Material chain
+        // while each source's OverloadMaterials/OverloadTextures flags admit
+        // the next one (C4Game.cpp:901-977). C4MaterialMap::Load prepends new
+        // names while earlier sources win collisions (C4Material.cpp:263-299).
+        // Hazard/CTF_DeepSea has this exact shape: its enclosing package owns
+        // TexMap slot 3=Water-Liquid but only the final global Material.c4g
+        // supplies Water.c4m. Missing that second source turns map byte 0x83
+        // into sky, so C4Game::PlaceAnimal cannot place either shark.
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+
+        let package = dir.path().join("Pack.c4f");
+        let scenario_dir = package.join("Deep.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Deep\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapZoom=10\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[0x83, 0x83], &[0x83, 0x83]]),
+        )
+        .expect("write map");
+
+        let package_materials = package.join("Material.c4g");
+        std::fs::create_dir_all(&package_materials).expect("package materials");
+        std::fs::write(
+            package_materials.join("TexMap.txt"),
+            "OverloadMaterials\nOverloadTextures\n3=Water-Liquid\n4=PackStone-Smooth\n",
+        )
+        .expect("write package texmap");
+        // Keep this source non-empty: reaching the global Water material must
+        // be caused by OverloadMaterials, not the C++ zero-material fallback.
+        std::fs::write(
+            package_materials.join("PackStone.c4m"),
+            "[Material]\nName=PackStone\nDensity=100\n",
+        )
+        .expect("write package material");
+
+        let global_materials = dir.path().join("Material.c4g");
+        std::fs::create_dir_all(&global_materials).expect("global materials");
+        // Later C++ material resources must carry TexMap.txt so LoadFlags can
+        // admit their contents; this table is not used for slot mappings.
+        std::fs::write(global_materials.join("TexMap.txt"), "# global table\n")
+            .expect("write global texmap");
+        std::fs::write(
+            global_materials.join("Water.c4m"),
+            "[Material]\nName=Water\nDensity=25\n",
+        )
+        .expect("write global water");
+
+        // Resolver order mirrors DeepSea: enclosing package, then content
+        // root. There is deliberately no scenario-local Material.c4g.
+        let resolver = FileSystemResolver {
+            roots: vec![package, dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let landscape = engine.landscape().expect("landscape loaded");
+
+        assert_eq!(
+            landscape.grid_byte_at(5, 5),
+            Some(0x83),
+            "the package TexMap byte survives with its IFT bit"
+        );
+        assert!(
+            landscape.is_liquid_at(5, 5),
+            "global Water.c4m supplies slot 3 density through OverloadMaterials"
+        );
+        assert!(landscape.is_ift_at(5, 5));
     }
 
     #[test]
