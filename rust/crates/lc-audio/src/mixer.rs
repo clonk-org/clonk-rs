@@ -133,6 +133,15 @@ impl AudioSystem {
         Ok(MusicHandle::new(self.mixer.clone(), id))
     }
 
+    /// A cheap `Send + Sync` handle onto the shared mixer so expensive
+    /// music decodes (a full MIDI render through FluidSynth) can run off
+    /// the caller's thread and start playback when ready.
+    pub fn worker_handle(&self) -> AudioWorkerHandle {
+        AudioWorkerHandle {
+            mixer: self.mixer.clone(),
+        }
+    }
+
     pub fn play_sound(&self, sound: &SoundHandle, looped: bool) -> Result<ChannelId, AudioError> {
         self.mixer.play_sound(sound.id(), looped)
     }
@@ -264,6 +273,31 @@ impl CpalBackend {
             .map_err(|err| AudioError::Stream(err.to_string()))?;
 
         Ok((mixer, Self { _stream: stream }))
+    }
+}
+
+/// See [`AudioSystem::worker_handle`]: decode-and-play from worker threads.
+#[derive(Clone)]
+pub struct AudioWorkerHandle {
+    mixer: Arc<AudioMixer>,
+}
+
+impl AudioWorkerHandle {
+    pub fn load_music(&self, data: &[u8]) -> Result<MusicHandle, AudioError> {
+        let id = self.mixer.load_music(data)?;
+        Ok(MusicHandle::new(self.mixer.clone(), id))
+    }
+
+    pub fn play_music(&self, music: &MusicHandle, looped: bool) -> Result<(), AudioError> {
+        self.mixer.play_music(music.id(), looped)
+    }
+
+    pub fn halt_music(&self) {
+        self.mixer.halt_music();
+    }
+
+    pub fn music_set_volume(&self, volume: f32) {
+        self.mixer.music_set_volume(volume);
     }
 }
 

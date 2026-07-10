@@ -1650,7 +1650,13 @@ fn toggle_fullscreen(window: &Window, display_options: &mut DisplayOptions) {
 struct AudioContext {
     system: AudioSystem,
     options: AudioOptions,
-    current_music: Option<MusicHandle>,
+    /// Music loads run on a worker thread (a MIDI track is a FULL
+    /// FluidSynth render — it must never block scenario activation like it
+    /// never blocks C++'s streamed SDL_mixer playback). The generation
+    /// counter cancels a pending load when the music is stopped/replaced
+    /// before the decode finishes; the slot carries the finished handle.
+    music_generation: Arc<std::sync::atomic::AtomicU64>,
+    pending_music: Arc<std::sync::Mutex<Option<MusicHandle>>>,
     loaded_sounds: HashMap<String, SoundHandle>,
     active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
     resolver: SoundResolver,
@@ -1662,7 +1668,8 @@ impl AudioContext {
         Ok(Self {
             system: AudioSystem::new(options.max_channels)?,
             options,
-            current_music: None,
+            music_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pending_music: Arc::new(std::sync::Mutex::new(None)),
             loaded_sounds: HashMap::new(),
             active_channels: HashMap::new(),
             resolver: SoundResolver::new(),
@@ -1671,20 +1678,51 @@ impl AudioContext {
     }
 
     fn play_music(&mut self, data: &[u8], looped: bool) -> Result<(), AudioError> {
+        use std::sync::atomic::Ordering;
         self.stop_music();
         if !self.options.music_enabled {
             return Ok(());
         }
-        let music = self.system.load_music(data)?;
-        self.system.play_music(&music, looped)?;
-        self.system.music_set_volume(self.options.music_volume);
-        self.current_music = Some(music);
+        // Decode off-thread: a MIDI track is a full FluidSynth render and
+        // was the single largest scenario-activation cost. C++ streams
+        // music through SDL_mixer with zero load-time work.
+        let generation = self.music_generation.load(Ordering::SeqCst);
+        let worker = self.system.worker_handle();
+        let volume = self.options.music_volume;
+        let data = data.to_vec();
+        let generation_ref = Arc::clone(&self.music_generation);
+        let slot = Arc::clone(&self.pending_music);
+        std::thread::spawn(move || {
+            let music = match worker.load_music(&data) {
+                Ok(music) => music,
+                Err(error) => {
+                    tracing::warn!(%error, "music decode failed");
+                    return;
+                }
+            };
+            if generation_ref.load(Ordering::SeqCst) != generation {
+                return; // stopped or replaced while decoding
+            }
+            if let Err(error) = worker.play_music(&music, looped) {
+                tracing::warn!(%error, "music playback failed");
+                return;
+            }
+            worker.music_set_volume(volume);
+            if generation_ref.load(Ordering::SeqCst) != generation {
+                // A stop raced the play call: honor it.
+                worker.halt_music();
+                return;
+            }
+            *slot.lock().unwrap() = Some(music);
+        });
         Ok(())
     }
 
     fn stop_music(&mut self) {
+        self.music_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.system.halt_music();
-        self.current_music.take();
+        self.pending_music.lock().unwrap().take();
     }
 
     fn process_audio(
@@ -4720,29 +4758,12 @@ fn candidate_material_paths(paths: &AppPaths) -> Vec<PathBuf> {
         "MatDefs.c4g",
     ];
 
+    // Direct group paths ONLY — never bare roots: a root candidate makes
+    // the loaders walk the WHOLE planet/content tree recursively on every
+    // scenario activation (the dominant load-time cost after music).
+    // C++ opens the known Material.c4g groups directly
+    // (C4Game::OpenScenario's material chain).
     let mut candidates = Vec::new();
-
-    let planet_dir = paths.planet_dir();
-    if planet_dir.exists() {
-        candidates.push(planet_dir.to_path_buf());
-    }
-    let install_root = paths.install_root();
-    if install_root.exists() {
-        candidates.push(install_root.to_path_buf());
-    }
-    if let Some(content) = paths.content_dir() {
-        if content.exists() {
-            candidates.push(content.to_path_buf());
-        }
-    }
-    let scenario_dir = paths.scenario_dir();
-    if scenario_dir.exists() {
-        candidates.push(scenario_dir);
-    }
-    let system_group = paths.system_group_path();
-    if system_group.exists() {
-        candidates.push(system_group.to_path_buf());
-    }
 
     let mut group_bases = vec![
         paths.planet_dir().to_path_buf(),
@@ -4837,6 +4858,14 @@ fn load_scenario_material_textures(scenario_path: &Path) -> HashMap<String, Imag
         }
     }
     textures
+}
+
+/// The shared (non-scenario) material textures are scenario-independent —
+/// decode them once per process; scenario activation only re-reads the
+/// scenario-local Material.c4g.
+fn shared_material_texture_images(paths: &AppPaths) -> &'static HashMap<String, ImageData> {
+    static SHARED: std::sync::OnceLock<HashMap<String, ImageData>> = std::sync::OnceLock::new();
+    SHARED.get_or_init(|| load_material_texture_images(paths))
 }
 
 fn load_material_texture_images(paths: &AppPaths) -> HashMap<String, ImageData> {
@@ -9768,11 +9797,14 @@ impl GameApp {
         self.rebuild_definition_sprites();
         {
             // Scenario-local textures first (Wall/Brick in GoldRush's own
-            // Material.c4g), the shared sets after.
+            // Material.c4g), the shared sets after (decoded once per
+            // process — they are scenario-independent).
             let mut textures = load_scenario_material_textures(&path);
             if let Ok(paths) = AppPaths::discover() {
-                for (name, image) in load_material_texture_images(&paths) {
-                    textures.entry(name).or_insert(image);
+                for (name, image) in shared_material_texture_images(&paths) {
+                    textures
+                        .entry(name.clone())
+                        .or_insert_with(|| image.clone());
                 }
             }
             self.material_texture_images = Arc::new(textures);
@@ -13156,30 +13188,34 @@ mod tests {
         // loading completes and the menu is shown; pump boot to that point first.
         wait_for_menu(&mut app);
 
-        assert!(
-            app.audio
-                .as_ref()
-                .map(|audio| audio.music_is_playing())
-                .unwrap_or(false),
-            "menu music should start on launch"
-        );
+        // Music decodes on a worker thread now (the FluidSynth render must
+        // never block the caller) — poll for playback start.
+        let wait_for_music = |app: &GameApp| {
+            let started = std::time::Instant::now();
+            loop {
+                let playing = app
+                    .audio
+                    .as_ref()
+                    .map(|audio| audio.music_is_playing())
+                    .unwrap_or(false);
+                if playing || started.elapsed() > std::time::Duration::from_secs(20) {
+                    break playing;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        assert!(wait_for_music(&app), "menu music should start on launch");
 
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start sandbox scenario");
         assert!(
-            app.audio
-                .as_ref()
-                .map(|audio| audio.music_is_playing())
-                .unwrap_or(false),
+            wait_for_music(&app),
             "sandbox scenario should have looping music"
         );
 
         app.return_to_menu();
         assert!(
-            app.audio
-                .as_ref()
-                .map(|audio| audio.music_is_playing())
-                .unwrap_or(false),
+            wait_for_music(&app),
             "menu music should resume after returning to the menu"
         );
     }
