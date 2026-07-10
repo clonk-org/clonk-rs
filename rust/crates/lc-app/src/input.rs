@@ -186,27 +186,6 @@ impl KeyboardBindings {
             bindings.insert(spec.default_key, spec.binding);
         }
 
-        insert_default_binding(
-            &mut bindings,
-            VirtualKeyCode::Up,
-            Binding::button(ControlButton::Up),
-        );
-        insert_default_binding(
-            &mut bindings,
-            VirtualKeyCode::Left,
-            Binding::button(ControlButton::Left),
-        );
-        insert_default_binding(
-            &mut bindings,
-            VirtualKeyCode::Down,
-            Binding::button(ControlButton::Down),
-        );
-        insert_default_binding(
-            &mut bindings,
-            VirtualKeyCode::Right,
-            Binding::button(ControlButton::Right),
-        );
-
         let clear_keys = HashSet::from([VirtualKeyCode::Space]);
 
         Self {
@@ -538,14 +517,6 @@ fn map_sdl_arrow_scancode(value: i32) -> Option<VirtualKeyCode> {
     }
 }
 
-fn insert_default_binding(
-    bindings: &mut HashMap<VirtualKeyCode, Binding>,
-    key: VirtualKeyCode,
-    binding: Binding,
-) {
-    bindings.insert(key, binding);
-}
-
 fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     match key {
         VirtualKeyCode::A => Some('A' as i32),
@@ -615,6 +586,46 @@ mod tests {
     }
 
     #[test]
+    fn default_player_one_movement_matches_cpp_keyboard_set_one() {
+        // C++ parity: C4Config.cpp:624-635 defines the complete keyboard set 1;
+        // movement is S/Z/X/C and does not include arrow-key aliases.
+        let bindings = KeyboardBindings::default_bindings();
+        for (id, key, button) in [
+            (ControlBindingId::Up, VirtualKeyCode::S, ControlButton::Up),
+            (
+                ControlBindingId::Left,
+                VirtualKeyCode::Z,
+                ControlButton::Left,
+            ),
+            (
+                ControlBindingId::Down,
+                VirtualKeyCode::X,
+                ControlButton::Down,
+            ),
+            (
+                ControlBindingId::Right,
+                VirtualKeyCode::C,
+                ControlButton::Right,
+            ),
+        ] {
+            assert_eq!(bindings.key_for(id), Some(key));
+            assert_eq!(
+                bindings.event_for_key(key, ElementState::Pressed),
+                Some(ControlEvent::Press(button))
+            );
+        }
+
+        for key in [
+            VirtualKeyCode::Up,
+            VirtualKeyCode::Left,
+            VirtualKeyCode::Down,
+            VirtualKeyCode::Right,
+        ] {
+            assert_eq!(bindings.event_for_key(key, ElementState::Pressed), None);
+        }
+    }
+
+    #[test]
     fn cursor_toggle_binding_produces_command() {
         let bindings = KeyboardBindings::default_bindings();
         assert_eq!(
@@ -667,6 +678,22 @@ mod tests {
             bindings.event_for_key(VirtualKeyCode::A, ElementState::Released),
             Some(ControlEvent::Release(ControlButton::Left))
         );
+        assert_eq!(
+            bindings.key_for(ControlBindingId::Up),
+            Some(VirtualKeyCode::W)
+        );
+        assert_eq!(
+            bindings.key_for(ControlBindingId::Left),
+            Some(VirtualKeyCode::A)
+        );
+        assert_eq!(
+            bindings.key_for(ControlBindingId::Down),
+            Some(VirtualKeyCode::S)
+        );
+        assert_eq!(
+            bindings.key_for(ControlBindingId::Right),
+            Some(VirtualKeyCode::D)
+        );
         // Falling back to default should still handle the clear command.
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::Space, ElementState::Pressed),
@@ -718,6 +745,12 @@ mod tests {
         assert_ne!(
             bindings.key_for(ControlBindingId::Throw),
             Some(VirtualKeyCode::A)
+        );
+
+        bindings.rebind(ControlBindingId::Right, VirtualKeyCode::Right);
+        assert_eq!(
+            bindings.key_for(ControlBindingId::Right),
+            Some(VirtualKeyCode::Right)
         );
 
         bindings.reset_binding(ControlBindingId::Throw);
