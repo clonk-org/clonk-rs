@@ -31,7 +31,10 @@
 
 use crate::clonk_fonts::ClonkFontSet;
 use crate::startup_main_menu::{draw_bar, IntRect};
-use crate::{draw_image_bilinear, draw_image_bilinear_additive, draw_image_strip, ImageData};
+use crate::{
+    draw_image_bilinear, draw_image_bilinear_additive, draw_image_strip, GuiPoint, ImageData,
+    KeyCode,
+};
 use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
@@ -634,6 +637,7 @@ pub struct OptionsDlgAssets {
 /// Mutable display state of the Program sheet. Defaults mirror a fresh US
 /// config on macOS (C4Config.cpp:385-404) — the state the reference capture
 /// shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProgramSheetState {
     /// Lang combo text, `"{CC} - {Name}"` (UpdateLanguage, ctor 1196-1232).
     pub language_text: String,
@@ -651,8 +655,6 @@ pub struct ProgramSheetState {
     /// Slider value 0..=100; `FairCrewStrength2Slider(1000) = 9`
     /// (C4StartupOptionsDlg.cpp:1061-1065).
     pub fair_crew_slider: i32,
-    /// Initial focus is on the tabular (ctor 1039) -> active-tab highlight.
-    pub tabular_focused: bool,
 }
 
 impl Default for ProgramSheetState {
@@ -667,9 +669,269 @@ impl Default for ProgramSheetState {
             show_log_timestamps: false,
             preloading: false,
             fair_crew_slider: 9,
-            tabular_focused: true,
         }
     }
+}
+
+/// One `C4GUI::Tabular::Sheet` in constructor order
+/// (`C4StartupOptionsDlg.cpp:663-668`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OptionsSheet {
+    #[default]
+    Program,
+    Graphics,
+    Sound,
+    Keyboard,
+    Gamepad,
+    Network,
+}
+
+impl OptionsSheet {
+    const ALL: [Self; 6] = [
+        Self::Program,
+        Self::Graphics,
+        Self::Sound,
+        Self::Keyboard,
+        Self::Gamepad,
+        Self::Network,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Program => 0,
+            Self::Graphics => 1,
+            Self::Sound => 2,
+            Self::Keyboard => 3,
+            Self::Gamepad => 4,
+            Self::Network => 5,
+        }
+    }
+
+    fn wrapping_offset(self, delta: isize) -> Self {
+        let len = Self::ALL.len() as isize;
+        let index = (self.index() as isize + delta).rem_euclid(len) as usize;
+        Self::ALL[index]
+    }
+}
+
+/// Observable callbacks from the C++ options dialog chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionsDlgAction {
+    /// `C4StartupOptionsDlg::DoBack`; the app owns validation/persistence.
+    Back,
+    /// User-selected tab (`Tabular::SelectionChanged(true)`).
+    SheetChanged(OptionsSheet),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OptionsFocus {
+    Back,
+    Tabular,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OptionsHit {
+    Back,
+    Tab(OptionsSheet),
+}
+
+/// Live interaction and presentation state for the pixel-parity options
+/// dialog. It deliberately emits external work as actions instead of owning
+/// configuration persistence.
+pub struct OptionsDlgState {
+    program: ProgramSheetState,
+    active_sheet: OptionsSheet,
+    /// The C++ ctor explicitly focuses the tabular after adding all controls
+    /// (`C4StartupOptionsDlg.cpp:1039`).
+    focus: OptionsFocus,
+    layout: Option<OptionsDlgLayout>,
+    pointer_position: Option<GuiPoint>,
+    hovered: Option<OptionsHit>,
+    pressed_back: bool,
+}
+
+impl Default for OptionsDlgState {
+    fn default() -> Self {
+        Self::new(ProgramSheetState::default())
+    }
+}
+
+impl OptionsDlgState {
+    pub fn new(program: ProgramSheetState) -> Self {
+        Self {
+            program,
+            active_sheet: OptionsSheet::Program,
+            focus: OptionsFocus::Tabular,
+            layout: None,
+            pointer_position: None,
+            hovered: None,
+            pressed_back: false,
+        }
+    }
+
+    /// Refreshes the cached C++ integer layout used for pointer hit-testing.
+    pub fn resize(
+        &mut self,
+        width: i32,
+        height: i32,
+        gui: &ClonkFontSet,
+        book: &BookFonts,
+    ) {
+        self.layout = Some(options_dlg_layout(width.max(1), height.max(1), gui, book));
+        self.hovered = self
+            .pointer_position
+            .and_then(|point| self.layout.as_ref().and_then(|layout| options_hit_test(layout, point)));
+    }
+
+    pub const fn active_sheet(&self) -> OptionsSheet {
+        self.active_sheet
+    }
+
+    pub fn program(&self) -> &ProgramSheetState {
+        &self.program
+    }
+
+    pub fn program_mut(&mut self) -> &mut ProgramSheetState {
+        &mut self.program
+    }
+
+    pub const fn pointer_position(&self) -> Option<GuiPoint> {
+        self.pointer_position
+    }
+
+    pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
+        self.pointer_position = position;
+        self.hovered = position
+            .and_then(|point| self.layout.as_ref().and_then(|layout| options_hit_test(layout, point)));
+        if position.is_none() {
+            self.pressed_back = false;
+        }
+    }
+
+    pub fn pointer_left(&mut self) {
+        self.set_pointer_position(None);
+    }
+
+    pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<OptionsDlgAction> {
+        self.set_pointer_position(Some(position));
+        Vec::new()
+    }
+
+    pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<OptionsDlgAction> {
+        self.set_pointer_position(Some(position));
+        match self.hovered {
+            Some(OptionsHit::Back) => {
+                self.focus = OptionsFocus::Back;
+                self.pressed_back = true;
+                Vec::new()
+            }
+            Some(OptionsHit::Tab(sheet)) => {
+                self.focus = OptionsFocus::Tabular;
+                self.pressed_back = false;
+                self.select_sheet(sheet)
+            }
+            None => {
+                self.pressed_back = false;
+                Vec::new()
+            }
+        }
+    }
+
+    pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<OptionsDlgAction> {
+        self.set_pointer_position(Some(position));
+        let activate_back = self.pressed_back && self.hovered == Some(OptionsHit::Back);
+        self.pressed_back = false;
+        activate_back
+            .then_some(OptionsDlgAction::Back)
+            .into_iter()
+            .collect()
+    }
+
+    pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<OptionsDlgAction> {
+        match key {
+            // Dedicated options bindings: K_BACK + K_LEFT, plus the dialog's
+            // OnEscape override (C4StartupOptionsDlg.cpp:615-620; header:37).
+            KeyCode::Escape | KeyCode::Left => vec![OptionsDlgAction::Back],
+            KeyCode::Up if self.focus == OptionsFocus::Tabular => {
+                self.select_sheet(self.active_sheet.wrapping_offset(-1))
+            }
+            KeyCode::Down if self.focus == OptionsFocus::Tabular => {
+                self.select_sheet(self.active_sheet.wrapping_offset(1))
+            }
+            // This controller intentionally covers the visible dialog chrome;
+            // sheet-child focus is added together with each sheet renderer.
+            KeyCode::Tab => {
+                self.pressed_back = false;
+                self.focus = match self.focus {
+                    OptionsFocus::Tabular => OptionsFocus::Back,
+                    OptionsFocus::Back => OptionsFocus::Tabular,
+                };
+                Vec::new()
+            }
+            KeyCode::Enter | KeyCode::Space if self.focus == OptionsFocus::Back => {
+                self.pressed_back = true;
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<OptionsDlgAction> {
+        if matches!(key, KeyCode::Enter | KeyCode::Space)
+            && self.focus == OptionsFocus::Back
+            && self.pressed_back
+        {
+            self.pressed_back = false;
+            return vec![OptionsDlgAction::Back];
+        }
+        Vec::new()
+    }
+
+    fn select_sheet(&mut self, sheet: OptionsSheet) -> Vec<OptionsDlgAction> {
+        if self.active_sheet == sheet {
+            return Vec::new();
+        }
+        self.active_sheet = sheet;
+        vec![OptionsDlgAction::SheetChanged(sheet)]
+    }
+
+    const fn tabular_focused(&self) -> bool {
+        matches!(self.focus, OptionsFocus::Tabular)
+    }
+
+    const fn back_highlighted(&self) -> bool {
+        matches!(self.focus, OptionsFocus::Back) || matches!(self.hovered, Some(OptionsHit::Back))
+    }
+}
+
+fn rect_contains(rect: &IntRect, point: GuiPoint) -> bool {
+    let (x, y) = (point.x.floor() as i32, point.y.floor() as i32);
+    x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
+}
+
+/// `Tabular::MouseInput` for a graphical left tab strip
+/// (C4GuiTabular.cpp:464-534). `Inside` is inclusive for the internal
+/// caption bands even though the surrounding `C4Rect` is half-open.
+fn options_hit_test(layout: &OptionsDlgLayout, point: GuiPoint) -> Option<OptionsHit> {
+    if rect_contains(&layout.back_button, point) {
+        return Some(OptionsHit::Back);
+    }
+    if !rect_contains(&layout.tabular, point) {
+        return None;
+    }
+    let x = point.x.floor() as i32 - layout.tabular.x;
+    let y = point.y.floor() as i32 - layout.tabular.y;
+    if !(0..=95).contains(&x) {
+        return None;
+    }
+    OptionsSheet::ALL
+        .iter()
+        .copied()
+        .find(|sheet| {
+            let top = 20 + 72 * sheet.index() as i32;
+            (top..=top + 70).contains(&y)
+        })
+        .map(OptionsHit::Tab)
 }
 
 // ---------------------------------------------------------------------------
@@ -960,18 +1222,32 @@ fn crop_image(image: &ImageData, x: u32, y: u32, w: u32, h: u32) -> ImageData {
 // Renderer
 // ---------------------------------------------------------------------------
 
-/// Renders the first-shown options dialog frame (Program tab).
+/// Renders the live options dialog chrome and the implemented active sheet.
 pub struct OptionsDlgScreen;
 
 impl OptionsDlgScreen {
-    /// Draws one steady-state frame in the C++ draw order (spec section 4).
-    /// The caller applies the final whole-surface gamma pass.
+    /// Source-compatible first-shown renderer. New callers with live input
+    /// state should use [`Self::render_state`].
     pub fn render(
         surface: &mut Surface,
         assets: &OptionsDlgAssets,
         gui: &ClonkFontSet,
         book: &BookFonts,
-        state: &ProgramSheetState,
+        program: &ProgramSheetState,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let state = OptionsDlgState::new(program.clone());
+        Self::render_state(surface, assets, gui, book, &state, gamma);
+    }
+
+    /// Draws one live steady-state frame in the C++ draw order (spec section
+    /// 4). The caller applies the final whole-surface gamma pass.
+    pub fn render_state(
+        surface: &mut Surface,
+        assets: &OptionsDlgAssets,
+        gui: &ClonkFontSet,
+        book: &BookFonts,
+        state: &OptionsDlgState,
         gamma: Option<&GammaRamp>,
     ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
@@ -1002,11 +1278,25 @@ impl OptionsDlgScreen {
             &assets.button,
             gamma,
         );
+        if state.back_highlighted() {
+            draw_image_bilinear_additive(
+                surface,
+                &GuiRect::new(
+                    (b.x + 5) as f32,
+                    (b.y + 3) as f32,
+                    (b.w - 10) as f32,
+                    (b.h - 6) as f32,
+                ),
+                &blacken_transparent(&assets.button_highlight),
+                gamma,
+            );
+        }
         let font = gui.button_font(b.h);
+        let pressed_offset = i32::from(state.pressed_back);
         font.draw_with_gamma(
             surface,
-            (b.x + b.x + b.w - 1) / 2,
-            (b.y + b.y + b.h - 1 - font.line_height) / 2,
+            (b.x + b.x + b.w - 1) / 2 + pressed_offset,
+            (b.y + b.y + b.h - 1 - font.line_height) / 2 + pressed_offset,
             "Back",
             YELLOW_FONT_RGBA,
             TextAlign::Center,
@@ -1017,8 +1307,11 @@ impl OptionsDlgScreen {
         // 4. Tab strip: inactive captions, then paper, then the active
         // caption + focus highlight (Tabular::DrawElement, C4GuiTabular.cpp:
         // 388-458).
-        for i in 1..6 {
-            Self::draw_tab_caption(surface, assets, book, &layout, i, gamma);
+        let active_sheet = state.active_sheet().index();
+        for i in 0..SHEET_TITLES.len() {
+            if i != active_sheet {
+                Self::draw_tab_caption(surface, assets, book, &layout, i, gamma);
+            }
         }
         let p = layout.paper;
         draw_image_bilinear_white_pad(
@@ -1027,9 +1320,10 @@ impl OptionsDlgScreen {
             &assets.paper,
             gamma,
         );
-        Self::draw_tab_caption(surface, assets, book, &layout, 0, gamma);
-        if state.tabular_focused {
-            let f = layout.focus_highlight;
+        Self::draw_tab_caption(surface, assets, book, &layout, active_sheet, gamma);
+        if state.tabular_focused() {
+            let mut f = layout.focus_highlight;
+            f.y += 72 * active_sheet as i32;
             draw_image_bilinear_additive(
                 surface,
                 &GuiRect::new(f.x as f32, f.y as f32, f.w as f32, f.h as f32),
@@ -1038,27 +1332,35 @@ impl OptionsDlgScreen {
             );
         }
 
+        // Non-Program sheet controls are implemented together with their
+        // pixel renderers. Never leave stale Program controls visible after
+        // switching sheets (C4GuiTabular.cpp:258-267).
+        if state.active_sheet() != OptionsSheet::Program {
+            return;
+        }
+
         // 5. Program sheet children, add order (ctor 675-792).
+        let program = state.program();
         let black = STARTUP_FONT_RGBA;
         let draw_book_left = |surface: &mut Surface, pos: (i32, i32), text: &str| {
             book.book.draw_with_gamma(surface, pos.0, pos.1, text, black, TextAlign::Left, true, gamma);
         };
         draw_book_left(surface, layout.language_label, "Language:");
-        Self::draw_combo(surface, assets, book, &layout.language_combo, &state.language_text, gamma);
-        draw_book_left(surface, layout.language_info, &state.language_info);
+        Self::draw_combo(surface, assets, book, &layout.language_combo, &program.language_text, gamma);
+        draw_book_left(surface, layout.language_info, &program.language_info);
         draw_book_left(surface, layout.font_label, "Font:");
-        Self::draw_combo(surface, assets, book, &layout.font_face_combo, &state.font_face, gamma);
-        Self::draw_combo(surface, assets, book, &layout.font_size_combo, &state.font_size, gamma);
+        Self::draw_combo(surface, assets, book, &layout.font_face_combo, &program.font_face, gamma);
+        Self::draw_combo(surface, assets, book, &layout.font_size_combo, &program.font_size, gamma);
         draw_book_left(surface, layout.white_chat_label, "White Chat:");
-        Self::draw_checkbox(surface, assets, book, &layout.ingame_check, "Ingame", state.white_chat_ingame, gamma);
-        Self::draw_checkbox(surface, assets, book, &layout.lobby_check, "Lobby", state.white_chat_lobby, gamma);
+        Self::draw_checkbox(surface, assets, book, &layout.ingame_check, "Ingame", program.white_chat_ingame, gamma);
+        Self::draw_checkbox(surface, assets, book, &layout.lobby_check, "Lobby", program.white_chat_lobby, gamma);
         Self::draw_checkbox(
-            surface, assets, book, &layout.timestamps_check, "Timestamps", state.show_log_timestamps, gamma,
+            surface, assets, book, &layout.timestamps_check, "Timestamps", program.show_log_timestamps, gamma,
         );
         Self::draw_checkbox(
-            surface, assets, book, &layout.preloading_check, "Preload game data", state.preloading, gamma,
+            surface, assets, book, &layout.preloading_check, "Preload game data", program.preloading, gamma,
         );
-        Self::draw_fair_crew_group(surface, assets, book, &layout, state, gamma);
+        Self::draw_fair_crew_group(surface, assets, book, &layout, program, gamma);
         Self::draw_small_button(surface, book, &layout.reset_button, "Reset configuration", gamma);
         Self::draw_small_button(surface, book, &layout.advanced_button, "Advanced settings", gamma);
     }
@@ -1373,6 +1675,81 @@ mod tests {
         assert_eq!(l.reset_button.x, 356 + 352 + (230 - reset_w) / 2);
     }
 
+    // C4GuiTabular.cpp:464-534 switches a left-hand sheet on mouse-down;
+    // the caption hit bands are inclusive and advance by 72 px. The options
+    // dialog starts with the tabular focused (C4StartupOptionsDlg.cpp:1039).
+    #[test]
+    fn live_state_switches_exact_tab_hit_bands_on_pointer_down() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::default();
+        state.resize(1280, 720, &gui, &book);
+        let layout = options_dlg_layout(1280, 720, &gui, &book);
+
+        let second_tab = crate::GuiPoint::new(
+            layout.tabular.x as f32,
+            (layout.tabular.y + 92) as f32,
+        );
+        assert_eq!(
+            state.handle_pointer_down(second_tab),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Graphics)]
+        );
+        assert_eq!(state.active_sheet(), OptionsSheet::Graphics);
+        assert!(state.handle_pointer_up(second_tab).is_empty());
+
+        // One-pixel gap between first [20,90] and second [92,162] bands.
+        let gap = crate::GuiPoint::new(
+            layout.tabular.x as f32,
+            (layout.tabular.y + 91) as f32,
+        );
+        assert!(state.handle_pointer_down(gap).is_empty());
+        assert_eq!(state.active_sheet(), OptionsSheet::Graphics);
+    }
+
+    // C4StartupOptionsDlg.h:38-51 and C4GuiTabular.cpp:222-239: Left and
+    // Escape leave; Up/Down wrap the focused tabular. A focused GUI button
+    // activates on key-up (C4GuiButton.cpp:112-128).
+    #[test]
+    fn live_state_routes_options_keys_and_back_button_like_cpp() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::default();
+        state.resize(1280, 720, &gui, &book);
+
+        assert_eq!(
+            state.handle_key_down(crate::KeyCode::Up),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Network)]
+        );
+        assert_eq!(
+            state.handle_key_down(crate::KeyCode::Down),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Program)]
+        );
+        assert_eq!(state.handle_key_down(crate::KeyCode::Left), vec![OptionsDlgAction::Back]);
+        assert_eq!(state.handle_key_down(crate::KeyCode::Escape), vec![OptionsDlgAction::Back]);
+
+        assert!(state.handle_key_down(crate::KeyCode::Tab).is_empty());
+        assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
+        assert_eq!(state.handle_key_up(crate::KeyCode::Enter), vec![OptionsDlgAction::Back]);
+    }
+
+    // CallbackButton only fires if a left-down is released over the same
+    // control (C4GuiButton.cpp:130-154). The exact C4Rect edge is half-open.
+    #[test]
+    fn live_state_back_hit_test_requires_matching_press_and_release() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::default();
+        state.resize(1280, 720, &gui, &book);
+        let back = options_dlg_layout(1280, 720, &gui, &book).back_button;
+        let inside = crate::GuiPoint::new(back.x as f32, back.y as f32);
+        let outside = crate::GuiPoint::new((back.x + back.w) as f32, back.y as f32);
+
+        assert!(state.handle_pointer_down(inside).is_empty());
+        assert!(state.handle_pointer_up(outside).is_empty());
+        assert!(state.handle_pointer_down(inside).is_empty());
+        assert_eq!(state.handle_pointer_up(inside), vec![OptionsDlgAction::Back]);
+    }
+
     // DrawLineDw is GL_LINES between pixel centers (StdGL.cpp:893-934): by
     // the diamond-exit rule the END pixel is not rasterized, in either
     // direction. Blending is (255-A)/255 of the inverted-alpha color.
@@ -1461,9 +1838,16 @@ mod tests {
         };
         let gui = endeavour_font_set();
         let book = book_fonts();
-        let state = ProgramSheetState::default();
+        let state = OptionsDlgState::default();
         let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        OptionsDlgScreen::render(&mut surface, &assets, &gui, &book, &state, Some(standard_gamma()));
+        OptionsDlgScreen::render_state(
+            &mut surface,
+            &assets,
+            &gui,
+            &book,
+            &state,
+            Some(standard_gamma()),
+        );
         // Final whole-surface gamma pass (mirrors render_startup_frame).
         standard_gamma().apply_to_surface(&mut surface);
         std::fs::create_dir_all("/tmp/menu-parity-options").expect("mkdir");

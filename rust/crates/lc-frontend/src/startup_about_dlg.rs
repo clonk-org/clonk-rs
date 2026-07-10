@@ -7,7 +7,7 @@
 
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::startup_main_menu::{draw_bar, IntRect};
-use crate::ImageData;
+use crate::{GuiPoint, ImageData, KeyCode};
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
 use lc_graphics::{GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
@@ -253,6 +253,218 @@ pub struct AboutDlgAssets {
     pub scroll: ImageData,
 }
 
+/// Visible page of `C4StartupAboutDlg` (`aboutPages`, cpp:286-312).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AboutPage {
+    #[default]
+    Credits,
+    Licenses,
+}
+
+/// Observable callbacks from the About dialog. Page changes are applied to
+/// [`AboutDlgState`] immediately; update checking deliberately remains an
+/// external request (`C4StartupAboutDlg::OnUpdateBtn`, cpp:377-380).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AboutDlgAction {
+    Back,
+    CheckForUpdates,
+    PageChanged(AboutPage),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AboutButton {
+    Back,
+    Update,
+    Licenses,
+}
+
+impl AboutButton {
+    const ALL: [Self; 3] = [Self::Back, Self::Update, Self::Licenses];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Back => 0,
+            Self::Update => 1,
+            Self::Licenses => 2,
+        }
+    }
+}
+
+/// Live controller/presentation state for the pixel-parity About dialog.
+/// The C++ dialog has no initial focus; mouse-down focuses a button and a
+/// matching mouse/key release invokes it.
+pub struct AboutDlgState {
+    page: AboutPage,
+    layout: Option<AboutLayout>,
+    pointer_position: Option<GuiPoint>,
+    hovered: Option<AboutButton>,
+    pressed: Option<AboutButton>,
+    focused: Option<AboutButton>,
+}
+
+impl Default for AboutDlgState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AboutDlgState {
+    pub const fn new() -> Self {
+        Self {
+            page: AboutPage::Credits,
+            layout: None,
+            pointer_position: None,
+            hovered: None,
+            pressed: None,
+            focused: None,
+        }
+    }
+
+    pub fn resize(&mut self, width: i32, height: i32) {
+        self.layout = Some(about_layout(width.max(1), height.max(1)));
+        self.hovered = self.pointer_position.and_then(|point| self.hit_test(point));
+    }
+
+    pub const fn current_page(&self) -> AboutPage {
+        self.page
+    }
+
+    pub const fn pointer_position(&self) -> Option<GuiPoint> {
+        self.pointer_position
+    }
+
+    pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
+        self.pointer_position = position;
+        self.hovered = position.and_then(|point| self.hit_test(point));
+        if position.is_none() {
+            self.pressed = None;
+        }
+    }
+
+    pub fn pointer_left(&mut self) {
+        self.set_pointer_position(None);
+    }
+
+    pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<AboutDlgAction> {
+        self.set_pointer_position(Some(position));
+        Vec::new()
+    }
+
+    pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<AboutDlgAction> {
+        self.set_pointer_position(Some(position));
+        self.pressed = self.hovered;
+        if self.pressed.is_some() {
+            self.focused = self.pressed;
+        }
+        Vec::new()
+    }
+
+    pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<AboutDlgAction> {
+        self.set_pointer_position(Some(position));
+        let pressed = self.pressed.take();
+        match (pressed, self.hovered) {
+            (Some(button), Some(released)) if button == released => self.activate(button),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<AboutDlgAction> {
+        match key {
+            // Unlike the Back button, both dialog overrides leave directly,
+            // including from the license page (C4StartupAboutDlg.h:36-39).
+            KeyCode::Escape => {
+                self.pressed = None;
+                vec![AboutDlgAction::Back]
+            }
+            KeyCode::Tab => {
+                self.pressed = None;
+                self.advance_focus();
+                Vec::new()
+            }
+            KeyCode::Enter => match self.focused.filter(|button| self.is_visible(*button)) {
+                Some(button) => {
+                    self.pressed = Some(button);
+                    Vec::new()
+                }
+                None => vec![AboutDlgAction::Back],
+            },
+            KeyCode::Space => {
+                self.pressed = self.focused.filter(|button| self.is_visible(*button));
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<AboutDlgAction> {
+        if !matches!(key, KeyCode::Enter | KeyCode::Space) {
+            return Vec::new();
+        }
+        self.pressed
+            .take()
+            .filter(|button| self.focused == Some(*button) && self.is_visible(*button))
+            .map(|button| self.activate(button))
+            .unwrap_or_default()
+    }
+
+    fn activate(&mut self, button: AboutButton) -> Vec<AboutDlgAction> {
+        match button {
+            AboutButton::Back if self.page == AboutPage::Licenses => {
+                self.page = AboutPage::Credits;
+                self.hovered = self.pointer_position.and_then(|point| self.hit_test(point));
+                vec![AboutDlgAction::PageChanged(self.page)]
+            }
+            AboutButton::Back => vec![AboutDlgAction::Back],
+            AboutButton::Update => vec![AboutDlgAction::CheckForUpdates],
+            AboutButton::Licenses if self.page == AboutPage::Credits => {
+                self.page = AboutPage::Licenses;
+                self.hovered = self.pointer_position.and_then(|point| self.hit_test(point));
+                vec![AboutDlgAction::PageChanged(self.page)]
+            }
+            AboutButton::Licenses => Vec::new(),
+        }
+    }
+
+    fn advance_focus(&mut self) {
+        let visible: Vec<_> = AboutButton::ALL
+            .iter()
+            .copied()
+            .filter(|button| self.is_visible(*button))
+            .collect();
+        if visible.is_empty() {
+            self.focused = None;
+            return;
+        }
+        self.focused = self
+            .focused
+            .and_then(|focused| visible.iter().position(|button| *button == focused))
+            .map(|index| visible[(index + 1) % visible.len()])
+            .or_else(|| visible.first().copied());
+    }
+
+    fn hit_test(&self, point: GuiPoint) -> Option<AboutButton> {
+        let layout = self.layout.as_ref()?;
+        AboutButton::ALL
+            .iter()
+            .copied()
+            .filter(|button| self.is_visible(*button))
+            .find(|button| about_rect_contains(&layout.buttons[button.index()], point))
+    }
+
+    const fn is_visible(&self, button: AboutButton) -> bool {
+        !matches!((self.page, button), (AboutPage::Licenses, AboutButton::Licenses))
+    }
+
+    fn is_pressed(&self, button: AboutButton) -> bool {
+        matches!(self.pressed, Some(pressed) if pressed == button)
+    }
+}
+
+fn about_rect_contains(rect: &IntRect, point: GuiPoint) -> bool {
+    let (x, y) = (point.x.floor() as i32, point.y.floor() as i32);
+    x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
+}
+
 /// C4GUI_Caption2FontClr / C4GUI_ButtonFontClr / FullscreenCaptionFontClr
 /// 0xffffff00 after MakeColorReadableOnBlack forces alpha 0xff (C4Gui.h:54,
 /// 56, 164; C4Gui.cpp:71-90).
@@ -291,15 +503,27 @@ fn draw_scrollbar(
     crate::draw_image_strip(surface, x, y + 16, scroll, 16, 16, 16, 16, gamma);
 }
 
-/// Renders the first-shown state of C4StartupAboutDlg (page 0, no fade, no
-/// hover/focus) in the exact C++ draw order (about.md §"Exact draw order").
+/// Renders the live state of C4StartupAboutDlg in the C++ draw order
+/// (about.md §"Exact draw order").
 pub struct AboutDlgScreen;
 
 impl AboutDlgScreen {
+    /// Source-compatible first-shown renderer. New callers with live input
+    /// state should use [`Self::render_state`].
     pub fn render(
         surface: &mut Surface,
         assets: &AboutDlgAssets,
         fonts: &ClonkFontSet,
+        gamma: Option<&GammaRamp>,
+    ) {
+        Self::render_state(surface, assets, fonts, &AboutDlgState::default(), gamma);
+    }
+
+    pub fn render_state(
+        surface: &mut Surface,
+        assets: &AboutDlgAssets,
+        fonts: &ClonkFontSet,
+        state: &AboutDlgState,
         gamma: Option<&GammaRamp>,
     ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
@@ -341,22 +565,31 @@ impl AboutDlgScreen {
         // C4GuiButton.cpp:81-109): barButton 3-slice, then the caption in the
         // largest GUI font fitting Hgt-2 (CaptionFont at 32px), yellow,
         // centered at ((x0+x1)/2, (y0+y1-lh)/2).
-        for (rect, label) in layout.buttons.iter().zip(BUTTON_LABELS) {
+        for (index, (rect, label)) in layout.buttons.iter().zip(BUTTON_LABELS).enumerate() {
+            let button = AboutButton::ALL[index];
+            if !state.is_visible(button) {
+                continue;
+            }
             let bar = GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32);
             draw_bar(surface, &bar, &assets.button, gamma);
             let font = fonts.button_font(rect.h);
             let (caption, _) = expand_hotkey_markup(label);
             let (x1, y1) = (rect.x + rect.w - 1, rect.y + rect.h - 1);
+            let pressed_offset = i32::from(state.is_pressed(button));
             font.draw_with_gamma(
                 surface,
-                (rect.x + x1) / 2,
-                (rect.y + y1 - font.line_height) / 2,
+                (rect.x + x1) / 2 + pressed_offset,
+                (rect.y + y1 - font.line_height) / 2 + pressed_offset,
                 &caption,
                 YELLOW,
                 TextAlign::Center,
                 true,
                 gamma,
             );
+        }
+
+        if state.current_page() != AboutPage::Credits {
+            return;
         }
 
         // 7+. Credits sections: caption label, then the TextWindow rows
@@ -505,6 +738,89 @@ mod tests {
         assert_eq!(overflowing, vec!["Scripting"]);
         // Scripting: content 254 > viewport 226 (9 rows; row 9 clipped).
         assert_eq!(content_height(&font, 9), 254);
+    }
+
+    // Buttons invoke callbacks only after a matching down/up
+    // (C4GuiButton.cpp:130-154). Update checking remains an external action
+    // (`C4StartupAboutDlg::OnUpdateBtn`, cpp:377-380).
+    #[test]
+    fn live_state_hits_exact_about_buttons_and_emits_update_request() {
+        let mut state = AboutDlgState::default();
+        state.resize(1280, 720);
+        let layout = about_layout(1280, 720);
+        let update = layout.buttons[1];
+        let point = crate::GuiPoint::new(update.x as f32, update.y as f32);
+
+        assert!(state.handle_pointer_down(point).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(point),
+            vec![AboutDlgAction::CheckForUpdates]
+        );
+
+        // x2 is the Licenses button's x0 at 1280px, so step above the row to
+        // test the Update rectangle's half-open edge without hitting it.
+        let outside = crate::GuiPoint::new(
+            (update.x + update.w) as f32,
+            (update.y - 1) as f32,
+        );
+        assert!(state.handle_pointer_down(outside).is_empty());
+        assert!(state.handle_pointer_up(outside).is_empty());
+    }
+
+    // OnAdvanceButton shows page 1 and hides itself; the Back *button* walks
+    // to page 0 before leaving (C4StartupAboutDlg.h:39-40, cpp:361-375).
+    #[test]
+    fn live_state_licenses_and_back_follow_cpp_page_stack() {
+        let mut state = AboutDlgState::default();
+        state.resize(1280, 720);
+        let layout = about_layout(1280, 720);
+        let licenses = layout.buttons[2];
+        let licenses_point = crate::GuiPoint::new(licenses.x as f32, licenses.y as f32);
+
+        state.handle_pointer_down(licenses_point);
+        assert_eq!(
+            state.handle_pointer_up(licenses_point),
+            vec![AboutDlgAction::PageChanged(AboutPage::Licenses)]
+        );
+        assert_eq!(state.current_page(), AboutPage::Licenses);
+        assert!(state.handle_pointer_down(licenses_point).is_empty());
+        assert!(state.handle_pointer_up(licenses_point).is_empty());
+
+        let back = layout.buttons[0];
+        let back_point = crate::GuiPoint::new(back.x as f32, back.y as f32);
+        state.handle_pointer_down(back_point);
+        assert_eq!(
+            state.handle_pointer_up(back_point),
+            vec![AboutDlgAction::PageChanged(AboutPage::Credits)]
+        );
+        state.handle_pointer_down(back_point);
+        assert_eq!(state.handle_pointer_up(back_point), vec![AboutDlgAction::Back]);
+    }
+
+    // No control has focus on first show. Therefore dialog Enter leaves;
+    // Tab selects Back, Update, Licenses in add order, and a focused button
+    // activates on key-up (C4GuiDialogs.cpp:616-646; C4GuiButton.cpp:112-128).
+    #[test]
+    fn live_state_keyboard_focus_and_activation_match_about_dialog() {
+        let mut state = AboutDlgState::default();
+        state.resize(1280, 720);
+        assert_eq!(state.handle_key_down(crate::KeyCode::Enter), vec![AboutDlgAction::Back]);
+
+        assert!(state.handle_key_down(crate::KeyCode::Tab).is_empty()); // Back
+        assert!(state.handle_key_down(crate::KeyCode::Tab).is_empty()); // Update
+        assert!(state.handle_key_down(crate::KeyCode::Space).is_empty());
+        assert_eq!(
+            state.handle_key_up(crate::KeyCode::Space),
+            vec![AboutDlgAction::CheckForUpdates]
+        );
+
+        assert!(state.handle_key_down(crate::KeyCode::Tab).is_empty()); // Licenses
+        assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
+        assert_eq!(
+            state.handle_key_up(crate::KeyCode::Enter),
+            vec![AboutDlgAction::PageChanged(AboutPage::Licenses)]
+        );
+        assert_eq!(state.handle_key_down(crate::KeyCode::Escape), vec![AboutDlgAction::Back]);
     }
 
     // Renders the dialog at 1280x720 and dumps a PPM for the manual diff
