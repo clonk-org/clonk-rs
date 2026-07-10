@@ -5483,6 +5483,19 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlrJumpAndRunControl", get_plr_jump_and_run_control);
     script.register_host_function("DoHomebaseMaterial", do_homebase_material);
     script.register_host_function("DoHomebaseProduction", do_homebase_production);
+    script.register_host_function("AssignVar", set_var);
+    script.register_host_function("SetVar", set_var);
+    script.register_host_function("Not", legacy_not);
+    script.register_host_function("Or", legacy_or);
+    script.register_host_function("And", legacy_and);
+    script.register_host_function("BitAnd", legacy_bit_and);
+    script.register_host_function("Sum", legacy_sum);
+    script.register_host_function("Sub", legacy_sub);
+    script.register_host_function("Mul", legacy_mul);
+    script.register_host_function("Div", legacy_div);
+    script.register_host_function("LessThan", legacy_less_than);
+    script.register_host_function("GreaterThan", legacy_greater_than);
+    script.register_host_function("SEqual", legacy_s_equal);
     script.register_host_function("Random", random);
     script.register_host_function("SetGravity", set_gravity);
     script.register_host_function("GetGravity", get_gravity);
@@ -8162,6 +8175,148 @@ fn dispatch_effect_fx_callback(
     });
     global_carrier
         .and_then(|script| call_scoped_script_function_or_global(script, function, call_args))
+}
+
+fn legacy_arg_int(args: &[Value], index: usize, function: &str) -> Result<i32, RuntimeError> {
+    value_to_i32(
+        args.get(index).unwrap_or(&Value::Nil),
+        function,
+        &format!("argument {}", index + 1),
+    )
+}
+
+fn legacy_not(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new("Not expects at most 1 argument"));
+    }
+    Ok(Value::Bool(
+        !args.first().unwrap_or(&Value::Nil).as_bool(),
+    ))
+}
+
+fn legacy_or(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 5 {
+        return Err(RuntimeError::new("Or expects at most 5 arguments"));
+    }
+    Ok(Value::Bool(args.iter().any(Value::as_bool)))
+}
+
+fn legacy_and(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new("And expects at most 2 arguments"));
+    }
+    Ok(Value::Bool(
+        (0..2).all(|index| args.get(index).unwrap_or(&Value::Nil).as_bool()),
+    ))
+}
+
+fn legacy_bit_and(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new("BitAnd expects at most 2 arguments"));
+    }
+    Ok(Value::Int(
+        legacy_arg_int(args, 0, "BitAnd")? & legacy_arg_int(args, 1, "BitAnd")?,
+    ))
+}
+
+fn legacy_sum(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 4 {
+        return Err(RuntimeError::new("Sum expects at most 4 arguments"));
+    }
+    (0..4)
+        .try_fold(0_i32, |sum, index| {
+            Ok(sum.wrapping_add(legacy_arg_int(args, index, "Sum")?))
+        })
+        .map(Value::Int)
+}
+
+fn legacy_sub(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 4 {
+        return Err(RuntimeError::new("Sub expects at most 4 arguments"));
+    }
+    let first = legacy_arg_int(args, 0, "Sub")?;
+    (1..4)
+        .try_fold(first, |difference, index| {
+            Ok(difference.wrapping_sub(legacy_arg_int(args, index, "Sub")?))
+        })
+        .map(Value::Int)
+}
+
+fn legacy_mul(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new("Mul expects at most 2 arguments"));
+    }
+    Ok(Value::Int(
+        legacy_arg_int(args, 0, "Mul")?.wrapping_mul(legacy_arg_int(args, 1, "Mul")?),
+    ))
+}
+
+fn legacy_div(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new("Div expects at most 2 arguments"));
+    }
+    let dividend = legacy_arg_int(args, 0, "Div")?;
+    let divisor = legacy_arg_int(args, 1, "Div")?;
+    Ok(Value::Int(if divisor == 0 {
+        0
+    } else {
+        dividend.wrapping_div(divisor)
+    }))
+}
+
+fn legacy_less_than(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "LessThan expects at most 2 arguments",
+        ));
+    }
+    Ok(Value::Int(i32::from(
+        legacy_arg_int(args, 0, "LessThan")? < legacy_arg_int(args, 1, "LessThan")?,
+    )))
+}
+
+fn legacy_greater_than(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "GreaterThan expects at most 2 arguments",
+        ));
+    }
+    Ok(Value::Int(i32::from(
+        legacy_arg_int(args, 0, "GreaterThan")? > legacy_arg_int(args, 1, "GreaterThan")?,
+    )))
+}
+
+fn legacy_s_equal(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new("SEqual expects at most 2 arguments"));
+    }
+    let string = |value: &Value, parameter: &str| match value {
+        Value::String(value) => Ok(value.clone()),
+        Value::Nil => Ok(String::new()),
+        other => Err(RuntimeError::new(format!(
+            "SEqual: expected string for {parameter}, got {}",
+            other.type_name()
+        ))),
+    };
+    let left = string(args.first().unwrap_or(&Value::Nil), "first argument")?;
+    let right = string(args.get(1).unwrap_or(&Value::Nil), "second argument")?;
+    Ok(Value::Int(i32::from(left == right)))
+}
+
+fn set_var(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new("SetVar expects at most 2 arguments"));
+    }
+    let index = legacy_arg_int(args, 0, "SetVar")?;
+    if !(0..AUL_MAX_PAR).contains(&index) {
+        return Ok(Value::Nil);
+    }
+    let value = args.get(1).cloned().unwrap_or(Value::Nil);
+    let Some(slots) = lc_script::caller_var_slots() else {
+        return Ok(Value::Nil);
+    };
+    slots.set(index, value.clone());
+    Ok(value)
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -22679,9 +22834,12 @@ mod tests {
         "AddMenuItem",
         "AddMessage",
         "AdjustWalkRotation",
+        "And",
         "Angle",
         "AnyContainer",
         "AppendCommand",
+        "AssignVar",
+        "BitAnd",
         "BlastFree",
         "BlastObject",
         "BoundBy",
@@ -22710,6 +22868,7 @@ mod tests {
         "DigFree",
         "DigFreeRect",
         "Distance",
+        "Div",
         "DoCon",
         "DoDamage",
         "DoEnergy",
@@ -22836,6 +22995,7 @@ mod tests {
         "GetYDir",
         "GrabContents",
         "GrabObjectInfo",
+        "GreaterThan",
         "InLiquid",
         "Incinerate",
         "IncinerateLandscape",
@@ -22844,6 +23004,7 @@ mod tests {
         "Jump",
         "LandscapeHeight",
         "LandscapeWidth",
+        "LessThan",
         "Log",
         "MakeCrewMember",
         "Material",
@@ -22851,7 +23012,9 @@ mod tests {
         "Message",
         "Min",
         "Mod",
+        "Mul",
         "NoContainer",
+        "Not",
         "Object",
         "ObjectCall",
         "ObjectCount",
@@ -22859,6 +23022,7 @@ mod tests {
         "ObjectDistance",
         "ObjectSetAction",
         "OnFire",
+        "Or",
         "PathFree",
         "PlayerMessage",
         "PlrMessage",
@@ -22872,6 +23036,7 @@ mod tests {
         "RemoveObject",
         "ResetGamma",
         "ResetPhysical",
+        "SEqual",
         "ScriptGo",
         "SelectMenuItem",
         "SetAction",
@@ -22924,6 +23089,7 @@ mod tests {
         "SetSolidMask",
         "SetTemperature",
         "SetTransferZone",
+        "SetVar",
         "SetVertex",
         "SetViewOffset",
         "SetVisibility",
@@ -22939,6 +23105,8 @@ mod tests {
         "SoundLevel",
         "Sqrt",
         "Stuck",
+        "Sub",
+        "Sum",
         "TrainPhysical",
         "WildcardMatch",
     ];
@@ -22953,6 +23121,41 @@ mod tests {
             .map(|name| name.to_string())
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn legacy_butterfly_helpers_match_cpp() {
+        // The tutorial `_BTF` script uses the old wrapper functions registered
+        // by C4Script.cpp:6679-6701 and caller Var slots from :3372-3396.
+        // Missing operands are the VM's nil slots and convert to 0/false.
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                r#"
+                #strict
+                func Probe() {
+                    SetVar(0, Sum(1, 2));
+                    SetVar(1, GreaterThan(4));
+                    SetVar(2, LessThan(-1));
+                    return [Var(0), Var(1), Var(2), SEqual("Fly", "Fly"),
+                            Not(0), Or(0, 0, 1)];
+                }
+                "#,
+            )
+            .expect("legacy helper probe compiles");
+
+        assert_eq!(
+            engine.call("Probe", &[]).expect("legacy helpers run"),
+            Value::Array(vec![
+                Value::Int(3),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Bool(true),
+                Value::Bool(true),
+            ])
+        );
     }
 
     fn empty_state() -> Value {
