@@ -1948,16 +1948,11 @@ impl<'a> Vm<'a> {
 
     fn eval_index(&self, collection: Value, index: Value) -> Result<Value, RuntimeError> {
         match (&collection, index) {
-            (Value::Array(elements), Value::Int(raw_index)) => {
-                if raw_index < 0 {
-                    return Err(RuntimeError::new("array index cannot be negative"));
-                }
-                let index = raw_index as usize;
-                elements
-                    .get(index)
-                    .cloned()
-                    .ok_or_else(|| RuntimeError::new("array index out of bounds"))
-            }
+            (Value::Array(elements), Value::Int(raw_index)) => Ok(usize::try_from(raw_index)
+                .ok()
+                .and_then(|index| elements.get(index))
+                .cloned()
+                .unwrap_or(Value::Nil)),
             (Value::Proplist(entries), Value::String(key)) => {
                 Ok(entries.get(&key).cloned().unwrap_or(Value::Nil))
             }
@@ -2969,6 +2964,23 @@ mod tests {
         "#;
         let result = execute_script(source, "Test", &[]).unwrap();
         assert_eq!(result, Value::Int(99));
+    }
+
+    #[test]
+    fn vm_array_value_access_returns_nil_outside_bounds_like_cpp() {
+        // AB_ARRAYA_V passes noref=true to C4Value::GetContainerElement
+        // (C4AulExec.cpp:906-918), which Set0()s the result whenever the
+        // array does not have the requested index (C4Value.cpp:207-214).
+        let source = "func Test(index) { var arr = [1]; return arr[index]; }";
+
+        assert_eq!(
+            execute_script(source, "Test", &[Value::Int(1)]).expect("read succeeds"),
+            Value::Nil
+        );
+        assert_eq!(
+            execute_script(source, "Test", &[Value::Int(-1)]).expect("read succeeds"),
+            Value::Nil
+        );
     }
 
     #[test]
