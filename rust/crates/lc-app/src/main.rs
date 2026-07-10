@@ -72,9 +72,9 @@ use lc_engine::{
 use lc_frontend::{
     default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas,
     DefinitionSprite, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData,
-    InputDispatcher, KeyCode, MainMenuAction, MainMenuItem, MaterialRenderInfo, PlayerOverlay,
-    ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction,
-    ViewportInput, ViewportPointer,
+    InputDispatcher, InventoryOverlay, KeyCode, MainMenuAction, MainMenuItem, MaterialRenderInfo,
+    PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
+    StartupMenuAction, ViewportInput, ViewportPointer,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::{ButtonTextures, Rect as GuiRect};
@@ -10220,6 +10220,7 @@ impl GameApp {
                 startup_hint_owner,
                 &self.bindings,
             );
+            populate_crew_inventories(&self.engine, &self.snapshot, &mut players);
             self.populate_crew_infos(&mut players);
             self.populate_crew_portraits(&mut players);
             // Command rows for the local player's real cursor
@@ -12392,6 +12393,119 @@ fn collect_player_overlays(
         });
     }
     players
+}
+
+/// Populate the real cursor's inventory presentation. C++ only reaches the
+/// contents list after resolving `C4Player::Cursor`/`ViewCursor`
+/// (src/C4Viewport.cpp:888-917); non-cursor crew therefore retain an empty
+/// presentation list.
+fn populate_crew_inventories(
+    engine: &Engine,
+    snapshot: &SimulationSnapshot,
+    players: &mut [PlayerOverlay],
+) {
+    for player in players {
+        let cursor = player.cursor;
+        for crew in &mut player.crew {
+            crew.inventory = (cursor == Some(crew.object_id))
+                .then(|| collect_crew_inventory(engine, snapshot, crew.object_id, player.owner_color))
+                .unwrap_or_default();
+        }
+    }
+}
+
+fn collect_crew_inventory(
+    engine: &Engine,
+    snapshot: &SimulationSnapshot,
+    crew_id: ObjectId,
+    fallback_color: Color,
+) -> Vec<InventoryOverlay> {
+    let Some(crew) = snapshot.object(crew_id) else {
+        return Vec::new();
+    };
+    let mut groups: Vec<InventoryOverlay> = Vec::new();
+
+    for child_id in &crew.contents {
+        let Some(child) = snapshot
+            .object(*child_id)
+            .filter(|child| child.status.is_active())
+        else {
+            continue;
+        };
+        let owner_color = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == child.owner)
+            .and_then(|player| player.color)
+            .map(|color| Color::opaque(color.r, color.g, color.b))
+            .unwrap_or_else(|| {
+                if child.owner == crew.owner {
+                    fallback_color
+                } else {
+                    default_owner_color(child.owner)
+                }
+            });
+        let picture = inventory_definition_picture(engine, &child.definition_id, owner_color);
+
+        // Best available approximation of C4Object::CanConcatPictureWith
+        // (src/C4Object.cpp:6173-6213). The snapshot models the definition,
+        // name, blit mode, graphics variant and overlays; comparing the
+        // resolved owner-colored picture also separates available ColorByOwner
+        // differences. Per-object ColorMod/PictureRect and DefCore
+        // AllowPictureStack are not snapshotted yet, and custom graphics/
+        // picture overlays are not composed into this picture, so those exact
+        // custom-picture cases remain a documented presentation gap.
+        let existing = groups.iter().position(|group| {
+            snapshot.object(group.object_id).is_some_and(|representative| {
+                representative.definition_id == child.definition_id
+                    && representative.custom_name == child.custom_name
+                    && representative.blit_mode == child.blit_mode
+                    && representative.base_graphics == child.base_graphics
+                    && representative.graphics_overlays == child.graphics_overlays
+                    && group.picture == picture
+            })
+        });
+        if let Some(index) = existing {
+            groups[index].count += 1;
+        } else {
+            groups.push(InventoryOverlay {
+                object_id: child.id,
+                definition_id: child.definition_id.clone(),
+                picture,
+                count: 1,
+            });
+        }
+    }
+
+    groups
+}
+
+fn inventory_definition_picture(
+    engine: &Engine,
+    definition_id: &str,
+    owner_color: Color,
+) -> Option<ImageData> {
+    let image = engine.definition_picture_image(definition_id)?;
+    let width = image.width();
+    let height = image.height();
+    let source = image.pixels();
+    let Some(mask) = image.color_mask() else {
+        return Some(ImageData::from_arc(width, height, source));
+    };
+    let mut pixels = source.to_vec();
+    for (pixel, amount) in pixels.chunks_exact_mut(4).zip(mask.iter().copied()) {
+        let amount = u16::from(amount);
+        let inverse = 255_u16 - amount;
+        for (channel, owner) in pixel[..3]
+            .iter_mut()
+            .zip([owner_color.r, owner_color.g, owner_color.b])
+        {
+            let base = u16::from(*channel) * inverse / 255;
+            let tint = u16::from(owner) * amount / 255;
+            *channel = base.saturating_add(tint).min(255) as u8;
+        }
+    }
+    Some(ImageData::new(width, height, pixels))
 }
 
 fn select_focus_candidate(
@@ -14851,6 +14965,111 @@ mod tests {
         assert!((other_entry.energy_fraction - 0.4).abs() < f32::EPSILON);
         assert_eq!(other_entry.object_id, teammate);
         assert!(other_entry.portrait.is_none());
+    }
+
+    #[test]
+    fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
+        // DrawCursorInfo forwards the cursor's ordered Contents to DrawIDList
+        // (src/C4Viewport.cpp:911-917). DrawIDList keeps each group's first
+        // occurrence, uses that object's picture and reports the group count
+        // (src/C4ObjectList.cpp:343-372,849-903).
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root")
+            .to_path_buf();
+        let flag_group = Group::open(
+            repository.join("content/Objects.c4d/Items.c4d/Equipment.c4d/Flag.c4d"),
+        )
+        .expect("open real FLAG definition");
+        let flag_resource = lc_resources::ResourceDefinition::load(&flag_group)
+            .expect("load real FLAG definition");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_resource(&flag_resource).expect("compile real FLAG definition"),
+            )
+            .expect("register FLAG");
+        engine
+            .register_definition(
+                Definition::from_script("ROCK", "Rock", "").expect("compile ROCK definition"),
+            )
+            .expect("register ROCK");
+
+        let crew_id = ObjectId::new(1);
+        let flag_a = ObjectId::new(2);
+        let rock = ObjectId::new(3);
+        let flag_b = ObjectId::new(4);
+        let mut crew = make_object(crew_id.as_u64(), "CLNK", Vector2::ZERO);
+        crew.owner = 0;
+        crew.contents = vec![flag_a, rock, flag_b];
+        let mut first_flag = make_object(flag_a.as_u64(), "FLAG", Vector2::ZERO);
+        first_flag.owner = 0;
+        first_flag.crew_member = false;
+        first_flag.container = Some(crew_id);
+        let mut rock_object = make_object(rock.as_u64(), "ROCK", Vector2::ZERO);
+        rock_object.owner = 0;
+        rock_object.crew_member = false;
+        rock_object.container = Some(crew_id);
+        let mut second_flag = make_object(flag_b.as_u64(), "FLAG", Vector2::ZERO);
+        second_flag.owner = 0;
+        second_flag.crew_member = false;
+        second_flag.container = Some(crew_id);
+        let mut snapshot = make_snapshot(
+            vec![crew, first_flag, rock_object, second_flag],
+            vec![HudPlayerSnapshot {
+                owner: 0,
+                crew: vec![crew_id],
+                focus: Some(crew_id),
+                eliminated: false,
+                wealth: 0,
+                score: 0,
+            }],
+        );
+        let owner_color = RgbColor::new(0xc0, 0x20, 0x40);
+        snapshot.players.push(PlayerState {
+            id: 0,
+            cursor: Some(crew_id),
+            crew: vec![crew_id],
+            color: Some(owner_color),
+            ..PlayerState::default()
+        });
+
+        let bindings = KeyboardBindings::load(None);
+        let mut overlays = collect_player_overlays(&snapshot, Some(crew_id), None, &bindings);
+        populate_crew_inventories(&engine, &snapshot, &mut overlays);
+
+        let inventory = &overlays[0].crew[0].inventory;
+        assert_eq!(inventory.len(), 2, "first-occurrence groups stay ordered");
+        assert_eq!(inventory[0].object_id, flag_a);
+        assert_eq!(inventory[0].definition_id, "FLAG");
+        assert_eq!(inventory[0].count, 2);
+        assert_eq!(inventory[1].object_id, rock);
+        assert_eq!(inventory[1].definition_id, "ROCK");
+        assert_eq!(inventory[1].count, 1);
+
+        let source = engine
+            .definition_picture_image("FLAG")
+            .expect("real FLAG picture");
+        let picture = inventory[0].picture.as_ref().expect("FLAG HUD picture");
+        assert_eq!((picture.width(), picture.height()), (64, 64));
+        let source_pixels = source.pixels();
+        let mask = source.color_mask().expect("FLAG ColorByOwner mask");
+        let sample = mask
+            .iter()
+            .position(|value| *value != 0)
+            .expect("FLAG picture has a colorized pixel");
+        let offset = sample * 4;
+        let amount = u16::from(mask[sample]);
+        let inverse = 255_u16 - amount;
+        let tint = [owner_color.r, owner_color.g, owner_color.b];
+        for (channel, owner) in tint.into_iter().enumerate() {
+            let expected = (u16::from(source_pixels[offset + channel]) * inverse / 255
+                + u16::from(owner) * amount / 255) as u8;
+            assert_eq!(picture.pixels()[offset + channel], expected);
+        }
+        assert_eq!(picture.pixels()[offset + 3], source_pixels[offset + 3]);
     }
 
     #[test]
