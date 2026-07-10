@@ -6,9 +6,8 @@ slices are recorded in `git log -- rust/ parity/`.
 ## Gate
 
 Workspace nextest, strict clippy, snapshots, and parity are green. Scenario
-load/apply and activation are 93/93; Tutorials 01–10 are warning-free for 1,200
-ticks. The pinned Goldrush comparator first diverges at frame 1077 (object 642:
-Rust `Breeze`, C++ `Still`).
+load/apply and activation are 93/93. The pinned Goldrush comparator first
+diverges at frame 1077 (object 642: Rust `Breeze`, C++ `Still`).
 
 ```sh
 cargo nextest run --workspace
@@ -28,8 +27,7 @@ rebuilt pinned live comparison.
   movement damping/clamping/collision behavior.
 - **Commands/objects:** pathfinding/Tick35, FLOAT, Exit/Throw, arrival/intervals,
   vehicle/linekit/dig/trade behavior, OCF/sectors/find order, containers,
-  initial-placement lifecycle, permanent crew/base state, elimination, and
-  rank/version gates.
+  permanent crew/base state, elimination, and rank/version gates.
 - **Script/network/state:** strict C4Value conversion/serialization, remaining
   DefCore/ActMap/effect/menu/callback order, object-info/evaluation payloads,
   control synchronization, and protocol/auth/league behavior.
