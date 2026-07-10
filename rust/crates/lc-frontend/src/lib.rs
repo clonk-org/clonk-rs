@@ -52,6 +52,8 @@ pub use startup_options::{ControlOptionItem, ControlOptionsAction, ControlOption
 
 const MIN_VIEWPORT_ZOOM: f32 = 0.125;
 const MAX_VIEWPORT_ZOOM: f32 = 4.0;
+/// `C4ViewportScrollBorder` (src/C4Constants.h:95).
+const VIEWPORT_SCROLL_BORDER: i32 = 40;
 const CAMERA_SMOOTHING_ALPHA: f32 = 0.2;
 const CAMERA_SNAP_THRESHOLD: f32 = 1.0;
 const CAMERA_JUMP_THRESHOLD: f32 = 256.0;
@@ -697,7 +699,11 @@ impl GraphicsSystem {
         viewports: &[ViewportInput<'_>],
     ) -> Vec<EngineSurfaceSnapshot> {
         self.active_viewports.clear();
-        self.surface.fill(Color::opaque(8, 12, 24)); // base fill before compositing viewports
+        if let Some(background) = self.hud_graphics.background.as_ref() {
+            tile_image_on_surface(&mut self.surface, background, 0, 0);
+        } else {
+            self.surface.fill(Color::opaque(8, 12, 24));
+        }
 
         let owner_colors = Self::collect_owner_colors(snapshot);
         let mut used_camera_keys = Vec::new();
@@ -749,10 +755,6 @@ impl GraphicsSystem {
             return;
         }
 
-        let format = self.surface.format();
-        let mut viewport_surface = Surface::new(rect.width, rect.height, format);
-        viewport_surface.fill(Color::opaque(0, 0, 0));
-
         let saved_surface_width = self.surface_width;
         let saved_surface_height = self.surface_height;
         let saved_viewport_x = self.viewport_x;
@@ -764,6 +766,17 @@ impl GraphicsSystem {
         self.surface_width = rect.width;
         self.surface_height = rect.height;
         self.update_world_dimensions(snapshot.landscape.as_ref());
+
+        let rect = self.centered_viewport_rect(rect);
+        let format = self.surface.format();
+        let mut viewport_surface = Surface::new(rect.width, rect.height, format);
+        if let Some(background) = self.hud_graphics.background.as_ref() {
+            tile_image_on_surface(&mut viewport_surface, background, rect.x, rect.y);
+        } else {
+            viewport_surface.fill(Color::opaque(0, 0, 0));
+        }
+        self.surface_width = rect.width;
+        self.surface_height = rect.height;
 
         let zoom = input.zoom.clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
         let world_width = if self.world_width > 0 {
@@ -883,26 +896,6 @@ impl GraphicsSystem {
         self.world_height = saved_world_height;
 
         blit_surface(&mut viewport_surface, &content_surface, offset_x, offset_y);
-        if content_surface.width() > 0 && content_surface.height() > 0 {
-            let content_width = content_surface.width() as i32;
-            let content_height = content_surface.height() as i32;
-            let offset_x_i32 = offset_x;
-            let offset_y_i32 = offset_y;
-            for y in 0..viewport_surface.height() as i32 {
-                for x in 0..viewport_surface.width() as i32 {
-                    let rel_x = x - offset_x_i32;
-                    let rel_y = y - offset_y_i32;
-                    if rel_x >= 0 && rel_x < content_width && rel_y >= 0 && rel_y < content_height {
-                        continue;
-                    }
-                    let sample_x = rel_x.clamp(0, content_width - 1) as u32;
-                    let sample_y = rel_y.clamp(0, content_height - 1) as u32;
-                    if let Some(color) = content_surface.get_pixel(sample_x, sample_y) {
-                        let _ = viewport_surface.set_pixel(x as u32, y as u32, color);
-                    }
-                }
-            }
-        }
         blit_surface(&mut self.surface, &viewport_surface, rect.x, rect.y);
 
         self.active_viewports.push(ActiveViewport {
@@ -919,6 +912,23 @@ impl GraphicsSystem {
             viewport_y: origin_y,
             zoom,
         });
+    }
+
+    /// `C4GraphicsSystem::RecalculateViewports` caps fullscreen viewport
+    /// output to the landscape plus the two scroll borders and centers the
+    /// result inside its layout cell (src/C4GraphicsSystem.cpp:384-396).
+    fn centered_viewport_rect(&self, area: SurfaceRect) -> SurfaceRect {
+        let border = VIEWPORT_SCROLL_BORDER.saturating_mul(2);
+        let max_width = self.world_width.max(1).saturating_add(border) as u32;
+        let max_height = self.world_height.max(1).saturating_add(border) as u32;
+        let width = area.width.min(max_width);
+        let height = area.height.min(max_height);
+        SurfaceRect::new(
+            area.x + area.width.saturating_sub(width) as i32 / 2,
+            area.y + area.height.saturating_sub(height) as i32 / 2,
+            width,
+            height,
+        )
     }
 
     fn collect_highlight_ids(
@@ -1133,19 +1143,7 @@ impl GraphicsSystem {
                 self.world_width = width;
             }
 
-            let mut max_surface_height = landscape
-                .surface()
-                .iter()
-                .copied()
-                .max()
-                .unwrap_or(self.fallback_ground_height);
-            if max_surface_height < self.fallback_ground_height {
-                max_surface_height = self.fallback_ground_height;
-            }
-            if max_surface_height <= 0 {
-                max_surface_height = self.surface_height as i32;
-            }
-            self.world_height = max_surface_height.max(1);
+            self.world_height = landscape.estimated_height().max(1);
         } else {
             if self.world_width <= 0 {
                 self.world_width = self.surface_width as i32;
@@ -3187,6 +3185,43 @@ impl GraphicsSystem {
     }
 }
 
+fn tile_image_on_surface(surface: &mut Surface, image: &ImageData, origin_x: i32, origin_y: i32) {
+    let image_width = image.width() as usize;
+    let image_height = image.height() as usize;
+    let surface_width = surface.width() as usize;
+    let surface_height = surface.height() as usize;
+    if image_width == 0 || image_height == 0 || surface_width == 0 || surface_height == 0 {
+        return;
+    }
+    let source = image.pixels();
+    let source_stride = image_width.saturating_mul(4);
+    let destination_stride = surface.stride();
+    if source.len() < source_stride.saturating_mul(image_height)
+        || destination_stride < surface_width.saturating_mul(4)
+    {
+        return;
+    }
+    let start_x = origin_x.rem_euclid(image_width as i32) as usize;
+    let destination = surface.pixels_mut();
+    for y in 0..surface_height {
+        let source_y = (origin_y + y as i32).rem_euclid(image_height as i32) as usize;
+        let source_row = &source[source_y * source_stride..(source_y + 1) * source_stride];
+        let destination_row = &mut destination
+            [y * destination_stride..y * destination_stride + surface_width * 4];
+        let mut destination_x = 0;
+        let mut source_x = start_x;
+        while destination_x < surface_width {
+            let copy_width = (image_width - source_x).min(surface_width - destination_x);
+            let source_start = source_x * 4;
+            let destination_start = destination_x * 4;
+            destination_row[destination_start..destination_start + copy_width * 4]
+                .copy_from_slice(&source_row[source_start..source_start + copy_width * 4]);
+            destination_x += copy_width;
+            source_x = 0;
+        }
+    }
+}
+
 fn blit_surface(dst: &mut Surface, src: &Surface, offset_x: i32, offset_y: i32) {
     if src.width() == 0 || src.height() == 0 {
         return;
@@ -4503,6 +4538,89 @@ mod tests {
     }
 
     #[test]
+    fn viewport_uses_the_landscape_world_height_below_the_surface_depth() {
+        // `GBackHgt` is the authoritative viewport bound; it is not inferred
+        // from the deepest solid column (C4Viewport.cpp:1160-1209).
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(320, 240);
+        let mut landscape = Landscape::flat(640, 300);
+        landscape.set_world_height(480);
+        snapshot.landscape = Some(landscape);
+        let mut graphics = GraphicsSystem::new(
+            640,
+            480,
+            300,
+            "Tutorial",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
+        graphics.render_frame(&snapshot, &viewports);
+
+        assert_eq!(graphics.active_viewports[0].content_rect.height, 480);
+    }
+
+    #[test]
+    fn small_world_viewport_is_centered_with_tiled_scroll_borders() {
+        // Fullscreen viewports are capped to GBackWdt/Hgt plus the two
+        // 40-pixel scroll borders (C4GraphicsSystem.cpp:384-396). Areas
+        // outside the viewport and its landscape borders tile Background.png
+        // (C4GraphicsSystem.cpp:285-290; C4Viewport.cpp:1030-1041).
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(320, 240);
+        let mut landscape = Landscape::flat(640, 300);
+        landscape.set_world_height(480);
+        snapshot.landscape = Some(landscape);
+        let background_color = Color::opaque(73, 41, 19);
+        let background = ImageData::new(
+            1,
+            1,
+            vec![
+                background_color.r,
+                background_color.g,
+                background_color.b,
+                background_color.a,
+            ],
+        );
+        let hud_graphics = Arc::new(HudGraphics {
+            background: Some(background),
+            ..HudGraphics::default()
+        });
+        let mut graphics = GraphicsSystem::new(
+            1_000,
+            800,
+            300,
+            "Tutorial",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            hud_graphics,
+        );
+
+        let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let viewport = &graphics.active_viewports[0];
+        assert_eq!(
+            (
+                viewport.rect.x,
+                viewport.rect.y,
+                viewport.rect.width,
+                viewport.rect.height
+            ),
+            (140, 120, 720, 560)
+        );
+        assert_eq!(graphics.surface().get_pixel(0, 0), Some(background_color));
+        assert_eq!(
+            graphics.surface().get_pixel(140, 120),
+            Some(background_color)
+        );
+    }
+
+    #[test]
     fn object_color_reflects_energy_level() {
         let snapshot = make_snapshot();
         let mut energized = snapshot.objects[0].clone();
@@ -5544,6 +5662,9 @@ mod tests {
         let mut daytime = make_snapshot();
         daytime.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
         daytime.objects[0].position = Vector2::new(150, 140);
+        // Keep the probe inside GBackHgt: C4Viewport clips landscape drawing
+        // at the borders (C4Viewport.cpp:1035-1041).
+        daytime.landscape = Some(Landscape::flat(256, 150));
 
         let mut day_view = GraphicsSystem::new(
             200,
