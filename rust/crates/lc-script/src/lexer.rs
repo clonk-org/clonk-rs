@@ -686,6 +686,38 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
+
+        // C4AulParse.cpp:711-723 changes a decimal token into TGS_C4ID
+        // when the first non-digit is uppercase or `_`. Hazard's HUD ids
+        // (`1HUD`, `2HUD`, `3HUD`) depend on this path.
+        if matches!(self.peek_char(), Some('A'..='Z' | '_')) {
+            while let Some(ch) = self.peek_char() {
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    let (idx, consumed, _, _) = self.bump_char().unwrap();
+                    end_idx = idx + consumed.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let lexeme = &self.input[start_idx..end_idx];
+            if lexeme.len() == 4
+                && lexeme
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+            {
+                return Ok(Token::new(
+                    TokenKind::C4Id(lexeme.to_string()),
+                    line,
+                    column,
+                ));
+            }
+            return Err(ParseError::new(
+                format!("invalid C4ID literal: {lexeme}"),
+                line,
+                column,
+            ));
+        }
+
         let slice = &self.input[start_idx..end_idx];
         match slice.parse::<i32>() {
             Ok(value) => Ok(Token::new(TokenKind::Number(value), line, column)),
@@ -898,6 +930,24 @@ mod tests {
         } else {
             panic!("Expected integer literal");
         }
+    }
+
+    #[test]
+    fn tokenizes_c4ids_starting_with_a_digit_like_cpp() {
+        // C4AulParse.cpp:711-723 promotes a decimal token to TGS_C4ID
+        // when its next character is uppercase or underscore.
+        let tokens = lex_all("1HUD 2HUD 3HUD").expect("numeric-leading C4IDs lex");
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.kind.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                TokenKind::C4Id("1HUD".to_string()),
+                TokenKind::C4Id("2HUD".to_string()),
+                TokenKind::C4Id("3HUD".to_string()),
+            ]
+        );
     }
 
     #[test]
