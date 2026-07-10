@@ -58,6 +58,150 @@ const CAMERA_SMOOTHING_ALPHA: f32 = 0.2;
 const CAMERA_SNAP_THRESHOLD: f32 = 1.0;
 const CAMERA_JUMP_THRESHOLD: f32 = 256.0;
 const PICK_TOLERANCE: f32 = 6.0;
+const MATERIAL_OVERLAY_EXACT: i32 = 1;
+const MATERIAL_OVERLAY_HUGE_ZOOM: i32 = 4;
+const MATERIAL_OVERLAY_MONOCHROME: i32 = 8;
+
+/// Presentation fields from one C4MaterialCore. Colors and alpha retain the
+/// C++ arrays verbatim: three RGB triplets and two sets of three transparency
+/// values (`0` opaque, `255` transparent).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaterialRenderInfo {
+    color: [u8; 9],
+    alpha: [u8; 6],
+    texture_overlay: Option<String>,
+    overlay_type: i32,
+    density: i32,
+}
+
+impl MaterialRenderInfo {
+    pub fn new(
+        color: [u8; 9],
+        alpha: [u8; 6],
+        texture_overlay: Option<String>,
+        overlay_type: i32,
+        density: i32,
+    ) -> Self {
+        Self {
+            color,
+            alpha,
+            texture_overlay,
+            overlay_type,
+            density,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MaterialPixel {
+    red: u8,
+    green: u8,
+    blue: u8,
+    transparency: u8,
+}
+
+fn lighten_material_channel(channel: u8) -> u8 {
+    if channel & 0x80 != 0 {
+        255
+    } else {
+        channel << 1
+    }
+}
+
+fn apply_material_pattern(
+    pixel: &mut MaterialPixel,
+    pattern: &ImageData,
+    x: i32,
+    y: i32,
+    zoom: i32,
+    monochrome: bool,
+) {
+    let width = pattern.width();
+    let height = pattern.height();
+    if width == 0 || height == 0 {
+        return;
+    }
+    let sample_x = if zoom == 0 { x } else { x / zoom };
+    let sample_y = if zoom == 0 { y } else { y / zoom };
+    let source = (((sample_y as u32 % height) * width + sample_x as u32 % width) * 4) as usize;
+    let data = pattern.pixels();
+    if source + 4 > data.len() {
+        return;
+    }
+
+    let modifiers = if monochrome {
+        [data[source + 2]; 3]
+    } else {
+        [data[source], data[source + 1], data[source + 2]]
+    };
+    pixel.red = lighten_material_channel(
+        ((u16::from(pixel.red) * u16::from(modifiers[0])) >> 8) as u8,
+    );
+    pixel.green = lighten_material_channel(
+        ((u16::from(pixel.green) * u16::from(modifiers[1])) >> 8) as u8,
+    );
+    pixel.blue = lighten_material_channel(
+        ((u16::from(pixel.blue) * u16::from(modifiers[2])) >> 8) as u8,
+    );
+    let pattern_transparency = 255u8.saturating_sub(data[source + 3]);
+    pixel.transparency = pixel
+        .transparency
+        .saturating_add(pattern_transparency);
+}
+
+fn compose_material_pixel(
+    material: &MaterialRenderInfo,
+    landscape_pixel: u8,
+    x: i32,
+    y: i32,
+    texture: &ImageData,
+    overlay: Option<&ImageData>,
+) -> Color {
+    let mut pixel = MaterialPixel {
+        red: material.color[0],
+        green: material.color[1],
+        blue: material.color[2],
+        transparency: material.alpha[if landscape_pixel & 0x80 == 0 { 0 } else { 3 }],
+    };
+    let primary_zoom = if material.overlay_type & MATERIAL_OVERLAY_HUGE_ZOOM != 0 {
+        4
+    } else if material.overlay_type & MATERIAL_OVERLAY_EXACT != 0 {
+        1
+    } else {
+        0
+    };
+    let monochrome = material.overlay_type & MATERIAL_OVERLAY_MONOCHROME != 0;
+    apply_material_pattern(
+        &mut pixel,
+        texture,
+        x,
+        y,
+        primary_zoom,
+        monochrome,
+    );
+    if let Some(overlay) = overlay {
+        let overlay_zoom = if material.overlay_type & MATERIAL_OVERLAY_EXACT != 0 {
+            1
+        } else {
+            2
+        };
+        apply_material_pattern(
+            &mut pixel,
+            overlay,
+            x,
+            y,
+            overlay_zoom,
+            monochrome,
+        );
+    }
+    Color::new(
+        pixel.red,
+        pixel.green,
+        pixel.blue,
+        255u8.saturating_sub(pixel.transparency),
+    )
+}
+
 const DEFAULT_PLAYER_COLORS: [Color; 12] = [
     Color::opaque(0xE8, 0x00, 0x00),
     Color::opaque(0x00, 0x00, 0xF4),
@@ -487,10 +631,8 @@ pub struct GraphicsSystem {
     /// plane samples them per pixel (C++ builds Surface32 from the same
     /// Material.c4g textures during MapToSurface).
     material_textures: Arc<HashMap<String, ImageData>>,
-    /// Material base colors (first Color= triplet): the landscape pixel
-    /// is base x texture, doubled — CPattern::PatternClr's ModulateClrA +
-    /// LightenClr (StdDDraw2.cpp:187-207).
-    material_colors: Arc<HashMap<String, [u8; 3]>>,
+    /// C4MaterialCore presentation fields by lowercase material name.
+    material_render_info: Arc<HashMap<String, MaterialRenderInfo>>,
     /// Cached RGBA render of the landscape plane, keyed by the pixel
     /// grid's revision.
     landscape_cache: Option<(u64, ImageData)>,
@@ -540,7 +682,7 @@ impl GraphicsSystem {
             camera_states: HashMap::new(),
             sky: None,
             material_textures: Arc::new(HashMap::new()),
-            material_colors: Arc::new(HashMap::new()),
+            material_render_info: Arc::new(HashMap::new()),
             landscape_cache: None,
         }
     }
@@ -567,8 +709,11 @@ impl GraphicsSystem {
         self.landscape_cache = None;
     }
 
-    pub fn set_material_colors(&mut self, colors: Arc<HashMap<String, [u8; 3]>>) {
-        self.material_colors = colors;
+    pub fn set_material_render_info(
+        &mut self,
+        render_info: Arc<HashMap<String, MaterialRenderInfo>>,
+    ) {
+        self.material_render_info = render_info;
         self.landscape_cache = None;
     }
 
@@ -1520,7 +1665,7 @@ impl GraphicsSystem {
         let Some(grid) = landscape.and_then(|landscape| landscape.pixel_grid()) else {
             return false;
         };
-        if self.material_textures.is_empty() {
+        if self.material_textures.is_empty() || self.material_render_info.is_empty() {
             return false;
         }
         let revision = grid.revision();
@@ -1535,65 +1680,89 @@ impl GraphicsSystem {
             let bytes = grid.bytes();
             let textures = grid.texture_names();
             let materials = grid.material_names();
-            // Per texmap slot: the texture image or a flat fallback color.
+            // Per texmap slot: C4TexMapEntry's primary pattern plus the
+            // material's secondary pattern.
             enum Slot<'a> {
                 Empty,
-                Texture(&'a ImageData, [u8; 3]),
-                Flat([u8; 4]),
+                Patterns {
+                    material: &'a MaterialRenderInfo,
+                    texture: &'a ImageData,
+                    overlay: Option<&'a ImageData>,
+                },
             }
             let slots: Vec<Slot> = (0..128usize)
                 .map(|index| {
-                    let base = materials
+                    let Some(material) = materials
                         .get(index)
                         .and_then(|name| name.as_deref())
-                        .and_then(|name| self.material_colors.get(&name.to_ascii_lowercase()))
-                        .copied()
-                        .unwrap_or([255, 255, 255]);
-                    let texture = textures
-                        .get(index)
-                        .and_then(|name| name.as_deref())
-                        .and_then(|name| self.material_textures.get(&name.to_ascii_lowercase()));
-                    if let Some(texture) = texture {
-                        return Slot::Texture(texture, base);
-                    }
-                    if materials.get(index).and_then(|name| name.as_ref()).is_some() {
-                        let flat = if base != [255, 255, 255] {
-                            [base[0], base[1], base[2], 255]
+                        .and_then(|name| {
+                            self.material_render_info
+                                .get(&name.to_ascii_lowercase())
+                        })
+                    else {
+                        return Slot::Empty;
+                    };
+                    let resolve_texture = |name: &str| {
+                        let name = if (25..50).contains(&material.density)
+                            && name.eq_ignore_ascii_case("Smooth")
+                        {
+                            "liquid".to_string()
                         } else {
-                            [120, 92, 56, 255]
+                            name.to_ascii_lowercase()
                         };
-                        return Slot::Flat(flat);
+                        self.material_textures.get(&name)
+                    };
+                    let Some(texture) = textures
+                        .get(index)
+                        .and_then(|name| name.as_deref())
+                        .and_then(resolve_texture)
+                    else {
+                        return Slot::Empty;
+                    };
+                    let overlay_name = material
+                        .texture_overlay
+                        .as_deref()
+                        .filter(|name| {
+                            self.material_textures
+                                .contains_key(&name.to_ascii_lowercase())
+                        })
+                        .unwrap_or("Smooth");
+                    Slot::Patterns {
+                        material,
+                        texture,
+                        overlay: resolve_texture(overlay_name),
                     }
-                    Slot::Empty
                 })
                 .collect();
             let mut pixels = vec![0u8; width as usize * height as usize * 4];
             for y in 0..height as usize {
                 for x in 0..width as usize {
                     let byte = bytes[y * width as usize + x];
+                    // Pixel zero is sky. C4Landscape::GetClrByTex only
+                    // applies material patterns when `pix` is nonzero
+                    // (C4Landscape.cpp:2622-2632).
+                    if byte == 0 {
+                        continue;
+                    }
                     let index = (byte & 0x7f) as usize;
                     let out = (y * width as usize + x) * 4;
                     match &slots[index] {
                         Slot::Empty => {}
-                        Slot::Flat(color) => pixels[out..out + 4].copy_from_slice(color),
-                        Slot::Texture(texture, base) => {
-                            let tw = texture.width().max(1) as usize;
-                            let th = texture.height().max(1) as usize;
-                            let src = ((y % th) * tw + (x % tw)) * 4;
-                            let data = texture.pixels();
-                            if src + 4 <= data.len() {
-                                // ModulateClrA + LightenClr
-                                // (CPattern::PatternClr): base x texture,
-                                // doubled and clamped.
-                                for channel in 0..3 {
-                                    let modulated = (base[channel] as u32
-                                        * data[src + channel] as u32)
-                                        / 255;
-                                    pixels[out + channel] =
-                                        (modulated * 2).min(255) as u8;
-                                }
-                                pixels[out + 3] = 255;
-                            }
+                        Slot::Patterns {
+                            material,
+                            texture,
+                            overlay,
+                        } => {
+                            let color = compose_material_pixel(
+                                material,
+                                byte,
+                                x as i32,
+                                y as i32,
+                                texture,
+                                *overlay,
+                            );
+                            pixels[out..out + 4]
+                                .copy_from_slice(&[color.r, color.g, color.b, color.a]);
                         }
                     }
                 }
@@ -1621,12 +1790,13 @@ impl GraphicsSystem {
                 if cache_pixels[src + 3] == 0 {
                     continue;
                 }
-                let color = Color::opaque(
+                let color = Color::new(
                     cache_pixels[src],
                     cache_pixels[src + 1],
                     cache_pixels[src + 2],
+                    cache_pixels[src + 3],
                 );
-                let _ = self.surface.set_pixel(screen_x, screen_y, color);
+                let _ = self.surface.blend_pixel(screen_x, screen_y, color);
             }
         }
         true
@@ -5810,5 +5980,193 @@ mod tests {
         );
         let expected = blend_color_over(liquid, sky);
         assert_eq!(pixel, expected);
+    }
+
+    #[test]
+    fn material_patterns_modulate_texmap_then_overlay_at_overlay_zoom() {
+        // C4Landscape::GetClrByTex applies the texmap pattern and then the
+        // material pattern (C4Landscape.cpp:2619-2633). CPattern samples the
+        // material overlay at zoom two and performs ModulateClrA + LightenClr
+        // (C4Material.cpp:374-377; StdDDraw2.cpp:187-207).
+        let material = MaterialRenderInfo::new(
+            [64, 96, 128, 0, 0, 0, 0, 0, 0],
+            [10, 0, 0, 0, 0, 0],
+            Some("Smooth".to_string()),
+            0,
+            50,
+        );
+        let rough = ImageData::new(
+            4,
+            1,
+            vec![
+                1, 1, 1, 255, 2, 2, 2, 255, 128, 64, 255, 235, 3, 3, 3, 255,
+            ],
+        );
+        let smooth = ImageData::new(2, 1, vec![4, 4, 4, 255, 64, 128, 32, 245]);
+
+        assert_eq!(
+            compose_material_pixel(&material, 1, 2, 0, &rough, Some(&smooth)),
+            Color::new(32, 48, 62, 215),
+        );
+    }
+
+    #[test]
+    fn material_ift_bit_selects_the_background_alpha_triplet() {
+        // Mat2Pal selects Alpha[0] for a foreground texmap byte and Alpha[3]
+        // for the same byte plus IFT (C4Landscape.cpp:2828-2845).
+        let material = MaterialRenderInfo::new(
+            [100, 110, 120, 0, 0, 0, 0, 0, 0],
+            [10, 0, 0, 70, 0, 0],
+            None,
+            0,
+            50,
+        );
+        let texture = ImageData::new(1, 1, vec![255, 255, 255, 255]);
+
+        let foreground = compose_material_pixel(&material, 1, 0, 0, &texture, None);
+        let background = compose_material_pixel(&material, 1 | 0x80, 0, 0, &texture, None);
+
+        assert_eq!(foreground.a, 245);
+        assert_eq!(background.a, 185);
+        assert_eq!(foreground.r, background.r);
+        assert_eq!(foreground.g, background.g);
+        assert_eq!(foreground.b, background.b);
+    }
+
+    #[test]
+    fn material_overlay_flags_control_primary_and_overlay_sampling() {
+        // C4TexMapEntry::Init uses HugeZoom=4 for the primary pattern;
+        // C4Material::CrossMapMaterials forces the secondary overlay to zoom
+        // two unless Exact selects one (C4Texture.cpp:91-102;
+        // C4Material.cpp:374-377).
+        let primary = ImageData::new(
+            4,
+            1,
+            vec![
+                32, 32, 32, 255, 16, 16, 16, 255, 8, 8, 8, 255, 64, 64, 64, 255,
+            ],
+        );
+        let white = ImageData::new(1, 1, vec![255, 255, 255, 255]);
+        let overlay = ImageData::new(
+            4,
+            1,
+            vec![
+                8, 8, 8, 255, 64, 64, 64, 255, 32, 32, 32, 255, 16, 16, 16, 255,
+            ],
+        );
+        let default = MaterialRenderInfo::new([128; 9], [0; 6], None, 0, 50);
+        let huge = MaterialRenderInfo::new(
+            [128; 9],
+            [0; 6],
+            None,
+            MATERIAL_OVERLAY_HUGE_ZOOM,
+            50,
+        );
+        let exact = MaterialRenderInfo::new(
+            [128; 9],
+            [0; 6],
+            None,
+            MATERIAL_OVERLAY_EXACT,
+            50,
+        );
+
+        assert_eq!(
+            compose_material_pixel(&default, 1, 3, 0, &primary, None).r,
+            64,
+        );
+        assert_eq!(
+            compose_material_pixel(&huge, 1, 3, 0, &primary, None).r,
+            32,
+        );
+        assert_eq!(
+            compose_material_pixel(&default, 1, 2, 0, &white, Some(&overlay)).r,
+            126,
+        );
+        assert_eq!(
+            compose_material_pixel(&exact, 1, 2, 0, &white, Some(&overlay)).r,
+            62,
+        );
+    }
+
+    #[test]
+    fn monochrome_material_patterns_use_the_blue_texture_channel() {
+        // CPattern::PatternClr passes the low byte of the BGRA dword to
+        // ModulateClrMonoA, i.e. the source texture's blue channel
+        // (StdDDraw2.cpp:195-205; StdPNGLibpng.cpp:200-223).
+        let mut pixel = MaterialPixel {
+            red: 64,
+            green: 96,
+            blue: 128,
+            transparency: 0,
+        };
+        let texture = ImageData::new(1, 1, vec![10, 20, 200, 255]);
+
+        apply_material_pattern(&mut pixel, &texture, 0, 0, 0, true);
+
+        assert_eq!([pixel.red, pixel.green, pixel.blue], [100, 150, 200]);
+    }
+
+    #[test]
+    fn textured_material_alpha_blends_over_the_rendered_sky() {
+        // C4Landscape::GetClrByTex stores the material transparency in
+        // Surface32 (C4Landscape.cpp:2619-2633), and BlitLandscape composites
+        // that surface over the already-rendered viewport (StdGL.cpp:578-580,
+        // 640-664). The Rust cache must not force the material opaque.
+        let landscape: Landscape = serde_json::from_value(serde_json::json!({
+            "width": 1,
+            "surface": [1],
+            "world_height": 1,
+            "pixels": {
+                "width": 1,
+                "height": 1,
+                "bytes": "01",
+                "texture_names": [null, "Rough"],
+                "densities": [0, 50],
+                "material_names": [null, "Earth"]
+            }
+        }))
+        .expect("pixel landscape");
+        let textures = HashMap::from([
+            (
+                "rough".to_string(),
+                ImageData::new(1, 1, vec![255, 255, 255, 255]),
+            ),
+            (
+                "smooth".to_string(),
+                ImageData::new(1, 1, vec![255, 255, 255, 255]),
+            ),
+        ]);
+        let materials = HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new(
+                [64, 0, 0, 0, 0, 0, 0, 0, 0],
+                [127, 0, 0, 0, 0, 0],
+                Some("Smooth".to_string()),
+                0,
+                50,
+            ),
+        )]);
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            1,
+            "Material alpha",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics
+            .surface_mut()
+            .set_pixel(0, 0, Color::opaque(10, 20, 30))
+            .expect("sky pixel");
+        graphics.set_material_textures(Arc::new(textures));
+        graphics.set_material_render_info(Arc::new(materials));
+
+        assert!(graphics.draw_ground_textured(Some(&landscape)));
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(Color::opaque(130, 9, 14)),
+        );
     }
 }

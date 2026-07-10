@@ -72,9 +72,9 @@ use lc_engine::{
 use lc_frontend::{
     default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas,
     DefinitionSprite, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData,
-    InputDispatcher, KeyCode, MainMenuAction, MainMenuItem, PlayerOverlay, ScenarioEntry,
-    ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput,
-    ViewportPointer,
+    InputDispatcher, KeyCode, MainMenuAction, MainMenuItem, MaterialRenderInfo, PlayerOverlay,
+    ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction,
+    ViewportInput, ViewportPointer,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::{ButtonTextures, Rect as GuiRect};
@@ -2886,10 +2886,10 @@ struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
     sky: Option<SkyRenderState>,
-    /// Landscape texture pngs + material base colors (re-applied on
+    /// Landscape texture pngs + material render metadata (re-applied on
     /// every GraphicsSystem rebuild, like the sky).
     material_texture_images: Arc<HashMap<String, ImageData>>,
-    material_base_colors: Arc<HashMap<String, [u8; 3]>>,
+    material_render_info: Arc<HashMap<String, MaterialRenderInfo>>,
     /// System.c4g global script sources, loaded once at boot for every
     /// fresh game engine (the C++ `Game.ScriptEngine` scripts).
     system_scripts: Vec<(String, String)>,
@@ -4937,13 +4937,45 @@ fn candidate_material_paths(paths: &AppPaths) -> Vec<PathBuf> {
     candidates
 }
 
-/// Texture pngs from every reachable Material.c4g (planet, content,
-/// scenario) keyed by lowercase basename — the landscape plane samples
-/// them per pixel (C4Landscape::MapToSurface composition).
-/// First Color= triplet per material (lowercase name) across the
-/// scenario-local and shared material groups.
-fn load_material_colors(scenario_path: &Path) -> HashMap<String, [u8; 3]> {
-    let mut colors = HashMap::new();
+fn material_value_array<const N: usize>(values: Option<Vec<i32>>) -> [u8; N] {
+    let mut result = [0; N];
+    values
+        .into_iter()
+        .flatten()
+        .take(N)
+        .enumerate()
+        .for_each(|(index, value)| result[index] = value as u8);
+    result
+}
+
+fn material_render_info(
+    material: &lc_resources::MaterialDefinition,
+) -> lc_frontend::MaterialRenderInfo {
+    let color = material_value_array(
+        material
+            .int_list("ColorX")
+            .or_else(|| material.int_list("Color")),
+    );
+    let alpha = material_value_array(material.int_list("Alpha"));
+    let texture_overlay = material.value("TextureOverlay").and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    });
+    lc_frontend::MaterialRenderInfo::new(
+        color,
+        alpha,
+        texture_overlay,
+        material.int("OverlayType").unwrap_or(0),
+        material.int("Density").unwrap_or(0),
+    )
+}
+
+/// Render metadata from every reachable Material.c4g, keyed by lowercase
+/// material name. Scenario-local definitions win the shared overloads.
+fn load_material_render_info(
+    scenario_path: &Path,
+) -> HashMap<String, lc_frontend::MaterialRenderInfo> {
+    let mut render_info = HashMap::new();
     let mut absorb = |group_path: &Path| {
         let Ok(group) = Group::open(group_path) else {
             return;
@@ -4953,20 +4985,9 @@ fn load_material_colors(scenario_path: &Path) -> HashMap<String, [u8; 3]> {
         };
         for material in library.iter() {
             let name = material.name().to_ascii_lowercase();
-            if colors.contains_key(&name) {
-                continue;
-            }
-            let triplet = material.int_list("Color").unwrap_or_default();
-            if triplet.len() >= 3 {
-                colors.insert(
-                    name,
-                    [
-                        triplet[0].clamp(0, 255) as u8,
-                        triplet[1].clamp(0, 255) as u8,
-                        triplet[2].clamp(0, 255) as u8,
-                    ],
-                );
-            }
+            render_info
+                .entry(name)
+                .or_insert_with(|| material_render_info(material));
         }
     };
     absorb(&scenario_path.join("Material.c4g"));
@@ -4975,7 +4996,7 @@ fn load_material_colors(scenario_path: &Path) -> HashMap<String, [u8; 3]> {
             absorb(&candidate);
         }
     }
-    colors
+    render_info
 }
 
 fn load_scenario_material_textures(scenario_path: &Path) -> HashMap<String, ImageData> {
@@ -5606,7 +5627,7 @@ impl GameApp {
             graphics,
             sky: None,
             material_texture_images: Arc::new(HashMap::new()),
-            material_base_colors: Arc::new(HashMap::new()),
+            material_render_info: Arc::new(HashMap::new()),
             system_scripts,
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
@@ -5707,7 +5728,7 @@ impl GameApp {
         self.graphics
             .set_material_textures(Arc::clone(&self.material_texture_images));
         self.graphics
-            .set_material_colors(Arc::clone(&self.material_base_colors));
+            .set_material_render_info(Arc::clone(&self.material_render_info));
 
         if self.mode == AppMode::Menu {
             let width_f = width as f32;
@@ -10504,7 +10525,7 @@ impl GameApp {
         self.graphics
             .set_material_textures(Arc::clone(&self.material_texture_images));
         self.graphics
-            .set_material_colors(Arc::clone(&self.material_base_colors));
+            .set_material_render_info(Arc::clone(&self.material_render_info));
 
         self.menu_state.set_pointer_position(None);
         self.menu_state.refresh_menu_entries();
@@ -10684,11 +10705,11 @@ impl GameApp {
                 }
             }
             self.material_texture_images = Arc::new(textures);
-            self.material_base_colors = Arc::new(load_material_colors(&path));
+            self.material_render_info = Arc::new(load_material_render_info(&path));
             self.graphics
                 .set_material_textures(Arc::clone(&self.material_texture_images));
             self.graphics
-                .set_material_colors(Arc::clone(&self.material_base_colors));
+                .set_material_render_info(Arc::clone(&self.material_render_info));
         }
 
         // Parameters.ScenarioTitle: the Title.txt language entry beats
@@ -10954,7 +10975,7 @@ impl GameApp {
         self.graphics
             .set_material_textures(Arc::clone(&self.material_texture_images));
         self.graphics
-            .set_material_colors(Arc::clone(&self.material_base_colors));
+            .set_material_render_info(Arc::clone(&self.material_render_info));
         self.frame_text.clear();
         self.status_text.clear();
         self.energy_fraction = 0.0;
@@ -15934,6 +15955,48 @@ mod tests {
         );
 
         reset_cached_app_paths();
+    }
+
+    #[test]
+    fn material_render_info_preserves_cpp_color_alpha_and_overlay_fields() {
+        // C4MaterialCore::CompileFunc parses Color and then ColorX into the
+        // same 3x3 array, followed by the 3x2 Alpha array, TextureOverlay,
+        // and OverlayType (C4Material.cpp:170-204; C4Material.h:79-105).
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material]\n\
+             Name=Earth\n\
+             Color=1,2,3,4,5,6,7,8,9\n\
+             ColorX=11,12,13,14\n\
+             Alpha=21,22,23,24\n\
+             Density=50\n\
+             TextureOverlay=Smooth\n\
+             OverlayType=8\n",
+        )
+        .expect("material library");
+        let definition = library.get("Earth").expect("Earth material");
+
+        assert_eq!(
+            material_render_info(definition),
+            lc_frontend::MaterialRenderInfo::new(
+                [11, 12, 13, 14, 0, 0, 0, 0, 0],
+                [21, 22, 23, 24, 0, 0],
+                Some("Smooth".to_string()),
+                8,
+                50,
+            ),
+        );
+    }
+
+    #[test]
+    fn material_render_bytes_keep_the_cpp_uint32_low_byte() {
+        // C4MaterialCore stores Color/Alpha as uint32 arrays and the INI
+        // compiler reads them with strtoul (C4Material.h:79-81;
+        // StdCompiler.cpp:651-654). Palette/texture composition then narrows
+        // to uint8, so out-of-range values wrap instead of clamping.
+        assert_eq!(
+            material_value_array::<4>(Some(vec![255, 256, -1, 511])),
+            [255, 0, 255, 255],
+        );
     }
 
     fn cleanup_quicksave_file() {
