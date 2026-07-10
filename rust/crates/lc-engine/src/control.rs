@@ -144,6 +144,9 @@ pub const COM_MENU_UP: u8 = 54;
 pub const COM_MENU_DOWN: u8 = 55;
 pub const COM_MENU_SELECT: u8 = 60;
 pub const COM_CLEAR_PRESSED_COMS: u8 = 61;
+/// C4MN_AdjustPosition (C4Menu.h:71), ORed into
+/// C4ControlPlayerControl::Data for pointer-driven menu selection.
+pub const C4MN_ADJUST_POSITION: i32 = i32::MIN;
 
 /// COM_MenuFirst..COM_MenuLast (C4Constants.h:249-250).
 pub const COM_MENU_FIRST: u8 = COM_MENU_ENTER;

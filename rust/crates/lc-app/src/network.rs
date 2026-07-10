@@ -568,7 +568,7 @@ fn emit_frame_controls(
     for control in frame.controls {
         match control {
             lc_engine::ControlPacket::PlayerControl(data) => {
-                if let Some(event) = interpret_player_control_command(data.command) {
+                if let Some(event) = control_event_for_player_control(&data) {
                     if data.player == local_owner {
                         continue;
                     }
@@ -595,17 +595,31 @@ fn emit_frame_controls(
     Ok(())
 }
 
+fn control_event_for_player_control(data: &PlayerControlData) -> Option<ControlEvent> {
+    if data.data != 0 {
+        let command = u8::try_from(data.command).ok()?;
+        return Some(ControlEvent::RawPlayerControl {
+            command,
+            data: data.data,
+        });
+    }
+    interpret_player_control_command(data.command)
+}
+
 fn control_packet_for_event(
     owner: i32,
     event: ControlEvent,
     client_id: ClientId,
 ) -> Option<lc_engine::ControlPacket> {
-    let command = control_command_for_event(event)?;
+    let (command, data) = match event {
+        ControlEvent::RawPlayerControl { command, data } => (i32::from(command), data),
+        event => (control_command_for_event(event)?, 0),
+    };
     let by_client = i32::try_from(client_id).ok()?;
     Some(lc_engine::ControlPacket::PlayerControl(PlayerControlData {
         player: owner,
         command,
-        data: 0,
+        data,
         by_client,
     }))
 }
@@ -676,6 +690,42 @@ fn current_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_menu_control_preserves_the_cpp_data_slot() {
+        // C4ObjectMenu::OnUserSelectItem queues COM_MenuSelect with the
+        // item index ORed with C4MN_AdjustPosition; the synchronized
+        // C4ControlPlayerControl packet must retain that signed Data value
+        // (C4ObjectMenu.cpp:461-465; C4Control.cpp:586-592).
+        let data = lc_engine::C4MN_ADJUST_POSITION | 1;
+        let packet = control_packet_for_event(
+            7,
+            ControlEvent::RawPlayerControl {
+                command: COM_MENU_SELECT,
+                data,
+            },
+            3,
+        )
+        .expect("pointer menu controls produce a network packet");
+        let expected = PlayerControlData {
+            player: 7,
+            command: i32::from(COM_MENU_SELECT),
+            data,
+            by_client: 3,
+        };
+        assert_eq!(
+            packet,
+            lc_engine::ControlPacket::PlayerControl(expected.clone())
+        );
+        assert_eq!(
+            control_event_for_player_control(&expected),
+            Some(ControlEvent::RawPlayerControl {
+                command: COM_MENU_SELECT,
+                data,
+            }),
+            "remote peers must receive the same signed Data payload"
+        );
+    }
 
     #[test]
     fn accumulator_batches_controls_for_tick() {

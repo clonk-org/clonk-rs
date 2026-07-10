@@ -7958,16 +7958,18 @@ impl GameApp {
             if button_state == ElementState::Released {
                 match target {
                     EngineScriptMenuPointerTarget::Close => {
-                        self.engine
-                            .player_in_com(self.local_owner, lc_engine::COM_MENU_CLOSE, 0)?;
+                        self.dispatch_control_event(ControlEvent::RawPlayerControl {
+                            command: lc_engine::COM_MENU_CLOSE,
+                            data: 0,
+                        })?;
                     }
                     EngineScriptMenuPointerTarget::Item(index) => {
                         if self.select_script_menu_pointer_item(index)? {
-                            self.engine.player_in_com(
-                                self.local_owner,
-                                lc_engine::COM_MENU_ENTER,
-                                index as i32,
-                            )?;
+                            let data = i32::try_from(index).unwrap_or(i32::MAX);
+                            self.dispatch_control_event(ControlEvent::RawPlayerControl {
+                                command: lc_engine::COM_MENU_ENTER,
+                                data,
+                            })?;
                         }
                     }
                     EngineScriptMenuPointerTarget::Background => {}
@@ -8025,11 +8027,12 @@ impl GameApp {
             return Ok(false);
         }
         if selection != index as i32 {
-            self.engine.player_in_com(
-                self.local_owner,
-                lc_engine::COM_MENU_SELECT,
-                index as i32,
-            )?;
+            let data = i32::try_from(index).unwrap_or(i32::MAX)
+                | lc_engine::C4MN_ADJUST_POSITION;
+            self.dispatch_control_event(ControlEvent::RawPlayerControl {
+                command: lc_engine::COM_MENU_SELECT,
+                data,
+            })?;
         }
         Ok(true)
     }

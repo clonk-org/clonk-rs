@@ -15,7 +15,7 @@ use crate::control::{
     COM_MENU_LEFT, COM_MENU_NAVIGATION1, COM_MENU_NAVIGATION2, COM_MENU_RIGHT, COM_MENU_SELECT,
     COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_NONE, COM_RELEASE_FIRST, COM_RELEASE_LAST,
     COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
-    COM_WHEEL_DOWN, COM_WHEEL_UP,
+    COM_WHEEL_DOWN, COM_WHEEL_UP, C4MN_ADJUST_POSITION,
 };
 use crate::math::itofix;
 use crate::{
@@ -816,7 +816,7 @@ impl Engine {
             }
             COM_MENU_SELECT => {
                 if !menu.items.is_empty() {
-                    self.set_object_menu_selection(index, data & i32::MAX)?;
+                    self.set_object_menu_selection(index, data & !C4MN_ADJUST_POSITION)?;
                 }
             }
             COM_MENU_SHOW_TEXT => {
