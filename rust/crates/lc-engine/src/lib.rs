@@ -664,8 +664,8 @@ pub struct JoinPlayerConfig {
     /// The crew roster from the player file (C4Player::CrewInfoList).
     pub crew: Vec<player_file::CrewInfo>,
     /// `PrefControlStyle` (AutoStopControl): Jump'n'Run control when true
-    /// (C4Player::InitControl, C4Player.cpp:2371-2380; the scenario
-    /// ForcedControlStyle head override is not parsed yet).
+    /// (C4Player::InitControl, C4Player.cpp:2371-2380). The scenario-wide
+    /// `ForcedControlStyle` is stored separately from this preference.
     pub control_style: bool,
     /// `Game.Parameters.StartupPlayerCount` — gates the standard-position
     /// distribution (C4Player.cpp:719).
@@ -5484,6 +5484,10 @@ pub struct EngineState {
     pub particles: Vec<ParticleSnapshot>,
     #[serde(default)]
     pub players: Vec<PlayerState>,
+    /// Scenario `[Head] ForcedAutoStopControl`; retained so players joining
+    /// after a save restore receive the same scenario override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forced_control_style: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teams: Vec<TeamInfo>,
     #[serde(default)]
@@ -5596,6 +5600,7 @@ impl EngineState {
             object_order: Vec::new(),
             particles: snapshot.particles.clone(),
             players: snapshot.players.clone(),
+            forced_control_style: None,
             teams: Vec::new(),
             crew_selection: snapshot.crew_selection.clone(),
             crew_roles: snapshot.crew_roles.clone(),
@@ -9910,6 +9915,9 @@ pub struct Engine {
     objective_check_counter: u8,
     players_registered: bool,
     players: HashMap<i32, Player>,
+    /// Scenario `[Head] ForcedAutoStopControl`, separate from each player's
+    /// effective `PlayerControlState::control_style` preference.
+    forced_control_style: Option<bool>,
     /// Ordered `Game.Teams` entries loaded from the scenario's Teams.txt.
     teams: Rc<Vec<TeamInfo>>,
     crew_selection: HashMap<i32, CrewSelection>,
@@ -11574,6 +11582,7 @@ impl Engine {
             objective_check_counter: 0,
             players_registered: false,
             players: HashMap::new(),
+            forced_control_style: None,
             teams: Rc::new(Vec::new()),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
@@ -18594,6 +18603,7 @@ impl Engine {
             object_order: self.exec_list.clone(),
             particles,
             players,
+            forced_control_style: self.forced_control_style,
             teams: self.teams.as_ref().clone(),
             crew_selection,
             crew_roles,
@@ -18937,6 +18947,7 @@ impl Engine {
             .map(Player::from_state)
             .map(|player| (player.id(), player))
             .collect();
+        self.forced_control_style = state.forced_control_style;
         self.teams = Rc::new(state.teams.clone());
         self.players_registered = !self.players.is_empty();
         self.next_mission = state.next_mission.clone();
@@ -43542,6 +43553,22 @@ protected func Activity() { SetActionTargets(); return(1); }
             Some(PhysicalInfo::default())
         );
         assert_eq!(engine.objects[crew_idx].state.temporary_physical, None);
+    }
+
+    #[test]
+    fn engine_state_retains_forced_control_style_for_later_joins() {
+        // Savegame restoration preserves C4S.Head, which remains the source
+        // for C4Player::ApplyForcedControl on runtime joins
+        // (C4Game.cpp:4234; C4Player.cpp:2369-2389).
+        let mut state = Engine::new().capture_state();
+        state.forced_control_style = Some(true);
+
+        let encoded = state.to_json_string().expect("state serializes");
+        let decoded = EngineState::from_json_str(&encoded).expect("state deserializes");
+        let mut restored = Engine::new();
+        restored.restore_state(&decoded).expect("state restores");
+
+        assert_eq!(restored.capture_state().forced_control_style, Some(true));
     }
 
     #[test]

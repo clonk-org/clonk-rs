@@ -194,6 +194,10 @@ pub struct Scenario {
     base_buy_enabled: bool,
     base_sell_enabled: bool,
     landscape_insert_thrust: bool,
+    /// `[Head] ForcedAutoStopControl`: `None` keeps the player-file
+    /// preference; `Some` forces classic/Jump'n'Run control for all players
+    /// (C4Player::ApplyForcedControl, C4Player.cpp:2369-2389).
+    forced_control_style: Option<bool>,
     /// The surviving definition hosts and definition-pack System.c4g hosts in
     /// their C4DefList::Load order. System hosts remain in place when a later
     /// definition overload removes an earlier same-ID definition host.
@@ -527,6 +531,8 @@ impl Scenario {
             base_buy_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_BUY) != 0,
             base_sell_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_SELL) != 0,
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
+            forced_control_style: (manifest.core.head.forced_control_style >= 0)
+                .then_some(manifest.core.head.forced_control_style != 0),
             definition_load_steps,
             scenario_system_scripts: load_scenario_system_scripts(group)?,
             player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
@@ -585,6 +591,12 @@ impl Scenario {
 
     pub fn objectives(&self) -> &ScenarioObjectives {
         &self.objectives
+    }
+
+    /// The scenario-wide `ForcedAutoStopControl` override, or `None` when
+    /// joining players should retain their player-file preference.
+    pub fn forced_control_style(&self) -> Option<bool> {
+        self.forced_control_style
     }
 
     pub fn physics(&self) -> Option<PhysicsSettings> {
@@ -1272,6 +1284,7 @@ impl Scenario {
             base_buy_enabled: false,
             base_sell_enabled: false,
             landscape_insert_thrust: false,
+            forced_control_style: None,
             definition_load_steps,
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
@@ -7329,6 +7342,7 @@ global func Step(state, frame, random)
             base_buy_enabled: true,
             base_sell_enabled: true,
             landscape_insert_thrust: false,
+            forced_control_style: None,
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
@@ -7427,6 +7441,7 @@ global func Step(state, frame, random)
             base_buy_enabled: true,
             base_sell_enabled: true,
             landscape_insert_thrust: false,
+            forced_control_style: None,
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
@@ -10267,7 +10282,7 @@ public func ActualizePhase(pClonk)
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=Legacy Test\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Foo=2\nPosition=120,160\n",
+            "[Head]\nTitle=Legacy Test\nForcedAutoStopControl=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Foo=2\nPosition=120,160\n",
         )
         .expect("write legacy scenario core");
         std::fs::write(
@@ -10288,6 +10303,9 @@ public func ActualizePhase(pClonk)
         let scenario =
             Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
         assert_eq!(scenario.name(), Some("Legacy Test"));
+        // C4SHead::ForcedControlStyle is retained past scenario parsing for
+        // C4Player::ApplyForcedControl at join (C4Player.cpp:2369-2389).
+        assert_eq!(scenario.forced_control_style(), Some(true));
 
         let mut engine = Engine::with_seed(0);
         let created = scenario

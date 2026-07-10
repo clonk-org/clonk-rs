@@ -263,6 +263,13 @@ impl Player {
         }
     }
 
+    /// Whether this player uses Jump'n'Run/AutoStop control. Local key-up
+    /// routing consults this just as C4Game::LocalControlKeyUp reads
+    /// `C4Player::ControlStyle` (C4Game.cpp:3578-3592).
+    pub fn control_style(&self) -> bool {
+        self.control.control_style
+    }
+
     pub fn from_config(config: PlayerConfig) -> Self {
         let PlayerConfig {
             id,
