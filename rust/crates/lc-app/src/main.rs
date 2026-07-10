@@ -2107,17 +2107,25 @@ impl AudioContext {
     }
 
     fn ensure_sound(&mut self, name: &str) -> Result<Option<SoundHandle>, AudioError> {
+        self.ensure_sound_with_key(name)
+            .map(|resolved| resolved.map(|(handle, _)| handle))
+    }
+
+    fn ensure_sound_with_key(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<(SoundHandle, String)>, AudioError> {
         let request_key = name.to_ascii_lowercase();
         if let Some(resolved) = self.resolver.resolve_entry(name) {
             let cache_key = resolved.cache_key();
             if let Some(handle) = self.loaded_sounds.get(&cache_key) {
-                return Ok(Some(handle.clone()));
+                return Ok(Some((handle.clone(), cache_key)));
             }
             match resolved.load_audio() {
                 Ok(bytes) => {
                     let handle = self.system.load_sound(bytes.as_slice())?;
                     self.loaded_sounds.insert(cache_key.clone(), handle.clone());
-                    return Ok(Some(handle));
+                    return Ok(Some((handle, cache_key)));
                 }
                 Err(err) => {
                     if self
