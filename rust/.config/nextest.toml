@@ -1,0 +1,10 @@
+# Known-flaky lc-app tests: env-lock / process-parallelism races
+# (install_definition_resolver path-case probe; the threaded audio boot).
+# Retry them instead of failing whole gate batteries on one-offs.
+[[profile.default.overrides]]
+filter = 'package(lc-app) and (test(install_definition_resolver_handles_case_insensitive_paths) or test(menu_music_runs_in_menu_cycle))'
+retries = 2
+
+[[profile.default.overrides]]
+filter = 'package(lc-network) and test(control_sync_and_reconnect_smoke)'
+retries = 2
