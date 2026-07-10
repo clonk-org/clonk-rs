@@ -13109,6 +13109,10 @@ impl Engine {
             self.next_object_id,
             self.team_home_base_rule,
         )
+        // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
+        // execution. FindBase is one of the APIs that explicitly walks the
+        // forward master list (C4Game.cpp:1582,3732-3744).
+        .with_master_order(self.exec_list.iter().rev().copied())
         .with_particle_defs(self.particle_system.def_names())
         .with_crew_ranks(Rc::clone(&self.crew_ranks))
         .with_materials(Some(self.materials_shared()))
@@ -18456,7 +18460,10 @@ impl Engine {
                     shape_attach: ShapeAttachRecord::default(),
                     t_attach: 0,
                     no_collect_delay: 0,
-                    base: OWNER_NONE,
+                    // C4Object::CompileFunc persists Base verbatim
+                    // (C4Object.cpp:2776); owner validation is a separate
+                    // post-load pass (C4Object.cpp:3157-3162).
+                    base: snapshot.base,
                     energy: snapshot.energy,
                     need_energy: snapshot.need_energy,
                     construction: snapshot.construction,
@@ -29685,7 +29692,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         shape_attach: ShapeAttachRecord::default(),
         t_attach: 0,
         no_collect_delay: 0,
-        base: OWNER_NONE,
+        base: snapshot.base,
         energy: snapshot.energy,
         need_energy: snapshot.need_energy,
         construction: snapshot.construction,

@@ -543,6 +543,10 @@ impl HostWorldObject {
 pub(crate) struct HostWorldContext {
     objects: Rc<HashMap<ObjectId, HostWorldObject>>,
     order: Rc<Vec<ObjectId>>,
+    /// `Game.Objects` from First -> Next. The engine's `exec_list` is this
+    /// order reversed; only APIs such as C4Game::FindBase explicitly walk
+    /// the forward master list (C4Game.cpp:3732-3744).
+    master_order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
     definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
     /// Lazily built on the first sector query: most callbacks never run
@@ -605,6 +609,7 @@ impl Default for HostWorldContext {
         Self {
             objects: Rc::new(HashMap::new()),
             order: Rc::new(Vec::new()),
+            master_order: Rc::new(Vec::new()),
             landscape: None,
             definitions: Rc::new(HashMap::new()),
             sectors: RefCell::new(None),
@@ -752,9 +757,11 @@ impl HostWorldContext {
             order.push(id);
             lookup.insert(id, object);
         }
+        let order = Rc::new(order);
         Self {
             objects: Rc::new(lookup),
-            order: Rc::new(order),
+            master_order: Rc::clone(&order),
+            order,
             landscape: landscape.map(Rc::new),
             definitions,
             sectors,
@@ -895,6 +902,18 @@ impl HostWorldContext {
 
     pub(crate) fn object_ids(&self) -> &[ObjectId] {
         self.order.as_ref().as_slice()
+    }
+
+    pub(crate) fn master_object_ids(&self) -> &[ObjectId] {
+        self.master_order.as_ref().as_slice()
+    }
+
+    pub(crate) fn with_master_order<I>(mut self, order: I) -> Self
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        self.master_order = Rc::new(order.into_iter().collect());
+        self
     }
 
     pub(crate) fn landscape_ref(&self) -> Option<&Landscape> {
@@ -5660,6 +5679,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetRDir", set_r_dir);
     script.register_host_function("AdjustWalkRotation", adjust_walk_rotation);
     script.register_host_function("GetRDir", get_r_dir);
+    script.register_host_function("FindBase", find_base);
     script.register_host_function("FindObject", find_object);
     script.register_host_function("FindObjectOwner", find_object_owner);
     script.register_host_function("FindObject2", find_object2);
@@ -15284,6 +15304,46 @@ fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
     find_object_cpp(args, "FindObject", None)
 }
 
+/// FnFindBase/C4Game::FindBase (C4Script.cpp:1976-1979;
+/// C4Game.cpp:3732-3744): validate the player, then walk the active object
+/// master list and return the indexed object whose stored Base matches.
+fn find_base(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "FindBase",
+        "player",
+    )?;
+    let mut index = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "FindBase",
+        "index",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        if context.player_state(player).is_none() || index < 0 {
+            return Ok(Value::Nil);
+        }
+        for object_id in context.master_object_ids() {
+            let Some(object) = context.get_world_object(object_id) else {
+                continue;
+            };
+            if !object.status().is_active()
+                || object.full_state().map(|state| state.base) != Some(player)
+            {
+                continue;
+            }
+            if index == 0 {
+                return Ok(object_reference_value(object_id));
+            }
+            index -= 1;
+        }
+        Ok(Value::Nil)
+    })
+}
+
 /// Shared FnFindObject search (C4Script.cpp:2113-2135) with an optional
 /// owner filter injected by FindObjectOwner (C4Script.cpp:2137-2161).
 fn find_object_cpp(
@@ -22997,6 +23057,12 @@ impl EffectHostContext {
         ids
     }
 
+    fn master_object_ids(&self) -> Vec<ObjectId> {
+        let mut ids = self.world.master_object_ids().to_vec();
+        ids.extend(self.pending_order.iter().copied());
+        ids
+    }
+
     /// `cthr->Obj` for the executing host call: the FindObject family
     /// excludes the caller and searches caller-relative coordinates on
     /// local calls (C4Script.cpp:2115-2131).
@@ -24552,6 +24618,7 @@ mod tests {
         "Exit",
         "Extinguish",
         "ExtractMaterialAmount",
+        "FindBase",
         "FindConstructionSite",
         "FindContents",
         "FindObject",
@@ -32802,6 +32869,146 @@ public func SeedFull()
             0,
             None,
         )
+    }
+
+    #[test]
+    fn find_base_uses_stored_base_and_cpp_master_order() {
+        // FnFindBase validates the player before C4Game::FindBase walks
+        // Objects.First -> Next, skips Status=0, and selects the indexed
+        // object whose stored C4Object::Base matches (C4Script.cpp:1976-1979;
+        // C4Game.cpp:3732-3744). Runtime stMain insertion puts the newest
+        // same-definition object first in that FORWARD master-list walk
+        // (C4ObjectList.cpp:110-180).
+        let definition = crate::Definition::from_script("HUT1", "Hut", "#strict\n")
+            .expect("definition compiles");
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Player"))
+            .expect("player registers");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let older = engine
+            .spawn_object(crate::SpawnConfig::new("HUT1"))
+            .expect("older hut spawns");
+        let newer = engine
+            .spawn_object(crate::SpawnConfig::new("HUT1"))
+            .expect("newer hut spawns");
+        let owned_non_base = engine
+            .spawn_object(crate::SpawnConfig::new("HUT1").with_owner(0))
+            .expect("owned non-base hut spawns");
+        let deleted_base = engine
+            .spawn_object(crate::SpawnConfig::new("HUT1"))
+            .expect("deleted base hut spawns");
+        let inactive_base = engine
+            .spawn_object(crate::SpawnConfig::new("HUT1"))
+            .expect("inactive base hut spawns");
+        let older_index = engine.find_object_index(older).expect("older exists");
+        let newer_index = engine.find_object_index(newer).expect("newer exists");
+        let deleted_index = engine
+            .find_object_index(deleted_base)
+            .expect("deleted base exists");
+        let inactive_index = engine
+            .find_object_index(inactive_base)
+            .expect("inactive base exists");
+        engine.objects[older_index].state.base = 0;
+        engine.objects[newer_index].state.base = 0;
+        engine.objects[deleted_index].state.base = 0;
+        engine.objects[deleted_index].state.status = ObjectStatus::Deleted;
+        engine.objects[inactive_index].state.base = 0;
+        engine.objects[inactive_index].state.status = ObjectStatus::Inactive;
+
+        assert_eq!(
+            engine.debug_exec_order(),
+            [
+                older,
+                newer,
+                owned_non_base,
+                deleted_base,
+                inactive_base
+            ]
+        );
+        let world = engine.host_world_context();
+        let call = |args: Vec<Value>| {
+            with_object_host_context_with_world(world.clone(), || find_base(&args))
+                .0
+                .expect("FindBase succeeds")
+        };
+        let first = call(vec![Value::Int(0)]);
+        let second = call(vec![Value::Int(0), Value::Int(1)]);
+
+        assert_eq!(
+            object_id_from_value(&first),
+            Some(newer),
+            "Status, Base, not Owner/category, filters the forward master list"
+        );
+        assert_eq!(object_id_from_value(&second), Some(older));
+        assert_eq!(
+            object_id_from_value(&call(Vec::new())),
+            Some(newer),
+            "missing C4ValueInt slots default player/index to zero"
+        );
+        assert_eq!(
+            call(vec![Value::Int(0), Value::Int(-1)]),
+            Value::Nil,
+            "a negative index decrements away from zero and never matches"
+        );
+        assert_eq!(
+            call(vec![Value::Int(0), Value::Int(2)]),
+            Value::Nil,
+            "an out-of-range index returns nil"
+        );
+        assert_eq!(
+            call(vec![Value::Int(7)]),
+            Value::Nil,
+            "FnFindBase rejects a player absent from Game.Players"
+        );
+    }
+
+    #[test]
+    fn find_base_preserves_loaded_base_and_master_order() {
+        // Base is compiled as part of C4Object (C4Object.cpp:2776), and
+        // Objects.txt is decompiled back-to-front then loaded with stReverse
+        // to reconstruct the same master list (C4ObjectList.cpp:507-529).
+        // Therefore a save/restore must preserve both Base and the forward
+        // FindBase traversal order (C4Game.cpp:3732-3744).
+        let definition = crate::Definition::from_script("HUT1", "Hut", "#strict\n")
+            .expect("definition compiles");
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Player"))
+            .expect("player registers");
+        engine
+            .register_definition(definition.clone())
+            .expect("definition registers");
+        let older = engine
+            .spawn_object(crate::SpawnConfig::new("HUT1").with_loaded(true))
+            .expect("older loaded hut spawns");
+        let newer = engine
+            .spawn_object(crate::SpawnConfig::new("HUT1").with_loaded(true))
+            .expect("newer loaded hut spawns");
+        let older_index = engine.find_object_index(older).expect("older exists");
+        let newer_index = engine.find_object_index(newer).expect("newer exists");
+        engine.objects[older_index].state.base = 0;
+        engine.objects[newer_index].state.base = 0;
+
+        let state = engine.capture_state();
+        let mut restored = crate::Engine::with_seed(0);
+        restored
+            .register_definition(definition)
+            .expect("definition registers for restore");
+        restored.restore_state(&state).expect("state restores");
+        let world = restored.host_world_context();
+        let (first, _) = with_object_host_context_with_world(world, || {
+            find_base(&[Value::Int(0)])
+        });
+
+        assert_eq!(
+            object_id_from_value(&first.expect("FindBase after restore succeeds")),
+            Some(newer),
+            "restored Base and forward master ordering stay authoritative"
+        );
     }
 
     #[test]
