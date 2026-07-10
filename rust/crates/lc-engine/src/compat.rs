@@ -16055,10 +16055,7 @@ fn set_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let command_direction = match CommandDirection::from_script_value(raw_direction) {
-        Some(direction) => direction,
-        None => return Ok(Value::Bool(false)),
-    };
+    let command_direction = CommandDirection::from_raw(raw_direction);
 
     let mut index = 1;
     let target_id =
@@ -30222,6 +30219,21 @@ func ProbeBadIndex(id) {
             .object_update
             .expect("command direction update recorded");
         assert_eq!(update.command_direction, Some(CommandDirection::Right));
+    }
+
+    #[test]
+    fn set_com_dir_preserves_raw_int32_like_cpp() {
+        // FnSetComDir writes ncomdir directly without validating the COMD_*
+        // ring (C4Script.cpp:792-796).
+        let (result, outcome) = with_object_host_context(|| set_com_dir(&[Value::Int(200)]));
+        assert_eq!(result.expect("SetComDir succeeds"), Value::Bool(true));
+        assert_eq!(
+            outcome
+                .object_update
+                .and_then(|update| update.command_direction)
+                .map(CommandDirection::to_script_value),
+            Some(200)
+        );
     }
 
     #[test]

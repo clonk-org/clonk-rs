@@ -550,9 +550,10 @@ impl<'de> Deserialize<'de> for Direction {
 
 /// C4Action::ComDir storage.
 ///
-/// The named `COMD_*` values form the engine's directional ring. The backing
-/// field is prepared as an int32 newtype so persisted action state can retain
-/// C++ values outside that ring without conflating them with `COMD_Stop`.
+/// The named `COMD_*` values form the engine's directional ring, but C++
+/// compiles and scripts the backing `int32_t` verbatim (C4Action.cpp:45-54;
+/// C4Script.cpp:792-796). Values outside the ring therefore remain distinct
+/// from `COMD_Stop` across loaded and snapshotted action state.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct CommandDirection(i32);
@@ -576,6 +577,10 @@ impl CommandDirection {
     pub const Left: Self = Self(7);
     #[allow(non_upper_case_globals)]
     pub const UpLeft: Self = Self(8);
+
+    pub const fn from_raw(value: i32) -> Self {
+        Self(value)
+    }
 
     pub const fn to_script_value(self) -> i32 {
         self.0
@@ -619,7 +624,7 @@ impl<'de> Deserialize<'de> for CommandDirection {
         D: Deserializer<'de>,
     {
         let raw = i32::deserialize(deserializer)?;
-        Ok(CommandDirection::from_script_value(raw).unwrap_or_default())
+        Ok(CommandDirection::from_raw(raw))
     }
 }
 
@@ -30538,11 +30543,7 @@ fn value_to_command_direction(
     value: Value,
 ) -> Result<CommandDirection, EngineError> {
     let raw = value_to_int(definition, function, value)?;
-    CommandDirection::from_script_value(raw).ok_or_else(|| EngineError::InvalidScriptOutput {
-        definition: definition.to_string(),
-        function: function.to_string(),
-        detail: format!("unsupported command_direction value {raw}"),
-    })
+    Ok(CommandDirection::from_raw(raw))
 }
 
 fn value_to_object_reference(
@@ -31302,6 +31303,43 @@ mod tests {
         let direction: Direction = serde_json::from_str("13").expect("direction decodes");
         assert_eq!(direction.to_script_value(), 13);
         assert_eq!(serde_json::to_string(&direction).expect("direction encodes"), "13");
+    }
+
+    #[test]
+    fn command_direction_json_round_trip_preserves_raw_int32() {
+        // C4Action::CompileFunc persists Action.ComDir verbatim
+        // (C4Action.cpp:45-54); save/snapshot JSON must do the same.
+        let direction: CommandDirection =
+            serde_json::from_str("200").expect("command direction decodes");
+        assert_eq!(direction.to_script_value(), 200);
+        assert_eq!(
+            serde_json::to_string(&direction).expect("command direction encodes"),
+            "200"
+        );
+    }
+
+    #[test]
+    fn command_delta_preserves_raw_command_direction() {
+        // C4Action::ComDir is a plain int32 assignment, including through
+        // script-produced state updates (C4Script.cpp:792-796).
+        let direction = value_to_command_direction("TEST", "Step", Value::Int(200))
+            .expect("raw command direction converts");
+        assert_eq!(direction.to_script_value(), 200);
+    }
+
+    #[test]
+    fn raw_command_direction_skips_unmatched_movement_switch_like_cpp() {
+        // C4Object::ExecAction's DFA_WALK switch has only COMD_* cases and
+        // no default (C4Object.cpp:4785-4798), so a persisted raw value does
+        // not accelerate or decelerate the object.
+        let mut velocity = FixedVec2::new(itofix(2), itofix(3));
+        apply_walk_physical_movement(
+            &mut velocity,
+            CommandDirection::from_raw(200),
+            itofix(10),
+        );
+        assert_eq!(velocity, FixedVec2::new(itofix(2), itofix(3)));
+        assert_eq!(CommandDirection::from_raw(200).axis_components(), (0, 0));
     }
 
     #[test]

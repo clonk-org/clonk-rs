@@ -886,8 +886,7 @@ unsafe fn make_snapshot(
         action.data = entry.action_data;
 
         let direction = Direction::from_raw(entry.direction);
-        let command_direction =
-            CommandDirection::from_script_value(entry.command_direction).unwrap_or_default();
+        let command_direction = CommandDirection::from_raw(entry.command_direction);
 
         let effects_slice: &[LcEngineEffectSnapshot] = if entry.effect_count == 0 {
             &[]
@@ -3056,7 +3055,7 @@ global func Step(state, frame, random)
             action_ticks: 2,
             action_data: 0,
             direction: 13,
-            command_direction: 3,
+            command_direction: 200,
             effects: &effect_snapshot,
             effect_count: 1,
             vertices: ptr::null(),
@@ -3108,6 +3107,9 @@ global func Step(state, frame, random)
         // C4Action::CompileFunc transports Action.Dir as an unrestricted
         // int32 (C4Action.cpp:45-54); the bridge must not collapse it to 0/1.
         assert_eq!(recorded.direction.to_script_value(), 13);
+        // ComDir is the adjacent unrestricted int32 field in the same
+        // C4Action::CompileFunc block (C4Action.cpp:45-54).
+        assert_eq!(recorded.command_direction.to_script_value(), 200);
         // The ABI action_ticks slot carries C4Object Action.Time (the
         // bridge exports obj->Action.Time); the phase-delay counter is
         // not transported.

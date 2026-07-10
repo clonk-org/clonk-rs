@@ -4267,14 +4267,9 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?;
-                match CommandDirection::from_script_value(raw) {
-                    Some(command_direction) => self.command_direction = Some(command_direction),
-                    None => tracing::warn!(
-                        line = self.line,
-                        value = raw,
-                        "Objects.txt ComDir outside the COMD_* range; keeping default"
-                    ),
-                }
+                // C4Action::CompileFunc persists ComDir verbatim without
+                // COMD_* range validation (C4Action.cpp:45-54).
+                self.command_direction = Some(CommandDirection::from_raw(raw));
             }
             "action" => {
                 self.action_name = Some(trimmed_value.to_string());
@@ -9325,6 +9320,29 @@ public func ActualizePhase(pClonk)
                 .direction
                 .to_script_value(),
             13
+        );
+    }
+
+    #[test]
+    fn objects_comdir_values_round_trip_as_raw_ints_like_cpp() {
+        // C4Action::CompileFunc reads and writes ComDir as a plain int with
+        // no range validation (C4Action.cpp:45-54). Shipped scenarios use
+        // ComDir=200 for persisted WDWB objects.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=GOOD\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\nComDir=200\n",
+        )
+        .expect("write objects");
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(
+            engine
+                .object_snapshot(ObjectId::new(10))
+                .expect("ComDir=200 object loaded")
+                .command_direction
+                .to_script_value(),
+            200
         );
     }
 
