@@ -659,6 +659,8 @@ impl FrontendAssets {
             net_get_ref: self.dialog_image("StartupNetGetRef.png")?,
             gui_caption: self.dialog_image("GUICaption.png")?,
             gui_button: self.dialog_image("GUIButton.png")?,
+            gui_button_down: self.dialog_image("GUIButtonDown.png")?,
+            gui_button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             gui_icons_ex: self.dialog_image("GUIIcons2.png")?,
         })
     }

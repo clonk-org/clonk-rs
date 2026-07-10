@@ -9,7 +9,7 @@
 
 use crate::clonk_fonts::ClonkFontSet;
 use crate::startup_main_menu::{draw_bar, IntRect};
-use crate::ImageData;
+use crate::{GuiPoint, ImageData, KeyCode};
 use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
@@ -703,6 +703,324 @@ fn gui_rect(r: IntRect) -> GuiRect {
     GuiRect::new(r.x as f32, r.y as f32, r.w as f32, r.h as f32)
 }
 
+/// Focusable controls in the player-selection dialog's player mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlrSelControl {
+    PlayerList,
+    Back,
+    NewPlayer,
+    Activate,
+    Delete,
+    Properties,
+    Crew,
+}
+
+/// Requests produced by [`PlrSelController`]. File creation, deletion and
+/// persistence remain application responsibilities; activation is mirrored
+/// locally so the renderer can update immediately.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlrSelAction {
+    SelectionChanged(Option<usize>),
+    FocusChanged(PlrSelControl),
+    Back,
+    NewPlayer,
+    ActivationChanged { index: usize, activated: bool },
+    DeletePlayer(usize),
+    PlayerProperties(usize),
+    ShowCrew(usize),
+}
+
+/// Live input/selection state for `C4StartupPlrSelDlg` player mode.
+pub struct PlrSelController {
+    width: i32,
+    height: i32,
+    activations: Vec<bool>,
+    selected: Option<usize>,
+    focus: PlrSelControl,
+    pointer_position: Option<GuiPoint>,
+    hovered: Option<PlrSelControl>,
+    pointer_pressed: Option<PlrSelControl>,
+    key_pressed: Option<(PlrSelControl, KeyCode)>,
+}
+
+impl PlrSelController {
+    pub fn new(player_count: usize) -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            activations: vec![false; player_count],
+            // UpdatePlayerList selects the first available entry
+            // (C4StartupPlrSelDlg.cpp:724-729).
+            selected: (player_count > 0).then_some(0),
+            focus: PlrSelControl::PlayerList,
+            pointer_position: None,
+            hovered: None,
+            pointer_pressed: None,
+            key_pressed: None,
+        }
+    }
+
+    pub fn resize(&mut self, width: i32, height: i32) {
+        self.width = width.max(1);
+        self.height = height.max(1);
+        self.hovered = self.pointer_position.and_then(|point| self.hit_button(point));
+    }
+
+    pub fn set_player_count(&mut self, player_count: usize) {
+        self.activations.resize(player_count, false);
+        self.normalize_selection();
+    }
+
+    /// Replaces the activation flags after player-file discovery. Like C++,
+    /// the first activated player is selected, falling back to the first
+    /// deactivated player (C4StartupPlrSelDlg.cpp:695-729).
+    pub fn set_player_activations(&mut self, activations: Vec<bool>) {
+        self.activations = activations;
+        self.selected = self
+            .activations
+            .iter()
+            .position(|activated| *activated)
+            .or_else(|| (!self.activations.is_empty()).then_some(0));
+    }
+
+    pub fn player_activations(&self) -> &[bool] {
+        &self.activations
+    }
+
+    pub fn is_player_activated(&self, index: usize) -> Option<bool> {
+        self.activations.get(index).copied()
+    }
+
+    pub const fn selected_index(&self) -> Option<usize> {
+        self.selected
+    }
+
+    pub fn set_selected_index(&mut self, selected: Option<usize>) {
+        self.selected = selected.filter(|index| *index < self.activations.len());
+    }
+
+    pub const fn focused_control(&self) -> PlrSelControl {
+        self.focus
+    }
+
+    pub fn pointer_position(&self) -> Option<GuiPoint> {
+        self.pointer_position
+    }
+
+    pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
+        self.pointer_position = position;
+        self.hovered = position.and_then(|point| self.hit_button(point));
+        if position.is_none() {
+            self.pointer_pressed = None;
+        }
+    }
+
+    pub fn pointer_left(&mut self) {
+        self.set_pointer_position(None);
+    }
+
+    pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
+        self.pointer_position = Some(position);
+        self.hovered = self.hit_button(position);
+        Vec::new()
+    }
+
+    pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
+        self.pointer_position = Some(position);
+        self.hovered = self.hit_button(position);
+        self.pointer_pressed = self.hovered;
+
+        let layout = self.layout();
+        if contains_plrsel(layout.list_client, position) {
+            let mut actions = self.change_focus(PlrSelControl::PlayerList);
+            let selected = self.list_item_at(position);
+            actions.extend(self.change_selection(selected));
+            return actions;
+        }
+        Vec::new()
+    }
+
+    pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
+        self.pointer_position = Some(position);
+        self.hovered = self.hit_button(position);
+        let Some(pressed) = self.pointer_pressed.take() else {
+            return Vec::new();
+        };
+        if self.hit_button(position) != Some(pressed) {
+            return Vec::new();
+        }
+        self.activate(pressed)
+    }
+
+    pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<PlrSelAction> {
+        match key {
+            // StartupPlrSelBack binds Back, Left and Escape at override
+            // priority (C4StartupPlrSelDlg.cpp:596-605).
+            KeyCode::Escape | KeyCode::Left => vec![PlrSelAction::Back],
+            KeyCode::Tab => self.advance_focus(),
+            KeyCode::Up if self.focus == PlrSelControl::PlayerList => self.move_selection(-1),
+            KeyCode::Down if self.focus == PlrSelControl::PlayerList => self.move_selection(1),
+            KeyCode::Right if self.focus == PlrSelControl::PlayerList => self
+                .selected
+                .map(PlrSelAction::ShowCrew)
+                .into_iter()
+                .collect(),
+            KeyCode::Space if self.focus == PlrSelControl::PlayerList => {
+                self.toggle_selected_activation()
+            }
+            KeyCode::Enter if self.focus == PlrSelControl::PlayerList => self
+                .selected
+                .map(PlrSelAction::PlayerProperties)
+                .into_iter()
+                .collect(),
+            KeyCode::Enter | KeyCode::Space => {
+                self.key_pressed = Some((self.focus, key));
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<PlrSelAction> {
+        let Some((pressed, pressed_key)) = self.key_pressed.take() else {
+            return Vec::new();
+        };
+        if pressed_key != key || pressed != self.focus {
+            return Vec::new();
+        }
+        self.activate(pressed)
+    }
+
+    fn layout(&self) -> PlrSelLayout {
+        plrsel_layout(self.width, self.height)
+    }
+
+    fn hit_button(&self, point: GuiPoint) -> Option<PlrSelControl> {
+        const CONTROLS: [PlrSelControl; 6] = [
+            PlrSelControl::Back,
+            PlrSelControl::NewPlayer,
+            PlrSelControl::Activate,
+            PlrSelControl::Delete,
+            PlrSelControl::Properties,
+            PlrSelControl::Crew,
+        ];
+        self.layout()
+            .buttons
+            .iter()
+            .zip(CONTROLS)
+            .find_map(|(rect, control)| contains_plrsel(*rect, point).then_some(control))
+    }
+
+    fn list_item_at(&self, point: GuiPoint) -> Option<usize> {
+        let layout = self.layout();
+        if point.x >= (layout.list_client.x + layout.item_width) as f32 {
+            return None;
+        }
+        let offset = point.y as i32 - layout.list_client.y;
+        if offset < 0 || offset % layout.item_pitch >= layout.item_height {
+            return None;
+        }
+        let index = (offset / layout.item_pitch) as usize;
+        (index < self.activations.len()).then_some(index)
+    }
+
+    fn advance_focus(&mut self) -> Vec<PlrSelAction> {
+        const ORDER: [PlrSelControl; 7] = [
+            PlrSelControl::PlayerList,
+            PlrSelControl::Back,
+            PlrSelControl::NewPlayer,
+            PlrSelControl::Activate,
+            PlrSelControl::Delete,
+            PlrSelControl::Properties,
+            PlrSelControl::Crew,
+        ];
+        let index = ORDER.iter().position(|control| *control == self.focus).unwrap_or(0);
+        self.change_focus(ORDER[(index + 1) % ORDER.len()])
+    }
+
+    fn change_focus(&mut self, focus: PlrSelControl) -> Vec<PlrSelAction> {
+        if self.focus == focus {
+            return Vec::new();
+        }
+        self.focus = focus;
+        self.key_pressed = None;
+        vec![PlrSelAction::FocusChanged(focus)]
+    }
+
+    fn change_selection(&mut self, selected: Option<usize>) -> Vec<PlrSelAction> {
+        if self.selected == selected {
+            return Vec::new();
+        }
+        self.selected = selected;
+        vec![PlrSelAction::SelectionChanged(selected)]
+    }
+
+    fn move_selection(&mut self, delta: i32) -> Vec<PlrSelAction> {
+        if self.activations.is_empty() {
+            return Vec::new();
+        }
+        let selected = match (self.selected, delta) {
+            (None, value) if value < 0 => Some(self.activations.len() - 1),
+            (None, _) => Some(0),
+            (Some(index), value) if value < 0 => Some(index.saturating_sub(1)),
+            (Some(index), _) => Some((index + 1).min(self.activations.len() - 1)),
+        };
+        self.change_selection(selected)
+    }
+
+    fn toggle_selected_activation(&mut self) -> Vec<PlrSelAction> {
+        let Some(index) = self.selected else {
+            return Vec::new();
+        };
+        let Some(activated) = self.activations.get_mut(index) else {
+            return Vec::new();
+        };
+        *activated = !*activated;
+        vec![PlrSelAction::ActivationChanged {
+            index,
+            activated: *activated,
+        }]
+    }
+
+    fn activate(&mut self, control: PlrSelControl) -> Vec<PlrSelAction> {
+        match control {
+            PlrSelControl::PlayerList => Vec::new(),
+            PlrSelControl::Back => vec![PlrSelAction::Back],
+            PlrSelControl::NewPlayer => vec![PlrSelAction::NewPlayer],
+            PlrSelControl::Activate => self.toggle_selected_activation(),
+            PlrSelControl::Delete => self
+                .selected
+                .map(PlrSelAction::DeletePlayer)
+                .into_iter()
+                .collect(),
+            PlrSelControl::Properties => self
+                .selected
+                .map(PlrSelAction::PlayerProperties)
+                .into_iter()
+                .collect(),
+            PlrSelControl::Crew => self
+                .selected
+                .map(PlrSelAction::ShowCrew)
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn normalize_selection(&mut self) {
+        self.selected = self
+            .selected
+            .filter(|index| *index < self.activations.len())
+            .or_else(|| (!self.activations.is_empty()).then_some(0));
+    }
+}
+
+fn contains_plrsel(rect: IntRect, point: GuiPoint) -> bool {
+    point.x >= rect.x as f32
+        && point.y >= rect.y as f32
+        && point.x < (rect.x + rect.w) as f32
+        && point.y < (rect.y + rect.h) as f32
+}
+
 // ---------------------------------------------------------------------------
 // Renderer
 // ---------------------------------------------------------------------------
@@ -1021,6 +1339,113 @@ mod tests {
 
         // Title label anchor: centered at x=640, y=8.
         assert_eq!(l.title_anchor, (640, 8));
+    }
+
+    fn center(rect: IntRect) -> crate::GuiPoint {
+        crate::GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
+    }
+
+    fn click(controller: &mut PlrSelController, rect: IntRect) -> Vec<PlrSelAction> {
+        let point = center(rect);
+        assert!(controller.handle_pointer_down(point).is_empty());
+        controller.handle_pointer_up(point)
+    }
+
+    // The six C4StartupPlrSelDlg callback buttons keep the list selection and
+    // dispatch their operation on release; selection-dependent buttons do
+    // nothing without a selected item (C4StartupPlrSelDlg.cpp:575-584,
+    // 840-869,912-962; C4GuiButton.cpp:128-155).
+    #[test]
+    fn controller_routes_all_player_buttons_and_tracks_activation() {
+        let layout = plrsel_layout(1280, 720);
+        let mut controller = PlrSelController::new(2);
+        controller.set_player_activations(vec![true, false]);
+        controller.resize(1280, 720);
+
+        let second_row = crate::GuiPoint::new(
+            (layout.list_client.x + 4) as f32,
+            (layout.list_client.y + layout.item_pitch + 4) as f32,
+        );
+        assert_eq!(
+            controller.handle_pointer_down(second_row),
+            vec![PlrSelAction::SelectionChanged(Some(1))]
+        );
+        assert!(controller.handle_pointer_up(second_row).is_empty());
+
+        assert_eq!(click(&mut controller, layout.buttons[0]), vec![PlrSelAction::Back]);
+        assert_eq!(click(&mut controller, layout.buttons[1]), vec![PlrSelAction::NewPlayer]);
+        assert_eq!(
+            click(&mut controller, layout.buttons[2]),
+            vec![PlrSelAction::ActivationChanged {
+                index: 1,
+                activated: true,
+            }]
+        );
+        assert_eq!(controller.is_player_activated(1), Some(true));
+        assert_eq!(
+            click(&mut controller, layout.buttons[3]),
+            vec![PlrSelAction::DeletePlayer(1)]
+        );
+        assert_eq!(
+            click(&mut controller, layout.buttons[4]),
+            vec![PlrSelAction::PlayerProperties(1)]
+        );
+        assert_eq!(
+            click(&mut controller, layout.buttons[5]),
+            vec![PlrSelAction::ShowCrew(1)]
+        );
+    }
+
+    // ListBox uses half-open item rects and one-pixel row spacing. Clicking
+    // spacing clears selection; Up/Down do not wrap. Space toggles the
+    // selected ListItem and Enter invokes its double-click/property callback
+    // (C4GuiListBox.cpp:142-173,218-254,386-394;
+    // C4StartupPlrSelDlg.cpp:65-72,568-569,596-613).
+    #[test]
+    fn controller_matches_list_hit_testing_and_keys() {
+        let layout = plrsel_layout(1280, 720);
+        let mut controller = PlrSelController::new(2);
+        controller.resize(1280, 720);
+        assert_eq!(controller.selected_index(), Some(0));
+        assert_eq!(controller.focused_control(), PlrSelControl::PlayerList);
+
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Down),
+            vec![PlrSelAction::SelectionChanged(Some(1))]
+        );
+        assert!(controller.handle_key_down(crate::KeyCode::Down).is_empty());
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Space),
+            vec![PlrSelAction::ActivationChanged {
+                index: 1,
+                activated: true,
+            }]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Enter),
+            vec![PlrSelAction::PlayerProperties(1)]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Right),
+            vec![PlrSelAction::ShowCrew(1)]
+        );
+
+        let spacing = crate::GuiPoint::new(
+            (layout.list_client.x + 2) as f32,
+            (layout.list_client.y + layout.item_height) as f32,
+        );
+        assert_eq!(
+            controller.handle_pointer_down(spacing),
+            vec![PlrSelAction::SelectionChanged(None)]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Up),
+            vec![PlrSelAction::SelectionChanged(Some(1))]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Escape),
+            vec![PlrSelAction::Back]
+        );
     }
 
     fn book_fonts() -> BookFontSet {

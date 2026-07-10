@@ -10,7 +10,7 @@
 
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::startup_main_menu::{draw_bar, IntRect};
-use crate::ImageData;
+use crate::{GuiPoint, ImageData, KeyCode};
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
 use lc_graphics::{Color, GammaRamp, PixelFormat, Surface};
 use lc_gui::Rect as GuiRect;
@@ -36,6 +36,10 @@ pub struct NetDlgAssets {
     pub gui_caption: ImageData,
     /// `GUIButton.png` (128x32): bottom button planks, 3-slice border 32.
     pub gui_button: ImageData,
+    /// `GUIButtonDown.png`: pressed bottom-button plank.
+    pub gui_button_down: ImageData,
+    /// `GUIButtonHighlight.png`: additive focus/hover/pressed overlay.
+    pub gui_button_highlight: ImageData,
     /// `GUIIcons2.png` (256x320): extended 64x64 icon grid, 4 columns.
     pub gui_icons_ex: ImageData,
 }
@@ -580,6 +584,382 @@ impl Default for NetDlgConfig {
     }
 }
 
+/// The two sheets of `C4StartupNetDlg` (C4StartupNetDlg.h:133,
+/// C4StartupNetDlg.cpp:814-836).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetDlgMode {
+    GameList,
+    Chat,
+}
+
+/// Focusable controls and callback buttons in C++ traversal order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetDlgControl {
+    GameList,
+    JoinAddress,
+    ChatInput,
+    GamesButton,
+    ChatButton,
+    Internet,
+    Record,
+    Back,
+    Refresh,
+    JoinGame,
+    CreateGame,
+}
+
+/// Requests produced by [`NetDlgController`]. The controller mutates only
+/// presentation-local state; the application owns network/config side effects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetDlgAction {
+    FocusChanged(NetDlgControl),
+    ModeChanged(NetDlgMode),
+    Back,
+    Refresh,
+    JoinGame { address: Option<String> },
+    CreateGame,
+    MasterserverSignupChanged(bool),
+    RecordingChanged(bool),
+    JoinAddressChanged(String),
+}
+
+/// Live input state for the pixel-parity network dialog.
+///
+/// Pointer hits use the same half-open integer rectangles as `C4Rect::Contains`
+/// (C4Rect.h:40-43). Buttons retain C++'s press-on-down, invoke-on-up model
+/// (C4GuiButton.cpp:112-155), including keyboard activation.
+pub struct NetDlgController {
+    metrics: NetDlgFontMetrics,
+    width: i32,
+    height: i32,
+    config: NetDlgConfig,
+    mode: NetDlgMode,
+    join_address: String,
+    focus: NetDlgControl,
+    pointer_position: Option<GuiPoint>,
+    hovered: Option<NetDlgControl>,
+    pointer_pressed: Option<NetDlgControl>,
+    key_pressed: Option<(NetDlgControl, KeyCode)>,
+}
+
+impl NetDlgController {
+    pub fn new(config: NetDlgConfig, metrics: NetDlgFontMetrics) -> Self {
+        Self {
+            metrics,
+            width: 1,
+            height: 1,
+            config,
+            mode: NetDlgMode::GameList,
+            join_address: String::new(),
+            // C4StartupNetDlg.cpp:734 / GetDlgModeFocusControl: game list.
+            focus: NetDlgControl::GameList,
+            pointer_position: None,
+            hovered: None,
+            pointer_pressed: None,
+            key_pressed: None,
+        }
+    }
+
+    pub fn resize(&mut self, width: i32, height: i32) {
+        self.width = width.max(1);
+        self.height = height.max(1);
+        self.hovered = self.pointer_position.and_then(|point| self.hit_button(point));
+    }
+
+    pub const fn config(&self) -> NetDlgConfig {
+        self.config
+    }
+
+    pub const fn mode(&self) -> NetDlgMode {
+        self.mode
+    }
+
+    pub const fn focused_control(&self) -> NetDlgControl {
+        self.focus
+    }
+
+    pub fn pointer_position(&self) -> Option<GuiPoint> {
+        self.pointer_position
+    }
+
+    pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
+        self.pointer_position = position;
+        self.hovered = position.and_then(|point| self.hit_button(point));
+        if position.is_none() {
+            self.pointer_pressed = None;
+        }
+    }
+
+    pub fn pointer_left(&mut self) {
+        self.set_pointer_position(None);
+    }
+
+    pub fn join_address(&self) -> &str {
+        &self.join_address
+    }
+
+    pub fn set_join_address(&mut self, address: impl Into<String>) {
+        self.join_address = address.into();
+    }
+
+    /// Adds text received from the windowing layer while the IP edit owns
+    /// focus. `KeyCode` intentionally contains navigation keys only, so text
+    /// input is a separate operation just like C4GUI::Edit::CharIn.
+    pub fn handle_text_input(&mut self, text: &str) -> Vec<NetDlgAction> {
+        if self.focus != NetDlgControl::JoinAddress || self.mode != NetDlgMode::GameList {
+            return Vec::new();
+        }
+        self.join_address
+            .extend(text.chars().filter(|character| !character.is_control()));
+        vec![NetDlgAction::JoinAddressChanged(self.join_address.clone())]
+    }
+
+    pub fn delete_join_address_char(&mut self) -> Vec<NetDlgAction> {
+        if self.focus != NetDlgControl::JoinAddress || self.mode != NetDlgMode::GameList {
+            return Vec::new();
+        }
+        self.join_address.pop();
+        vec![NetDlgAction::JoinAddressChanged(self.join_address.clone())]
+    }
+
+    pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<NetDlgAction> {
+        self.pointer_position = Some(position);
+        self.hovered = self.hit_button(position);
+        Vec::new()
+    }
+
+    pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<NetDlgAction> {
+        self.pointer_position = Some(position);
+        self.hovered = self.hit_button(position);
+        self.pointer_pressed = self.hovered;
+
+        let hit = self.hit_control(position);
+        match hit {
+            Some(control @ (NetDlgControl::GameList | NetDlgControl::JoinAddress)) => {
+                self.change_focus(control)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<NetDlgAction> {
+        self.pointer_position = Some(position);
+        self.hovered = self.hit_button(position);
+        let Some(pressed) = self.pointer_pressed.take() else {
+            return Vec::new();
+        };
+        if self.hit_button(position) != Some(pressed) {
+            return Vec::new();
+        }
+        self.activate(pressed)
+    }
+
+    pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<NetDlgAction> {
+        match key {
+            KeyCode::Escape => vec![NetDlgAction::Back],
+            // StartupNetBack binds Left, but an edit/chat input consumes it
+            // first at control priority (C4StartupNetDlg.cpp:624-627).
+            KeyCode::Left
+                if !matches!(
+                    self.focus,
+                    NetDlgControl::JoinAddress | NetDlgControl::ChatInput
+                ) =>
+            {
+                vec![NetDlgAction::Back]
+            }
+            KeyCode::Tab => self.advance_focus(),
+            KeyCode::Enter | KeyCode::Space if self.focus.is_button() => {
+                self.key_pressed = Some((self.focus, key));
+                Vec::new()
+            }
+            KeyCode::Enter
+                if matches!(
+                    self.focus,
+                    NetDlgControl::GameList | NetDlgControl::JoinAddress
+                ) =>
+            {
+                self.join_action()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<NetDlgAction> {
+        let Some((pressed, pressed_key)) = self.key_pressed.take() else {
+            return Vec::new();
+        };
+        if pressed_key != key || pressed != self.focus {
+            return Vec::new();
+        }
+        self.activate(pressed)
+    }
+
+    fn layout(&self) -> NetDlgLayout {
+        net_dlg_layout(self.width, self.height, &self.metrics)
+    }
+
+    fn hit_control(&self, point: GuiPoint) -> Option<NetDlgControl> {
+        self.hit_button(point).or_else(|| {
+            let layout = self.layout();
+            match self.mode {
+                NetDlgMode::GameList if contains(layout.join_edit, point) => {
+                    Some(NetDlgControl::JoinAddress)
+                }
+                NetDlgMode::GameList if contains(layout.game_list, point) => {
+                    Some(NetDlgControl::GameList)
+                }
+                _ => None,
+            }
+        })
+    }
+
+    fn hit_button(&self, point: GuiPoint) -> Option<NetDlgControl> {
+        let layout = self.layout();
+        let mut buttons = vec![
+            (NetDlgControl::GamesButton, layout.btn_game_list),
+            (NetDlgControl::ChatButton, layout.btn_chat),
+            (NetDlgControl::Back, layout.buttons[0]),
+            (NetDlgControl::CreateGame, layout.buttons[3]),
+        ];
+        if self.mode == NetDlgMode::GameList {
+            buttons.extend([
+                (NetDlgControl::Internet, layout.btn_internet),
+                (NetDlgControl::Record, layout.btn_record),
+                (NetDlgControl::Refresh, layout.buttons[1]),
+                (NetDlgControl::JoinGame, layout.buttons[2]),
+            ]);
+        }
+        buttons
+            .into_iter()
+            .find_map(|(control, rect)| contains(rect, point).then_some(control))
+    }
+
+    fn advance_focus(&mut self) -> Vec<NetDlgAction> {
+        const GAME_LIST_ORDER: [NetDlgControl; 10] = [
+            NetDlgControl::GameList,
+            NetDlgControl::JoinAddress,
+            NetDlgControl::Internet,
+            NetDlgControl::Record,
+            NetDlgControl::Back,
+            NetDlgControl::Refresh,
+            NetDlgControl::JoinGame,
+            NetDlgControl::CreateGame,
+            NetDlgControl::GamesButton,
+            NetDlgControl::ChatButton,
+        ];
+        const CHAT_ORDER: [NetDlgControl; 5] = [
+            NetDlgControl::ChatInput,
+            NetDlgControl::Back,
+            NetDlgControl::CreateGame,
+            NetDlgControl::GamesButton,
+            NetDlgControl::ChatButton,
+        ];
+        let order = match self.mode {
+            NetDlgMode::GameList => GAME_LIST_ORDER.as_slice(),
+            NetDlgMode::Chat => CHAT_ORDER.as_slice(),
+        };
+        let index = order.iter().position(|control| *control == self.focus).unwrap_or(0);
+        self.change_focus(order[(index + 1) % order.len()])
+    }
+
+    fn change_focus(&mut self, focus: NetDlgControl) -> Vec<NetDlgAction> {
+        if self.focus == focus {
+            return Vec::new();
+        }
+        self.focus = focus;
+        self.key_pressed = None;
+        vec![NetDlgAction::FocusChanged(focus)]
+    }
+
+    fn activate(&mut self, control: NetDlgControl) -> Vec<NetDlgAction> {
+        match control {
+            NetDlgControl::GamesButton => self.change_mode(NetDlgMode::GameList),
+            NetDlgControl::ChatButton => {
+                let mode = match self.mode {
+                    NetDlgMode::GameList => NetDlgMode::Chat,
+                    NetDlgMode::Chat => NetDlgMode::GameList,
+                };
+                self.change_mode(mode)
+            }
+            NetDlgControl::Internet => {
+                self.config.masterserver_signup = !self.config.masterserver_signup;
+                vec![NetDlgAction::MasterserverSignupChanged(
+                    self.config.masterserver_signup,
+                )]
+            }
+            NetDlgControl::Record => {
+                self.config.record = !self.config.record;
+                vec![NetDlgAction::RecordingChanged(self.config.record)]
+            }
+            NetDlgControl::Back => vec![NetDlgAction::Back],
+            NetDlgControl::Refresh => vec![NetDlgAction::Refresh],
+            NetDlgControl::JoinGame => self.join_action(),
+            NetDlgControl::CreateGame => vec![NetDlgAction::CreateGame],
+            NetDlgControl::GameList
+            | NetDlgControl::JoinAddress
+            | NetDlgControl::ChatInput => Vec::new(),
+        }
+    }
+
+    fn change_mode(&mut self, mode: NetDlgMode) -> Vec<NetDlgAction> {
+        self.mode = mode;
+        let focus = match mode {
+            NetDlgMode::GameList => NetDlgControl::GameList,
+            NetDlgMode::Chat => NetDlgControl::ChatInput,
+        };
+        let mut actions = vec![NetDlgAction::ModeChanged(mode)];
+        actions.extend(self.change_focus(focus));
+        actions
+    }
+
+    fn join_action(&self) -> Vec<NetDlgAction> {
+        let address = self.join_address.trim();
+        vec![NetDlgAction::JoinGame {
+            address: (!address.is_empty()).then(|| address.to_string()),
+        }]
+    }
+
+    fn is_highlighted(&self, control: NetDlgControl) -> bool {
+        self.focus == control || self.hovered == Some(control)
+    }
+
+    fn is_pressed(&self, control: NetDlgControl) -> bool {
+        self.pointer_pressed == Some(control)
+            || self.key_pressed.is_some_and(|(pressed, _)| pressed == control)
+    }
+}
+
+impl NetDlgControl {
+    const fn is_button(self) -> bool {
+        !matches!(
+            self,
+            Self::GameList | Self::JoinAddress | Self::ChatInput
+        )
+    }
+}
+
+fn contains(rect: IntRect, point: GuiPoint) -> bool {
+    point.x >= rect.x as f32
+        && point.y >= rect.y as f32
+        && point.x < (rect.x + rect.w) as f32
+        && point.y < (rect.y + rect.h) as f32
+}
+
+fn blacken_transparent(image: &ImageData) -> ImageData {
+    let pixels = image
+        .pixels()
+        .chunks_exact(4)
+        .flat_map(|pixel| {
+            if pixel[3] == 0 {
+                [0, 0, 0, 0]
+            } else {
+                [pixel[0], pixel[1], pixel[2], pixel[3]]
+            }
+        })
+        .collect();
+    ImageData::new(image.width(), image.height(), pixels)
+}
+
 /// Renders `C4StartupNetDlg`'s deterministic first-shown state.
 pub struct NetDlgScreen;
 
@@ -596,9 +976,55 @@ impl NetDlgScreen {
         config: NetDlgConfig,
         get_ref_phase: u32,
     ) {
+        Self::render_impl(
+            surface,
+            assets,
+            fonts,
+            gamma,
+            config,
+            None,
+            get_ref_phase,
+        );
+    }
+
+    /// Draws the live controller state. Unlike [`Self::render`], this path
+    /// reflects the active game/chat sheet, edited join address, config
+    /// toggles and button focus/hover/press state.
+    pub fn render_controller(
+        surface: &mut Surface,
+        assets: &NetDlgAssets,
+        fonts: &ClonkFontSet,
+        gamma: Option<&GammaRamp>,
+        controller: &NetDlgController,
+        get_ref_phase: u32,
+    ) {
+        Self::render_impl(
+            surface,
+            assets,
+            fonts,
+            gamma,
+            controller.config,
+            Some(controller),
+            get_ref_phase,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_impl(
+        surface: &mut Surface,
+        assets: &NetDlgAssets,
+        fonts: &ClonkFontSet,
+        gamma: Option<&GammaRamp>,
+        config: NetDlgConfig,
+        controller: Option<&NetDlgController>,
+        get_ref_phase: u32,
+    ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
         let metrics = NetDlgFontMetrics::from_fonts(fonts);
         let layout = net_dlg_layout(w, h, &metrics);
+        let mode = controller.map_or(NetDlgMode::GameList, |state| state.mode);
+        let button_highlight = controller
+            .map(|_| blacken_transparent(&assets.gui_button_highlight));
 
         // ① Background: StartupNetworkBG plain-stretched one pixel past every
         // screen edge (FullscreenDialog::DrawBackground, C4GuiDialogs.cpp:878-887).
@@ -625,9 +1051,32 @@ impl NetDlgScreen {
         // ③④ Left icon buttons (IconButton::DrawElement, C4GuiButton.cpp:205-232).
         // GUIIcons2 sources: Ico_Ex_GameList = Ex+16, Ico_Ex_Chat = Ex+15 on a
         // 4-column 64x64 grid (C4GuiLabels.cpp:441-450).
-        Self::icon_button(surface, assets, fonts, gamma, layout.btn_game_list, (0, 256), "&Games");
-        Self::icon_button(surface, assets, fonts, gamma, layout.btn_chat, (192, 192), "&Chat");
+        Self::icon_button(
+            surface,
+            assets,
+            fonts,
+            gamma,
+            layout.btn_game_list,
+            (0, 256),
+            "&Games",
+            button_highlight.as_ref(),
+            controller.is_some_and(|state| state.is_highlighted(NetDlgControl::GamesButton)),
+            controller.is_some_and(|state| state.is_pressed(NetDlgControl::GamesButton)),
+        );
+        Self::icon_button(
+            surface,
+            assets,
+            fonts,
+            gamma,
+            layout.btn_chat,
+            (192, 192),
+            "&Chat",
+            button_highlight.as_ref(),
+            controller.is_some_and(|state| state.is_highlighted(NetDlgControl::ChatButton)),
+            controller.is_some_and(|state| state.is_pressed(NetDlgControl::ChatButton)),
+        );
 
+        if mode == NetDlgMode::GameList {
         // ⑤ Tabular sheet 0 (zero chrome; C4GuiTabular.cpp:362-364):
         // "Running Games" wooden caption (WoodenLabel::DrawElement,
         // C4GuiLabels.cpp:168-209): bar, then ALeft text at x+5, vertically
@@ -715,40 +1164,100 @@ impl NetDlgScreen {
             gamma,
         );
         draw_3d_frame(surface, edit, gamma);
+        if let Some(address) = controller.map(|state| state.join_address()) {
+            draw_text_clipped(
+                surface,
+                &fonts.text,
+                edit.x + 4,
+                edit.y + 1,
+                address,
+                CLR_WHITE,
+                TextAlign::Left,
+                gamma,
+                inclusive_clip(edit),
+            );
+            if controller.is_some_and(|state| state.focus == NetDlgControl::JoinAddress) {
+                let caret_x = edit.x + 4 + fonts.text.measure(address, false).0;
+                draw_text_clipped(
+                    surface,
+                    &fonts.text,
+                    caret_x,
+                    edit.y - fonts.text.line_height / 3,
+                    "¦",
+                    CLR_WHITE,
+                    TextAlign::Left,
+                    gamma,
+                    inclusive_clip(edit),
+                );
+            }
+        }
+        } else {
+            Self::draw_chat_sheet(surface, assets, fonts, gamma, layout);
+        }
 
         // ⑥⑦ Right icon buttons, config-driven (C4StartupNetDlg.cpp:710-717)
         // on the 4-column grid: InternetOn Ex+7 (192,64) / InternetOff Ex+6
         // (128,64); RecordOn Ex+1 (64,0) / RecordOff Ex+0 (0,0).
-        let internet_src = if config.masterserver_signup { (192, 64) } else { (128, 64) };
-        let record_src = if config.record { (64, 0) } else { (0, 0) };
-        Self::icon_button(surface, assets, fonts, gamma, layout.btn_internet, internet_src, "&Internet");
-        Self::icon_button(surface, assets, fonts, gamma, layout.btn_record, record_src, "&Record");
+        if mode == NetDlgMode::GameList {
+            let internet_src = if config.masterserver_signup { (192, 64) } else { (128, 64) };
+            let record_src = if config.record { (64, 0) } else { (0, 0) };
+            Self::icon_button(
+                surface,
+                assets,
+                fonts,
+                gamma,
+                layout.btn_internet,
+                internet_src,
+                "&Internet",
+                button_highlight.as_ref(),
+                controller.is_some_and(|state| state.is_highlighted(NetDlgControl::Internet)),
+                controller.is_some_and(|state| state.is_pressed(NetDlgControl::Internet)),
+            );
+            Self::icon_button(
+                surface,
+                assets,
+                fonts,
+                gamma,
+                layout.btn_record,
+                record_src,
+                "&Record",
+                button_highlight.as_ref(),
+                controller.is_some_and(|state| state.is_highlighted(NetDlgControl::Record)),
+                controller.is_some_and(|state| state.is_pressed(NetDlgControl::Record)),
+            );
+        }
 
         // ⑧⑨⑩ Bottom wooden buttons (Button::DrawElement, C4GuiButton.cpp:81-110):
         // GUIButton 3-slice plank, then the markup caption centered at
         // ((x0+x1)/2, (y0+y1-LH)/2) in the largest font fitting Hgt-2.
-        let labels = ["Back", "Reloa&d", "&Join game", "&New game"];
-        for (rect, label) in layout.buttons.iter().zip(labels) {
-            draw_bar(surface, &gui_rect(*rect), &assets.gui_button, gamma);
-            let font = fonts.button_font(rect.h);
-            let (text, _) = expand_hotkey_markup(label);
-            font.draw_with_gamma(
+        let buttons = [
+            (NetDlgControl::Back, "Back"),
+            (NetDlgControl::Refresh, "Reloa&d"),
+            (NetDlgControl::JoinGame, "&Join game"),
+            (NetDlgControl::CreateGame, "&New game"),
+        ];
+        for (index, (control, label)) in buttons.into_iter().enumerate() {
+            if mode == NetDlgMode::Chat
+                && matches!(control, NetDlgControl::Refresh | NetDlgControl::JoinGame)
+            {
+                continue;
+            }
+            Self::bottom_button(
                 surface,
-                (rect.x + rect.x + rect.w - 1) / 2,
-                (rect.y + rect.y + rect.h - 1 - font.line_height) / 2,
-                &text,
-                CLR_YELLOW,
-                TextAlign::Center,
-                true,
+                assets,
+                fonts,
                 gamma,
+                layout.buttons[index],
+                label,
+                button_highlight.as_ref(),
+                controller.is_some_and(|state| state.is_highlighted(control)),
+                controller.is_some_and(|state| state.is_pressed(control)),
             );
         }
     }
 
-    /// One `C4GUI::IconButton` at rest: the 64x64 icon facet blitted 1:1,
-    /// then the markup caption in the TextFont, centered at the button's
-    /// bottom minus 4/5 of a line (C4GuiButton.cpp:205-232). No highlight at
-    /// t=0 (focus is on the list box).
+    /// One `C4GUI::IconButton`: focus/hover highlight behind the icon and a
+    /// second additive pass over a pressed icon (C4GuiButton.cpp:205-232).
     fn icon_button(
         surface: &mut Surface,
         assets: &NetDlgAssets,
@@ -757,7 +1266,15 @@ impl NetDlgScreen {
         rect: IntRect,
         src: (u32, u32),
         label: &str,
+        highlight_image: Option<&ImageData>,
+        highlighted: bool,
+        pressed: bool,
     ) {
+        if highlighted {
+            if let Some(highlight) = highlight_image {
+                crate::draw_image_bilinear_additive(surface, &gui_rect(rect), highlight, gamma);
+            }
+        }
         crate::draw_image_strip(
             surface,
             rect.x,
@@ -769,6 +1286,11 @@ impl NetDlgScreen {
             64,
             gamma,
         );
+        if pressed {
+            if let Some(highlight) = highlight_image {
+                crate::draw_image_bilinear_additive(surface, &gui_rect(rect), highlight, gamma);
+            }
+        }
         let (text, _) = expand_hotkey_markup(label);
         fonts.text.draw_with_gamma(
             surface,
@@ -780,6 +1302,98 @@ impl NetDlgScreen {
             true,
             gamma,
         );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bottom_button(
+        surface: &mut Surface,
+        assets: &NetDlgAssets,
+        fonts: &ClonkFontSet,
+        gamma: Option<&GammaRamp>,
+        rect: IntRect,
+        label: &str,
+        highlight_image: Option<&ImageData>,
+        highlighted: bool,
+        pressed: bool,
+    ) {
+        let plank = if pressed {
+            &assets.gui_button_down
+        } else {
+            &assets.gui_button
+        };
+        draw_bar(surface, &gui_rect(rect), plank, gamma);
+        if highlighted {
+            if let Some(highlight) = highlight_image {
+                crate::draw_image_bilinear_additive(
+                    surface,
+                    &GuiRect::new(
+                        (rect.x + 5) as f32,
+                        (rect.y + 3) as f32,
+                        (rect.w - 10) as f32,
+                        (rect.h - 6) as f32,
+                    ),
+                    highlight,
+                    gamma,
+                );
+            }
+        }
+        let font = fonts.button_font(rect.h);
+        let (text, _) = expand_hotkey_markup(label);
+        let offset = i32::from(pressed);
+        font.draw_with_gamma(
+            surface,
+            (rect.x + rect.x + rect.w - 1) / 2 + offset,
+            (rect.y + rect.y + rect.h - 1 - font.line_height) / 2 + offset,
+            &text,
+            CLR_YELLOW,
+            TextAlign::Center,
+            true,
+            gamma,
+        );
+    }
+
+    fn draw_chat_sheet(
+        surface: &mut Surface,
+        assets: &NetDlgAssets,
+        fonts: &ClonkFontSet,
+        gamma: Option<&GammaRamp>,
+        layout: NetDlgLayout,
+    ) {
+        draw_bar_with_border(
+            surface,
+            layout.game_list_caption,
+            &assets.gui_caption,
+            32,
+            gamma,
+        );
+        let caption = layout.game_list_caption;
+        draw_text_clipped(
+            surface,
+            &fonts.text,
+            caption.x + 5,
+            caption.y + (caption.h - fonts.text.line_height) / 2 - 1,
+            "Chat",
+            CLR_YELLOW,
+            TextAlign::Left,
+            gamma,
+            inclusive_clip(caption),
+        );
+        let chat = IntRect {
+            x: layout.game_list.x,
+            y: layout.game_list.y,
+            w: layout.game_list.w,
+            h: layout.join_edit.y + layout.join_edit.h - layout.game_list.y,
+        };
+        draw_box_engine(
+            surface,
+            chat.x,
+            chat.y,
+            chat.x + chat.w - 1,
+            chat.y + chat.h - 1,
+            CLR_DARK_BG,
+            gamma,
+        );
+        draw_3d_frame(surface, chat, gamma);
     }
 }
 
@@ -842,6 +1456,169 @@ mod tests {
         for (i, &x) in xs.iter().enumerate() {
             assert_eq!(layout.buttons[i], rect(x, 640, 153, 32), "button {i}");
         }
+    }
+
+    fn metrics() -> NetDlgFontMetrics {
+        NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        }
+    }
+
+    fn center(rect: IntRect) -> crate::GuiPoint {
+        crate::GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
+    }
+
+    fn click(controller: &mut NetDlgController, rect: IntRect) -> Vec<NetDlgAction> {
+        let point = center(rect);
+        assert!(controller.handle_pointer_down(point).is_empty());
+        controller.handle_pointer_up(point)
+    }
+
+    // Callback buttons invoke their C4StartupNetDlg handlers only after a
+    // left-down/up pair inside the same half-open C4Rect
+    // (C4GuiButton.cpp:128-155; C4Rect.h:40-43).
+    #[test]
+    fn controller_routes_every_visible_button_and_uses_half_open_hits() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        let layout = net_dlg_layout(1280, 720, &metrics());
+
+        assert_eq!(click(&mut controller, layout.buttons[0]), vec![NetDlgAction::Back]);
+        assert_eq!(click(&mut controller, layout.buttons[1]), vec![NetDlgAction::Refresh]);
+
+        controller.set_join_address(" 127.0.0.1:11111 ");
+        assert_eq!(
+            click(&mut controller, layout.buttons[2]),
+            vec![NetDlgAction::JoinGame {
+                address: Some("127.0.0.1:11111".into())
+            }]
+        );
+        assert_eq!(click(&mut controller, layout.buttons[3]), vec![NetDlgAction::CreateGame]);
+
+        assert_eq!(
+            click(&mut controller, layout.btn_internet),
+            vec![NetDlgAction::MasterserverSignupChanged(false)]
+        );
+        assert!(!controller.config().masterserver_signup);
+        assert_eq!(
+            click(&mut controller, layout.btn_record),
+            vec![NetDlgAction::RecordingChanged(true)]
+        );
+        assert!(controller.config().record);
+        assert_eq!(
+            click(&mut controller, layout.btn_chat),
+            vec![
+                NetDlgAction::ModeChanged(NetDlgMode::Chat),
+                NetDlgAction::FocusChanged(NetDlgControl::ChatInput),
+            ]
+        );
+        assert_eq!(
+            click(&mut controller, layout.btn_game_list),
+            vec![
+                NetDlgAction::ModeChanged(NetDlgMode::GameList),
+                NetDlgAction::FocusChanged(NetDlgControl::GameList),
+            ]
+        );
+
+        let outside = crate::GuiPoint::new(
+            (layout.buttons[0].x + layout.buttons[0].w) as f32,
+            layout.buttons[0].y as f32,
+        );
+        assert!(controller.handle_pointer_down(outside).is_empty());
+        assert!(controller.handle_pointer_up(outside).is_empty());
+    }
+
+    // The game list owns initial focus; Tab advances into the IP edit, whose
+    // Left key edits rather than firing StartupNetBack. A focused button uses
+    // C4GUI::Button's down/up key pair (C4StartupNetDlg.cpp:624-629,734;
+    // C4GuiDialogs.cpp:343-357,616-644; C4GuiButton.cpp:22-35,112-126).
+    #[test]
+    fn controller_matches_initial_focus_and_keyboard_activation() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        assert_eq!(controller.focused_control(), NetDlgControl::GameList);
+
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Enter),
+            vec![NetDlgAction::JoinGame { address: None }]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
+        );
+        assert!(controller.handle_key_down(crate::KeyCode::Left).is_empty());
+
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::Internet)]
+        );
+        assert!(controller.handle_key_down(crate::KeyCode::Space).is_empty());
+        assert_eq!(
+            controller.handle_key_up(crate::KeyCode::Space),
+            vec![NetDlgAction::MasterserverSignupChanged(false)]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Escape),
+            vec![NetDlgAction::Back]
+        );
+    }
+
+    // The live app must render the same state that receives input: edit text,
+    // toggled config icons, button interaction and the active sheet may not
+    // remain stuck at the first-shown snapshot (C4StartupNetDlg.cpp:814-964;
+    // C4GuiButton.cpp:81-110,205-232; C4GuiEdit.cpp:556-634).
+    #[test]
+    fn live_renderer_reflects_controller_state() {
+        use crate::test_support::{load_graphics_png, standard_gamma};
+        let assets = NetDlgAssets {
+            background: load_graphics_png("StartupNetworkBG.png"),
+            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            gui_caption: load_graphics_png("GUICaption.png"),
+            gui_button: load_graphics_png("GUIButton.png"),
+            gui_button_down: load_graphics_png("GUIButtonDown.png"),
+            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
+            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
+        };
+        let fonts = endeavour_font_set();
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+
+        let render = |controller: &NetDlgController| {
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            NetDlgScreen::render_controller(
+                &mut surface,
+                &assets,
+                &fonts,
+                Some(standard_gamma()),
+                controller,
+                0,
+            );
+            surface
+        };
+        let first_shown = render(&controller);
+
+        controller.set_join_address("127.0.0.1:11111");
+        let layout = net_dlg_layout(1280, 720, &metrics());
+        controller.handle_pointer_down(center(layout.join_edit));
+        let with_address = render(&controller);
+        assert_ne!(first_shown.pixels(), with_address.pixels());
+
+        controller.handle_pointer_move(center(layout.buttons[0]));
+        let hovered = render(&controller);
+        assert_ne!(with_address.pixels(), hovered.pixels());
+        controller.handle_pointer_down(center(layout.buttons[0]));
+        let pressed = render(&controller);
+        assert_ne!(hovered.pixels(), pressed.pixels());
+        controller.handle_pointer_up(center(layout.buttons[0]));
+
+        let actions = click(&mut controller, layout.btn_chat);
+        assert!(actions.contains(&NetDlgAction::ModeChanged(NetDlgMode::Chat)));
+        let chat = render(&controller);
+        assert_ne!(with_address.pixels(), chat.pixels());
     }
 
     /// Builds a `w`x`h` image whose pixel at column x is gray value `10*(x+1)`.
@@ -915,6 +1692,8 @@ mod tests {
             net_get_ref: load_graphics_png("StartupNetGetRef.png"),
             gui_caption: load_graphics_png("GUICaption.png"),
             gui_button: load_graphics_png("GUIButton.png"),
+            gui_button_down: load_graphics_png("GUIButtonDown.png"),
+            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
             gui_icons_ex: load_graphics_png("GUIIcons2.png"),
         };
         let fonts = endeavour_font_set();
