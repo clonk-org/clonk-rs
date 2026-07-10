@@ -1319,6 +1319,7 @@ unsafe fn make_snapshot(
     Some(SimulationSnapshot {
         frame,
         game_over: false,
+        round_results: Default::default(),
         physics: None,
         objects: snapshots,
         environment: EnvironmentFrame::default(),

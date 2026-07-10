@@ -425,6 +425,7 @@ mod tests {
         SimulationSnapshot {
             frame,
             game_over: false,
+            round_results: Default::default(),
             physics: None,
             objects: vec![ObjectSnapshot {
                 id: crate::ObjectId::new(1),

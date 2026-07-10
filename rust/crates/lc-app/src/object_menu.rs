@@ -1689,6 +1689,7 @@ mod tests {
         SimulationSnapshot {
             frame: 0,
             game_over: false,
+            round_results: Default::default(),
             physics: None,
             objects,
             environment: Default::default(),

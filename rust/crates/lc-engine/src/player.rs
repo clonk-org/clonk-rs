@@ -56,6 +56,11 @@ fn default_zoom() -> f32 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PlayerState {
     pub id: i32,
+    /// Unique `C4Player::ID` linking this runtime player to `C4PlayerInfo`;
+    /// distinct from the in-round `C4Player::Number` stored in `id`
+    /// (C4Player.h:67-70).
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub player_info_id: i32,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -64,10 +69,24 @@ pub struct PlayerState {
     pub team: Option<i32>,
     #[serde(default)]
     pub surrendered: bool,
+    /// Result flag projected from the linked `C4PlayerInfo::PIF_Won` state
+    /// (`C4PlayerInfo.h:63,219-237`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub won: bool,
+    /// `C4Player::Evaluated`, kept separate from game-over so evaluation is
+    /// idempotent (`C4Player.cpp:930-970`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub evaluated: bool,
     #[serde(default)]
     pub wealth: i32,
     #[serde(default)]
     pub points: i32,
+    /// Persistent settlement score from `C4PlayerInfoCore`, not the in-round
+    /// `Points` counter (`C4InfoCore.h:202-204`).
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub score: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub total_playing_time: i32,
     #[serde(default)]
     pub value: i32,
     #[serde(default)]
@@ -185,12 +204,17 @@ pub struct PlayerControlState {
 #[derive(Debug, Clone)]
 pub struct Player {
     id: i32,
+    player_info_id: i32,
     name: String,
     status: PlayerStatus,
     team: Option<i32>,
     surrendered: bool,
+    won: bool,
+    evaluated: bool,
     wealth: i32,
     points: i32,
+    score: i32,
+    total_playing_time: i32,
     value: i32,
     initial_value: i32,
     value_gain: i32,
@@ -229,12 +253,17 @@ impl Player {
     pub fn new(id: i32, name: impl Into<String>) -> Self {
         Self {
             id,
+            player_info_id: 0,
             name: name.into(),
             status: PlayerStatus::Active,
             team: None,
             surrendered: false,
+            won: false,
+            evaluated: false,
             wealth: 0,
             points: 0,
+            score: 0,
+            total_playing_time: 0,
             value: 0,
             initial_value: 0,
             value_gain: 0,
@@ -297,12 +326,17 @@ impl Player {
         } = config;
         let mut player = Self {
             id,
+            player_info_id: 0,
             name,
             status,
             team,
             surrendered,
+            won: false,
+            evaluated: false,
             wealth,
             points,
+            score: 0,
+            total_playing_time: 0,
             value,
             initial_value,
             value_gain,
@@ -336,12 +370,17 @@ impl Player {
     pub fn from_state(state: PlayerState) -> Self {
         let PlayerState {
             id,
+            player_info_id,
             name,
             status,
             team,
             surrendered,
+            won,
+            evaluated,
             wealth,
             points,
+            score,
+            total_playing_time,
             value,
             initial_value,
             value_gain,
@@ -368,12 +407,17 @@ impl Player {
         } = state;
         let mut player = Self {
             id,
+            player_info_id,
             name,
             status,
             team,
             surrendered,
+            won,
+            evaluated,
             wealth,
             points,
+            score,
+            total_playing_time,
             value,
             initial_value,
             value_gain,
@@ -409,12 +453,17 @@ impl Player {
         knowledge.sort();
         PlayerState {
             id: self.id,
+            player_info_id: self.player_info_id,
             name: self.name.clone(),
             status: self.status,
             team: self.team,
             surrendered: self.surrendered,
+            won: self.won,
+            evaluated: self.evaluated,
             wealth: self.wealth,
             points: self.points,
+            score: self.score,
+            total_playing_time: self.total_playing_time,
             value: self.value,
             initial_value: self.initial_value,
             value_gain: self.value_gain,
@@ -831,6 +880,14 @@ impl Player {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone)]
 pub struct PlayerConfig {
     id: i32,
@@ -1032,5 +1089,50 @@ mod tests {
 
         assert!(!state.fog_of_war);
         assert!(!state.force_fog_of_war);
+    }
+
+    #[test]
+    fn evaluation_fields_default_when_absent_and_round_trip() {
+        // C4Player persists its distinct PlayerInfo ID and Evaluated flag
+        // (C4Player.cpp:1567-1571), while Score and TotalPlayingTime belong
+        // to C4PlayerInfoCore (C4InfoCore.cpp:156-160). Keep all four distinct
+        // from the in-round player number and Points fields.
+        let legacy: PlayerState = serde_json::from_str(r#"{"id":2,"points":17}"#)
+            .unwrap_or_else(|error| panic!("valid legacy player state: {error}"));
+        assert_eq!(legacy.player_info_id, 0);
+        assert!(!legacy.won);
+        assert!(!legacy.evaluated);
+        assert_eq!(legacy.score, 0);
+        assert_eq!(legacy.total_playing_time, 0);
+
+        let evaluated = PlayerState {
+            id: 2,
+            player_info_id: 41,
+            won: true,
+            evaluated: true,
+            score: 250,
+            total_playing_time: 1_234,
+            ..PlayerState::default()
+        };
+        assert_eq!(Player::from_state(evaluated.clone()).to_state(), evaluated);
+    }
+
+    #[test]
+    fn default_evaluation_fields_do_not_change_serialized_player_shape() {
+        let value = serde_json::to_value(PlayerState {
+            id: 2,
+            ..PlayerState::default()
+        })
+        .unwrap_or_else(|error| panic!("player state serializes: {error}"));
+
+        for field in [
+            "player_info_id",
+            "won",
+            "evaluated",
+            "score",
+            "total_playing_time",
+        ] {
+            assert!(value.get(field).is_none(), "unexpected default field {field}");
+        }
     }
 }

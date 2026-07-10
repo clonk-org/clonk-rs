@@ -1,0 +1,136 @@
+use crate::DefinitionId;
+use serde::{Deserialize, Serialize};
+
+/// Per-player data retained by `C4RoundResultsPlayer` after evaluation.
+///
+/// The ID links to `C4PlayerInfo`, not the in-round `C4Player::Number`
+/// (`C4RoundResults.h:36-46`). The two C++ score fields use `-1` as their
+/// unknown sentinel (`C4RoundResults.h:63-69`); Rust keeps that sentinel for
+/// the always-present old score and represents the optional new score
+/// explicitly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoundResultsPlayerState {
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub player_info_id: i32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub total_playing_time: u32,
+    #[serde(default = "invalid_score", skip_serializing_if = "is_invalid_score")]
+    pub score_old: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_new: Option<i32>,
+    /// Raw scenario-specific text consumed as one player-row label. C++
+    /// appends multiple entries with exactly three spaces rather than a line
+    /// separator (`C4RoundResults.cpp:94-98`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub custom_evaluation_strings: String,
+}
+
+impl Default for RoundResultsPlayerState {
+    fn default() -> Self {
+        Self {
+            player_info_id: 0,
+            total_playing_time: 0,
+            score_old: invalid_score(),
+            score_new: None,
+            custom_evaluation_strings: String::new(),
+        }
+    }
+}
+
+/// Simulation-owned subset of `C4RoundResults` required by the classic
+/// evaluation dialog (`C4RoundResults.h:118-138`). Evaluation remains a
+/// separate behavioral step; this type only makes the resulting state
+/// snapshot- and save-safe.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoundResultsState {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goals: Vec<DefinitionId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fulfilled_goals: Vec<DefinitionId>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub playing_time_seconds: u32,
+    /// `C4RoundResults::fHideSettlementScore`; the scenario/melee decision
+    /// that sets it remains part of the later behavioral slice
+    /// (`C4RoundResults.cpp:240-245,362-369`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_settlement_score: bool,
+    /// Raw global evaluation text. C++ concatenates entries with `|`, which
+    /// its multiline GUI interprets as line separators
+    /// (`C4RoundResults.cpp:346-354`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub custom_evaluation_strings: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub players: Vec<RoundResultsPlayerState>,
+}
+
+impl RoundResultsState {
+    pub fn is_empty(&self) -> bool {
+        self.goals.is_empty()
+            && self.fulfilled_goals.is_empty()
+            && self.playing_time_seconds == 0
+            && !self.hide_settlement_score
+            && self.custom_evaluation_strings.is_empty()
+            && self.players.is_empty()
+    }
+}
+
+const fn invalid_score() -> i32 {
+    -1
+}
+
+fn is_invalid_score(value: &i32) -> bool {
+    *value == invalid_score()
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_defaults_match_cpp_unknown_score_sentinels() {
+        let player = RoundResultsPlayerState::default();
+        assert_eq!(player.player_info_id, 0);
+        assert_eq!(player.total_playing_time, 0);
+        assert_eq!(player.score_old, -1);
+        assert_eq!(player.score_new, None);
+        assert!(player.custom_evaluation_strings.is_empty());
+
+        let decoded: RoundResultsPlayerState = serde_json::from_str("{}")
+            .unwrap_or_else(|error| panic!("default player result parses: {error}"));
+        assert_eq!(decoded, player);
+    }
+
+    #[test]
+    fn dialog_metadata_keeps_nondefault_results_nonempty() {
+        assert!(!RoundResultsState {
+            hide_settlement_score: true,
+            ..RoundResultsState::default()
+        }
+        .is_empty());
+        assert!(!RoundResultsState {
+            custom_evaluation_strings: "First|Second".to_string(),
+            ..RoundResultsState::default()
+        }
+        .is_empty());
+        assert!(!RoundResultsState {
+            players: vec![RoundResultsPlayerState {
+                custom_evaluation_strings: "First   Second".to_string(),
+                ..RoundResultsPlayerState::default()
+            }],
+            ..RoundResultsState::default()
+        }
+        .is_empty());
+    }
+}

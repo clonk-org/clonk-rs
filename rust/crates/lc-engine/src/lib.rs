@@ -43,6 +43,7 @@ pub mod player_file;
 pub mod pxs;
 mod record;
 mod rng;
+mod round_results;
 pub mod scenario;
 mod script_constants;
 mod scoreboard;
@@ -81,6 +82,7 @@ pub use player::{
     Player, PlayerConfig, PlayerControlState, PlayerState, PlayerStatus, PlayerViewport,
 };
 pub use record::{Playback, PlaybackError, Recorder, Recording};
+pub use round_results::{RoundResultsPlayerState, RoundResultsState};
 pub use scenario::{
     LegacyC4SVal, PlayerStart, Scenario, ScenarioError, ScenarioObjectives, SkyConfig,
     MAX_PLAYER_STARTS,
@@ -5443,6 +5445,8 @@ pub struct SimulationSnapshot {
     pub frame: u64,
     #[serde(default)]
     pub game_over: bool,
+    #[serde(default, skip_serializing_if = "RoundResultsState::is_empty")]
+    pub round_results: RoundResultsState,
     #[serde(default)]
     pub physics: Option<PhysicsSettings>,
     pub objects: Vec<ObjectSnapshot>,
@@ -5563,6 +5567,8 @@ pub struct EngineState {
     pub scoreboard: ScoreboardState,
     #[serde(default)]
     pub game_over: bool,
+    #[serde(default, skip_serializing_if = "RoundResultsState::is_empty")]
+    pub round_results: RoundResultsState,
     #[serde(default)]
     pub landscape_insert_thrust: bool,
     /// The persistent C4MassMoverSet slots (MassMover.c4b in C++ saves,
@@ -5663,6 +5669,7 @@ impl EngineState {
             next_mission: NextMissionState::default(),
             scoreboard: snapshot.hud.scoreboard.clone(),
             game_over: snapshot.game_over,
+            round_results: snapshot.round_results.clone(),
             landscape_insert_thrust: false,
             // SimulationSnapshot carries no mover slots (the C++ snapshot
             // boundary is object-level); the set restores empty.
@@ -9999,6 +10006,9 @@ pub struct Engine {
     global_script_functions: Option<Arc<HashMap<String, lc_script::Function>>>,
     next_mission: NextMissionState,
     game_over_triggered: bool,
+    /// C4RoundResults is populated by the later evaluation behavior. Keep its
+    /// state distinct from the game-over trigger (C4Game.cpp:845-854).
+    round_results: RoundResultsState,
     objectives: ScenarioObjectives,
     objective_check_counter: u8,
     players_registered: bool,
@@ -11666,6 +11676,7 @@ impl Engine {
             global_script_functions: None,
             next_mission: NextMissionState::default(),
             game_over_triggered: false,
+            round_results: RoundResultsState::default(),
             objectives: ScenarioObjectives::default(),
             objective_check_counter: 0,
             players_registered: false,
@@ -18636,6 +18647,7 @@ impl Engine {
         SimulationSnapshot {
             frame: self.frame,
             game_over: self.game_over_triggered,
+            round_results: self.round_results.clone(),
             physics: Some(self.physics),
             objects,
             environment,
@@ -18893,6 +18905,7 @@ impl Engine {
             next_mission: self.next_mission.clone(),
             scoreboard: self.scoreboard.borrow().clone(),
             game_over: self.game_over_triggered,
+            round_results: self.round_results.clone(),
             landscape_insert_thrust: self.landscape_insert_thrust,
             mass_movers: self.mass_movers.clone(),
             sky: self.sky.as_ref().map(SkyState::snapshot),
@@ -19229,6 +19242,7 @@ impl Engine {
         self.next_mission = state.next_mission.clone();
         *self.scoreboard.borrow_mut() = state.scoreboard.clone();
         self.game_over_triggered = state.game_over;
+        self.round_results = state.round_results.clone();
 
         self.known_crew_owners = state.known_crew_owners.iter().cloned().collect();
         self.eliminated_crew_owners = state.eliminated_crew_owners.iter().cloned().collect();
@@ -46180,6 +46194,73 @@ func CrewSelection()
             assignments.get(&crew).map(|role| role.as_str()),
             Some("pilot")
         );
+    }
+
+    #[test]
+    fn round_results_state_defaults_and_round_trips_without_evaluation() {
+        // C4RoundResultsPlayer defaults both settlement scores to -1 and the
+        // remaining game data to zero (C4RoundResults.h:63-69). The round
+        // container starts with no goals/players and zero time
+        // (C4RoundResults.cpp:249-259). This slice only carries that state;
+        // C4Game::Evaluate remains the future behavioral trigger.
+        let mut engine = Engine::new();
+        assert_eq!(engine.round_results, RoundResultsState::default());
+
+        let encoded_default = serde_json::to_value(engine.capture_state())
+            .unwrap_or_else(|error| panic!("default state serializes: {error}"));
+        assert!(encoded_default.get("round_results").is_none());
+        let encoded_snapshot = serde_json::to_value(engine.snapshot())
+            .unwrap_or_else(|error| panic!("default snapshot serializes: {error}"));
+        assert!(encoded_snapshot.get("round_results").is_none());
+
+        let expected = RoundResultsState {
+            goals: vec!["GOLD".to_string(), "WIPF".to_string()],
+            fulfilled_goals: vec!["GOLD".to_string()],
+            playing_time_seconds: 731,
+            hide_settlement_score: true,
+            custom_evaluation_strings: "First line|Second line".to_string(),
+            players: vec![RoundResultsPlayerState {
+                player_info_id: 41,
+                total_playing_time: 1_234,
+                score_old: 150,
+                score_new: Some(250),
+                custom_evaluation_strings: "First note   Second note".to_string(),
+            }],
+        };
+        engine.round_results = expected.clone();
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.round_results, expected);
+        let state = EngineState::from_snapshot(&snapshot);
+        assert_eq!(state.round_results, expected);
+
+        let json = state
+            .to_json_string()
+            .unwrap_or_else(|error| panic!("round results serialize: {error}"));
+        let decoded = EngineState::from_json_str(&json)
+            .unwrap_or_else(|error| panic!("round results deserialize: {error}"));
+        assert_eq!(decoded.round_results, expected);
+
+        let mut restored = Engine::new();
+        restored
+            .restore_state(&decoded)
+            .unwrap_or_else(|error| panic!("round results restore: {error}"));
+        assert_eq!(restored.snapshot().round_results, expected);
+    }
+
+    #[test]
+    fn legacy_state_without_round_results_restores_cpp_defaults() {
+        let state = Engine::new().capture_state();
+        let mut value = serde_json::to_value(state)
+            .unwrap_or_else(|error| panic!("state serializes: {error}"));
+        value
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("engine state is an object"))
+            .remove("round_results");
+
+        let decoded: EngineState = serde_json::from_value(value)
+            .unwrap_or_else(|error| panic!("legacy state deserializes: {error}"));
+        assert_eq!(decoded.round_results, RoundResultsState::default());
     }
 
     #[test]
