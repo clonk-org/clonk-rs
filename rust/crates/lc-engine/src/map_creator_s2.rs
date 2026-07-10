@@ -240,6 +240,20 @@ impl Tree {
         }
     }
 
+    /// C4MapCreatorS2's copy constructor clones the evaluated tree, keeping
+    /// names only on global children; nested node names reset in
+    /// C4MCNode(owner, template, true) because their owner is not MCN_Node
+    /// (C4MapCreatorS2.cpp:137-150,701-714).
+    fn clone_creator(&self) -> Self {
+        let mut cloned = self.clone();
+        for node in cloned.nodes.iter_mut().skip(1) {
+            if node.owner != Some(0) {
+                node.name.clear();
+            }
+        }
+        cloned
+    }
+
     fn overlay(&self, id: NodeId) -> Option<&Overlay> {
         match &self.nodes[id].kind {
             NodeKind::Overlay(overlay) => Some(overlay),
@@ -1384,14 +1398,67 @@ pub(crate) fn create_s2_map_with_state(
     // C4MCMap::Default (src/C4MapCreatorS2.cpp:633-644) runs at creator
     // construction: MapWdt/MapHgt evaluate through the synced rng.
     let (wdt, hgt) = evaluate_map_size(map_width, map_height, map_player_extend, player_count, rng);
+    parse_and_render_s2_map(
+        Tree::new(),
+        source,
+        classifier,
+        default_map_for_size(wdt, hgt),
+        rng,
+        false,
+    )
+}
+
+/// Runtime C4MapCreatorS2 construction seam for C4Landscape::DrawMap
+/// (C4Landscape.cpp:2636-2668). With KeepMapCreator state, the evaluated
+/// tree is cloned so additional script can resolve its named templates;
+/// otherwise parsing starts from a fresh root. The retained state is never
+/// mutated. No landscape write or script host is performed here.
+pub(crate) fn render_runtime_s2_map(
+    retained: Option<&MapCreatorS2State>,
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    map_width: i32,
+    map_height: i32,
+    rng: &mut LcgRng,
+) -> Option<lc_resources::bitmap::IndexedBitmap> {
+    let tree = retained
+        .map(|creator| creator.tree.clone_creator())
+        .unwrap_or_else(Tree::new);
+    // FakeLS.MapWdt/MapHgt are C4SVal(requested, 0, requested, requested).
+    // C4SVal::Evaluate still calls Random(1) once per axis before BoundBy
+    // returns the exact value (C4Scenario.cpp:38-46).
+    let _ = rng.random(1);
+    let _ = rng.random(1);
+    parse_and_render_s2_map(
+        tree,
+        source,
+        classifier,
+        default_map_for_size(map_width, map_height),
+        rng,
+        true,
+    )
+    .bitmap
+}
+
+fn default_map_for_size(wdt: i32, hgt: i32) -> Overlay {
     let mut default_map = Overlay::default_template();
     default_map.is_map = true;
     default_map.wdt = wdt;
     default_map.hgt = hgt;
+    default_map
+}
 
+fn parse_and_render_s2_map(
+    tree: Tree,
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    default_map: Overlay,
+    rng: &mut LcgRng,
+    runtime_source: bool,
+) -> S2MapCreation {
     let mut parser = Parser {
         tokens: Tokenizer::new(source),
-        tree: Tree::new(),
+        tree,
         default_map,
         classifier,
         rng,
@@ -1399,10 +1466,22 @@ pub(crate) fn create_s2_map_with_state(
     if let Err(error) = parser.parse_into(0) {
         // C4MCParserErr::show (src/C4MapCreatorS2.cpp:823-827): log and
         // carry on with whatever parsed.
-        tracing::warn!(%error, "Landscape.txt parse error; rendering the nodes parsed so far");
+        if runtime_source {
+            tracing::warn!(%error, "runtime map script parse error; rendering the nodes parsed so far");
+        } else {
+            tracing::warn!(%error, "Landscape.txt parse error; rendering the nodes parsed so far");
+        }
     }
     let tree = parser.tree;
 
+    let bitmap = render_last_map(&tree);
+    S2MapCreation {
+        bitmap,
+        creator: MapCreatorS2State { tree },
+    }
+}
+
+fn render_last_map(tree: &Tree) -> Option<lc_resources::bitmap::IndexedBitmap> {
     // GetMap(nullptr): the last map entry (src/C4MapCreatorS2.cpp:786-792).
     let map = tree.nodes[0]
         .children
@@ -1410,7 +1489,7 @@ pub(crate) fn create_s2_map_with_state(
         .rev()
         .find(|&&child| tree.overlay(child).is_some_and(|overlay| overlay.is_map))
         .copied();
-    let bitmap = map.and_then(|map| {
+    map.and_then(|map| {
         let map_overlay = tree.overlay(map).expect("map overlay");
         let (wdt, hgt) = (map_overlay.wdt, map_overlay.hgt);
         if wdt <= 0 || hgt <= 0 {
@@ -1431,11 +1510,7 @@ pub(crate) fn create_s2_map_with_state(
             height: hgt as u32,
             indices: bytes,
         })
-    });
-    S2MapCreation {
-        bitmap,
-        creator: MapCreatorS2State { tree },
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1513,6 +1588,91 @@ mod tests {
         let restored: MapCreatorS2State =
             serde_json::from_str(&encoded).expect("creator restores");
         assert_eq!(restored, creation.creator);
+    }
+
+    #[test]
+    fn runtime_creator_clone_resolves_retained_named_template_without_mutation() {
+        // DrawMap copies pMapCreator when KeepMapCreator retained it, swaps
+        // in a FakeLS carrying the requested map size, then ReadScript can
+        // resolve named overlays from the cloned tree
+        // (C4Landscape.cpp:2636-2662; C4MapCreatorS2.cpp:701-714).
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(17);
+        let (w, h) = params();
+        let retained = create_s2_map_with_state(
+            "overlay Named { mat = Earth; tex = Rough; wdt = 50; seed = 7; };",
+            &mut classifier,
+            w,
+            h,
+            false,
+            1,
+            &mut rng,
+        )
+        .creator;
+        let original = retained.clone();
+        let before = rng.count;
+
+        let map = render_runtime_s2_map(
+            Some(&retained),
+            "map Runtime { seed = 9; Named; };",
+            &mut classifier,
+            8,
+            4,
+            &mut rng,
+        )
+        .expect("cloned creator renders retained template");
+
+        assert_eq!(retained, original, "DrawMap works on a creator copy");
+        assert_eq!((map.width, map.height), (8, 4));
+        let at = |x: u32, y: u32| map.indices[(y * map.width + x) as usize];
+        assert_eq!(at(0, 0), 2 | 0x80);
+        assert_eq!(at(3, 3), 2 | 0x80, "50% template uses requested width");
+        assert_eq!(at(4, 0), 0, "right half remains sky");
+        assert_eq!(
+            rng.count - before,
+            2,
+            "FakeLS exact MapWdt/MapHgt still evaluate with two Random(1) draws"
+        );
+    }
+
+    #[test]
+    fn runtime_creator_fresh_fallback_matches_exact_initial_creation() {
+        // Without pMapCreator, DrawMap constructs a fresh C4MapCreatorS2
+        // with the same FakeLS and then ReadScript/Render(nullptr)
+        // (C4Landscape.cpp:2642-2663). The seam must preserve the existing
+        // create_s2_map bitmap and synced RNG order for equivalent exact
+        // dimensions.
+        let source = "map Runtime { turbulence = 10 - 20; \
+                      overlay { mat = Rock; tex = Ridge; wdt = 50; }; };";
+        let mut runtime_classifier = test_classifier();
+        let mut creation_classifier = test_classifier();
+        let mut runtime_rng = LcgRng::seed_from_u64(23);
+        let mut creation_rng = runtime_rng.clone();
+        let before = runtime_rng.count;
+
+        let runtime = render_runtime_s2_map(
+            None,
+            source,
+            &mut runtime_classifier,
+            9,
+            5,
+            &mut runtime_rng,
+        )
+        .expect("fresh runtime creator renders");
+        let initial = create_s2_map(
+            source,
+            &mut creation_classifier,
+            LegacyC4SVal::new(9, 0, 9, 9),
+            LegacyC4SVal::new(5, 0, 5, 5),
+            false,
+            1,
+            &mut creation_rng,
+        )
+        .expect("initial creator renders");
+
+        assert_eq!(runtime, initial);
+        assert_eq!(runtime_rng, creation_rng, "RNG ledger remains identical");
+        assert_eq!(runtime_rng.count - before, 7);
     }
 
     #[test]
