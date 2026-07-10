@@ -861,6 +861,20 @@ impl HostWorldContext {
         })
     }
 
+    fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        self.sector_map().map(|sectors| {
+            let area = sectors.area(rect);
+            sectors.object_id_lists_in_area(&area)
+        })
+    }
+
+    fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        self.sector_map().map(|sectors| {
+            let area = sectors.area(rect);
+            sectors.shape_id_lists_in_area(&area)
+        })
+    }
+
     pub(crate) fn player_ids(&self) -> &[i32] {
         self.player_order.as_ref()
     }
@@ -952,6 +966,11 @@ trait WorldAccessor {
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect;
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
     fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
+    /// The bounded Find-with-sort walk needs the per-sector lists kept
+    /// separate (C4FindObject.cpp:283-307); shape lists arrive without the
+    /// Marker dedup the flat variants apply.
+    fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>>;
+    fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>>;
     /// Definition mass/value for the C4SO_Mass/C4SO_Value sorts.
     fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata>;
     /// Whether any definition script (or host function) knows `name` —
@@ -979,6 +998,14 @@ impl WorldAccessor for HostWorldContext {
 
     fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
         self.shape_sector_ids_in_rect(rect)
+    }
+
+    fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        self.object_sector_id_lists_in_rect(rect)
+    }
+
+    fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        self.shape_sector_id_lists_in_rect(rect)
     }
 
     fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata> {
@@ -1049,6 +1076,45 @@ impl WorldAccessor for FuncFindView {
             }
         }
         Some(ids)
+    }
+
+    fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        let mut lists = self.world.object_sector_id_lists_in_rect(rect)?;
+        let mut seen = lists.iter().flatten().copied().collect::<HashSet<_>>();
+        let pending: Vec<ObjectId> = self
+            .pending_order
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.pending_objects.get(&id).is_some_and(|object| {
+                    rect.contains_point(object.position.x, object.position.y)
+                }) && seen.insert(id)
+            })
+            .collect();
+        if !pending.is_empty() {
+            lists.push(pending);
+        }
+        Some(lists)
+    }
+
+    fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        let mut lists = self.world.shape_sector_id_lists_in_rect(rect)?;
+        let mut seen = lists.iter().flatten().copied().collect::<HashSet<_>>();
+        let pending: Vec<ObjectId> = self
+            .pending_order
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.pending_objects
+                    .get(&id)
+                    .is_some_and(|object| self.object_shape_rect(object).overlaps(&rect))
+                    && seen.insert(id)
+            })
+            .collect();
+        if !pending.is_empty() {
+            lists.push(pending);
+        }
+        Some(lists)
     }
 
     fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata> {
@@ -1133,6 +1199,45 @@ impl WorldAccessor for EffectHostContext {
             }
         }
         Some(ids)
+    }
+
+    fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        let mut lists = self.world.object_sector_id_lists_in_rect(rect)?;
+        let mut seen = lists.iter().flatten().copied().collect::<HashSet<_>>();
+        let pending: Vec<ObjectId> = self
+            .pending_order
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.pending_objects.get(&id).is_some_and(|object| {
+                    rect.contains_point(object.position.x, object.position.y)
+                }) && seen.insert(id)
+            })
+            .collect();
+        if !pending.is_empty() {
+            lists.push(pending);
+        }
+        Some(lists)
+    }
+
+    fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+        let mut lists = self.world.shape_sector_id_lists_in_rect(rect)?;
+        let mut seen = lists.iter().flatten().copied().collect::<HashSet<_>>();
+        let pending: Vec<ObjectId> = self
+            .pending_order
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.pending_objects
+                    .get(&id)
+                    .is_some_and(|object| self.object_shape_rect(object).overlaps(&rect))
+                    && seen.insert(id)
+            })
+            .collect();
+        if !pending.is_empty() {
+            lists.push(pending);
+        }
+        Some(lists)
     }
 }
 
@@ -13853,10 +13958,16 @@ impl SortCriterion {
     }
 }
 
-/// The single-result Find with a sort attached (C4FindObject.cpp:186-199):
-/// a running best, replaced when the uncached `Compare(candidate, best)`
-/// is positive. No PrepareCache — value functions (and `C4SO_Random`
-/// draws) run per comparison.
+/// The single-result Find with a sort attached (C4FindObject.cpp:272-308).
+/// Bounded criteria walk the per-sector lists: the inner
+/// `Find(*pLst)` (C4FindObject.cpp:186-199) keeps a running best PER LIST
+/// — replaced when the uncached `Compare(candidate, best)` is positive —
+/// and only each list's winner meets the outer running best
+/// (C4FindObject.cpp:287-293/299-305). The unbounded walk is the
+/// single-list case. No PrepareCache — value functions (and `C4SO_Random`
+/// draws) run per comparison, so the pairing is lockstep-relevant. The
+/// UseShapes lists carry no Marker: a shape spanning sectors is compared
+/// in every list holding it.
 fn find_first_with_sort(
     world: &impl WorldAccessor,
     condition: &FindCondition,
@@ -13865,27 +13976,54 @@ fn find_first_with_sort(
     if condition.is_impossible(world) {
         return Ok(None);
     }
-    let mut best: Option<(ObjectId, HostWorldObject)> = None;
-    for object_id in world.object_ids() {
-        let Some(object) = world.get_object(object_id) else {
-            continue;
-        };
-        if !object.status().is_active() {
-            continue;
-        }
-        if !condition.check(world, &object)? {
-            continue;
-        }
-        best = match best {
-            None => Some((object_id, object)),
-            Some((best_id, best_object)) => {
-                if sort.compare_uncached(world, &object, &best_object)? > 0 {
-                    Some((object_id, object))
-                } else {
-                    Some((best_id, best_object))
-                }
+    let lists = condition
+        .bounds()
+        .and_then(|(rect, use_shapes)| {
+            if use_shapes {
+                world.shape_sector_id_lists_in_rect(rect)
+            } else {
+                world.object_sector_id_lists_in_rect(rect)
             }
-        };
+        })
+        .unwrap_or_else(|| vec![world.object_ids()]);
+    let mut best: Option<(ObjectId, HostWorldObject)> = None;
+    for ids in lists {
+        // inner Find(*pLst): the per-list best
+        let mut list_best: Option<(ObjectId, HostWorldObject)> = None;
+        for object_id in ids {
+            let Some(object) = world.get_object(object_id) else {
+                continue;
+            };
+            if !object.status().is_active() {
+                continue;
+            }
+            if !condition.check(world, &object)? {
+                continue;
+            }
+            list_best = match list_best {
+                None => Some((object_id, object)),
+                Some((best_id, best_object)) => {
+                    if sort.compare_uncached(world, &object, &best_object)? > 0 {
+                        Some((object_id, object))
+                    } else {
+                        Some((best_id, best_object))
+                    }
+                }
+            };
+        }
+        // outer walk: the list winner vs the running best
+        if let Some((list_id, list_object)) = list_best {
+            best = match best {
+                None => Some((list_id, list_object)),
+                Some((best_id, best_object)) => {
+                    if sort.compare_uncached(world, &list_object, &best_object)? > 0 {
+                        Some((list_id, list_object))
+                    } else {
+                        Some((best_id, best_object))
+                    }
+                }
+            };
+        }
     }
     Ok(best.map(|(id, _)| id))
 }
@@ -29699,6 +29837,156 @@ func ProbeBadIndex(id) {
             values.iter().map(object_id_from_value).collect::<Vec<_>>(),
             vec![Some(ObjectId::new(2)), Some(ObjectId::new(1))],
             "sector (0,0) encounters BIGG first; its sector (1,0) repeat is deduped"
+        );
+    }
+
+    #[test]
+    fn find_object2_bounded_sort_walks_sector_lists_nested() {
+        // C4FindObject::Find(Objs, Sct) with a sort (C4FindObject.cpp:
+        // 283-307): each sector list yields its own best via the inner
+        // Find(*pLst), and only the per-list winners meet the running best.
+        // With C4SO_Random the uncached Compare draws value(obj1) then
+        // value(obj2) per comparison (C4FindObject.cpp:834-842,914-917), so
+        // the pairing — not just the draw count — is lockstep-relevant.
+        let world = sectored_find_world(
+            vec![
+                find_world_object(1, "ROCK", 10, 10, 1), // sector (0,0): [1]
+                find_world_object(2, "ROCK", 60, 10, 1), // sector (1,0): [2,3]
+                find_world_object(3, "ROCK", 70, 10, 1),
+            ],
+            HashMap::new(),
+        );
+        let args = vec![
+            Value::Array(vec![
+                Value::Int(10),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(150),
+                Value::Int(40),
+            ]),
+            Value::Array(vec![Value::Int(120)]), // C4SO_Random
+        ];
+        let rng = LcgRng::seed_from_u64(3);
+        let mut mirror = rng.clone();
+        let guard = enter_random_context(rng);
+        let (result, _) = with_object_host_context_with_world(world, || find_object2(&args));
+        let rng_after = guard.finish();
+        // Nested walk: sector (0,0) seeds best=1 without a draw; sector
+        // (1,0) draws Compare(3, 2) = (r1, r2) for its list winner, then
+        // Compare(winner, 1) = (r3, r4) against the running best.
+        let r1 = mirror.random(1 << 16);
+        let r2 = mirror.random(1 << 16);
+        let list_winner = if r2 - r1 > 0 { 3u64 } else { 2 };
+        let r3 = mirror.random(1 << 16);
+        let r4 = mirror.random(1 << 16);
+        let expected = if r4 - r3 > 0 { list_winner } else { 1 };
+        assert_eq!(rng_after, mirror, "exactly two Compare calls, four draws");
+        assert_eq!(
+            (expected, r2 - r1 > 0, r4 - r3 > 0),
+            (2, false, true),
+            "seed 3 discriminates the nested pairing from a flat running-best walk"
+        );
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(expected))
+        );
+    }
+
+    #[test]
+    fn find_object2_bounded_sort_ties_keep_the_first_in_sector_order() {
+        // Equal sort values compare to zero, so the incumbent stays
+        // (C4FindObject.cpp:196-198) — the winner is the first match in
+        // SECTOR-walk order, not master order.
+        let world = sectored_find_world(
+            vec![
+                find_world_object(1, "ROCK", 80, 10, 1), // sector (1,0)
+                find_world_object(2, "ROCK", 10, 10, 1), // sector (0,0)
+                find_world_object(3, "ROCK", 20, 10, 1), // sector (0,0)
+            ],
+            HashMap::new(),
+        );
+        let args = vec![
+            Value::Array(vec![
+                Value::Int(10),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(150),
+                Value::Int(40),
+            ]),
+            Value::Array(vec![Value::Int(140)]), // C4SO_Mass — all equal
+        ];
+        let (result, _) = with_object_host_context_with_world(world, || find_object2(&args));
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(2)),
+            "first match of the first sector list wins ties"
+        );
+    }
+
+    #[test]
+    fn find_object2_shape_sort_has_no_marker_so_spanning_shapes_compare_twice() {
+        // C4FindObject::Find's UseShapes arm has NO marker
+        // (C4FindObject.cpp:283-294, unlike FindMany:331-342): an object
+        // whose shape spans two sectors sits in both lists and is compared
+        // in both — its repeat costs Compare draws.
+        let definitions: HashMap<DefinitionId, DefinitionMetadata> = [
+            (
+                "SMLL".to_string(),
+                DefinitionMetadata {
+                    shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+            (
+                "BIGG".to_string(),
+                DefinitionMetadata {
+                    shape: Some(DefinitionRect::new(-30, -5, 60, 10)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let world = sectored_find_world(
+            vec![
+                // rank 1: sector (1,0) only
+                find_world_object(1, "SMLL", 90, 10, 1),
+                // rank 2: sectors (0,0) and (1,0)
+                find_world_object(2, "BIGG", 50, 10, 1),
+            ],
+            definitions,
+        );
+        let args = vec![
+            Value::Array(vec![
+                Value::Int(12),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(120),
+                Value::Int(40),
+            ]),
+            Value::Array(vec![Value::Int(120)]), // C4SO_Random
+        ];
+        let rng = LcgRng::seed_from_u64(7);
+        let mut mirror = rng.clone();
+        let guard = enter_random_context(rng);
+        let (result, _) = with_object_host_context_with_world(world, || find_object2(&args));
+        let rng_after = guard.finish();
+        // Sector (0,0) list [2]: best=2, no draw. Sector (1,0) list [1,2]:
+        // inner Compare(2, 1) draws (r1, r2); outer Compare(winner, 2)
+        // draws (r3, r4) — 2 can even meet itself.
+        let r1 = mirror.random(1 << 16);
+        let r2 = mirror.random(1 << 16);
+        let list_winner = if r2 - r1 > 0 { 2u64 } else { 1 };
+        let r3 = mirror.random(1 << 16);
+        let r4 = mirror.random(1 << 16);
+        let expected = if r4 - r3 > 0 { list_winner } else { 2 };
+        assert_eq!(
+            rng_after, mirror,
+            "four draws: the spanning shape is compared in BOTH sector lists"
+        );
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(expected))
         );
     }
 
