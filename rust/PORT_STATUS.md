@@ -55,7 +55,7 @@ rebuilt/relinked pinned live comparison when behavior changes.
 - **Music/audio:** `Music`/`MusicLevel` host calls work; C++ activation order and
   app/engine enabled state do not. `MusicEnabled`/`MusicLevel`/`PlayList`
   save/restore, random continuation, streaming/looped MIDI and definition WAVs remain.
-- **Resources/presentation:** sky/LaunchCloud, control/config/name/locale/group
+- **Resources/presentation:** sky, control/config/name/locale/group
   I/O; renderer transforms/GL/shaders/panning; particle graphics; tutorial
   difficulty/character-choice GUI, HUD/board/player menus; remaining startup,
   player, network, option, update/mission-access, search/scroll and tooltip flows.
