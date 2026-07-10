@@ -288,6 +288,9 @@ pub struct MaterialProperties {
     density: i32,
     friction: i32,
     placement: i32,
+    /// C4MaterialCore::MinHeightCount: minimum vertical run length for
+    /// `EffectiveMatCount` accounting (C4Material.h:120).
+    min_height_count: i32,
     splash_rate: i32,
     dig_free: bool,
     blast_free: bool,
@@ -321,6 +324,7 @@ impl MaterialProperties {
     fn from_definition(definition: &ResourceMaterialDefinition) -> Self {
         let density = definition.int("density").unwrap_or(0);
         let friction = definition.int("friction").unwrap_or(0);
+        let min_height_count = definition.int("minheightcount").unwrap_or(0);
         let dig_free = definition.bool_flag("digfree").unwrap_or(false);
         let blast_free = definition.bool_flag("blastfree").unwrap_or(false);
         let dig_to_object_on_request_only = definition
@@ -407,6 +411,7 @@ impl MaterialProperties {
             density,
             friction,
             placement,
+            min_height_count,
             splash_rate,
             dig_free,
             blast_free,
@@ -515,6 +520,10 @@ impl Material {
 
     pub fn placement(&self) -> i32 {
         self.properties.placement
+    }
+
+    pub fn min_height_count(&self) -> i32 {
+        self.properties.min_height_count
     }
 
     pub fn splash_rate(&self) -> i32 {
