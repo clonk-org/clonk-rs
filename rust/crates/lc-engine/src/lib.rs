@@ -20020,6 +20020,93 @@ impl Engine {
         }
     }
 
+    /// C4Object::ContactCheck (C4Movement.cpp:166-182): perform the shape
+    /// probe first, then synchronously dispatch the contacted directions in
+    /// Left/Right/Top/Bottom order. A truthy callback stops dispatch for this
+    /// probe; engine callback errors are fail-safe.
+    fn object_contact_check_at(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        position: Vector2,
+        solid_mask_indices: &[usize],
+    ) -> Option<ShapeContact> {
+        let contact = {
+            let object = self.objects.get(idx)?;
+            let landscape = self.landscape.as_ref()?;
+            let masks = self.solid_masks_for_movement(solid_mask_indices);
+            let contact_density = self
+                .definitions
+                .get(definition_id)
+                .map(|definition| definition.contact_density())
+                .unwrap_or(CONTACT_DENSITY_SOLID);
+            shape_contact_check(
+                &object.state.vertices,
+                position,
+                landscape,
+                &self.materials,
+                &masks,
+                Some(object.id),
+                contact_density,
+            )
+        };
+
+        for cnat in [CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM] {
+            if contact.contact_cnat & cnat == 0 {
+                continue;
+            }
+            let Some(function_name) = contact_callback_name(cnat) else {
+                continue;
+            };
+            let Some((object_id, callback_definition_id, action_library)) = self
+                .objects
+                .get(idx)
+                .and_then(|object| {
+                    self.definitions
+                        .get(&object.definition_id)
+                        .map(|definition| {
+                            (
+                                object.id,
+                                object.definition_id.clone(),
+                                definition.action_library().clone(),
+                            )
+                        })
+                })
+            else {
+                break;
+            };
+            let contact_calls = self
+                .definitions
+                .get(&callback_definition_id)
+                .map(|definition| definition.contact_function_calls())
+                .unwrap_or(false);
+            if !contact_calls {
+                continue;
+            }
+            match self.call_movement_object_function(
+                idx,
+                function_name,
+                &[],
+                &action_library,
+                object_id,
+                &callback_definition_id,
+            ) {
+                Ok(value) if value.as_bool() => break,
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        definition = %callback_definition_id,
+                        function = function_name,
+                        %error,
+                        "script error in engine callback; continuing like the C++ fail-safe exec"
+                    );
+                }
+            }
+        }
+
+        Some(contact)
+    }
+
     /// ObjectActionCornerScale (C4ObjectCom.cpp:167-217): probe a free
     /// spot up-and-sideways, then KneelUp (Walk fallback) with the fixed
     /// coords shifted.
@@ -20031,32 +20118,26 @@ impl Engine {
         solid_mask_indices: &[usize],
     ) -> bool {
         const CORNER_RANGE: i32 = ATTACH_RANGE + 2;
-        let corner_okay = |engine: &Engine, range_x: i32, range_y: i32| -> bool {
-            let object = &engine.objects[idx];
-            let cty = object.state.position.y - range_y;
-            let ctx = if object.state.direction == Direction::Left {
-                object.state.position.x - range_x
+        let corner_okay = |engine: &mut Engine, range_x: i32, range_y: i32| -> bool {
+            let (position, direction) = {
+                let object = &engine.objects[idx];
+                (object.state.position, object.state.direction)
+            };
+            let cty = position.y - range_y;
+            let ctx = if direction == Direction::Left {
+                position.x - range_x
             } else {
-                object.state.position.x + range_x
+                position.x + range_x
             };
-            let Some(landscape) = engine.landscape.as_ref() else {
-                return false;
-            };
-            let masks = engine.solid_masks_for_movement(solid_mask_indices);
-            let contact = shape_contact_check(
-                &object.state.vertices,
-                Vector2::new(ctx, cty),
-                landscape,
-                &engine.materials,
-                &masks,
-                Some(object.id),
-                engine
-                    .definitions
-                    .get(definition_id)
-                    .map(|definition| definition.contact_density())
-                    .unwrap_or(50),
-            );
-            contact.contact_cnat == 0
+            engine
+                .object_contact_check_at(
+                    idx,
+                    definition_id,
+                    Vector2::new(ctx, cty),
+                    solid_mask_indices,
+                )
+                .map(|contact| contact.contact_cnat == 0)
+                .unwrap_or(false)
         };
         let (range_x, range_y) = if matches!(procedure, ActionProcedure::Scale) {
             // Scaling: range max to min (CheckCornerScale).
@@ -45941,6 +46022,95 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
         assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn corner_scale_probes_dispatch_contact_callbacks_like_cpp() {
+        // C++ CornerScaleOkay performs a full C4Object::ContactCheck for every
+        // probe (src/C4ObjectCom.cpp:167-179). ContactCheck synchronously calls
+        // ContactLeft/Right/Top/Bottom in bit order and stops on a truthy return
+        // (src/C4Movement.cpp:166-182). The pinned GoldRush differential at
+        // frame 309 freezes the result: failed Fish probes run ContactTop,
+        // leaving COMD_Down before the range-6 corner scale succeeds.
+        let script = r#"
+            local probeCount;
+
+            protected func ContactTop()
+            {
+                probeCount = probeCount + 1;
+                SetComDir(COMD_Down());
+                return 1;
+            }
+        "#;
+        let mut fish = Definition::from_script("FISH", "Fish", script).expect("script compiles");
+        fish.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_TOP)]);
+        fish.set_contact_density(50);
+        fish.set_contact_function_calls(true);
+        fish.configure_actions(
+            Some("Swim".to_string()),
+            HashMap::from([
+                (
+                    "Swim".to_string(),
+                    ActionSpec::default().with_procedure("SWIM"),
+                ),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+            ]),
+        );
+
+        let mut landscape = vehicle_grid_landscape(24, 24);
+        landscape.set_world_height(24);
+        for (x, y) in [(12, 8), (13, 7), (14, 6), (15, 5)] {
+            landscape.grid_write_byte(x, y, 1);
+        }
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(landscape);
+        engine.register_definition(fish).expect("fish registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("FISH")
+                    .with_position(Vector2::new(10, 10))
+                    .with_action(ActionState::new("Swim"))
+                    .with_direction(Direction::Right)
+                    .with_command_direction(CommandDirection::Right)
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("fish spawns");
+        let idx = engine.find_object_index(id).expect("fish exists");
+        let definition_id = engine.objects[idx].definition_id.clone();
+        assert_eq!(engine.objects[idx].state.position, Vector2::new(10, 10));
+        assert_eq!(
+            engine.objects[idx].state.vertices,
+            vec![ObjectVertex::new(0, 0).with_cnat(CNAT_TOP)]
+        );
+        let landscape = engine.landscape.as_ref().expect("landscape set");
+        assert_eq!(landscape.density_at(12, 8, &engine.materials), 100);
+        assert_eq!(landscape.density_at(16, 4, &engine.materials), 0);
+
+        assert!(engine.object_action_corner_scale(
+            idx,
+            &definition_id,
+            ActionProcedure::Swim,
+            &[],
+        ));
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.position, Vector2::new(16, 4));
+        assert_eq!(object.state.action.name, "Walk");
+        assert_eq!(object.state.direction, Direction::Right);
+        assert_eq!(
+            object.state.local_vars.get("probeCount"),
+            Some(&Value::Int(4)),
+            "ranges 2 through 5 each perform a full ContactCheck"
+        );
+        assert_eq!(
+            object.state.command_direction,
+            CommandDirection::Down,
+            "failed corner probes must run Fish ContactTop before the free range-6 probe"
+        );
     }
 
     #[test]

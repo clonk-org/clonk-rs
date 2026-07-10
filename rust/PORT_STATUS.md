@@ -5,11 +5,9 @@
 
 ## Current state
 
-- Pinned Goldrush (`LC_PIN_SEED=424242`) matches through frame 308; frame 309
-  first differs at FISH #1343 command direction (Rust `Right`, C++ `Down`).
-- The previous wall (frame 219) was direct DFA_SWIM facing bypassing `SetDir`,
-  `TurnAction`, and fixed-position resync. WALK/HANGLE/DIG/SWIM now share the C++
-  path, frozen by the production `C4ActionDirection.h` differential.
+- Pinned Goldrush (`LC_PIN_SEED=424242`) matches through frame 366; frame 367
+  first differs at object #1595 definition timer (Rust `0`, C++ `1`). Frame 309's
+  Fish corner probes now dispatch C++-ordered `Contact*` callbacks.
 - Foundational motion and RNG gaps are closed: object motion uses signed 16.16
   `C4Fixed`; `Random()` uses the shared C++ LCG/draw ledger.
 - Scenarios load/apply 93/93; audit is 92/93. CTF_DeepSea's animal result is
@@ -142,8 +140,7 @@ and a recorded new first mismatch.
 Build/relink and run pinned Goldrush:
 
 ```sh
-cd rust && cargo xtask ffi --release
-cd .. && cmake --build build-arm64-native --target clonk -j 8
+cmake --build build-arm64-native --target clonk -j 8
 cd build-arm64-native
 LC_RUST_ENGINE_RUNTIME=1 LC_PIN_SEED=424242 \
   clonk.app/Contents/MacOS/clonk \
