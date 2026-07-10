@@ -23,7 +23,9 @@ mod settings;
 mod startup_player_files;
 
 use std::cmp::Ordering;
-use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{
+    hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque,
+};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fs::{self, File};
@@ -61,16 +63,18 @@ use lc_engine::{
     ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
     JoinPlayerConfig, Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection,
     MenuRequestKind, MessageKind, MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate,
-    PlayerConfig, PlayerStatus, Recorder, Recording, RgbColor, Scenario, ScenarioError,
-    SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER,
-    FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
-    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
+    PlayerConfig, PlayerStatus, Recorder,
+    Recording, RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig,
+    SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
+    FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
+    FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
-    default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
-    GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher, KeyCode,
-    MainMenuAction, MainMenuItem, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
-    StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput, ViewportPointer,
+    default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas,
+    DefinitionSprite, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData,
+    InputDispatcher, KeyCode, MainMenuAction, MainMenuItem, PlayerOverlay, ScenarioEntry,
+    ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput,
+    ViewportPointer,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::{ButtonTextures, Rect as GuiRect};
@@ -90,13 +94,13 @@ use object_menu::{
 use pixels::{Pixels, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
+use startup_player_files::{discover_player_files, persist_activations, StartupPlayerFile};
 use serde::{
     de::{self, Unexpected, Visitor},
     ser::Serializer,
     Deserialize, Serialize,
 };
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
-use startup_player_files::{discover_player_files, persist_activations, StartupPlayerFile};
 use time::{macros::format_description, OffsetDateTime};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
@@ -1319,8 +1323,8 @@ fn run_integration_test(
         };
         let mut frame = vec![0u8; (w as usize) * (h as usize) * 4];
         app.render(&mut frame).context("render integration frame")?;
-        let png =
-            encode_surface_to_png(app.graphics.surface()).context("encode integration frame")?;
+        let png = encode_surface_to_png(app.graphics.surface())
+            .context("encode integration frame")?;
         std::fs::write(&dump, &png).with_context(|| format!("write {dump}"))?;
         println!("  wrote {dump} ({w}x{h})");
     }
@@ -1480,8 +1484,7 @@ fn main() -> Result<()> {
     // The app lays out and renders at the GUI resolution; the presenter
     // scales the finished frame to the window like the C++ engine scales
     // its GUI output (C4Gui.cpp:461).
-    let mut presenter =
-        lc_scaling::FramePresenter::new(display_options.scale, size.width, size.height);
+    let mut presenter = lc_scaling::FramePresenter::new(display_options.scale, size.width, size.height);
     let (logical_width, logical_height) = presenter.logical_size();
 
     let mut app = GameApp::new(
@@ -1594,11 +1597,7 @@ fn handle_window_event(
         WindowEvent::CloseRequested => {
             control_flow.set_exit();
         }
-        WindowEvent::Resized(size)
-        | WindowEvent::ScaleFactorChanged {
-            new_inner_size: &mut size,
-            ..
-        } => {
+        WindowEvent::Resized(size) | WindowEvent::ScaleFactorChanged { new_inner_size: &mut size, .. } => {
             let clamped = enforce_min_size(size);
             pixels
                 .resize_surface(clamped.width, clamped.height)
@@ -5019,6 +5018,7 @@ fn shared_material_texture_images(paths: &AppPaths) -> &'static HashMap<String, 
 }
 
 fn load_material_texture_images(paths: &AppPaths) -> HashMap<String, ImageData> {
+
     let mut textures = HashMap::new();
     for candidate in candidate_material_paths(paths) {
         let Ok(group) = Group::open(&candidate) else {
@@ -5325,11 +5325,7 @@ fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
 fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
     paths
         .and_then(|paths| Config::load(paths.config_file()).ok())
-        .and_then(|config| {
-            config
-                .get_in(Some("General"), "FairCrew")
-                .map(parse_config_bool)
-        })
+        .and_then(|config| config.get_in(Some("General"), "FairCrew").map(parse_config_bool))
         .unwrap_or(false)
 }
 
@@ -5682,9 +5678,7 @@ impl GameApp {
             run_started: None,
             board_line: None,
             show_startup_hint: false,
-            debug_hud: std::env::var("LC_APP_HUD_DEBUG")
-                .map(|v| v == "1")
-                .unwrap_or(false),
+            debug_hud: std::env::var("LC_APP_HUD_DEBUG").map(|v| v == "1").unwrap_or(false),
         };
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
@@ -6099,9 +6093,13 @@ impl GameApp {
 
     fn legacy_control_options_active(&self) -> bool {
         self.startup_view == StartupView::Options
-            && self.startup_options_dialog.as_ref().is_some_and(|dialog| {
-                dialog.active_sheet() == lc_frontend::startup_options_dlg::OptionsSheet::Keyboard
-            })
+            && self
+                .startup_options_dialog
+                .as_ref()
+                .is_some_and(|dialog| {
+                    dialog.active_sheet()
+                        == lc_frontend::startup_options_dlg::OptionsSheet::Keyboard
+                })
     }
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
@@ -6169,7 +6167,9 @@ impl GameApp {
                     }
                 }
                 if state == ElementState::Pressed {
-                    if self.startup_view == StartupView::NetworkGame && key == VirtualKeyCode::F5 {
+                    if self.startup_view == StartupView::NetworkGame
+                        && key == VirtualKeyCode::F5
+                    {
                         self.process_network_dialog_actions(vec![
                             lc_frontend::startup_netdlg::NetDlgAction::Refresh,
                         ])?;
@@ -6184,10 +6184,12 @@ impl GameApp {
                             VirtualKeyCode::Insert => {
                                 Some(lc_frontend::startup_plrsel::PlrSelAction::NewPlayer)
                             }
-                            VirtualKeyCode::Delete => selected
-                                .map(lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer),
-                            VirtualKeyCode::F2 => selected
-                                .map(lc_frontend::startup_plrsel::PlrSelAction::PlayerProperties),
+                            VirtualKeyCode::Delete => selected.map(
+                                lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer,
+                            ),
+                            VirtualKeyCode::F2 => selected.map(
+                                lc_frontend::startup_plrsel::PlrSelAction::PlayerProperties,
+                            ),
                             _ => None,
                         };
                         if let Some(action) = action {
@@ -6198,7 +6200,9 @@ impl GameApp {
                 }
                 if self.legacy_control_options_active() {
                     if key == VirtualKeyCode::Back && state == ElementState::Pressed {
-                        self.process_control_options_commands(vec![ControlOptionsCommand::Close])?;
+                        self.process_control_options_commands(vec![
+                            ControlOptionsCommand::Close,
+                        ])?;
                         return Ok(());
                     }
                     let mut commands = Vec::new();
@@ -6206,7 +6210,9 @@ impl GameApp {
                         if let Some(command) = self
                             .control_options
                             .as_mut()
-                            .and_then(|options| options.handle_virtual_key(key, &mut self.bindings))
+                            .and_then(|options| {
+                                options.handle_virtual_key(key, &mut self.bindings)
+                            })
                         {
                             commands.push(command);
                         }
@@ -6944,8 +6950,7 @@ impl GameApp {
                 // carries it, apply only in local rounds to avoid desyncs.
                 if self.network.is_some() {
                     tracing::warn!("networked surrender is not routed through control yet");
-                    self.status_text =
-                        "Surrender is not yet supported in network games".to_string();
+                    self.status_text = "Surrender is not yet supported in network games".to_string();
                 } else if let Err(err) = self.engine.set_player_surrendered(self.local_owner, true)
                 {
                     tracing::error!(error = ?err, "surrender failed");
@@ -6971,36 +6976,28 @@ impl GameApp {
                 // previous selection (C4MainMenu.cpp:842-852).
                 let selection = self.ingame_menu_selection();
                 self.toggle_sound_option();
-                self.ingame_menu = Some(IngameMenuState::options_menu(
-                    &self.option_flags(),
-                    selection,
-                ));
+                self.ingame_menu =
+                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
             }
             MenuAction::ToggleMusic => {
                 let selection = self.ingame_menu_selection();
                 self.toggle_music_option();
-                self.ingame_menu = Some(IngameMenuState::options_menu(
-                    &self.option_flags(),
-                    selection,
-                ));
+                self.ingame_menu =
+                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
             }
             MenuAction::ToggleMouseControl => {
                 let selection = self.ingame_menu_selection();
                 self.mouse_control = !self.mouse_control;
-                self.ingame_menu = Some(IngameMenuState::options_menu(
-                    &self.option_flags(),
-                    selection,
-                ));
+                self.ingame_menu =
+                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
             }
             MenuAction::Display(toggle) => {
                 // Toggle + reopen with the previous selection
                 // (C4MainMenu.cpp:855-884).
                 let selection = self.ingame_menu_selection();
                 self.display_flags.toggle(toggle);
-                self.ingame_menu = Some(IngameMenuState::display_menu(
-                    &self.display_flags,
-                    selection,
-                ));
+                self.ingame_menu =
+                    Some(IngameMenuState::display_menu(&self.display_flags, selection));
             }
             MenuAction::GoalInfo(id) | MenuAction::RuleInfo(id) => {
                 // C++ queues CID_ActivateGameGoalRule to show the goal/rule
@@ -7050,7 +7047,11 @@ impl GameApp {
             }
             entries.push(GoalRuleEntry {
                 definition_id: id.to_string(),
-                name: self.engine.definition_name(id).unwrap_or(id).to_string(),
+                name: self
+                    .engine
+                    .definition_name(id)
+                    .unwrap_or(id)
+                    .to_string(),
                 fulfilled: false,
             });
         }
@@ -7669,35 +7670,33 @@ impl GameApp {
                         return Ok(());
                     }
                     match self.startup_view {
-                        StartupView::ScenarioBrowser => match state {
-                            ElementState::Pressed => self.handle_menu_input(|menu| {
-                                menu.menu().handle_key_down(KeyCode::Enter)
-                            })?,
-                            ElementState::Released => self.handle_menu_input(|menu| {
-                                menu.menu().handle_key_up(KeyCode::Enter)
-                            })?,
-                        },
-                        StartupView::NetworkGame | StartupView::PlayerSelection => {}
-                        StartupView::MainMenu => {
-                            let actions = match state {
-                                ElementState::Pressed => {
-                                    self.main_menu_state.handle_key_down(KeyCode::Enter)
-                                }
-                                ElementState::Released => {
-                                    self.main_menu_state.handle_key_up(KeyCode::Enter)
-                                }
-                            };
-                            self.process_main_menu_actions(actions)?;
-                        }
-                        StartupView::NetworkLobby => match state {
-                            ElementState::Pressed => self.handle_menu_input(|menu| {
-                                menu.menu().handle_key_down(KeyCode::Enter)
-                            })?,
-                            ElementState::Released => self.handle_menu_input(|menu| {
-                                menu.menu().handle_key_up(KeyCode::Enter)
-                            })?,
-                        },
-                        StartupView::Options | StartupView::About => {}
+                    StartupView::ScenarioBrowser => match state {
+                        ElementState::Pressed => self.handle_menu_input(|menu| {
+                            menu.menu().handle_key_down(KeyCode::Enter)
+                        })?,
+                        ElementState::Released => self
+                            .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
+                    },
+                    StartupView::NetworkGame | StartupView::PlayerSelection => {}
+                    StartupView::MainMenu => {
+                        let actions = match state {
+                            ElementState::Pressed => {
+                                self.main_menu_state.handle_key_down(KeyCode::Enter)
+                            }
+                            ElementState::Released => {
+                                self.main_menu_state.handle_key_up(KeyCode::Enter)
+                            }
+                        };
+                        self.process_main_menu_actions(actions)?;
+                    }
+                    StartupView::NetworkLobby => match state {
+                        ElementState::Pressed => self.handle_menu_input(|menu| {
+                            menu.menu().handle_key_down(KeyCode::Enter)
+                        })?,
+                        ElementState::Released => self
+                            .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
+                    },
+                    StartupView::Options | StartupView::About => {}
                     }
                 }
                 AppMode::Running | AppMode::Loading => {}
@@ -7975,7 +7974,8 @@ impl GameApp {
                             let offset = point.y as i32 - layout.list_client.y;
                             let in_name_column = point.x
                                 >= (layout.list_client.x + layout.item_height) as f32
-                                && point.x < (layout.list_client.x + layout.item_width) as f32;
+                                && point.x
+                                    < (layout.list_client.x + layout.item_width) as f32;
                             (in_name_column
                                 && offset >= 0
                                 && offset % layout.item_pitch < layout.item_height)
@@ -8010,7 +8010,9 @@ impl GameApp {
                                 self.startup_player_dialog
                                     .as_mut()
                                     .and_then(|dialog| {
-                                        point.map(|point| dialog.handle_pointer_double_click(point))
+                                        point.map(|point| {
+                                            dialog.handle_pointer_double_click(point)
+                                        })
                                     })
                                     .unwrap_or_default(),
                             );
@@ -8108,8 +8110,12 @@ impl GameApp {
                                 .as_mut()
                                 .and_then(|options| {
                                     options.pointer_position().map(|point| match button_state {
-                                        ElementState::Pressed => options.handle_pointer_down(point),
-                                        ElementState::Released => options.handle_pointer_up(point),
+                                        ElementState::Pressed => {
+                                            options.handle_pointer_down(point)
+                                        }
+                                        ElementState::Released => {
+                                            options.handle_pointer_up(point)
+                                        }
                                     })
                                 })
                                 .unwrap_or_default();
@@ -8616,7 +8622,8 @@ impl GameApp {
                             "MasterServerSignUp",
                             i32::from(enabled).to_string(),
                         ) {
-                            self.status_text = format!("Unable to save network setting: {error}");
+                            self.status_text =
+                                format!("Unable to save network setting: {error}");
                         }
                     }
                 }
@@ -8630,7 +8637,8 @@ impl GameApp {
                             "Record",
                             i32::from(record).to_string(),
                         ) {
-                            self.status_text = format!("Unable to save recording setting: {error}");
+                            self.status_text =
+                                format!("Unable to save recording setting: {error}");
                         }
                     }
                 }
@@ -8798,7 +8806,8 @@ impl GameApp {
                                     dialog.set_selected_index(selected_before);
                                 }
                             }
-                            self.status_text = format!("Unable to save player selection: {error}");
+                            self.status_text =
+                                format!("Unable to save player selection: {error}");
                         }
                     }
                 }
@@ -8958,9 +8967,12 @@ impl GameApp {
                 // Double-click on the selected row opens/starts it
                 // (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
                 let now = Instant::now();
-                let is_double = self.scensel_last_click.is_some_and(|(last_index, at)| {
-                    last_index == index && now.duration_since(at) < Duration::from_millis(500)
-                }) && self.menu_state.menu().selected_index() == Some(index);
+                let is_double = self
+                    .scensel_last_click
+                    .is_some_and(|(last_index, at)| {
+                        last_index == index && now.duration_since(at) < Duration::from_millis(500)
+                    })
+                    && self.menu_state.menu().selected_index() == Some(index);
                 self.scensel_last_click = Some((index, now));
                 if is_double {
                     self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
@@ -9016,7 +9028,8 @@ impl GameApp {
     }
 
     fn open_network_game_dialog(&mut self) {
-        let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
+        let (masterserver_signup, _) =
+            load_network_startup_settings(self.app_paths.as_ref());
         let metrics = self
             .assets
             .clonk_fonts
@@ -9844,10 +9857,9 @@ impl GameApp {
             } else {
                 &menu.symbol_id
             };
-            let title_icon = self
-                .engine
-                .definition_picture_image(title_id)
-                .map(|image| ImageData::from_arc(image.width(), image.height(), image.pixels()));
+            let title_icon = self.engine.definition_picture_image(title_id).map(|image| {
+                ImageData::from_arc(image.width(), image.height(), image.pixels())
+            });
             let item_icons = menu
                 .items
                 .iter()
@@ -9867,17 +9879,17 @@ impl GameApp {
                 gfx.show_command_keys = show_command_keys;
             }
             if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
-                let font = lc_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
+                let font = lc_frontend::hud::HudFont::from_set(
+                    fonts.as_deref(),
+                    fallback.as_ref(),
+                );
                 let tiny = fonts
                     .as_deref()
                     .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
-                let area = self
-                    .graphics
-                    .viewport_rect(self.local_owner)
-                    .unwrap_or_else(|| {
-                        let surface = self.graphics.surface();
-                        Rect::new(0, 0, surface.width(), surface.height())
-                    });
+                let area = self.graphics.viewport_rect(self.local_owner).unwrap_or_else(|| {
+                    let surface = self.graphics.surface();
+                    Rect::new(0, 0, surface.width(), surface.height())
+                });
                 let surface = self.graphics.surface_mut();
                 render_engine_script_menu(
                     surface,
@@ -10561,9 +10573,12 @@ impl GameApp {
             };
 
             send_progress(0.05, "Reading scenario data");
-            let scenario_data =
-                Scenario::load_from_path_with_languages(&path_for_thread, &resolver, &languages)
-                    .map_err(|err| err.to_string());
+            let scenario_data = Scenario::load_from_path_with_languages(
+                &path_for_thread,
+                &resolver,
+                &languages,
+            )
+            .map_err(|err| err.to_string());
 
             match scenario_data {
                 Ok(data) => {
@@ -11053,12 +11068,7 @@ fn fill_engine_box(
                     .round()
                     .clamp(0.0, 255.0) as u8
             };
-            let out = Color::new(
-                blend(rgb[0], dst.r),
-                blend(rgb[1], dst.g),
-                blend(rgb[2], dst.b),
-                dst.a,
-            );
+            let out = Color::new(blend(rgb[0], dst.r), blend(rgb[1], dst.g), blend(rgb[2], dst.b), dst.a);
             let _ = surface.set_pixel(x as u32, y as u32, out);
         }
     }
@@ -11096,7 +11106,8 @@ fn draw_scensel_dynamic(
 ) {
     use lc_frontend::startup_scensel as scensel;
 
-    let layout = scensel::scen_sel_layout(surface.width() as i32, surface.height() as i32, fonts);
+    let layout =
+        scensel::scen_sel_layout(surface.width() as i32, surface.height() as i32, fonts);
 
     // Caption: current folder name, or "Scenarios" at root (cpp:1527-1535).
     scensel::draw_book_caption(
@@ -11126,15 +11137,7 @@ fn draw_scensel_dynamic(
         }
         if selected == Some(index + offset) {
             // C4GUI_ListBoxSelColor (focused list), C4GuiListBox.cpp:107-124.
-            fill_engine_box(
-                surface,
-                x,
-                y,
-                x + item_w - 1,
-                y + item_h - 1,
-                0xafaf0000,
-                gamma,
-            );
+            fill_engine_box(surface, x, y, x + item_w - 1, y + item_h - 1, 0xafaf0000, gamma);
         }
         scensel::draw_scen_list_item(
             surface,
@@ -11639,11 +11642,7 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
         Some(ImageData::new(w, h, pixels))
     }
 
-    fn control_image(
-        &self,
-        definition_id: &str,
-        function: &str,
-    ) -> Option<draw_commands::ImageAnnotation> {
+    fn control_image(&self, definition_id: &str, function: &str) -> Option<draw_commands::ImageAnnotation> {
         // GetSFunc resolves across the #include merge, child shadowing
         // parent (C4AulScript::GetSFunc); walk the chain in that order.
         let mut stack = vec![definition_id.to_string()];
@@ -12363,8 +12362,7 @@ fn startup_language_sequence(paths: Option<&AppPaths>) -> Vec<String> {
         }
     };
 
-    let config =
-        paths.and_then(|paths| lc_core::std_config::Config::load(paths.config_file()).ok());
+    let config = paths.and_then(|paths| lc_core::std_config::Config::load(paths.config_file()).ok());
     if let Some(config) = config.as_ref() {
         if let Some(sequence) = config
             .get_in(Some("General"), "LanguageEx")
@@ -12774,9 +12772,9 @@ fn load_scenario_music_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
                 folder_path.display()
             )
         })?;
-        if let Some(data) = find_music_group_asset(&folder)
-            .with_context(|| format!("failed to inspect {} for Music.c4g", folder_path.display()))?
-        {
+        if let Some(data) = find_music_group_asset(&folder).with_context(|| {
+            format!("failed to inspect {} for Music.c4g", folder_path.display())
+        })? {
             return Ok(Some(data));
         }
         parent = folder_path.parent();
@@ -12809,7 +12807,8 @@ fn has_extension(path: &Path, expected: &str) -> bool {
 }
 
 fn is_music_path(path: &Path) -> bool {
-    path.extension()
+    path
+        .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
         .is_some_and(|extension| {
@@ -13100,7 +13099,8 @@ mod tests {
         // (C4Game.cpp:362-366), and C4Player::InitControl copies the player
         // file's AutoStopControl preference (C4Player.cpp:2371-2380).
         let install = tempdir().expect("install root");
-        fs::create_dir_all(install.path().join("planet/System.c4g")).expect("create system group");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("create system group");
         let player_dir = install.path().join("build/Tyler.c4p");
         fs::create_dir_all(&player_dir).expect("create player file group");
         fs::write(
@@ -13280,9 +13280,7 @@ mod tests {
             .crew_selection
             .get(&app.local_owner)
             .expect("crew selection exists after join");
-        let cursor = selection
-            .cursor
-            .expect("the crew cursor is selected at join");
+        let cursor = selection.cursor.expect("the crew cursor is selected at join");
         // AdjustCursorCommand selects exactly the cursor (Cursor->DoSelect,
         // C4Player.cpp:1255-1257) — the app focus must adopt it instead of
         // stacking a second selection.
@@ -13762,7 +13760,7 @@ mod tests {
                 in_liquid: false,
                 mobile: false,
                 ocf: 0,
-                timer: 0,
+            timer: 0,
                 own_mass: 0,
                 on_fire: false,
                 fire_phase: 0,
@@ -13817,7 +13815,7 @@ mod tests {
                 in_liquid: false,
                 mobile: false,
                 ocf: 0,
-                timer: 0,
+            timer: 0,
                 own_mass: 0,
                 on_fire: false,
                 fire_phase: 0,
@@ -14174,11 +14172,15 @@ mod tests {
         fs::create_dir_all(&global).expect("create global music group");
         fs::write(global.join("Frontend.ogg"), b"frontend").expect("write frontend");
         fs::write(global.join("Pizza Strings.ogg"), b"pizza").expect("write pizza");
-        let scenario = dir.path().join("Tutorial.c4f").join("Tutorial01.c4s");
+        let scenario = dir
+            .path()
+            .join("Tutorial.c4f")
+            .join("Tutorial01.c4s");
         fs::create_dir_all(&scenario).expect("create tutorial scenario");
 
         let global = Group::open(&global).expect("open global music");
-        let mut resolver = MusicResolver::with_global_group(global).expect("build global resolver");
+        let mut resolver =
+            MusicResolver::with_global_group(global).expect("build global resolver");
         resolver
             .configure_scenario(Some(&scenario))
             .expect("configure tutorial scenario");
@@ -14227,7 +14229,8 @@ mod tests {
         fs::write(local.join("Local Theme.ogg"), b"local").expect("write local theme");
 
         let global = Group::open(&global).expect("open global music");
-        let mut resolver = MusicResolver::with_global_group(global).expect("build global resolver");
+        let mut resolver =
+            MusicResolver::with_global_group(global).expect("build global resolver");
         resolver
             .configure_scenario(Some(&scenario))
             .expect("configure local scenario");
@@ -14304,7 +14307,8 @@ mod tests {
         let scenario = dir.path().join("Drachenfels.c4s");
         let princess = scenario.join("Princess.c4d");
         fs::create_dir_all(&princess).expect("create definition directory");
-        fs::write(princess.join("PrincessScream.wav"), b"scream").expect("write nested effect");
+        fs::write(princess.join("PrincessScream.wav"), b"scream")
+            .expect("write nested effect");
 
         assert_eq!(
             load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
@@ -14319,7 +14323,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let scenario = dir.path().join("Effects.c4s");
         fs::create_dir_all(&scenario).expect("create scenario directory");
-        fs::write(scenario.join("Ambient.wav"), b"effect").expect("write root effect");
+        fs::write(scenario.join("Ambient.wav"), b"effect")
+            .expect("write root effect");
 
         assert_eq!(
             load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
@@ -14332,7 +14337,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let scenario = dir.path().join("Scenario.c4s");
         fs::create_dir_all(&scenario).expect("create scenario directory");
-        fs::write(scenario.join("Local.OGG"), b"scenario track").expect("write local track");
+        fs::write(scenario.join("Local.OGG"), b"scenario track")
+            .expect("write local track");
 
         assert_eq!(
             load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
@@ -14348,7 +14354,8 @@ mod tests {
         let music = folder.join("Music.c4g");
         fs::create_dir_all(&scenario).expect("create scenario directory");
         fs::create_dir_all(&music).expect("create music group");
-        fs::write(music.join("Knightly Wonders.mid"), b"shared track").expect("write shared track");
+        fs::write(music.join("Knightly Wonders.mid"), b"shared track")
+            .expect("write shared track");
 
         assert_eq!(
             load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
@@ -14524,8 +14531,7 @@ mod tests {
                 f64::from(button.x + button.w / 2),
                 f64::from(button.y + button.h / 2),
             );
-            app.handle_cursor_moved(point)
-                .expect("move over main button");
+            app.handle_cursor_moved(point).expect("move over main button");
             app.handle_mouse_button(ElementState::Pressed)
                 .expect("press main button");
             app.handle_mouse_button(ElementState::Released)
@@ -14684,12 +14690,8 @@ mod tests {
             .expect("release Update");
         assert!(app.status_text.contains("not yet implemented"));
         let mut after_update = vec![0_u8; 1280 * 720 * 4];
-        app.render(&mut after_update)
-            .expect("render update feedback");
-        assert_ne!(
-            before_update, after_update,
-            "update feedback must be visible"
-        );
+        app.render(&mut after_update).expect("render update feedback");
+        assert_ne!(before_update, after_update, "update feedback must be visible");
 
         app.handle_cursor_moved(about_back_point)
             .expect("move over About Back");
