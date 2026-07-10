@@ -13357,9 +13357,6 @@ impl Engine {
             // (C4MassMover.cpp:119).
         }
         self.apply_particle_commands(particles);
-        if !transfer_zones.is_empty() {
-            self.apply_transfer_zone_commands(transfer_zones)?;
-        }
         if !audio.is_empty() {
             self.pending_audio.extend(audio);
         }
@@ -13398,6 +13395,14 @@ impl Engine {
                 }
                 Err(error) => return Err(error),
             }
+        }
+        // Transfer zones fold AFTER the spawns: C4Game::NewObject adds the
+        // object to Game.Objects BEFORE its creation callbacks fire
+        // (C4Game.cpp:1115-1131), so a SetTransferZone recorded during the
+        // scenario Initialize (C4Script.cpp:3145-3149) always found its
+        // owner live — including owners this very batch creates.
+        if !transfer_zones.is_empty() {
+            self.apply_transfer_zone_commands(transfer_zones)?;
         }
         // Nested-call outcomes fold AFTER the spawns: scripts arrow-call
         // objects they just created (C++ creates them live mid-call), so
@@ -42516,6 +42521,41 @@ protected func Activity() { SetActionTargets(); return(1); }
             }])
             .expect("missing owner drops, never errors");
         assert!(engine.capture_state().transfer_zones.is_empty());
+    }
+
+    #[test]
+    fn scenario_batch_transfer_zone_lands_on_an_object_spawned_in_the_same_batch() {
+        // C4Game::NewObject adds the object to Game.Objects BEFORE the
+        // creation callbacks fire ("From now on, object is ready to be
+        // used in scripts!", C4Game.cpp:1115-1131), so a SetTransferZone
+        // during the scenario Initialize (FnSetTransferZone ->
+        // Game.TransferZones.Set, C4Script.cpp:3145-3149) always finds
+        // its owner live. The deferred batch apply must materialize the
+        // batch's spawns before its transfer-zone commands land (the
+        // AH_Predator door zones: owners 53/69/84/86 spawned in the very
+        // batch whose zones were dropped).
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+        let owner = ObjectId::new(53);
+        let batch = ScenarioBatch {
+            spawns: vec![SpawnConfig::new("Test").with_id(owner)],
+            transfer_zones: vec![TransferZoneCommand::Set {
+                owner,
+                rect: TransferZoneRect {
+                    x: 630,
+                    y: 620,
+                    width: 12,
+                    height: 20,
+                },
+            }],
+            ..ScenarioBatch::default()
+        };
+        engine.apply_scenario_batch(batch).expect("batch applies");
+        let zones = engine.capture_state().transfer_zones;
+        assert_eq!(zones.len(), 1, "the zone must land on the fresh spawn");
+        assert_eq!(zones[0].owner, owner);
     }
 
     #[test]
