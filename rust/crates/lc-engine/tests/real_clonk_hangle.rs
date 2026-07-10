@@ -222,7 +222,7 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
 }
 
 #[test]
-fn tutorial_flag_throw_assigns_base_and_advances_past_script120() {
+fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     // Tutorial01's real sequence carries FLAG through Script60, teaches
     // contained COM_Throw in Script110, observes C4Object::Base through
     // GetBase in Script120, then unlocks digging in Script160. Contained
@@ -338,6 +338,69 @@ fn tutorial_flag_throw_assigns_base_and_advances_past_script120() {
         engine.snapshot().players[0].show_control,
         script110_mask,
         "Script120 must call GetBase(HUT2) and advance without a script error"
+    );
+
+    engine
+        .apply_object_update(
+            clonk,
+            ObjectUpdate::new()
+                .clear_container()
+                .with_position(Vector2::new(220, 271))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .with_command_direction(CommandDirection::Stop),
+        )
+        .expect("leave HUT2 for the digging lesson");
+    for _ in 0..500 {
+        engine
+            .apply_object_update(
+                clonk,
+                ObjectUpdate::new()
+                    .with_position(Vector2::new(220, 271))
+                    .with_velocity(Vector2::ZERO),
+            )
+            .expect("keep CLNK in Script160's lesson area");
+        engine.tick().expect("Script160 frame");
+        if engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.temporary_physical.is_none())
+        {
+            break;
+        }
+    }
+    let script160_clonk = engine.object_snapshot(clonk).expect("CLNK at Script160");
+    assert!(
+        script160_clonk.temporary_physical.is_none(),
+        "Script160 ResetPhysical unlocks digging; frame={}, position={:?}, container={:?}, show_control={}",
+        engine.snapshot().frame,
+        script160_clonk.position,
+        script160_clonk.container,
+        engine.snapshot().players[0].show_control,
+    );
+    engine.set_landscape(Landscape::flat(80, 30));
+    engine
+        .apply_object_update(
+            clonk,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(30, 20))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .with_command_direction(CommandDirection::Stop),
+        )
+        .expect("place the unlocked CLNK on a stable digging floor");
+    engine
+        .player_in_com(joined.number, COM_DIG, 0)
+        .expect("normal player Dig control");
+    for _ in 0..=10 {
+        engine.tick().expect("dig single-click timeout frame");
+    }
+    assert_eq!(
+        engine
+            .object_snapshot(clonk)
+            .expect("CLNK after Dig")
+            .action
+            .name,
+        "Dig"
     );
 }
 

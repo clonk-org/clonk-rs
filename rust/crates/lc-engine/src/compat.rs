@@ -11275,15 +11275,18 @@ fn reset_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("ResetPhysical requires an active engine context"))?;
-        let Some(object) = context.object_context_mut() else {
+        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
             return Ok(Value::Bool(false));
         };
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
-        Ok(Value::Bool(object.reset_physical(name.as_deref())))
+        Ok(Value::Bool(
+            context
+                .object_scope_mut(target)
+                .is_some_and(|object| object.reset_physical(name.as_deref())),
+        ))
     })
 }
 
@@ -35655,6 +35658,51 @@ func ProbeBadIndex(id) {
         assert_eq!(physicals.info, None);
         assert_eq!(physicals.temporary, None);
         assert_eq!(physicals.changes, Vec::<(String, i32)>::new());
+    }
+
+    #[test]
+    fn global_reset_physical_targets_a_foreign_object_like_cpp() {
+        // FnResetPhysical uses its explicit pObj even when cthr->Obj is null
+        // (C4Script.cpp:614-636). Tutorial01 Script160 relies on the global
+        // `ResetPhysical(GetCrew())` form to unlock digging.
+        let mut definition = crate::Definition::from_script("CLNK", "Clonk", "#strict\n")
+            .expect("definition compiles");
+        let permanent = PhysicalInfo {
+            can_dig: C4_MAX_PHYSICAL,
+            ..PhysicalInfo::default()
+        };
+        definition.set_physical(permanent);
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(crate::SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        let index = engine.find_object_index(clonk).expect("clonk exists");
+        engine.objects[index].state.temporary_physical = Some(PhysicalInfo {
+            can_dig: 0,
+            ..permanent
+        });
+
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            engine.host_world_context(),
+            2,
+            || reset_physical(&[object_reference_value(clonk)]),
+        );
+
+        assert_eq!(result.expect("ResetPhysical succeeds"), Value::Bool(true));
+        let physicals = outcome
+            .other_objects
+            .iter()
+            .find(|other| other.object_id == clonk)
+            .and_then(|other| other.update.as_ref())
+            .and_then(|update| update.physicals.as_ref())
+            .expect("foreign physical reset is recorded");
+        assert_eq!(physicals.temporary, None);
+        assert!(physicals.changes.is_empty());
     }
 
     #[test]
