@@ -158,6 +158,89 @@ fn engine_script_menu_title(menu: &lc_engine::ObjectMenuState) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EngineScriptMenuLayout {
+    pub bounds: Rect,
+    pub title: Rect,
+    pub client_x: i32,
+    pub client_y: i32,
+    pub columns: i32,
+    pub lines: i32,
+    pub first_index: usize,
+    pub visible: usize,
+}
+
+impl EngineScriptMenuLayout {
+    pub fn item_rect(self, index: usize) -> Option<Rect> {
+        let slot = index.checked_sub(self.first_index)?;
+        if slot >= self.visible {
+            return None;
+        }
+        let slot = i32::try_from(slot).ok()?;
+        Some(Rect::new(
+            self.client_x + (slot % self.columns) * CLASSIC_ITEM_SIZE,
+            self.client_y + (slot / self.columns) * CLASSIC_ITEM_SIZE,
+            CLASSIC_ITEM_SIZE as u32,
+            CLASSIC_ITEM_SIZE as u32,
+        ))
+    }
+}
+
+pub(crate) fn engine_script_menu_layout(
+    area: Rect,
+    font_line_height: i32,
+    menu: &lc_engine::ObjectMenuState,
+    show_commands: bool,
+) -> EngineScriptMenuLayout {
+    // C4MN_Style_Normal is a fixed 35px icon grid; five columns are set
+    // by InitMenu unless SetMenuSize replaced them (C4Menu.cpp:359-365,
+    // 642-648, 715-762).
+    let columns = menu.columns.max(1);
+    let item_count = i32::try_from(menu.items.len()).unwrap_or(i32::MAX);
+    let natural_lines = (item_count / columns) + i32::from(item_count % columns != 0);
+    let max_lines = ((area.height as i32 - 100) / CLASSIC_ITEM_SIZE).max(1);
+    let lines = natural_lines.max(1).min(max_lines);
+    let title_height = font_line_height.max(CLASSIC_TITLE_HEIGHT);
+    let command_height = i32::from(show_commands) * CLASSIC_COMMAND_HEIGHT;
+    let width = columns * CLASSIC_ITEM_SIZE + 2 * CLASSIC_FRAME_WIDTH;
+    let height = lines * CLASSIC_ITEM_SIZE
+        + title_height
+        + command_height
+        + CLASSIC_FRAME_WIDTH;
+
+    // Default C4Menu alignment is Right|Bottom with one C4SymbolSize (35)
+    // below and two at the right (C4Menu.cpp:298, 727-745).
+    let mut x = area.width as i32 - 2 * CLASSIC_ITEM_SIZE - width;
+    let mut y = area.height as i32 - CLASSIC_ITEM_SIZE - height;
+    if width > area.width as i32 - 2 * CLASSIC_ITEM_SIZE {
+        x = (area.width as i32 - width) / 2;
+    }
+    if height > area.height as i32 - 2 * CLASSIC_ITEM_SIZE {
+        y = (area.height as i32 - height) / 2;
+    }
+    x += area.x;
+    y += area.y;
+
+    let visible = (columns * lines) as usize;
+    let first_index = usize::try_from(menu.selection)
+        .ok()
+        .filter(|selection| *selection >= visible && lines > 1)
+        .map(|selection| {
+            ((selection / columns as usize) + 1 - lines as usize) * columns as usize
+        })
+        .unwrap_or(0);
+    EngineScriptMenuLayout {
+        bounds: Rect::new(x, y, width as u32, height as u32),
+        title: Rect::new(x, y, width as u32, title_height as u32),
+        client_x: x + CLASSIC_FRAME_WIDTH,
+        client_y: y + title_height,
+        columns,
+        lines,
+        first_index,
+        visible,
+    }
+}
+
 /// Draws a script-created `C4ObjectMenu` from the engine's live runtime
 /// state. The engine remains the sole owner of selection and item state; this
 /// is deliberately a read-only presentation view.
@@ -219,35 +302,14 @@ fn render_engine_normal_menu(
     selected: Option<usize>,
     time_on_selection: u32,
 ) {
-    // C4MN_Style_Normal is a fixed 35px icon grid; five columns are set
-    // by InitMenu unless SetMenuSize replaced them (C4Menu.cpp:359-365,
-    // 642-648, 715-762).
-    let columns = menu.columns.max(1);
-    let item_count = i32::try_from(menu.items.len()).unwrap_or(i32::MAX);
-    let natural_lines = (item_count / columns) + i32::from(item_count % columns != 0);
-    let max_lines = ((area.height as i32 - 100) / CLASSIC_ITEM_SIZE).max(1);
-    let lines = natural_lines.max(1).min(max_lines);
-    let title_height = font.line_height().max(CLASSIC_TITLE_HEIGHT);
-    let command_height = i32::from(gfx.show_commands) * CLASSIC_COMMAND_HEIGHT;
-    let width = columns * CLASSIC_ITEM_SIZE + 2 * CLASSIC_FRAME_WIDTH;
-    let height = lines * CLASSIC_ITEM_SIZE
-        + title_height
-        + command_height
-        + CLASSIC_FRAME_WIDTH;
-
-    // Default C4Menu alignment is Right|Bottom with one C4SymbolSize (35)
-    // below and two at the right (C4Menu.cpp:298, 727-745).
-    let mut x = area.width as i32 - 2 * CLASSIC_ITEM_SIZE - width;
-    let mut y = area.height as i32 - CLASSIC_ITEM_SIZE - height;
-    if width > area.width as i32 - 2 * CLASSIC_ITEM_SIZE {
-        x = (area.width as i32 - width) / 2;
-    }
-    if height > area.height as i32 - 2 * CLASSIC_ITEM_SIZE {
-        y = (area.height as i32 - height) / 2;
-    }
-    x += area.x;
-    y += area.y;
-    let bounds = Rect::new(x, y, width as u32, height as u32);
+    let layout = engine_script_menu_layout(area, font.line_height(), menu, gfx.show_commands);
+    let bounds = layout.bounds;
+    let x = bounds.x;
+    let y = bounds.y;
+    let width = bounds.width as i32;
+    let height = bounds.height as i32;
+    let title_height = layout.title.height as i32;
+    let columns = layout.columns;
 
     fill_rect(
         surface,
@@ -256,7 +318,7 @@ fn render_engine_normal_menu(
     );
     draw_3d_frame(surface, bounds);
 
-    let title_rect = Rect::new(x, y, width as u32, title_height as u32);
+    let title_rect = layout.title;
     if let Some(caption_bar) = gfx.caption_bar.as_ref() {
         draw_caption_bar(surface, title_rect, caption_bar);
     }
@@ -280,15 +342,10 @@ fn render_engine_normal_menu(
         TextAlign::Left,
     );
 
-    let client_x = x + CLASSIC_FRAME_WIDTH;
-    let client_y = y + title_height;
-    let visible = (columns * lines) as usize;
-    let first_index = selected
-        .filter(|selection| *selection >= visible && lines > 1)
-        .map(|selection| {
-            ((selection / columns as usize) + 1 - lines as usize) * columns as usize
-        })
-        .unwrap_or(0);
+    let client_x = layout.client_x;
+    let client_y = layout.client_y;
+    let visible = layout.visible;
+    let first_index = layout.first_index;
     for (slot, (index, item)) in menu
         .items
         .iter()
