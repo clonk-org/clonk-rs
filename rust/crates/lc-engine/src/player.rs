@@ -151,6 +151,16 @@ pub struct PlayerControlState {
     /// (C4Object::Draw gate, C4Object.cpp:2497-2502).
     #[serde(default)]
     pub select_flash: i32,
+    /// `CursorSelection` — armed to 1 by CursorLeft/CursorRight
+    /// (C4Player.cpp:1274,1292); the next regular com commits the pick via
+    /// UpdateSelectionToggleStatus (:1355-1365).
+    #[serde(default)]
+    pub cursor_selection: i32,
+    /// `CursorToggled` — set when CursorToggle ran in selection mode
+    /// (C4Player.cpp:1326); switches the commit from SelectSingleByCursor
+    /// to AdjustCursorCommand.
+    #[serde(default)]
+    pub cursor_toggled: i32,
 }
 
 #[derive(Debug, Clone)]

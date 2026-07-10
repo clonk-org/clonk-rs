@@ -1,31 +1,21 @@
-use std::collections::HashMap;
-
 use lc_engine::{
     CommandDirection, CommandKind, ControlButton, ControlCommand, ControlEvent, Engine,
-    EngineError, COM_CLEAR_PRESSED_COMS, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT,
-    COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
+    EngineError, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE,
+    COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE,
+    COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
 };
 
-/// Player input routing for the Rust frontend. Object-directed coms run the
-/// engine's `C4Player::InCom` port (single/double synthesis + the full
-/// `C4Object::DirectCom` chain, C4Player.cpp:1490-1554 /
-/// C4Object.cpp:3327-3557); cursor cycling and menu coms are handled here
-/// like `C4Player::DirectCom`'s cursor half (C4Player.cpp:1479-1487).
-pub struct InputDispatcher {
-    players: HashMap<i32, PlayerInputContext>,
-}
-
-impl Default for InputDispatcher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Player input routing for the Rust frontend. All coms — object-directed
+/// AND cursor coms — run the engine's `C4Player::InCom` port
+/// (single/double synthesis, the cursor selection model and the full
+/// `C4Object::DirectCom` chain, C4Player.cpp:1490-1554 / 1235-1488 /
+/// C4Object.cpp:3327-3557); only menu coms stay app-side.
+#[derive(Default)]
+pub struct InputDispatcher {}
 
 impl InputDispatcher {
     pub fn new() -> Self {
-        Self {
-            players: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Applies a control event for the given player. Returns the direction
@@ -37,11 +27,6 @@ impl InputDispatcher {
         owner: i32,
         event: ControlEvent,
     ) -> Result<Option<CommandDirection>, EngineError> {
-        let frame = engine.frame();
-        let context = self
-            .players
-            .entry(owner)
-            .or_insert_with(PlayerInputContext::new);
         match event {
             ControlEvent::Press(button) => {
                 engine.player_in_com(owner, button_com(button), 0)?;
@@ -50,11 +35,10 @@ impl InputDispatcher {
                 engine.player_in_com(owner, button_com(button) + COM_RELEASE_OFFSET, 0)?;
             }
             ControlEvent::ClearPressed => {
-                context.selection.clear();
                 engine.player_in_com(owner, COM_CLEAR_PRESSED_COMS, 0)?;
             }
             ControlEvent::Command { command, kind } => {
-                let handled = handle_command(engine, owner, context, command, kind, frame)?;
+                let handled = handle_command(engine, owner, command, kind)?;
                 if !handled {
                     if let Some(com) = command_com(command, kind) {
                         engine.player_in_com(owner, com, 0)?;
@@ -103,166 +87,38 @@ fn command_com(command: ControlCommand, kind: CommandKind) -> Option<u8> {
     })
 }
 
-const DOUBLE_CLICK_WINDOW: u64 = 10;
-
-struct PlayerInputContext {
-    selection: SelectionControlState,
-}
-
-impl PlayerInputContext {
-    fn new() -> Self {
-        Self {
-            selection: SelectionControlState::new(),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct SelectionControlState {
-    last_toggle_frame: Option<u64>,
-}
-
-impl SelectionControlState {
-    fn new() -> Self {
-        Self {
-            last_toggle_frame: None,
-        }
-    }
-
-    fn register_toggle(&mut self, frame: u64) -> ToggleOutcome {
-        match self.last_toggle_frame {
-            Some(previous) if frame.saturating_sub(previous) <= DOUBLE_CLICK_WINDOW => {
-                self.last_toggle_frame = None;
-                ToggleOutcome::Double
-            }
-            _ => {
-                self.last_toggle_frame = Some(frame);
-                ToggleOutcome::Single
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        self.last_toggle_frame = None;
-    }
-}
-
-enum ToggleOutcome {
-    Single,
-    Double,
-}
-
-#[derive(Clone, Copy)]
-enum CycleDirection {
-    Next,
-    Previous,
-}
-
-fn cycle_cursor(
-    engine: &mut Engine,
-    owner: i32,
-    direction: CycleDirection,
-) -> Result<(), EngineError> {
-    engine.ensure_cursor(owner)?;
-    let mut crew = engine.crew_members(owner);
-    if crew.is_empty() {
-        return Ok(());
-    }
-    crew.sort_by_key(|id| id.as_u64());
-    let target = match engine.crew_cursor(owner) {
-        Some(current) => {
-            if let Some((index, _)) = crew.iter().enumerate().find(|(_, id)| **id == current) {
-                match direction {
-                    CycleDirection::Next => crew.get(index + 1).copied().unwrap_or_else(|| crew[0]),
-                    CycleDirection::Previous => {
-                        if index == 0 {
-                            *crew.last().unwrap()
-                        } else {
-                            crew[index - 1]
-                        }
-                    }
-                }
-            } else {
-                crew[0]
-            }
-        }
-        None => crew[0],
-    };
-    engine.set_crew_cursor(owner, Some(target))?;
-    Ok(())
-}
-
-fn toggle_cursor_selection(engine: &mut Engine, owner: i32) -> Result<(), EngineError> {
-    let previously_selected = engine.selected_crew(owner);
-    engine.ensure_cursor(owner)?;
-    let Some(cursor) = engine.crew_cursor(owner) else {
-        return Ok(());
-    };
-    if previously_selected.contains(&cursor) {
-        engine.deselect_crew(owner, [cursor]);
-    } else if !previously_selected.is_empty() {
-        engine.select_crew(owner, [cursor])?;
-    }
-    Ok(())
-}
-
-fn select_all_crew(engine: &mut Engine, owner: i32) -> Result<(), EngineError> {
-    let mut crew = engine.crew_members(owner);
-    if crew.is_empty() {
-        return Ok(());
-    }
-    crew.sort_by_key(|id| id.as_u64());
-    let cursor = crew[0];
-    engine.select_crew(owner, crew.clone())?;
-    engine.set_crew_cursor(owner, Some(cursor))?;
-    Ok(())
-}
 
 fn handle_command(
     engine: &mut Engine,
     owner: i32,
-    context: &mut PlayerInputContext,
     command: ControlCommand,
     kind: CommandKind,
-    frame: u64,
 ) -> Result<bool, EngineError> {
     match command {
-        ControlCommand::CursorLeft => {
-            if matches!(
-                kind,
-                CommandKind::Press | CommandKind::Single | CommandKind::Double
-            ) {
-                cycle_cursor(engine, owner, CycleDirection::Previous)?;
-                return Ok(true);
-            }
-        }
-        ControlCommand::CursorRight => {
-            if matches!(
-                kind,
-                CommandKind::Press | CommandKind::Single | CommandKind::Double
-            ) {
-                cycle_cursor(engine, owner, CycleDirection::Next)?;
-                return Ok(true);
-            }
-        }
-        ControlCommand::CursorToggle => match kind {
-            CommandKind::Release => return Ok(true),
-            CommandKind::Double => {
-                select_all_crew(engine, owner)?;
-                context.selection.clear();
-                return Ok(true);
-            }
-            CommandKind::Press | CommandKind::Single => {
-                match context.selection.register_toggle(frame) {
-                    ToggleOutcome::Single => toggle_cursor_selection(engine, owner)?,
-                    ToggleOutcome::Double => {
-                        select_all_crew(engine, owner)?;
-                        context.selection.clear();
-                    }
+        ControlCommand::CursorLeft | ControlCommand::CursorRight | ControlCommand::CursorToggle => {
+            // The engine runs the full C4Player cursor model: InCom
+            // synthesizes Single/Double from the plain presses
+            // (C4Player.cpp:1522-1536) and DirectCom dispatches
+            // CursorLeft/CursorRight/CursorToggle/SelectAllCrew
+            // (C4Player.cpp:1457-1485).
+            let base = match command {
+                ControlCommand::CursorLeft => COM_CURSOR_LEFT,
+                ControlCommand::CursorRight => COM_CURSOR_RIGHT,
+                _ => COM_CURSOR_TOGGLE,
+            };
+            match kind {
+                CommandKind::Press => engine.player_in_com(owner, base, 0)?,
+                CommandKind::Release => {
+                    engine.player_in_com(owner, base + COM_RELEASE_OFFSET, 0)?
                 }
-                return Ok(true);
+                // App-side Single/Double synthesis would double-fire what
+                // InCom already synthesizes; pass the double through for
+                // callers that pre-detect it (network replay).
+                CommandKind::Double => engine.player_direct_com(owner, base | COM_DOUBLE, 0)?,
+                CommandKind::Single => {}
             }
-        },
+            return Ok(true);
+        }
         ControlCommand::PlayerMenu => {
             if matches!(kind, CommandKind::Press) {
                 // Menu handling occurs in the app layer; nothing to forward to the engine.
@@ -414,31 +270,29 @@ global func Step(state, frame, random) { return nil; }
 
     #[test]
     fn cursor_right_cycles_to_next_crew() -> Result<(), EngineError> {
+        // C4Player::CursorRight (C4Player.cpp:1261-1275): without a cursor
+        // the scan starts at Crew.First; from a cursor it walks ->Next and
+        // wraps by rescanning from the front.
         let mut engine = setup_engine();
         let first = spawn_crew_member(&mut engine, 1, 0)?;
         let second = spawn_crew_member(&mut engine, 1, 10)?;
         let mut dispatcher = InputDispatcher::new();
+        let press = ControlEvent::Command {
+            command: ControlCommand::CursorRight,
+            kind: CommandKind::Press,
+        };
 
-        dispatcher.handle_event(
-            &mut engine,
-            1,
-            ControlEvent::Command {
-                command: ControlCommand::CursorRight,
-                kind: CommandKind::Press,
-            },
-        )?;
+        dispatcher.handle_event(&mut engine, 1, press)?;
+        assert_eq!(
+            engine.crew_cursor(1),
+            Some(first),
+            "no cursor: the scan starts at Crew.First (C4Player.cpp:1268-1270)"
+        );
 
+        dispatcher.handle_event(&mut engine, 1, press)?;
         assert_eq!(engine.crew_cursor(1), Some(second));
 
-        dispatcher.handle_event(
-            &mut engine,
-            1,
-            ControlEvent::Command {
-                command: ControlCommand::CursorRight,
-                kind: CommandKind::Press,
-            },
-        )?;
-
+        dispatcher.handle_event(&mut engine, 1, press)?;
         assert_eq!(
             engine.crew_cursor(1),
             Some(first),
@@ -463,11 +317,14 @@ global func Step(state, frame, random) { return nil; }
             },
         )?;
 
-        let selected_once = engine.selected_crew(1);
+        // Pure toggle (no CursorSelection): every crew's Select flips ON
+        // (C4Player::CursorToggle, C4Player.cpp:1329-1336).
+        let mut selected_once = engine.selected_crew(1);
+        selected_once.sort_by_key(|id| id.as_u64());
         assert_eq!(
             selected_once,
-            vec![first],
-            "first toggle selects cursor crew"
+            vec![first, second],
+            "pure toggle flips Select on the whole crew"
         );
 
         dispatcher.handle_event(

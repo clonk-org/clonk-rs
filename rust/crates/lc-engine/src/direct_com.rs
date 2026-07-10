@@ -223,25 +223,44 @@ impl Engine {
         Ok(())
     }
 
-    /// `C4Player::DirectCom` (C4Player.cpp:1453-1488). The cursor coms'
-    /// crew-cycling half (CursorLeft/CursorRight/CursorToggle/SelectAllCrew,
-    /// :1481-1484) still lives in the frontend's InputDispatcher; the
-    /// script-override half (`Cursor->CallControl`, :1457-1474) runs here.
+    /// `C4Player::DirectCom` (C4Player.cpp:1453-1488): the cursor coms'
+    /// script-override half (`Cursor->CallControl`, :1457-1475) and the
+    /// crew-cycling dispatch (:1479-1485); everything else goes to the
+    /// cursor object via ObjectCom.
     pub fn player_direct_com(&mut self, owner: i32, com: u8, data: i32) -> Result<(), EngineError> {
         let plain_cursor = matches!(
             com & !COM_DOUBLE,
             COM_CURSOR_LEFT | COM_CURSOR_RIGHT | COM_CURSOR_TOGGLE
         );
         if plain_cursor {
-            if let Some(cursor) = self.crew_cursor(owner) {
-                if let Some(index) = self.find_object_index(cursor) {
+            // Cursor object override (:1457-1475).
+            if !self.is_owner_eliminated(owner) {
+                if let Some(index) = self
+                    .crew_cursor(owner)
+                    .and_then(|cursor| self.find_object_index(cursor))
+                {
                     self.objects[index].state.controller = owner;
                     if self.object_call_control(index, owner, com, None)? {
+                        if com & COM_DOUBLE == 0 {
+                            self.player_update_selection_toggle_status(owner)?;
+                        }
                         return Ok(());
                     }
                 }
             }
-            // Crew cycling (C4Player.cpp:1481-1484) is frontend-handled.
+            // Crew cycling (:1479-1485).
+            match com & !COM_DOUBLE {
+                COM_CURSOR_LEFT => self.player_cursor_left(owner)?,
+                COM_CURSOR_RIGHT => self.player_cursor_right(owner)?,
+                COM_CURSOR_TOGGLE => {
+                    if com & COM_DOUBLE != 0 {
+                        self.player_select_all_crew(owner)?;
+                    } else {
+                        self.player_cursor_toggle(owner)?;
+                    }
+                }
+                _ => {}
+            }
             return Ok(());
         }
         // Everything else routes to the cursor object (C4Player.cpp:1486);
@@ -250,9 +269,19 @@ impl Engine {
         self.player_object_com(owner, com, data)
     }
 
-    /// `C4Player::ObjectCom` (C4Player.cpp:1368-1390): route the com to the
-    /// cursor object with an updated controller.
+    /// `C4Player::ObjectCom` (C4Player.cpp:1367-1390): commit the cursor
+    /// selection on regular coms, then route the com to the cursor object
+    /// with an updated controller.
     fn player_object_com(&mut self, owner: i32, com: u8, data: i32) -> Result<(), EngineError> {
+        // Eliminated (:1369).
+        if self.is_owner_eliminated(owner) {
+            return Ok(());
+        }
+        // If regular com, update cursor & selection status (:1378-1379).
+        let is_release = (COM_RELEASE_FIRST..=COM_RELEASE_LAST).contains(&com);
+        if com & (COM_SINGLE | COM_DOUBLE) == 0 && !is_release {
+            self.player_update_selection_toggle_status(owner)?;
+        }
         self.ensure_cursor(owner)?;
         let Some(cursor) = self.crew_cursor(owner) else {
             return Ok(());
@@ -260,10 +289,338 @@ impl Engine {
         let Some(index) = self.find_object_index(cursor) else {
             return Ok(());
         };
-        // UpdateSelectionToggleStatus (:1378-1379) belongs to the cursor
-        // selection model, which the frontend still approximates.
         self.objects[index].state.controller = owner;
         self.object_direct_com(index, com, data)
+    }
+
+    // ---- Cursor selection model (C4Player.cpp:1235-1365) ------------------
+
+    /// `C4Object::DoSelect` (C4Object.cpp:5815-5824): CrewDisabled guard,
+    /// the Select flag unless cursor-only, and the `~CrewSelection(false,
+    /// fCursor)` callback.
+    fn object_do_select(
+        &mut self,
+        index: usize,
+        owner: i32,
+        cursor_only: bool,
+    ) -> Result<(), EngineError> {
+        if self.objects[index].state.crew_disabled {
+            return Ok(());
+        }
+        if !cursor_only {
+            let id = self.objects[index].id;
+            let selection = self.crew_selection.entry(owner).or_default();
+            if !selection.selected.contains(&id) {
+                selection.selected.push(id);
+            }
+        }
+        self.contained_call(
+            index,
+            "CrewSelection",
+            &[Value::Bool(false), Value::Bool(cursor_only)],
+        )?;
+        Ok(())
+    }
+
+    /// `C4Object::UnSelect` (C4Object.cpp:5826-5832).
+    fn object_un_select(
+        &mut self,
+        index: usize,
+        owner: i32,
+        cursor_only: bool,
+    ) -> Result<(), EngineError> {
+        if !cursor_only {
+            let id = self.objects[index].id;
+            if let Some(selection) = self.crew_selection.get_mut(&owner) {
+                selection.selected.retain(|candidate| *candidate != id);
+            }
+        }
+        self.contained_call(
+            index,
+            "CrewSelection",
+            &[Value::Bool(true), Value::Bool(cursor_only)],
+        )?;
+        Ok(())
+    }
+
+    /// `C4Player::SetCursor` (C4Player.cpp:1831-1847).
+    fn player_set_cursor(
+        &mut self,
+        owner: i32,
+        target: ObjectId,
+        select_flash: bool,
+        select_arrow: bool,
+    ) -> Result<(), EngineError> {
+        let Some(target_index) = self.find_object_index(target) else {
+            return Ok(());
+        };
+        // Check disabled (:1834).
+        if self.objects[target_index].state.crew_disabled {
+            return Ok(());
+        }
+        let previous = self.crew_cursor(owner);
+        let changed = previous != Some(target);
+        self.crew_selection
+            .entry(owner)
+            .or_default()
+            .set_cursor(Some(target));
+        // Unselect previous (:1841).
+        if let Some(previous_index) = previous
+            .filter(|_| changed)
+            .and_then(|id| self.find_object_index(id))
+        {
+            self.object_un_select(previous_index, owner, true)?;
+        }
+        // Select object (:1843).
+        self.object_do_select(target_index, owner, true)?;
+        if let Some(player) = self.players.get_mut(&owner) {
+            if select_arrow {
+                player.control.cursor_flash = 30;
+            }
+            if select_flash {
+                player.control.select_flash = 30;
+            }
+        }
+        Ok(())
+    }
+
+    /// The player's crew roster in C4Player::Crew order (join order), with
+    /// only active objects like the C++ list after ClearPointers.
+    fn player_crew_roster(&self, owner: i32) -> Vec<ObjectId> {
+        self.crew_members(owner)
+    }
+
+    /// `C4Player::GetHiRankActiveCrew` (C4Player.cpp:1003-1021): without
+    /// the crew-info rank model every member ranks -1, so the FIRST
+    /// eligible roster entry wins the strict `iRank > iHighestRank` race.
+    fn player_hi_rank_active_crew(&self, owner: i32, select_only: bool) -> Option<ObjectId> {
+        let selected = self
+            .crew_selection
+            .get(&owner)
+            .map(|selection| selection.selected.clone())
+            .unwrap_or_default();
+        self.player_crew_roster(owner)
+            .into_iter()
+            .filter(|id| {
+                self.find_object_index(*id)
+                    .is_some_and(|index| !self.objects[index].state.crew_disabled)
+            })
+            .find(|id| !select_only || selected.contains(id))
+    }
+
+    /// `C4Player::AdjustCursorCommand` (C4Player.cpp:1235-1258).
+    fn player_adjust_cursor_command(&mut self, owner: i32) -> Result<(), EngineError> {
+        // Find hirank Select, else any (:1240-1245).
+        let hi_rank = self
+            .player_hi_rank_active_crew(owner, true)
+            .or_else(|| self.player_hi_rank_active_crew(owner, false));
+        let previous = self.crew_cursor(owner);
+        if previous != hi_rank {
+            self.crew_selection
+                .entry(owner)
+                .or_default()
+                .set_cursor(hi_rank);
+        }
+        // UnSelect previous cursor (:1253).
+        if let Some(previous_index) = previous
+            .filter(|id| Some(*id) != hi_rank)
+            .and_then(|id| self.find_object_index(id))
+        {
+            self.object_un_select(previous_index, owner, true)?;
+        }
+        // We have a cursor: do select it (:1255) — the non-cursor DoSelect
+        // sets the Select flag too.
+        if let Some(cursor_index) = hi_rank.and_then(|id| self.find_object_index(id)) {
+            self.object_do_select(cursor_index, owner, false)?;
+        }
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.control.cursor_flash = 30;
+        }
+        Ok(())
+    }
+
+    /// `C4Player::CursorRight` (C4Player.cpp:1261-1275).
+    fn player_cursor_right(&mut self, owner: i32) -> Result<(), EngineError> {
+        self.player_cursor_step(owner, false)
+    }
+
+    /// `C4Player::CursorLeft` (C4Player.cpp:1278-1293).
+    fn player_cursor_left(&mut self, owner: i32) -> Result<(), EngineError> {
+        self.player_cursor_step(owner, true)
+    }
+
+    fn player_cursor_step(&mut self, owner: i32, backwards: bool) -> Result<(), EngineError> {
+        let mut roster = self.player_crew_roster(owner);
+        if backwards {
+            roster.reverse();
+        }
+        let eligible = |engine: &Self, id: ObjectId| {
+            engine
+                .find_object_index(id)
+                .is_some_and(|index| !engine.objects[index].state.crew_disabled)
+        };
+        // Walk on from the cursor's link; falling off the end rescans the
+        // whole list from the front (C4Player.cpp:1264-1270).
+        let next = self
+            .crew_cursor(owner)
+            .and_then(|cursor| roster.iter().position(|id| *id == cursor))
+            .and_then(|position| {
+                roster[position + 1..]
+                    .iter()
+                    .copied()
+                    .find(|id| eligible(self, *id))
+            })
+            .or_else(|| roster.iter().copied().find(|id| eligible(self, *id)));
+        if let Some(target) = next {
+            self.player_set_cursor(owner, target, false, true)?;
+        }
+        // Updates (:1272-1274).
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.control.cursor_flash = 30;
+            player.control.cursor_selection = 1;
+        }
+        Ok(())
+    }
+
+    /// `C4Player::UnselectCrew` (C4Player.cpp:1295-1306).
+    fn player_unselect_crew(&mut self, owner: i32) -> Result<(), EngineError> {
+        let cursor = self.crew_cursor(owner);
+        let mut cursor_deselected = false;
+        for id in self.player_crew_roster(owner) {
+            if cursor == Some(id) {
+                cursor_deselected = true;
+            }
+            if let Some(index) = self.find_object_index(id) {
+                self.object_un_select(index, owner, false)?;
+            }
+        }
+        // A cursor outside the crew unselects too (:1305).
+        if let Some(cursor_index) = cursor
+            .filter(|_| !cursor_deselected)
+            .and_then(|id| self.find_object_index(id))
+        {
+            self.object_un_select(cursor_index, owner, false)?;
+        }
+        Ok(())
+    }
+
+    /// `C4Player::SelectSingleByCursor` (C4Player.cpp:1308-1317).
+    fn player_select_single_by_cursor(&mut self, owner: i32) -> Result<(), EngineError> {
+        self.player_unselect_crew(owner)?;
+        if let Some(cursor_index) = self
+            .crew_cursor(owner)
+            .and_then(|id| self.find_object_index(id))
+        {
+            self.object_do_select(cursor_index, owner, false)?;
+        }
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.control.select_flash = 30;
+        }
+        self.player_adjust_cursor_command(owner)
+    }
+
+    /// `C4Player::CursorToggle` (C4Player.cpp:1319-1339).
+    fn player_cursor_toggle(&mut self, owner: i32) -> Result<(), EngineError> {
+        let cursor_selection = self
+            .players
+            .get(&owner)
+            .map(|player| player.control.cursor_selection)
+            .unwrap_or(0);
+        if cursor_selection != 0 {
+            // Selection mode: toggle cursor select (:1323-1327).
+            if let Some(cursor) = self.crew_cursor(owner) {
+                let selected = self
+                    .crew_selection
+                    .get(&owner)
+                    .map(|selection| selection.selected.contains(&cursor))
+                    .unwrap_or(false);
+                if let Some(index) = self.find_object_index(cursor) {
+                    if selected {
+                        self.object_un_select(index, owner, false)?;
+                    } else {
+                        self.object_do_select(index, owner, false)?;
+                    }
+                }
+            }
+            if let Some(player) = self.players.get_mut(&owner) {
+                player.control.cursor_toggled = 1;
+            }
+        } else {
+            // Pure toggle: toggle all Select (:1329-1336).
+            for id in self.player_crew_roster(owner) {
+                let Some(index) = self.find_object_index(id) else {
+                    continue;
+                };
+                if self.objects[index].state.crew_disabled {
+                    continue;
+                }
+                let selected = self
+                    .crew_selection
+                    .get(&owner)
+                    .map(|selection| selection.selected.contains(&id))
+                    .unwrap_or(false);
+                if selected {
+                    self.object_un_select(index, owner, false)?;
+                } else {
+                    self.object_do_select(index, owner, false)?;
+                }
+            }
+            self.player_adjust_cursor_command(owner)?;
+        }
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.control.select_flash = 30;
+        }
+        Ok(())
+    }
+
+    /// `C4Player::SelectAllCrew` (C4Player.cpp:1341-1353).
+    fn player_select_all_crew(&mut self, owner: i32) -> Result<(), EngineError> {
+        for id in self.player_crew_roster(owner) {
+            if let Some(index) = self.find_object_index(id) {
+                self.object_do_select(index, owner, false)?;
+            }
+        }
+        self.player_adjust_cursor_command(owner)?;
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.control.cursor_selection = 0;
+            player.control.cursor_toggled = 0;
+            player.control.select_flash = 30;
+        }
+        // Game display (:1352): the app is the local player's view.
+        self.pending_audio.push(crate::AudioCommand::PlaySound {
+            name: "Ding".to_string(),
+            target: None,
+            volume: 100,
+            looped: false,
+            custom_falloff: None,
+        });
+        Ok(())
+    }
+
+    /// `C4Player::UpdateSelectionToggleStatus` (C4Player.cpp:1355-1365).
+    fn player_update_selection_toggle_status(&mut self, owner: i32) -> Result<(), EngineError> {
+        let (cursor_selection, cursor_toggled) = self
+            .players
+            .get(&owner)
+            .map(|player| {
+                (
+                    player.control.cursor_selection,
+                    player.control.cursor_toggled,
+                )
+            })
+            .unwrap_or((0, 0));
+        if cursor_selection != 0 {
+            if cursor_toggled != 0 {
+                self.player_adjust_cursor_command(owner)?;
+            } else {
+                self.player_select_single_by_cursor(owner)?;
+            }
+        }
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.control.cursor_selection = 0;
+            player.control.cursor_toggled = 0;
+        }
+        Ok(())
     }
 
     /// `C4Object::DirectCom` (C4Object.cpp:3327-3557).
@@ -2401,6 +2758,178 @@ protected func ControlContents(idTarget) { return(1); }
             )),
             "falsy Selection plays the Grab sound"
         );
+    }
+
+    /// Three crew members in roster (creation) order for the cursor-com
+    /// cycling tests; the cursor starts on the first.
+    fn crew_trio(engine: &mut Engine) -> [ObjectId; 3] {
+        register_clonk(engine, "CLNK", "#strict\n");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let spawn = |engine: &mut Engine| {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("CLNK")
+                        .with_owner(1)
+                        .with_crew_member(true)
+                        .with_action(ActionState::new("Walk")),
+                )
+                .expect("spawn crew")
+        };
+        let trio = [spawn(engine), spawn(engine), spawn(engine)];
+        engine.select_crew(1, vec![trio[0]]).expect("select");
+        engine.set_crew_cursor(1, Some(trio[0])).expect("cursor");
+        trio
+    }
+
+    fn control_state(engine: &Engine, owner: i32) -> &crate::player::PlayerControlState {
+        &engine.players.get(&owner).expect("player").control
+    }
+
+    #[test]
+    fn cursor_right_cycles_the_crew_in_roster_order_skipping_disabled() {
+        // C4Player::CursorRight (C4Player.cpp:1261-1275): the next crew
+        // link with Status and !CrewDisabled becomes the cursor;
+        // CursorFlash = 30 and CursorSelection = 1.
+        let mut engine = Engine::new();
+        let [_, b, c] = crew_trio(&mut engine);
+        let b_index = engine.find_object_index(b).expect("b exists");
+        engine.objects[b_index].state.crew_disabled = true;
+
+        engine.player_in_com(1, COM_CURSOR_RIGHT, 0).expect("in_com");
+        assert_eq!(
+            engine.crew_cursor(1),
+            Some(c),
+            "the disabled middle crew is skipped (C4Player.cpp:1267)"
+        );
+        assert_eq!(control_state(&engine, 1).cursor_flash, 30);
+        assert_eq!(control_state(&engine, 1).cursor_selection, 1);
+    }
+
+    #[test]
+    fn cursor_left_wraps_to_the_last_crew_member() {
+        // C4Player::CursorLeft (C4Player.cpp:1278-1293): walking Prev off
+        // the front rescans from Crew.Last.
+        let mut engine = Engine::new();
+        let [_, _, c] = crew_trio(&mut engine);
+
+        engine.player_in_com(1, COM_CURSOR_LEFT, 0).expect("in_com");
+        assert_eq!(engine.crew_cursor(1), Some(c));
+    }
+
+    #[test]
+    fn cursor_toggle_in_selection_mode_toggles_the_cursor_select() {
+        // After a cursor com CursorSelection = 1, so CursorToggle flips the
+        // cursor's Select and arms CursorToggled (C4Player.cpp:1322-1327).
+        let mut engine = Engine::new();
+        let [a, b, _] = crew_trio(&mut engine);
+
+        engine.player_in_com(1, COM_CURSOR_RIGHT, 0).expect("right");
+        assert_eq!(engine.crew_cursor(1), Some(b));
+        engine.player_in_com(1, COM_CURSOR_TOGGLE, 0).expect("toggle");
+        assert_eq!(
+            engine.selected_crew(1),
+            vec![a, b],
+            "the new cursor's Select toggled ON"
+        );
+        assert_eq!(control_state(&engine, 1).cursor_toggled, 1);
+        assert_eq!(control_state(&engine, 1).select_flash, 30);
+    }
+
+    #[test]
+    fn regular_com_after_cursor_move_selects_single_by_cursor() {
+        // UpdateSelectionToggleStatus (C4Player.cpp:1355-1365) runs on the
+        // next regular com (C4Player::ObjectCom, :1378-1379): an untoggled
+        // CursorSelection commits SelectSingleByCursor — only the cursor
+        // stays selected.
+        let mut engine = Engine::new();
+        let [_, b, _] = crew_trio(&mut engine);
+
+        engine.player_in_com(1, COM_CURSOR_RIGHT, 0).expect("right");
+        engine.player_in_com(1, COM_DOWN, 0).expect("down");
+        assert_eq!(
+            engine.selected_crew(1),
+            vec![b],
+            "SelectSingleByCursor unselected the rest (C4Player.cpp:1308-1317)"
+        );
+        assert_eq!(engine.crew_cursor(1), Some(b));
+        assert_eq!(control_state(&engine, 1).cursor_selection, 0);
+    }
+
+    #[test]
+    fn cursor_toggle_double_selects_all_crew() {
+        // COM_CursorToggle_D → SelectAllCrew (C4Player.cpp:1485,
+        // 1341-1353): everyone Select, flags reset, Ding.
+        let mut engine = Engine::new();
+        let [a, b, c] = crew_trio(&mut engine);
+
+        engine.player_in_com(1, COM_CURSOR_TOGGLE, 0).expect("first");
+        engine.player_in_com(1, COM_CURSOR_TOGGLE, 0).expect("second");
+        let mut selected = engine.selected_crew(1);
+        selected.sort_by_key(|id| id.as_u64());
+        assert_eq!(selected, vec![a, b, c]);
+        assert_eq!(control_state(&engine, 1).cursor_selection, 0);
+        assert_eq!(control_state(&engine, 1).cursor_toggled, 0);
+        assert!(
+            engine.pending_audio.iter().any(|command| matches!(
+                command,
+                crate::AudioCommand::PlaySound { name, .. } if name == "Ding"
+            )),
+            "SelectAllCrew plays Ding (C4Player.cpp:1352)"
+        );
+    }
+
+    #[test]
+    fn pure_cursor_toggle_flips_select_on_the_whole_crew() {
+        // Without CursorSelection the toggle flips every non-disabled
+        // crew's Select (C4Player.cpp:1329-1336) and re-adjusts the cursor
+        // to the hirank Select (AdjustCursorCommand, :1235-1258).
+        let mut engine = Engine::new();
+        let [a, b, c] = crew_trio(&mut engine);
+
+        engine.player_in_com(1, COM_CURSOR_TOGGLE, 0).expect("toggle");
+        // a was selected -> off; b, c were unselected -> on.
+        assert_eq!(engine.selected_crew(1), vec![b, c]);
+        assert_eq!(
+            engine.crew_cursor(1),
+            Some(b),
+            "AdjustCursorCommand moves the cursor to the first Select"
+        );
+        let _ = a;
+    }
+
+    #[test]
+    fn cursor_com_script_override_consumes_the_cycling() {
+        // C4Player::DirectCom's cursor half (C4Player.cpp:1457-1475): a
+        // truthy ControlCursorRight on the cursor object consumes the com
+        // before any cycling.
+        let script = r#"
+#strict
+protected func ControlCursorRight() { return(1); }
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", script);
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let a = spawn_crew(&mut engine, "CLNK", 1);
+        let b = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("spawn b");
+
+        engine.player_in_com(1, COM_CURSOR_RIGHT, 0).expect("in_com");
+        assert_eq!(
+            engine.crew_cursor(1),
+            Some(a),
+            "the override kept the cursor in place"
+        );
+        let _ = b;
     }
 
     #[test]
