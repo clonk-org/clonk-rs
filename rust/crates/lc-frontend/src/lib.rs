@@ -528,6 +528,14 @@ pub struct PlayerOverlay {
     /// `C4Player::ShowStartup` — keyboard hint + name until the first
     /// control com (src/C4Player.cpp:1376, src/C4Viewport.cpp:1450).
     pub show_startup: bool,
+    /// `C4Player::ShowControl` and `ShowControlPos`, consumed by
+    /// `C4Viewport::DrawPlayerControls` (src/C4Viewport.cpp:1394-1441).
+    pub show_control: i32,
+    pub show_control_position: i32,
+    /// Raw `C4Player::LastCom`; `Com2Control` selects the pressed hint.
+    pub last_com: u8,
+    /// Short `PlrControlKeyName` values in CON_* order.
+    pub control_key_labels: Vec<String>,
     pub crew: Vec<CrewOverlay>,
     /// The cursor object's contextual command icons
     /// (C4Object::DrawCommands, src/C4Object.cpp:2940-3098), resolved by
@@ -5372,6 +5380,10 @@ mod tests {
             owner_color: Color::opaque(0, 100, 200),
             select_count: 1,
             show_startup: false,
+            show_control: 0,
+            show_control_position: 0,
+            last_com: 0,
+            control_key_labels: Vec::new(),
             crew: vec![CrewOverlay {
                 object_id,
                 label: "Joe".to_string(),

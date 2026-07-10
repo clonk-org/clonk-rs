@@ -9937,8 +9937,12 @@ impl GameApp {
         let viewports = collect_viewport_inputs(&self.snapshot, self.local_owner, self.focus_id);
         if let Some(_focus) = self.focus_snapshot.as_ref() {
             let startup_hint_owner = self.show_startup_hint.then_some(self.local_owner);
-            let mut players =
-                collect_player_overlays(&self.snapshot, self.focus_id, startup_hint_owner);
+            let mut players = collect_player_overlays(
+                &self.snapshot,
+                self.focus_id,
+                startup_hint_owner,
+                &self.bindings,
+            );
             self.populate_crew_infos(&mut players);
             self.populate_crew_portraits(&mut players);
             // Command rows for the local player's real cursor
@@ -11926,6 +11930,7 @@ fn collect_player_overlays(
     snapshot: &SimulationSnapshot,
     focus_id: Option<ObjectId>,
     startup_hint_owner: Option<i32>,
+    bindings: &KeyboardBindings,
 ) -> Vec<PlayerOverlay> {
     let detail_map: HashMap<_, _> = snapshot
         .players
@@ -11999,6 +12004,28 @@ fn collect_player_overlays(
             .get(&player.owner)
             .and_then(|state| state.color.map(|rgb| Color::opaque(rgb.r, rgb.g, rgb.b)))
             .unwrap_or_else(|| default_owner_color(player.owner));
+        let show_control = detail_map
+            .get(&player.owner)
+            .map(|state| state.show_control)
+            .unwrap_or(0);
+        let show_control_position = detail_map
+            .get(&player.owner)
+            .map(|state| state.show_control_position)
+            .unwrap_or(0);
+        let last_com = detail_map
+            .get(&player.owner)
+            .map(|state| state.control.last_com)
+            .unwrap_or(0);
+        let control_key_labels = ControlBindingId::ALL
+            .iter()
+            .take(10)
+            .map(|binding| {
+                bindings
+                    .key_for(*binding)
+                    .map(format_key_label)
+                    .unwrap_or_default()
+            })
+            .collect();
         players.push(PlayerOverlay {
             owner: player.owner,
             name,
@@ -12009,6 +12036,10 @@ fn collect_player_overlays(
             owner_color,
             select_count,
             show_startup: startup_hint_owner == Some(player.owner),
+            show_control,
+            show_control_position,
+            last_com,
+            control_key_labels,
             crew,
             commands: Vec::new(),
         });
@@ -14119,10 +14150,17 @@ mod tests {
             wealth: 120,
             cursor: Some(focus),
             crew: vec![focus, teammate],
+            show_control: 1 | 1 << 10,
+            show_control_position: 3,
+            control: lc_engine::PlayerControlState {
+                last_com: 5,
+                ..Default::default()
+            },
             ..PlayerState::default()
         });
 
-        let overlay = collect_player_overlays(&snapshot, Some(focus), Some(1));
+        let bindings = KeyboardBindings::load(None);
+        let overlay = collect_player_overlays(&snapshot, Some(focus), Some(1), &bindings);
         assert_eq!(overlay.len(), 1);
         let player = &overlay[0];
         assert_eq!(player.owner, 1);
@@ -14135,6 +14173,18 @@ mod tests {
         // SelectCount defaults to the cursor selection (C4Viewport.cpp:1320).
         assert_eq!(player.select_count, 1);
         assert!(player.show_startup, "startup hint owner matches");
+        assert_eq!(player.show_control, 1 | 1 << 10);
+        assert_eq!(player.show_control_position, 3);
+        assert_eq!(player.last_com, 5);
+        assert_eq!(player.control_key_labels.len(), 10);
+        assert_eq!(
+            player.control_key_labels[3],
+            format_key_label(
+                bindings
+                    .key_for(ControlBindingId::Throw)
+                    .expect("throw has a default binding")
+            )
+        );
 
         let mut focused = player
             .crew
