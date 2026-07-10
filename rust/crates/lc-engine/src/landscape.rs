@@ -15,6 +15,10 @@ const C4M_BACKGROUND: i32 = 0;
 const C4M_SOLID: i32 = 50;
 /// DensityLiquid lower bound (C4M_Liquid, C4Material.h:203).
 const C4M_LIQUID: i32 = 25;
+/// C4M_MaxTexIndex: slot 127 is reserved for landscape diffs, so runtime
+/// texture-map lookup/allocation only visits 1..126 (C4Constants.h:63;
+/// C4Texture.cpp:319-340).
+const C4M_MAX_TEX_INDEX: usize = 127;
 
 /// Hex-string serde for the pixel byte plane (a JSON number array would be
 /// ~10MB for a real map; hex keeps state exports tractable).
@@ -374,10 +378,93 @@ pub(crate) struct RuntimeTexMapState {
 }
 
 impl RuntimeTexMapState {
+    pub(crate) fn texture_exists(&self, name: &str) -> bool {
+        self.texture_inventory
+            .iter()
+            .any(|texture| texture.eq_ignore_ascii_case(name))
+    }
+
     pub(crate) fn material(&self, name: &str) -> Option<&RuntimeTexMapMaterial> {
         self.materials
             .iter()
             .find(|material| material.name.eq_ignore_ascii_case(name))
+    }
+
+    /// C4TextureMap::GetIndex (C4Texture.cpp:319-345), relocated from the
+    /// activation-only classifier so runtime landscape writes can share the
+    /// same retained texmap state while preserving its lookup/allocation
+    /// behavior.
+    pub(crate) fn get_index(
+        &mut self,
+        material_name: &str,
+        texture_name: Option<&str>,
+        add_if_missing: bool,
+    ) -> u8 {
+        for slot in 1..C4M_MAX_TEX_INDEX {
+            if let Some(existing) = &self.material_names[slot] {
+                if existing.eq_ignore_ascii_case(material_name)
+                    && texture_name
+                        .map(|texture| {
+                            self.match_texture_names[slot]
+                                .as_deref()
+                                .is_some_and(|existing| existing.eq_ignore_ascii_case(texture))
+                        })
+                        .unwrap_or(true)
+                {
+                    return slot as u8;
+                }
+            }
+        }
+        if !add_if_missing {
+            return 0;
+        }
+        let Some((density, shape)) = self
+            .material(material_name)
+            .map(|material| (material.density, material.shape))
+        else {
+            return 0;
+        };
+        if let Some(texture) = texture_name {
+            if !self.texture_exists(texture) {
+                return 0;
+            }
+        }
+        let Some(slot) = (1..C4M_MAX_TEX_INDEX)
+            .find(|&slot| self.material_names[slot].is_none()) else {
+            return 0;
+        };
+        self.material_names[slot] = Some(material_name.to_string());
+        self.match_texture_names[slot] = texture_name.map(str::to_string);
+        self.texture_names[slot] = texture_name.map(str::to_string);
+        self.shapes[slot] = Some(shape);
+        self.densities[slot] = density;
+        slot as u8
+    }
+
+    /// C4TextureMap::GetIndexMatTex (C4Texture.cpp:346-367), with the
+    /// activation classifier's pre-relocation fallback behavior unchanged.
+    pub(crate) fn get_index_mat_tex(
+        &mut self,
+        material_texture: &str,
+        default_texture: Option<&str>,
+    ) -> u8 {
+        let (material, texture) = match material_texture.split_once('-') {
+            Some((material, texture)) => (material, Some(texture)),
+            None => (material_texture, None),
+        };
+        if let Some(texture) = texture {
+            let index = self.get_index(material, Some(texture), true);
+            if index != 0 {
+                return index;
+            }
+        }
+        if let Some(default_texture) = default_texture {
+            let index = self.get_index(material, Some(default_texture), true);
+            if index != 0 {
+                return index;
+            }
+        }
+        self.default_material_entry(material).unwrap_or(0)
     }
 
     pub(crate) fn set_default_material_entry(&mut self, name: &str, slot: u8) {

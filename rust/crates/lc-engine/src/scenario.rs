@@ -2974,8 +2974,6 @@ fn basic_map_params(landscape: &LegacyLandscape) -> crate::map_creator::BasicMap
 /// C4Wrappers.h:110-145, C4Landscape.cpp:2832-2839): a pixel byte's low 7
 /// bits are the texmap index (bit 0x80 = IFT); index 0, unmapped entries
 /// and unknown materials are sky (MNone, density 0).
-const C4M_MAX_TEX_INDEX: usize = 127;
-
 pub(crate) struct MapPixelClassifier {
     state: RuntimeTexMapState,
 }
@@ -3067,10 +3065,7 @@ impl MapPixelClassifier {
     /// C4TextureMap::CheckTexture (the map creators validate `tex=`
     /// fields against the loaded texture inventory).
     pub(crate) fn texture_exists(&self, name: &str) -> bool {
-        self.state
-            .texture_inventory
-            .iter()
-            .any(|t| t.eq_ignore_ascii_case(name))
+        self.state.texture_exists(name)
     }
 
     /// The material definition behind a name, scenario-local first
@@ -3088,44 +3083,8 @@ impl MapPixelClassifier {
         tex_name: Option<&str>,
         add_if_not_exist: bool,
     ) -> u8 {
-        for slot in 1..C4M_MAX_TEX_INDEX {
-            if let Some(existing) = &self.state.material_names[slot] {
-                if existing.eq_ignore_ascii_case(mat_name)
-                    && tex_name
-                        .map(|tex| {
-                            self.state.match_texture_names[slot]
-                                .as_deref()
-                                .is_some_and(|t| t.eq_ignore_ascii_case(tex))
-                        })
-                        .unwrap_or(true)
-                {
-                    return slot as u8;
-                }
-            }
-        }
-        if !add_if_not_exist {
-            return 0;
-        }
-        let Some(material) = self.material(mat_name) else {
-            return 0;
-        };
-        let shape = material.shape;
-        let density = material.density;
-        if let Some(tex) = tex_name {
-            if !self.texture_exists(tex) {
-                return 0;
-            }
-        }
-        let Some(slot) = (1..C4M_MAX_TEX_INDEX)
-            .find(|&slot| self.state.material_names[slot].is_none()) else {
-            return 0;
-        };
-        self.state.material_names[slot] = Some(mat_name.to_string());
-        self.state.match_texture_names[slot] = tex_name.map(str::to_string);
-        self.state.texture_names[slot] = tex_name.map(str::to_string);
-        self.state.shapes[slot] = Some(shape);
-        self.state.densities[slot] = density;
-        slot as u8
+        self.state
+            .get_index(mat_name, tex_name, add_if_not_exist)
     }
 
     /// C4TextureMap::GetIndexMatTex (C4Texture.cpp:346-367): split the
@@ -3137,26 +3096,8 @@ impl MapPixelClassifier {
         material_texture: &str,
         default_texture: Option<&str>,
     ) -> u8 {
-        let (material, texture) = match material_texture.split_once('-') {
-            Some((material, texture)) => (material, Some(texture)),
-            None => (material_texture, None),
-        };
-        if let Some(texture) = texture {
-            let index = self.get_index(material, Some(texture), true);
-            if index != 0 {
-                return index;
-            }
-        }
-        if let Some(default) = default_texture {
-            let index = self.get_index(material, Some(default), true);
-            if index != 0 {
-                return index;
-            }
-        }
-        // Game.Material.Map[iMaterial].DefaultMatTex: the exact entry stored
-        // by CrossMapMaterials, not the first texmap slot with this material
-        // (C4Material.cpp:349-370; C4Texture.cpp:360-367).
-        self.state.default_material_entry(material).unwrap_or(0)
+        self.state
+            .get_index_mat_tex(material_texture, default_texture)
     }
 }
 
