@@ -10,6 +10,7 @@ use lc_resources::definition::{
     ActionFacet as ResourceActionFacet, DefinitionGraphicsVariant as ResourceGraphicsVariant,
 };
 use lc_resources::{
+    decode_legacy_script_text, localize_script_source,
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap, ColorByOwnerMask,
     DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
     ResourceDefinition as ResourceDefinitionData,
@@ -326,17 +327,43 @@ impl Scenario {
         path: impl AsRef<Path>,
         resolver: &R,
     ) -> Result<Self, ScenarioError> {
+        Self::load_from_path_with_languages(path, resolver, &["US", "DE"])
+    }
+
+    pub fn load_from_path_with_languages<R, S>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+        languages: &[S],
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
         let group = Group::open(path)?;
-        Self::load_from_group_with(&group, resolver)
+        Self::load_from_group_with_languages(&group, resolver, languages)
     }
 
     pub fn load_from_group_with<R: LegacyDefinitionResolver>(
         group: &Group,
         resolver: &R,
     ) -> Result<Self, ScenarioError> {
+        Self::load_from_group_with_languages(group, resolver, &["US", "DE"])
+    }
+
+    pub fn load_from_group_with_languages<R, S>(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
         match Self::load_from_group(group) {
             Ok(scenario) => Ok(scenario),
-            Err(ScenarioError::ManifestMissing) => Self::load_legacy_from_group(group, resolver),
+            Err(ScenarioError::ManifestMissing) => {
+                Self::load_legacy_from_group(group, resolver, languages)
+            }
             Err(err) => Err(err),
         }
     }
@@ -355,10 +382,15 @@ impl Scenario {
         Scenario::from_manifest(group, manifest)
     }
 
-    fn load_legacy_from_group<R: LegacyDefinitionResolver>(
+    fn load_legacy_from_group<R, S>(
         group: &Group,
         resolver: &R,
-    ) -> Result<Self, ScenarioError> {
+        languages: &[S],
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
         let manifest = parse_legacy_scenario_manifest(group)?;
 
         let skip_ids: HashSet<String> = manifest
@@ -450,7 +482,7 @@ impl Scenario {
             return Err(ScenarioError::NoDefinitions);
         }
 
-        let script = load_legacy_scenario_script(group)?;
+        let script = load_legacy_scenario_script(group, languages)?;
         let mut classifier = build_map_pixel_classifier(group, resolver);
         let landscape = load_legacy_landscape(group, &manifest, classifier.as_mut())?;
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
@@ -2718,8 +2750,9 @@ fn parse_legacy_bool(value: &str) -> Option<bool> {
     }
 }
 
-fn load_legacy_scenario_script(
+fn load_legacy_scenario_script<S: AsRef<str>>(
     group: &Group,
+    languages: &[S],
 ) -> Result<Option<ScenarioScriptSource>, ScenarioError> {
     const SCRIPT_CANDIDATES: [&str; 1] = ["Script.c"];
     for candidate in SCRIPT_CANDIDATES {
@@ -2727,8 +2760,8 @@ fn load_legacy_scenario_script(
             continue;
         }
         let bytes = group.read_file(candidate)?;
-        // Use lossy UTF-8 conversion to handle legacy ISO-8859-1/Windows-1252 encoded scripts
-        let source = String::from_utf8_lossy(&bytes).into_owned();
+        let source = decode_legacy_script_text(&bytes);
+        let source = localize_script_source(group, &source, languages)?;
         return Ok(Some(ScenarioScriptSource {
             name: candidate.to_string(),
             source,
@@ -7272,6 +7305,84 @@ global func Step(state, frame, random)
             .apply(&mut engine)
             .expect("apply tolerates script errors like C++");
         (engine, created)
+    }
+
+    #[test]
+    fn legacy_scenario_script_replaces_localized_strings_before_compile() {
+        // C4Game loads ScenarioLangStringTable before Script.c and
+        // C4ScriptHost::MakeScript replaces `$key$` before Preparse
+        // (C4Game.cpp:229-230,3336-3341; C4ScriptHost.cpp:66-82).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "#strict\nglobal func Initialize() { Message(\"$MsgIntro2a$\"); }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("StringTblUS.txt"),
+            "MsgIntro2a=Come with me, princess!\n",
+        )
+        .expect("write string table");
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let script = &scenario.script.as_ref().expect("scenario script").source;
+
+        assert!(script.contains("\"Come with me, princess!\""));
+        assert!(!script.contains("$MsgIntro2a$"));
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let snapshot = engine.tick().expect("scenario ticks");
+        assert_eq!(snapshot.hud.messages.len(), 1);
+        assert_eq!(
+            snapshot.hud.messages[0].lines,
+            ["Come with me, princess!"]
+        );
+        assert!(snapshot.audio.iter().all(|command| !matches!(
+            command,
+            crate::AudioCommand::PlaySound { name, .. } if name == "MsgIntro2a"
+        )));
+    }
+
+    #[test]
+    fn legacy_scenario_script_respects_language_order() {
+        // C4ComponentHost tries each LanguageEx code in order after the
+        // unsuffixed StringTbl.txt candidate (C4ComponentHost.cpp:65-89;
+        // C4Components.h:56).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "#strict\nglobal func Localized() { return \"$MsgIntro2a$\"; }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("StringTblUS.txt"),
+            "MsgIntro2a=Come with me, princess!\n",
+        )
+        .expect("write US string table");
+        std::fs::write(
+            scenario_dir.join("StringTblDE.txt"),
+            "MsgIntro2a=Komm mit mir, Prinzessin!\n",
+        )
+        .expect("write DE string table");
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        let scenario = Scenario::load_from_path_with_languages(
+            &scenario_dir,
+            &resolver,
+            &["DE", "US"],
+        )
+        .expect("scenario loads");
+        let script = &scenario.script.as_ref().expect("scenario script").source;
+
+        assert!(script.contains("\"Komm mit mir, Prinzessin!\""));
+        assert!(!script.contains("\"Come with me, princess!\""));
     }
 
     /// Joins a default test player: the fixture's `[Player1] Crew=Good=1`
