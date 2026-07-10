@@ -12405,9 +12405,9 @@ impl Engine {
         Ok(())
     }
 
-    /// `C4Player::PlaceReadyVehic` (C4Player.cpp:619-640). The base-entry
-    /// exit command (:636) is not queued yet — the vehicle still enters the
-    /// base.
+    /// `C4Player::PlaceReadyVehic` (C4Player.cpp:619-640): ready vehicles
+    /// enter the first base and immediately receive a replacing Exit command
+    /// (:631-636).
     fn place_ready_vehic(
         &mut self,
         number: i32,
@@ -12441,7 +12441,20 @@ impl Engine {
                 if let Some(base) = first_base {
                     config = config.with_container(base);
                 }
-                self.spawn_object(config)?;
+                let vehicle = self.spawn_object(config)?;
+                if first_base.is_some() {
+                    if let Some(index) = self.find_object_index(vehicle) {
+                        // C4Object::SetCommand (C4Object.cpp:3937-3986):
+                        // decrement NoCollectDelay, clear, then push Base Exit.
+                        self.objects[index].apply_command_operations([
+                            CommandOperation::DecrementNoCollectDelay,
+                            CommandOperation::Clear,
+                            CommandOperation::PushFront(command::CommandRequest::new(
+                                CommandId::Exit,
+                            )),
+                        ]);
+                    }
+                }
             }
         }
         Ok(())
