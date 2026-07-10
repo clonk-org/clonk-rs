@@ -11,9 +11,11 @@ use crate::compat;
 use crate::control::{
     COM_CLEAR_PRESSED_COMS, COM_CONTENTS, COM_CURSOR_FIRST, COM_CURSOR_LAST, COM_CURSOR_LEFT,
     COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_FIRST,
-    COM_MENU_LAST, COM_MENU_NAVIGATION1, COM_MENU_NAVIGATION2, COM_NONE, COM_RELEASE_FIRST,
-    COM_RELEASE_LAST, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2,
-    COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP,
+    COM_MENU_LAST, COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER, COM_MENU_ENTER_ALL,
+    COM_MENU_LEFT, COM_MENU_NAVIGATION1, COM_MENU_NAVIGATION2, COM_MENU_RIGHT, COM_MENU_SELECT,
+    COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_NONE, COM_RELEASE_FIRST, COM_RELEASE_LAST,
+    COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
+    COM_WHEEL_DOWN, COM_WHEEL_UP,
 };
 use crate::math::itofix;
 use crate::{
@@ -114,8 +116,6 @@ const COM_DOWN_R: u8 = COM_DOWN + COM_RELEASE_OFFSET;
 impl Engine {
     /// `C4Player::InCom` (C4Player.cpp:1490-1554): pressed-com bookkeeping
     /// plus COM_Single/COM_Double synthesis around the LastCom buffer.
-    /// Cursor-object menu conversion (`Cursor->Menu->ConvertCom`, :1503-1508)
-    /// is handled by the app-side object menu before events reach the engine.
     pub fn player_in_com(&mut self, owner: i32, com: u8, data: i32) -> Result<(), EngineError> {
         // Coms for unknown players are dropped like C4Game control routing
         // does when Players.Get fails.
@@ -128,6 +128,27 @@ impl Engine {
             player.control.last_com = COM_NONE;
             return Ok(());
         }
+        // Cursor menu ConvertCom (C4Player.cpp:1502-1508;
+        // C4Menu.cpp:1040-1069). Only exact press coms convert: releases
+        // remain raw and are discarded by the pressed-com guard below.
+        let cursor_menu_active = self
+            .crew_cursor(owner)
+            .and_then(|cursor| self.find_object_index(cursor))
+            .is_some_and(|index| self.objects[index].state.menu.is_some());
+        let com = if cursor_menu_active {
+            match com {
+                COM_THROW => COM_MENU_ENTER,
+                COM_DIG => COM_MENU_CLOSE,
+                COM_SPECIAL2 => COM_MENU_ENTER_ALL,
+                COM_UP => COM_MENU_UP,
+                COM_LEFT => COM_MENU_LEFT,
+                COM_DOWN => COM_MENU_DOWN,
+                COM_RIGHT => COM_MENU_RIGHT,
+                _ => com,
+            }
+        } else {
+            com
+        };
         // Menu control: no single/double processing (C4Player.cpp:1510-1513).
         if (COM_MENU_FIRST..=COM_MENU_LAST).contains(&com) {
             return self.player_direct_com(owner, com, data);
@@ -647,9 +668,17 @@ impl Engine {
             return Ok(());
         }
 
-        // Menu control (:3350-3354) happens in the app-side object menu
-        // before coms are dispatched to the engine. Menu com leftovers from
-        // a closed menu are still swallowed (:3356-3357).
+        // COM_Special and COM_Contents bypass an active object menu;
+        // every other com goes to Menu->Control first, whose active-menu
+        // return consumes even unrecognized raw/release coms
+        // (C4Object.cpp:3349-3367; C4Menu.cpp:433-480).
+        let bypass_menu = plain_com == COM_SPECIAL || com == COM_CONTENTS;
+        if !bypass_menu && self.object_menu_control(index, com, data)? {
+            return Ok(());
+        }
+
+        // Menu com leftovers from a menu closed before execution are
+        // swallowed (C4Object.cpp:3369-3371).
         if (COM_MENU_NAVIGATION1..=COM_MENU_NAVIGATION2).contains(&com) {
             return Ok(());
         }
@@ -725,6 +754,156 @@ impl Engine {
 
         // Control by procedure (:3405-3556).
         self.object_procedure_com(index, com)
+    }
+
+    /// `C4Menu::Control` (C4Menu.cpp:433-480) for a script-created object
+    /// menu. Returns false only when no menu is active.
+    fn object_menu_control(
+        &mut self,
+        index: usize,
+        com: u8,
+        data: i32,
+    ) -> Result<bool, EngineError> {
+        let Some(menu) = self.objects[index].state.menu.clone() else {
+            return Ok(false);
+        };
+        let object_id = self.objects[index].id;
+        match com {
+            COM_MENU_ENTER => {
+                self.menu_user_enter(object_id, false)?;
+            }
+            COM_MENU_ENTER_ALL => {
+                self.menu_user_enter(object_id, true)?;
+            }
+            COM_MENU_CLOSE => {
+                let _ = self.close_object_menu(object_id, false)?;
+            }
+            COM_MENU_LEFT => {
+                let delta = if menu.selection - 1 < 0 {
+                    menu.items.len() as i32 - 1 - menu.selection
+                } else {
+                    -1
+                };
+                self.move_object_menu_selection(index, delta)?;
+            }
+            COM_MENU_RIGHT => {
+                let delta = if menu.selection + 1 >= menu.items.len() as i32 {
+                    -menu.selection
+                } else {
+                    1
+                };
+                self.move_object_menu_selection(index, delta)?;
+            }
+            COM_MENU_UP => {
+                let columns = menu.columns;
+                let mut delta = -columns;
+                if menu.selection + delta < 0 && columns > 0 {
+                    while menu.selection + delta + columns < menu.items.len() as i32 {
+                        delta += columns;
+                    }
+                }
+                self.move_object_menu_selection(index, delta)?;
+            }
+            COM_MENU_DOWN => {
+                let columns = menu.columns;
+                let mut delta = columns;
+                if menu.selection + delta >= menu.items.len() as i32 && columns > 0 {
+                    while menu.selection + delta - columns >= 0 {
+                        delta -= columns;
+                    }
+                }
+                self.move_object_menu_selection(index, delta)?;
+            }
+            COM_MENU_SELECT => {
+                if !menu.items.is_empty() {
+                    self.set_object_menu_selection(index, data & i32::MAX)?;
+                }
+            }
+            COM_MENU_SHOW_TEXT => {
+                if let Some(menu) = self.objects[index].state.menu.as_mut() {
+                    menu.text_progress = None;
+                }
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    /// `C4Menu::MoveSelection` (C4Menu.cpp:535-555): advance in fixed
+    /// increments until a selectable item is found, without crossing the
+    /// menu bounds.
+    fn move_object_menu_selection(
+        &mut self,
+        index: usize,
+        delta: i32,
+    ) -> Result<bool, EngineError> {
+        if delta == 0 {
+            return Ok(false);
+        }
+        let Some(menu) = self.objects[index].state.menu.as_ref() else {
+            return Ok(false);
+        };
+        let mut selection = menu.selection;
+        loop {
+            selection += delta;
+            let Some(item) = usize::try_from(selection)
+                .ok()
+                .and_then(|selection| menu.items.get(selection))
+            else {
+                return Ok(false);
+            };
+            if item.selectable {
+                break;
+            }
+        }
+        self.set_object_menu_selection(index, selection)?;
+        Ok(true)
+    }
+
+    /// `C4Menu::SetSelection(..., fDoCalls=true)` +
+    /// `C4ObjectMenu::OnSelectionChanged` (C4Menu.cpp:557-594;
+    /// C4ObjectMenu.cpp:93-104).
+    fn set_object_menu_selection(
+        &mut self,
+        index: usize,
+        requested: i32,
+    ) -> Result<(), EngineError> {
+        let object_id = self.objects[index].id;
+        let Some(mut menu) = self.objects[index].state.menu.clone() else {
+            return Ok(());
+        };
+        let selectable = usize::try_from(requested)
+            .ok()
+            .and_then(|selection| menu.items.get(selection))
+            .is_some_and(|item| item.selectable);
+        if (requested == -1 && menu.items.is_empty()) || selectable {
+            menu.selection = requested;
+            self.objects[index].state.menu = Some(menu.clone());
+        }
+        if !menu.user_menu {
+            return Ok(());
+        }
+        let Some(command_index) = menu
+            .command_object
+            .and_then(|command_object| self.find_object_index(command_object))
+            .filter(|&command_index| {
+                self.definitions
+                    .get(&self.objects[command_index].definition_id)
+                    .is_some_and(|definition| definition.has_function("OnMenuSelection"))
+            })
+        else {
+            // CB_Scenario selection callbacks remain part of the scenario
+            // script-menu gap; a missing callback is a silent C++ miss.
+            return Ok(());
+        };
+        let args = vec![Value::Int(menu.selection), compat::object_reference_value(object_id)];
+        if let Err(error) = self.call_object_function(command_index, "OnMenuSelection", args) {
+            tracing::warn!(
+                %error,
+                "script error in OnMenuSelection; continuing like the C++ fail-safe exec"
+            );
+        }
+        Ok(())
     }
 
     /// The `switch (GetProcedure())` tail of C4Object::DirectCom
@@ -2050,6 +2229,131 @@ mod tests {
     fn no_collect_delay(engine: &Engine, id: ObjectId) -> i32 {
         let index = engine.find_object_index(id).expect("object exists");
         engine.objects[index].state.no_collect_delay
+    }
+
+    #[test]
+    fn cursor_script_menu_consumes_controls_before_gameplay_like_cpp() {
+        // C4Player::InCom converts regular cursor-menu input before the
+        // single/double machinery (C4Player.cpp:1502-1513), then
+        // C4Object::DirectCom gives Menu->Control first refusal
+        // (C4Object.cpp:3363-3371). Dragon Rock depends on this ordering:
+        // its mandatory difficulty/type menus must complete before Up can
+        // become ObjectComUp/Jump.
+        let script = r#"
+        local chosen;
+        func OpenMenu() {
+            CreateMenu(WIPF, this(), this(), 0, "Choose");
+            AddMenuItem("First", "Choose(1)", WIPF, this());
+            AddMenuItem("Second", "Choose(2)", WIPF, this());
+            return 1;
+        }
+        func Choose(value) { chosen = value; return 1; }
+        func MenuQueryCancel() { return 1; }
+        "#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", script);
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let index = engine.find_object_index(crew).expect("crew exists");
+        engine
+            .call_object_function(index, "OpenMenu", Vec::new())
+            .expect("menu opens");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("menu open");
+        assert_eq!(menu.selection, 0);
+
+        engine.player_in_com(1, COM_RIGHT, 0).expect("menu right");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("menu stays open");
+        assert_eq!(menu.selection, 1, "Right navigates the script menu");
+        assert_eq!(
+            engine.object_snapshot(crew).expect("crew snapshot").command_direction,
+            CommandDirection::Stop,
+            "menu navigation must not leak into gameplay steering"
+        );
+        engine
+            .player_in_com(1, COM_RIGHT + COM_RELEASE_OFFSET, 0)
+            .expect("menu right release");
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("menu stays open")
+                .selection,
+            1,
+            "the raw release neither navigates again nor leaks"
+        );
+
+        engine.player_in_com(1, COM_DIG, 0).expect("menu close");
+        assert!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .is_some(),
+            "MenuQueryCancel may deny the soft close"
+        );
+
+        engine.player_in_com(1, COM_THROW, 0).expect("menu enter");
+        assert_eq!(engine.debug_object_menu(crew.as_u64()), Some(None));
+        let index = engine.find_object_index(crew).expect("crew survives");
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("chosen"),
+            Some(&Value::Int(2)),
+            "Enter executes the selected command"
+        );
+        engine
+            .player_in_com(1, COM_THROW + COM_RELEASE_OFFSET, 0)
+            .expect("throw release is ignored");
+
+        engine.player_in_com(1, COM_UP, 0).expect("gameplay up");
+        engine.tick().expect("queued jump executes");
+        assert_eq!(
+            engine.object_snapshot(crew).expect("crew snapshot").action.name,
+            "Jump",
+            "once the mandatory menu closes, Up reaches ObjectComUp"
+        );
+    }
+
+    #[test]
+    fn empty_script_menu_ignores_explicit_select_like_cpp() {
+        // C4Menu::Control guards COM_MenuSelect with ItemCount before
+        // SetSelection and its callback (C4Menu.cpp:474-476).
+        let script = r#"
+        local selection_calls;
+        func OpenMenu() {
+            selection_calls = 0;
+            CreateMenu(WIPF, this(), this(), 0, "Empty");
+            return 1;
+        }
+        func OnMenuSelection() { selection_calls++; return 1; }
+        "#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", script);
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let index = engine.find_object_index(crew).expect("crew exists");
+        engine
+            .call_object_function(index, "OpenMenu", Vec::new())
+            .expect("empty menu opens");
+
+        engine
+            .player_in_com(1, COM_MENU_SELECT, 0)
+            .expect("menu select is accepted");
+        let index = engine.find_object_index(crew).expect("crew survives");
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("selection_calls"),
+            Some(&Value::Int(0)),
+            "an empty menu must not run OnMenuSelection"
+        );
     }
 
     #[test]

@@ -86,7 +86,10 @@ use lc_resources::{
 };
 use menu_controls::map_menu_control_event;
 use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
-use object_menu::{ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState};
+use object_menu::{
+    render_engine_script_menu, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
+    ObjectMenuState,
+};
 use pixels::{Pixels, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
@@ -8988,7 +8991,10 @@ impl GameApp {
             // (C4Viewport::DrawCursorInfo, src/C4Viewport.cpp:948-961),
             // skipped while the cursor's menu is active
             // (src/C4Object.cpp:2952).
-            if self.display_flags.show_commands && self.object_menu.is_none() {
+            if self.display_flags.show_commands
+                && self.object_menu.is_none()
+                && self.engine.cursor_object_menu(self.local_owner).is_none()
+            {
                 let cursor_id = self
                     .snapshot
                     .players
@@ -9029,6 +9035,16 @@ impl GameApp {
             self.graphics.render_frame(&self.snapshot, &viewports);
         } else {
             self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
+        }
+
+        let script_menu = self
+            .engine
+            .cursor_object_menu(self.local_owner)
+            .map(|(_, menu)| menu.clone());
+        if let Some(menu) = script_menu.as_ref() {
+            let font = self.assets.font_arc();
+            let surface = self.graphics.surface_mut();
+            render_engine_script_menu(surface, font.as_ref(), menu);
         }
 
         if let Some(browser) = self.save_browser.as_ref() {
@@ -13362,6 +13378,103 @@ mod tests {
             .expect("start sandbox scenario");
         wait_for_running(&mut app);
         app
+    }
+
+    #[test]
+    fn engine_script_menu_is_visible_and_consumes_raw_player_controls() {
+        // C4Viewport draws the cursor object's menu (C4Viewport.cpp:
+        // 983-995), while C4Player::InCom converts raw controls before
+        // gameplay (C4Player.cpp:1502-1513). This is the app half of the
+        // mandatory Dragon Rock difficulty/type menu path.
+        lc_core::logging::init();
+        let mut app = new_running_sandbox_app();
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let menu = lc_engine::ObjectMenuState {
+            caption: "Choose".to_string(),
+            identification: serde_json::from_value(serde_json::json!({ "C4Id": "MENU" }))
+                .expect("menu identification deserializes"),
+            style: 0,
+            permanent: false,
+            selection: 0,
+            user_menu: true,
+            command_object: Some(cursor),
+            items: vec![
+                lc_engine::ObjectMenuItem {
+                    caption: "First".to_string(),
+                    command: "0".to_string(),
+                    command2: "0".to_string(),
+                    count: 12_345_678,
+                    item_id: "NONE".to_string(),
+                    selectable: true,
+                    value: None,
+                },
+                lc_engine::ObjectMenuItem {
+                    caption: "Second".to_string(),
+                    command: "0".to_string(),
+                    command2: "0".to_string(),
+                    count: 12_345_678,
+                    item_id: "NONE".to_string(),
+                    selectable: true,
+                    value: None,
+                },
+            ],
+            columns: 5,
+            lines: 0,
+            text_progress: None,
+            decoration: None,
+        };
+
+        let mut baseline = vec![0u8; 320 * 200 * 4];
+        app.render(&mut baseline).expect("baseline render");
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install script menu");
+        let mut with_menu = vec![0u8; 320 * 200 * 4];
+        app.render(&mut with_menu).expect("menu render");
+        assert_ne!(
+            with_menu, baseline,
+            "an engine-created script menu must be visible"
+        );
+
+        app.dispatch_control_event(ControlEvent::Press(ControlButton::Right))
+            .expect("right press");
+        app.dispatch_control_event(ControlEvent::Release(ControlButton::Right))
+            .expect("right release");
+        let menu = app
+            .engine
+            .debug_object_menu(cursor.as_u64())
+            .expect("cursor exists")
+            .expect("menu open");
+        assert_eq!(menu.selection, 1, "release must not navigate twice");
+        assert_eq!(
+            app.engine
+                .object_snapshot(cursor)
+                .expect("cursor snapshot")
+                .command_direction,
+            CommandDirection::Stop,
+            "menu navigation must not steer the crew"
+        );
+
+        app.dispatch_control_event(ControlEvent::Command {
+            command: ControlCommand::Throw,
+            kind: CommandKind::Press,
+        })
+        .expect("enter press");
+        app.dispatch_control_event(ControlEvent::Command {
+            command: ControlCommand::Throw,
+            kind: CommandKind::Release,
+        })
+        .expect("enter release");
+        assert_eq!(app.engine.debug_object_menu(cursor.as_u64()), Some(None));
     }
 
     // Escape opens the C4MainMenu-shaped player menu (C4MainMenu.cpp:643).

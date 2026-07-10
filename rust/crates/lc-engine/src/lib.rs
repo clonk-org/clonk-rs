@@ -1962,6 +1962,11 @@ pub struct ObjectMenuItem {
 /// C++ never persists menus in Objects.txt, so this state is runtime-only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectMenuState {
+    /// C4Menu::Caption from CreateMenu's szEmpty argument; the app uses
+    /// it as the menu title until Normal-style selection captions replace
+    /// it (C4Menu.cpp:351-358, 577-584).
+    #[serde(default)]
+    pub caption: String,
     /// C4Menu::Identification: idMenuID if given, else the symbol id
     /// (C4Script.cpp:1452). Kept as the raw script value (C4ID or int)
     /// so GetMenu returns exactly what the script compares against.
@@ -24604,6 +24609,20 @@ impl Engine {
         Ok(true)
     }
 
+    /// The local player's cursor-owned script menu. Kept out of snapshots
+    /// and saves like C++'s runtime-only C4ObjectMenu; frontends may read
+    /// this live state for presentation while controls stay in InCom.
+    pub fn cursor_object_menu(&self, owner: i32) -> Option<(ObjectId, &ObjectMenuState)> {
+        let cursor = self.crew_cursor(owner)?;
+        self.objects
+            .iter()
+            .find(|object| object.id == cursor)?
+            .state
+            .menu
+            .as_ref()
+            .map(|menu| (cursor, menu))
+    }
+
     /// Debug/test helper: the object's script menu state (outer None =
     /// object missing; inner None = no menu open).
     pub fn debug_object_menu(&self, id: u64) -> Option<Option<ObjectMenuState>> {
@@ -38594,6 +38613,7 @@ func Trigger() {
             .debug_object_menu(clonk.as_u64())
             .expect("clonk exists")
             .expect("menu is open");
+        assert_eq!(menu.caption, "Choose");
         assert_eq!(menu.style, 0, "C4MN_Style_Normal");
         assert!(!menu.permanent, "fPermanent defaults false");
         assert_eq!(menu.selection, -1, "C4Menu::Default Selection (-1)");
@@ -39302,7 +39322,11 @@ func Trigger() {
             "no menu -> false (C4Script.cpp:4489)"
         );
         call(&mut engine, "OpenMenu", Vec::new());
-        assert_eq!(size(&engine), (0, 0), "C4Menu::Default Columns/Lines");
+        assert_eq!(
+            size(&engine),
+            (5, 0),
+            "InitMenu gives normal menus five columns (C4Menu.cpp:359-365)"
+        );
         assert_eq!(
             call(&mut engine, "Resize", vec![Value::Int(3), Value::Int(4)]),
             Value::Bool(true)

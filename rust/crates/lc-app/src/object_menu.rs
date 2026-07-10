@@ -25,6 +25,9 @@ const TITLE_FONT_SIZE: f32 = 22.0;
 const ITEM_FONT_SIZE: f32 = 18.0;
 const DETAIL_FONT_SIZE: f32 = 14.0;
 const MODE_HINT: &str = "Press ←/→ to switch menus";
+/// `C4MN_Item_NoCount` (`src/C4Menu.h:67`): this sentinel suppresses the
+/// count suffix even though it lives in the same field as real counts.
+const MENU_ITEM_NO_COUNT: i32 = 12_345_678;
 
 #[derive(Clone, Debug)]
 struct ObjectMenuItem {
@@ -71,6 +74,13 @@ trait MenuEntry {
     fn label(&self) -> &str;
     fn description(&self) -> Option<&str>;
     fn count(&self) -> usize;
+    fn count_label(&self) -> Option<String> {
+        let count = self.count();
+        (count > 1).then(|| format!("x{count}"))
+    }
+    fn selectable(&self) -> bool {
+        true
+    }
     fn icon(&self) -> Option<&ImageData> {
         None
     }
@@ -92,6 +102,71 @@ impl MenuEntry for ObjectMenuItem {
     fn icon(&self) -> Option<&ImageData> {
         self.icon.as_ref()
     }
+}
+
+impl MenuEntry for lc_engine::ObjectMenuItem {
+    fn label(&self) -> &str {
+        &self.caption
+    }
+
+    fn description(&self) -> Option<&str> {
+        None
+    }
+
+    fn count(&self) -> usize {
+        1
+    }
+
+    fn count_label(&self) -> Option<String> {
+        (self.count != MENU_ITEM_NO_COUNT).then(|| format!("x{}", self.count))
+    }
+
+    fn selectable(&self) -> bool {
+        self.selectable
+    }
+}
+
+fn engine_script_menu_title(menu: &lc_engine::ObjectMenuState) -> String {
+    let title = (menu.style == 0)
+        .then(|| {
+            usize::try_from(menu.selection)
+                .ok()
+                .and_then(|selection| menu.items.get(selection))
+                .map(|item| item.caption.as_str())
+        })
+        .flatten()
+        .unwrap_or(&menu.caption);
+    if title.is_empty() {
+        " ".to_string()
+    } else {
+        title.to_string()
+    }
+}
+
+/// Draws a script-created `C4ObjectMenu` from the engine's live runtime
+/// state. The engine remains the sole owner of selection and item state; this
+/// is deliberately a read-only presentation view.
+pub fn render_engine_script_menu(
+    surface: &mut Surface,
+    font: &dyn TextFont,
+    menu: &lc_engine::ObjectMenuState,
+) {
+    if surface.width() == 0 || surface.height() == 0 {
+        return;
+    }
+
+    let selected = usize::try_from(menu.selection)
+        .ok()
+        .filter(|selection| *selection < menu.items.len());
+    ObjectMenuState::render_entries(
+        surface,
+        font,
+        &menu.items,
+        selected,
+        &engine_script_menu_title(menu),
+        "No menu entries.",
+        None,
+    );
 }
 
 #[derive(Clone, Debug)]
@@ -507,7 +582,7 @@ impl ObjectMenuState {
                 } else {
                     "Inventory unavailable."
                 };
-                self.render_entries(
+                Self::render_entries(
                     surface,
                     font,
                     &self.inventory,
@@ -525,7 +600,7 @@ impl ObjectMenuState {
                     if state.known_empty {
                         empty_message = "Container is empty.";
                     }
-                    self.render_entries(
+                    Self::render_entries(
                         surface,
                         font,
                         state.items.as_slice(),
@@ -536,12 +611,12 @@ impl ObjectMenuState {
                     );
                 } else {
                     let empty: &[ObjectMenuItem] = &[];
-                    self.render_entries(surface, font, empty, None, &title, empty_message, hint);
+                    Self::render_entries(surface, font, empty, None, &title, empty_message, hint);
                 }
             }
             MenuMode::Context => {
                 let title = format!("{} {}", self.crew_label, self.mode.title_suffix());
-                self.render_entries(
+                Self::render_entries(
                     surface,
                     font,
                     &self.context,
@@ -553,7 +628,7 @@ impl ObjectMenuState {
             }
             MenuMode::Build => {
                 let title = format!("{} {}", self.crew_label, self.mode.title_suffix());
-                self.render_entries(
+                Self::render_entries(
                     surface,
                     font,
                     &self.build,
@@ -567,7 +642,6 @@ impl ObjectMenuState {
     }
 
     fn render_entries<E: MenuEntry>(
-        &self,
         surface: &mut Surface,
         font: &dyn TextFont,
         items: &[E],
@@ -636,18 +710,18 @@ impl ObjectMenuState {
                 fill_rect(surface, row_rect, HIGHLIGHT_COLOR);
             }
 
-            let primary_color = if Some(index) == selected {
+            let primary_color = if !item.selectable() {
+                MUTED_TEXT_COLOR
+            } else if Some(index) == selected {
                 EMPHASIS_TEXT_COLOR
             } else {
                 TEXT_COLOR
             };
 
-            let count = item.count();
-            let label_text = if count > 1 {
-                format!("{} (x{})", item.label(), count)
-            } else {
-                item.label().to_string()
-            };
+            let label_text = item
+                .count_label()
+                .map(|count| format!("{} ({count})", item.label()))
+                .unwrap_or_else(|| item.label().to_string());
 
             let mut text_x = row_rect.x + 12;
             if let Some(icon) = item.icon() {
@@ -1449,5 +1523,72 @@ mod tests {
             }
             other => panic!("unexpected action: {:?}", other),
         }
+    }
+
+    #[test]
+    fn engine_script_menu_render_shows_selection_and_item_presentation() {
+        // CreateMenu/AddMenuItem populate the runtime menu drawn by
+        // C4Viewport::DrawMenu (C4Viewport.cpp:983-995). An item without a
+        // command is not selectable and a forced non-sentinel count is drawn
+        // beside its caption (C4Menu.cpp:152-210).
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Choose");
+            AddMenuItem("Information", "", MENU, this(), 0);
+            AddMenuItem("Selectable", "Choose()", MENU, this(), 3);
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+
+        assert_eq!(engine_script_menu_title(&menu), "Selectable");
+        let mut menu_without_caption = menu.clone();
+        menu_without_caption.caption.clear();
+        menu_without_caption.selection = -1;
+        assert_eq!(engine_script_menu_title(&menu_without_caption), " ");
+        let entries = &menu.items;
+        assert_eq!(entries[0].label(), "Information");
+        assert!(!entries[0].selectable());
+        assert_eq!(entries[0].count_label(), None);
+        assert_eq!(entries[1].label(), "Selectable");
+        assert!(entries[1].selectable());
+        assert_eq!(entries[1].count_label().as_deref(), Some("x3"));
+        assert_eq!(menu.selection, 1);
+
+        let font = lc_graphics::BitmapFont::new();
+        let mut surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
+        render_engine_script_menu(&mut surface, &font, &menu);
+
+        let panel_width = 340;
+        let panel_height = PANEL_PADDING * 2 + TITLE_GAP + ITEM_HEIGHT * 2 + ITEM_SPACING;
+        let panel_x = (surface.width() as i32 - panel_width) / 2;
+        let panel_y = (surface.height() as i32 - panel_height) / 2;
+        let first_row_y = panel_y + PANEL_PADDING + TITLE_GAP;
+        let probe_x = (panel_x + PANEL_PADDING + 2) as u32;
+        let unselected = surface
+            .get_pixel(probe_x, (first_row_y + 2) as u32)
+            .expect("unselected row pixel");
+        let selected = surface
+            .get_pixel(
+                probe_x,
+                (first_row_y + ITEM_HEIGHT + ITEM_SPACING + 2) as u32,
+            )
+            .expect("selected row pixel");
+        assert_ne!(
+            selected, unselected,
+            "the engine-owned selection must be visibly highlighted"
+        );
     }
 }

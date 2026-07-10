@@ -2391,7 +2391,9 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         "CreateMenu",
         "command object",
     )?;
-    let style = parse_optional_i32(args.get(6), "CreateMenu", "style")?.unwrap_or(0);
+    let caption = parse_optional_string(args.get(4), "CreateMenu", "caption")?
+        .unwrap_or_default();
+    let style = parse_optional_i32(args.get(6), "CreateMenu", "style")?.unwrap_or(0) & 127;
     let permanent = args.get(7).map(value_raw_truthy).unwrap_or(false);
     let menu_id = args.get(8).cloned().unwrap_or(Value::Nil);
 
@@ -2424,17 +2426,19 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         symbol
     };
     let menu = crate::ObjectMenuState {
+        caption,
         identification,
         // Style & C4MN_Style_BaseMask (C4Menu::InitMenu, C4Menu.cpp:359).
-        style: style & 127,
+        style,
         permanent,
         selection: -1,
         user_menu: true,
         command_object,
         items: Vec::new(),
-        // Columns = Lines = 0, fTextProgressing off (C4Menu::Default,
-        // C4Menu.cpp:299,303), no frame deco.
-        columns: 0,
+        // InitMenu immediately chooses five columns for Normal and one
+        // for every other style (C4Menu.cpp:359-365); Lines stays at its
+        // C4Menu::Default zero until layout/SetMenuSize.
+        columns: if style == 0 { 5 } else { 1 },
         lines: 0,
         text_progress: None,
         decoration: None,

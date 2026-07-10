@@ -1,15 +1,17 @@
 use lc_engine::{
     CommandDirection, CommandKind, ControlButton, ControlCommand, ControlEvent, Engine,
     EngineError, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE,
-    COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE,
-    COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
+    COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER,
+    COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SHOW_TEXT, COM_MENU_UP,
+    COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
 };
 
 /// Player input routing for the Rust frontend. All coms — object-directed
 /// AND cursor coms — run the engine's `C4Player::InCom` port
 /// (single/double synthesis, the cursor selection model and the full
 /// `C4Object::DirectCom` chain, C4Player.cpp:1490-1554 / 1235-1488 /
-/// C4Object.cpp:3327-3557); only menu coms stay app-side.
+/// C4Object.cpp:3327-3557). App-owned menus consume their commands before
+/// this layer; synchronized cursor-menu commands continue into the engine.
 #[derive(Default)]
 pub struct InputDispatcher {}
 
@@ -69,9 +71,24 @@ fn button_com(button: ControlButton) -> u8 {
     }
 }
 
-/// The com byte for a non-directional control event; cursor and menu coms
-/// are handled by `handle_command` before this runs.
+/// The com byte for a non-directional control event.
 fn command_com(command: ControlCommand, kind: CommandKind) -> Option<u8> {
+    let menu_com = match command {
+        ControlCommand::MenuEnter => Some(COM_MENU_ENTER),
+        ControlCommand::MenuEnterAll => Some(COM_MENU_ENTER_ALL),
+        ControlCommand::MenuClose => Some(COM_MENU_CLOSE),
+        ControlCommand::MenuShowText => Some(COM_MENU_SHOW_TEXT),
+        ControlCommand::MenuLeft => Some(COM_MENU_LEFT),
+        ControlCommand::MenuRight => Some(COM_MENU_RIGHT),
+        ControlCommand::MenuUp => Some(COM_MENU_UP),
+        ControlCommand::MenuDown => Some(COM_MENU_DOWN),
+        // MenuSelect needs C4ControlPlayerControl::Data; ControlEvent does
+        // not carry it yet, so forwarding it as index zero would be wrong.
+        _ => None,
+    };
+    if let Some(menu_com) = menu_com {
+        return matches!(kind, CommandKind::Press).then_some(menu_com);
+    }
     let base = match command {
         ControlCommand::Throw => COM_THROW,
         ControlCommand::Dig => COM_DIG,
@@ -210,6 +227,54 @@ global func Step(state, frame, random) { return nil; }
             .command_direction;
         assert_eq!(crew, CommandDirection::Right);
         assert_eq!(engine.crew_cursor(1), Some(crew_id));
+        Ok(())
+    }
+
+    #[test]
+    fn forwards_recorded_menu_navigation_to_the_cursor_menu() -> Result<(), EngineError> {
+        // C4Game::LocalPlayerControl queues the already-converted menu com
+        // for synchronized execution (C4Game.cpp:3610-3622). Replays and
+        // network peers therefore deliver COM_MenuRight directly.
+        let script = r#"
+        func Initialize() {
+            CreateMenu(WIPF, this(), this(), 0, "Choose");
+            AddMenuItem("First", "0", WIPF, this());
+            AddMenuItem("Second", "0", WIPF, this());
+        }
+        "#;
+        let mut engine = setup_engine();
+        let mut definition =
+            Definition::from_script("MenuWalker", "Menu Walker", script).expect("valid script");
+        definition.configure_actions(Some("Walk".to_string()), walker_actions());
+        definition.set_movement_profile(MovementProfile::default());
+        engine
+            .register_definition(definition)
+            .expect("register menu walker");
+        let crew = engine.spawn_object(
+            SpawnConfig::new("MenuWalker")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_action(ActionState::new("Walk")),
+        )?;
+        let mut dispatcher = InputDispatcher::new();
+
+        dispatcher.handle_event(
+            &mut engine,
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::MenuRight,
+                kind: CommandKind::Press,
+            },
+        )?;
+
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("menu remains open")
+                .selection,
+            1
+        );
         Ok(())
     }
 
