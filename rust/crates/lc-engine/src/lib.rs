@@ -25540,6 +25540,8 @@ impl Engine {
         definition.set_contact_function_calls(core.contact_function_calls);
         definition.set_collection_rect(core.collection.map(DefinitionRect::from));
         definition.set_collection_limit(core.collection_limit);
+        definition.set_entrance_rect(core.entrance.map(DefinitionRect::from));
+        definition.set_rotated_entrance(core.rotated_entrance);
         definition.set_fire_properties(
             core.contact_incinerate,
             core.no_burn_decay,

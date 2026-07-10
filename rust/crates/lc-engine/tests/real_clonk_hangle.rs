@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    CommandDirection, Definition, DefinitionTargetRect, Direction, Engine, JoinPlayerConfig,
+    ocf, CommandDirection, Definition, DefinitionTargetRect, Direction, Engine, JoinPlayerConfig,
     Landscape, ObjectUpdate, Scenario, ScenarioError, SpawnConfig, Vector2, CATEGORY_STATIC_BACK,
     CNAT_TOP, COM_UP,
 };
@@ -30,6 +30,73 @@ fn content_root() -> PathBuf {
     env::var_os("LC_CONTENT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../content"))
+}
+
+#[test]
+fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
+    // HUT2's DefCore Entrance=-18,8,16,17 must reach SetOCF's full-Con
+    // OCF_Entrance bit (C4Object.cpp:586-589). ObjectComUp at the real
+    // entrance then queues Enter before considering Jump
+    // (C4ObjectCom.cpp:335-348).
+    let content = content_root();
+    let tutorial = content.join("Tutorial.c4f/Tutorial01.c4s");
+    let resolver = ContentResolver {
+        root: content.clone(),
+    };
+    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
+        .expect("Tutorial01 and the real Objects.c4d load");
+    let mut engine = Engine::with_seed(0);
+    scenario.apply(&mut engine).expect("Tutorial01 applies");
+    let joined = engine
+        .join_player(JoinPlayerConfig {
+            name: "Entrance tester".to_string(),
+            team: None,
+            color_dw: 0xff_00_00,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            startup_player_count: 1,
+        })
+        .expect("Tutorial01 player joins");
+    let clonk = engine
+        .crew_cursor(joined.number)
+        .expect("Tutorial01 joins one selected CLNK");
+    let hut = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .find(|object| object.definition_id.as_str() == "HUT2")
+        .expect("Tutorial01 creates HUT2");
+
+    assert_ne!(
+        hut.ocf & ocf::ENTRANCE,
+        0,
+        "full-con HUT2 exposes its DefCore entrance"
+    );
+
+    engine
+        .apply_object_update(
+            clonk,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(570, 170))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .with_command_direction(CommandDirection::Stop),
+        )
+        .expect("place CLNK in the real hut entrance");
+    engine
+        .player_in_com(joined.number, COM_UP, 0)
+        .expect("normal player Up control");
+
+    assert_eq!(
+        engine
+            .object_snapshot(clonk)
+            .expect("CLNK after input")
+            .command_stack
+            .command_names(),
+        vec!["Enter".to_string()]
+    );
 }
 
 #[test]
