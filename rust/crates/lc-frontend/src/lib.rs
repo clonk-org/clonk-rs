@@ -4853,19 +4853,25 @@ mod tests {
         // (C4GraphicsSystem.cpp:285-290; C4Viewport.cpp:1030-1041).
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(320, 240);
-        let mut landscape = Landscape::flat(640, 300);
+        let surface = (0..640)
+            .map(|x| if x % 2 == 0 { 479 } else { 480 })
+            .collect();
+        let mut landscape = Landscape::new(640, surface).expect("valid landscape surface");
         landscape.set_world_height(480);
         snapshot.landscape = Some(landscape);
-        let background_color = Color::opaque(73, 41, 19);
+        let background_pattern = [
+            Color::opaque(73, 41, 19),
+            Color::opaque(19, 73, 41),
+            Color::opaque(41, 19, 73),
+            Color::opaque(101, 83, 59),
+        ];
         let background = ImageData::new(
-            1,
-            1,
-            vec![
-                background_color.r,
-                background_color.g,
-                background_color.b,
-                background_color.a,
-            ],
+            2,
+            2,
+            background_pattern
+                .iter()
+                .flat_map(|color| [color.r, color.g, color.b, color.a])
+                .collect(),
         );
         let hud_graphics = Arc::new(HudGraphics {
             background: Some(background),
@@ -4895,11 +4901,50 @@ mod tests {
             ),
             (140, 120, 720, 560)
         );
-        assert_eq!(graphics.surface().get_pixel(0, 0), Some(background_color));
+        assert_eq!(
+            (
+                viewport.content_rect.x,
+                viewport.content_rect.y,
+                viewport.content_rect.width,
+                viewport.content_rect.height
+            ),
+            (180, 160, 640, 480)
+        );
+
+        let pattern_at = |x: u32, y: u32| background_pattern[((y % 2) * 2 + x % 2) as usize];
+        assert_eq!(graphics.surface().get_pixel(0, 0), Some(pattern_at(0, 0)));
         assert_eq!(
             graphics.surface().get_pixel(140, 120),
-            Some(background_color)
+            Some(pattern_at(140, 120))
         );
+
+        let last_content_y =
+            (viewport.content_rect.y + viewport.content_rect.height as i32 - 1) as u32;
+        let first_border_y = (viewport.content_rect.y + viewport.content_rect.height as i32) as u32;
+        let terrain_x = (viewport.content_rect.x + 10) as u32;
+        let sky_x = terrain_x + 1;
+        let terrain_bottom = graphics
+            .surface()
+            .get_pixel(terrain_x, last_content_y)
+            .expect("terrain bottom pixel");
+        let sky_bottom = graphics
+            .surface()
+            .get_pixel(sky_x, last_content_y)
+            .expect("sky bottom pixel");
+        assert_ne!(terrain_bottom, sky_bottom, "bottom row must be nonuniform");
+
+        for x in [terrain_x, sky_x] {
+            let border = graphics
+                .surface()
+                .get_pixel(x, first_border_y)
+                .expect("first border pixel below content");
+            let last_content = graphics
+                .surface()
+                .get_pixel(x, last_content_y)
+                .expect("last content pixel");
+            assert_eq!(border, pattern_at(x, first_border_y));
+            assert_ne!(border, last_content, "terrain edge must not be extended");
+        }
     }
 
     #[test]
