@@ -654,6 +654,13 @@ impl RgbColor {
 pub struct JoinPlayerConfig {
     /// Player name (from C4PlayerInfo; falls back to the file core name).
     pub name: String,
+    /// Existing unique `C4PlayerInfo::ID`. Allocation remains the host's
+    /// responsibility (`C4PlayerInfo.cpp:781-799`).
+    pub player_info_id: i32,
+    /// Persistent C4PlayerInfoCore settlement score.
+    pub score: i32,
+    /// Persistent C4PlayerInfoCore total playing time in seconds.
+    pub total_playing_time: i32,
     /// Team id (0/None when teamless).
     pub team: Option<i32>,
     /// Resolved 24-bit player color (`pInfo->GetColor()`,
@@ -2079,6 +2086,10 @@ impl ShapeAttachRecord {
 }
 
 fn u32_is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn i32_is_zero(value: &i32) -> bool {
     *value == 0
 }
 
@@ -5443,6 +5454,10 @@ fn denumerate_script_value(value: &Value, object_numbers: &HashSet<u64>) -> Valu
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub frame: u64,
+    /// `C4Game::Time`, deliberately independent from FrameCounter
+    /// (C4Game.cpp:1755-1759,1939-1955).
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub game_time: i32,
     #[serde(default)]
     pub game_over: bool,
     #[serde(default, skip_serializing_if = "RoundResultsState::is_empty")]
@@ -5522,6 +5537,8 @@ pub struct NextMissionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineState {
     pub frame: u64,
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub game_time: i32,
     pub physics: PhysicsSettings,
     pub environment: EnvironmentSettings,
     pub next_object_id: u64,
@@ -5537,6 +5554,10 @@ pub struct EngineState {
     pub particles: Vec<ParticleSnapshot>,
     #[serde(default)]
     pub players: Vec<PlayerState>,
+    /// C4PlayerInfoList::iLastPlayerID (C4PlayerInfo.cpp:1733-1742);
+    /// allocation is a later behavior.
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub last_player_info_id: i32,
     /// Scenario `[Head] ForcedAutoStopControl`; retained so players joining
     /// after a save restore receive the same scenario override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5647,6 +5668,7 @@ impl EngineState {
 
         Self {
             frame: snapshot.frame,
+            game_time: snapshot.game_time,
             physics,
             environment: snapshot.environment.settings,
             next_object_id,
@@ -5655,6 +5677,20 @@ impl EngineState {
             object_order: Vec::new(),
             particles: snapshot.particles.clone(),
             players: snapshot.players.clone(),
+            last_player_info_id: snapshot
+                .players
+                .iter()
+                .map(|player| player.player_info_id)
+                .chain(
+                    snapshot
+                        .round_results
+                        .players
+                        .iter()
+                        .map(|player| player.player_info_id),
+                )
+                .max()
+                .unwrap_or(0)
+                .max(0),
             forced_control_style: None,
             teams: Vec::new(),
             crew_selection: snapshot.crew_selection.clone(),
@@ -9978,6 +10014,10 @@ pub struct Engine {
     /// or after it still execute this frame.
     exec_cursor: Option<usize>,
     frame: u64,
+    /// `C4Game::Time` seconds, advanced only by the future Sec1Timer port.
+    game_time: i32,
+    /// Runtime-only one-second latch (`C4Game::TimeGo`), never serialized.
+    time_go: bool,
     landscape: Option<Landscape>,
     sectors: Option<SectorMap>,
     physics: PhysicsSettings,
@@ -10013,6 +10053,9 @@ pub struct Engine {
     objective_check_counter: u8,
     players_registered: bool,
     players: HashMap<i32, Player>,
+    /// C4PlayerInfoList::iLastPlayerID. This structural slice only persists
+    /// and restores the counter; it does not allocate IDs.
+    last_player_info_id: i32,
     /// Scenario `[Head] ForcedAutoStopControl`, separate from each player's
     /// effective `PlayerControlState::control_style` preference.
     forced_control_style: Option<bool>,
@@ -11656,6 +11699,8 @@ impl Engine {
             pending_object_order_commands: Vec::new(),
             exec_cursor: None,
             frame: 0,
+            game_time: 0,
+            time_go: false,
             landscape: None,
             sectors: None,
             physics: PhysicsSettings::default(),
@@ -11681,6 +11726,7 @@ impl Engine {
             objective_check_counter: 0,
             players_registered: false,
             players: HashMap::new(),
+            last_player_info_id: 0,
             forced_control_style: None,
             teams: Rc::new(Vec::new()),
             crew_selection: HashMap::new(),
@@ -11821,7 +11867,10 @@ impl Engine {
             ((config.color_dw >> 8) & 0xff) as u8,
             (config.color_dw & 0xff) as u8,
         );
-        let mut player_config = PlayerConfig::new(number, config.name.clone());
+        let mut player_config = PlayerConfig::new(number, config.name.clone())
+            .with_player_info_id(config.player_info_id)
+            .with_score(config.score)
+            .with_total_playing_time(config.total_playing_time);
         if config.team.is_some() {
             player_config = player_config.with_team(config.team);
         }
@@ -12942,6 +12991,10 @@ impl Engine {
 
     pub fn frame(&self) -> u64 {
         self.frame
+    }
+
+    pub fn game_time(&self) -> i32 {
+        self.game_time
     }
 
     pub fn configure_objectives(&mut self, objectives: ScenarioObjectives) {
@@ -18646,6 +18699,7 @@ impl Engine {
         local_players.sort_unstable();
         SimulationSnapshot {
             frame: self.frame,
+            game_time: self.game_time,
             game_over: self.game_over_triggered,
             round_results: self.round_results.clone(),
             physics: Some(self.physics),
@@ -18883,6 +18937,7 @@ impl Engine {
 
         EngineState {
             frame: self.frame,
+            game_time: self.game_time,
             physics: self.physics,
             environment: self.environment,
             next_object_id: self.next_object_id,
@@ -18891,6 +18946,7 @@ impl Engine {
             object_order: self.exec_list.clone(),
             particles,
             players,
+            last_player_info_id: self.last_player_info_id,
             forced_control_style: self.forced_control_style,
             teams: self.teams.as_ref().clone(),
             crew_selection,
@@ -18926,6 +18982,8 @@ impl Engine {
         }
 
         self.frame = state.frame;
+        self.game_time = state.game_time;
+        self.time_go = false;
         self.physics = state.physics;
         self.environment = state.environment;
         self.environment.refresh_runtime_fields();
@@ -19236,6 +19294,27 @@ impl Engine {
             .map(Player::from_state)
             .map(|player| (player.id(), player))
             .collect();
+        for player in self.players.values_mut() {
+            player.set_game_join_time(self.game_time);
+        }
+        self.last_player_info_id = state
+            .last_player_info_id
+            .max(
+                state
+                    .players
+                    .iter()
+                    .map(|player| player.player_info_id)
+                    .chain(
+                        state
+                            .round_results
+                            .players
+                            .iter()
+                            .map(|player| player.player_info_id),
+                    )
+                    .max()
+                    .unwrap_or(0),
+            )
+            .max(0);
         self.forced_control_style = state.forced_control_style;
         self.teams = Rc::new(state.teams.clone());
         self.players_registered = !self.players.is_empty();
@@ -35508,6 +35587,9 @@ global func MenuCommand(state, kind, selection)
             engine
                 .join_player(JoinPlayerConfig {
                     name: name.to_string(),
+                    player_info_id: 0,
+                    score: 0,
+                    total_playing_time: 0,
                     team: None,
                     color_dw: 0xff0000,
                     pref_color: 0,
@@ -44156,6 +44238,9 @@ protected func Activity() { SetActionTargets(); return(1); }
             let joined = engine
                 .join_player(JoinPlayerConfig {
                     name: "Tester".into(),
+                    player_info_id: 0,
+                    score: 0,
+                    total_playing_time: 0,
                     team: None,
                     color_dw: 0xff0000,
                     pref_color: 0,
@@ -46261,6 +46346,121 @@ func CrewSelection()
         let decoded: EngineState = serde_json::from_value(value)
             .unwrap_or_else(|error| panic!("legacy state deserializes: {error}"));
         assert_eq!(decoded.round_results, RoundResultsState::default());
+    }
+
+    #[test]
+    fn game_clock_and_player_id_counter_round_trip_with_restore_baselines() {
+        // C4Game defaults Time/TimeGo to zero/false and persists Time
+        // separately from FrameCounter (C4Game.cpp:1762-1779,1939-1955).
+        // C4Player::GameJoinTime is Local-NoSave and is re-established from
+        // Game.Time after load (C4Player.cpp:389-390,1556-1567).
+        // LastPlayerID is persisted and repaired against existing player IDs
+        // (C4PlayerInfo.cpp:1733-1742,1785-1794); removed players can remain
+        // represented only in RoundResults (C4PlayerList.cpp:231-242).
+        let mut engine = Engine::new();
+        assert_eq!(engine.game_time(), 0);
+        assert!(!engine.time_go);
+        assert_eq!(engine.last_player_info_id, 0);
+
+        let default_state = serde_json::to_value(engine.capture_state())
+            .unwrap_or_else(|error| panic!("default state serializes: {error}"));
+        assert!(default_state.get("game_time").is_none());
+        assert!(default_state.get("last_player_info_id").is_none());
+        let legacy: EngineState = serde_json::from_value(default_state)
+            .unwrap_or_else(|error| panic!("legacy state deserializes: {error}"));
+        assert_eq!(legacy.game_time, 0);
+        assert_eq!(legacy.last_player_info_id, 0);
+        let default_snapshot = serde_json::to_value(engine.snapshot())
+            .unwrap_or_else(|error| panic!("default snapshot serializes: {error}"));
+        assert!(default_snapshot.get("game_time").is_none());
+
+        engine.game_time = 731;
+        engine.time_go = true;
+        engine.last_player_info_id = 61;
+        engine.round_results.players.push(RoundResultsPlayerState {
+            player_info_id: 57,
+            ..RoundResultsPlayerState::default()
+        });
+        engine.players.insert(
+            2,
+            PlayerConfig::new(2, "Profile")
+                .with_player_info_id(41)
+                .with_score(250)
+                .with_total_playing_time(1_234)
+                .build(),
+        );
+        assert_eq!(engine.player(2).expect("player").game_join_time(), 0);
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.game_time, 731);
+        let from_snapshot = EngineState::from_snapshot(&snapshot);
+        assert_eq!(from_snapshot.game_time, 731);
+        assert_eq!(from_snapshot.last_player_info_id, 57);
+
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .unwrap_or_else(|error| panic!("state serializes: {error}"));
+        assert!(!encoded.contains("game_join_time"));
+        assert!(!encoded.contains("time_go"));
+        let decoded = EngineState::from_json_str(&encoded)
+            .unwrap_or_else(|error| panic!("state deserializes: {error}"));
+        assert_eq!(decoded.game_time, 731);
+        assert_eq!(decoded.last_player_info_id, 61);
+
+        let mut restored = Engine::new();
+        restored
+            .restore_state(&decoded)
+            .unwrap_or_else(|error| panic!("state restores: {error}"));
+        assert_eq!(restored.game_time(), 731);
+        assert!(!restored.time_go);
+        assert_eq!(restored.last_player_info_id, 61);
+        let player = restored.player(2).expect("restored player");
+        assert_eq!(player.game_join_time(), 731);
+        assert_eq!(player.score(), 250);
+        assert_eq!(player.total_playing_time(), 1_234);
+
+        let mut stale_counter = decoded;
+        stale_counter.last_player_info_id = 17;
+        let mut repaired = Engine::new();
+        repaired
+            .restore_state(&stale_counter)
+            .unwrap_or_else(|error| panic!("stale counter state restores: {error}"));
+        assert_eq!(repaired.last_player_info_id, 57);
+    }
+
+    #[test]
+    fn join_config_propagates_existing_player_info_and_profile_values() {
+        // ID allocation belongs to C4PlayerInfoList::AssignPlayerIDs
+        // (C4PlayerInfo.cpp:781-799). This structural seam only carries an
+        // already-assigned ID and profile core into C4Player::Init.
+        let mut engine = Engine::new();
+        let joined = engine
+            .join_player(JoinPlayerConfig {
+                name: "Profile".to_string(),
+                player_info_id: 41,
+                score: 250,
+                total_playing_time: 1_234,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                startup_player_count: 1,
+            })
+            .unwrap_or_else(|error| panic!("player joins: {error}"));
+
+        let player = engine.player(joined.number).expect("joined player");
+        assert_eq!(player.player_info_id(), 41);
+        assert_eq!(player.score(), 250);
+        assert_eq!(player.total_playing_time(), 1_234);
+        assert_eq!(
+            player.game_join_time(),
+            0,
+            "join clock behavior is deferred"
+        );
+        assert_eq!(engine.last_player_info_id, 0, "allocation is deferred");
     }
 
     #[test]

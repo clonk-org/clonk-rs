@@ -4370,6 +4370,7 @@ mod tests {
     fn make_snapshot() -> SimulationSnapshot {
         SimulationSnapshot {
             frame: 0,
+            game_time: 0,
             game_over: false,
             round_results: Default::default(),
             physics: None,

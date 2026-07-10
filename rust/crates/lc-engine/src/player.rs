@@ -215,6 +215,9 @@ pub struct Player {
     points: i32,
     score: i32,
     total_playing_time: i32,
+    /// `C4Player::GameJoinTime`: local runtime baseline, deliberately absent
+    /// from PlayerState/save data (C4Player.h:78; C4Player.cpp:389-390).
+    game_join_time: i32,
     value: i32,
     initial_value: i32,
     value_gain: i32,
@@ -264,6 +267,7 @@ impl Player {
             points: 0,
             score: 0,
             total_playing_time: 0,
+            game_join_time: 0,
             value: 0,
             initial_value: 0,
             value_gain: 0,
@@ -302,12 +306,15 @@ impl Player {
     pub fn from_config(config: PlayerConfig) -> Self {
         let PlayerConfig {
             id,
+            player_info_id,
             name,
             status,
             team,
             surrendered,
             wealth,
             points,
+            score,
+            total_playing_time,
             value,
             initial_value,
             value_gain,
@@ -326,7 +333,7 @@ impl Player {
         } = config;
         let mut player = Self {
             id,
-            player_info_id: 0,
+            player_info_id,
             name,
             status,
             team,
@@ -335,8 +342,9 @@ impl Player {
             evaluated: false,
             wealth,
             points,
-            score: 0,
-            total_playing_time: 0,
+            score,
+            total_playing_time,
+            game_join_time: 0,
             value,
             initial_value,
             value_gain,
@@ -418,6 +426,7 @@ impl Player {
             points,
             score,
             total_playing_time,
+            game_join_time: 0,
             value,
             initial_value,
             value_gain,
@@ -512,6 +521,10 @@ impl Player {
         self.id
     }
 
+    pub fn player_info_id(&self) -> i32 {
+        self.player_info_id
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -584,6 +597,22 @@ impl Player {
 
     pub fn points(&self) -> i32 {
         self.points
+    }
+
+    pub fn score(&self) -> i32 {
+        self.score
+    }
+
+    pub fn total_playing_time(&self) -> i32 {
+        self.total_playing_time
+    }
+
+    pub(crate) fn game_join_time(&self) -> i32 {
+        self.game_join_time
+    }
+
+    pub(crate) fn set_game_join_time(&mut self, game_time: i32) {
+        self.game_join_time = game_time;
     }
 
     pub fn set_points(&mut self, points: i32) -> i32 {
@@ -891,12 +920,15 @@ fn is_zero_i32(value: &i32) -> bool {
 #[derive(Debug, Clone)]
 pub struct PlayerConfig {
     id: i32,
+    player_info_id: i32,
     name: String,
     status: PlayerStatus,
     team: Option<i32>,
     surrendered: bool,
     wealth: i32,
     points: i32,
+    score: i32,
+    total_playing_time: i32,
     value: i32,
     initial_value: i32,
     value_gain: i32,
@@ -918,12 +950,15 @@ impl PlayerConfig {
     pub fn new(id: i32, name: impl Into<String>) -> Self {
         Self {
             id,
+            player_info_id: 0,
             name: name.into(),
             status: PlayerStatus::Active,
             team: None,
             surrendered: false,
             wealth: 0,
             points: 0,
+            score: 0,
+            total_playing_time: 0,
             value: 0,
             initial_value: 0,
             value_gain: 0,
@@ -947,6 +982,11 @@ impl PlayerConfig {
         self
     }
 
+    pub fn with_player_info_id(mut self, player_info_id: i32) -> Self {
+        self.player_info_id = player_info_id;
+        self
+    }
+
     pub fn with_team(mut self, team: Option<i32>) -> Self {
         self.team = team;
         self
@@ -964,6 +1004,16 @@ impl PlayerConfig {
 
     pub fn with_points(mut self, points: i32) -> Self {
         self.points = points;
+        self
+    }
+
+    pub fn with_score(mut self, score: i32) -> Self {
+        self.score = score;
+        self
+    }
+
+    pub fn with_total_playing_time(mut self, total_playing_time: i32) -> Self {
+        self.total_playing_time = total_playing_time;
         self
     }
 
@@ -1134,5 +1184,27 @@ mod tests {
         ] {
             assert!(value.get(field).is_none(), "unexpected default field {field}");
         }
+    }
+
+    #[test]
+    fn player_config_carries_profile_values_but_not_the_join_clock() {
+        // C4Player::Init copies the linked C4PlayerInfo ID before loading the
+        // C4PlayerInfoCore profile values (C4Player.cpp:246-276). The local
+        // GameJoinTime baseline is runtime-only and starts at zero until Init
+        // assigns Game.Time (C4Player.cpp:389-390,1075).
+        let player = PlayerConfig::new(2, "Profile")
+            .with_player_info_id(41)
+            .with_score(250)
+            .with_total_playing_time(1_234)
+            .build();
+
+        let state = player.to_state();
+        assert_eq!(state.player_info_id, 41);
+        assert_eq!(state.score, 250);
+        assert_eq!(state.total_playing_time, 1_234);
+        assert_eq!(player.game_join_time(), 0);
+
+        let restored = Player::from_state(state);
+        assert_eq!(restored.game_join_time(), 0);
     }
 }

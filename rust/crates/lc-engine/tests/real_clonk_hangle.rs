@@ -31,6 +31,9 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp() {
     let joined = engine
         .join_player(JoinPlayerConfig {
             name: "Dig tester".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
             team: None,
             color_dw: 0xff_00_00,
             pref_color: 0,
@@ -129,6 +132,9 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
     let joined = engine
         .join_player(JoinPlayerConfig {
             name: "Entrance tester".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
             team: None,
             color_dw: 0xff_00_00,
             pref_color: 0,
@@ -245,6 +251,9 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     let joined = engine
         .join_player(JoinPlayerConfig {
             name: "Flag tester".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
             team: None,
             color_dw: 0xff_00_00,
             pref_color: 0,
@@ -493,6 +502,9 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp() {
     let joined = engine
         .join_player(JoinPlayerConfig {
             name: "Ceiling tester".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
             team: None,
             color_dw: 0xff_00_00,
             pref_color: 0,
@@ -607,6 +619,9 @@ fn tutorial_clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick() {
     let joined = engine
         .join_player(JoinPlayerConfig {
             name: "Flight tester".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
             team: None,
             color_dw: 0xff_00_00,
             pref_color: 0,

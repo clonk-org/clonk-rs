@@ -514,6 +514,9 @@ impl RuntimeHandle {
             .engine
             .join_player(crate::JoinPlayerConfig {
                 name,
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
                 team,
                 color_dw,
                 pref_color,
@@ -1318,6 +1321,7 @@ unsafe fn make_snapshot(
 
     Some(SimulationSnapshot {
         frame,
+        game_time: 0,
         game_over: false,
         round_results: Default::default(),
         physics: None,

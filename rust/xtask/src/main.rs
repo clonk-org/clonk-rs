@@ -534,6 +534,9 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
     let joined = engine
         .join_player(lc_engine::JoinPlayerConfig {
             name,
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
             team: None,
             color_dw,
             pref_color,

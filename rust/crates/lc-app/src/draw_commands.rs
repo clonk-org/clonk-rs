@@ -708,6 +708,7 @@ mod tests {
     fn snapshot_with(objects: Vec<ObjectSnapshot>) -> SimulationSnapshot {
         let mut snapshot = SimulationSnapshot {
             frame: 0,
+            game_time: 0,
             game_over: false,
             round_results: Default::default(),
             physics: None,

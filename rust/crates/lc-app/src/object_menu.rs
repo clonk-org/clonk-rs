@@ -1688,6 +1688,7 @@ mod tests {
         objects.insert(0, crew);
         SimulationSnapshot {
             frame: 0,
+            game_time: 0,
             game_over: false,
             round_results: Default::default(),
             physics: None,

@@ -66,6 +66,12 @@ impl CrewInfo {
 pub struct PlayerFile {
     /// `[Player] Name` (default "Neuling").
     pub name: String,
+    /// `[Player] Score`, the persistent settlement score
+    /// (C4InfoCore.cpp:156; default 0).
+    pub score: i32,
+    /// `[Player] TotalPlayingTime` in seconds
+    /// (C4InfoCore.cpp:160; default 0).
+    pub total_playing_time: i32,
     /// `[Preferences] Color` — the indexed preferred color (default 0).
     pub pref_color: i32,
     /// `[Preferences] ColorDw` — 24-bit RGB preference (default 0xff).
@@ -109,6 +115,8 @@ impl PlayerFile {
 
         Ok(Self {
             name: entry("Player", "Name").unwrap_or_else(|| "Neuling".to_string()),
+            score: int("Player", "Score", 0),
+            total_playing_time: int("Player", "TotalPlayingTime", 0),
             pref_color: int("Preferences", "Color", 0),
             pref_color_dw: entry("Preferences", "ColorDw")
                 .and_then(|value| parse_leading_i32(&value))
@@ -213,7 +221,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("player dir");
         std::fs::write(
             root.join("Player.txt"),
-            "[Player]\nName=Tyler\nRank=3\n\n[Preferences]\nColor=4\nColorDw=12345678\nPosition=2\nAutoStopControl=1\n",
+            "[Player]\nName=Tyler\nRank=3\nScore=250\nTotalPlayingTime=1234\n\n[Preferences]\nColor=4\nColorDw=12345678\nPosition=2\nAutoStopControl=1\n",
         )
         .expect("write core");
 
@@ -235,6 +243,10 @@ mod tests {
 
         let player = PlayerFile::load_from_path(&root).expect("player file loads");
         assert_eq!(player.name, "Tyler");
+        // C4PlayerInfoCore::CompileFunc stores both values in [Player]
+        // (C4InfoCore.cpp:148-161).
+        assert_eq!(player.score, 250);
+        assert_eq!(player.total_playing_time, 1_234);
         assert_eq!(player.pref_color, 4);
         assert_eq!(player.pref_color_dw, 12345678);
         assert_eq!(player.pref_position, 2);
@@ -276,6 +288,8 @@ mod tests {
 
         let player = PlayerFile::load_from_path(&root).expect("player file loads");
         assert_eq!(player.name, "Neuling");
+        assert_eq!(player.score, 0);
+        assert_eq!(player.total_playing_time, 0);
         assert_eq!(player.pref_color, 0);
         assert_eq!(player.pref_color_dw, 0xff);
         assert_eq!(player.pref_position, 0);

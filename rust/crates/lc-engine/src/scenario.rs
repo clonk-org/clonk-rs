@@ -7743,6 +7743,9 @@ global func Step(state, frame, random)
         engine
             .join_player(crate::JoinPlayerConfig {
                 name: "Tester".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
                 pref_color: 0,
@@ -7788,6 +7791,9 @@ global func Step(state, frame, random)
         engine
             .join_player(crate::JoinPlayerConfig {
                 name: "Tester".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
                 pref_color: 0,
@@ -7901,6 +7907,9 @@ global func Step(state, frame, random)
         let joined = engine
             .join_player(crate::JoinPlayerConfig {
                 name: "Tyler".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
                 team: None,
                 color_dw: 0xf40000,
                 pref_color: 3,
@@ -9123,6 +9132,9 @@ public func ActualizePhase(pClonk)
         engine
             .join_player(crate::JoinPlayerConfig {
                 name: "Tester".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
                 pref_color: 0,
@@ -9394,6 +9406,9 @@ public func ActualizePhase(pClonk)
         engine
             .join_player(crate::JoinPlayerConfig {
                 name: "Tester".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
                 pref_color: 0,
@@ -9588,6 +9603,9 @@ public func ActualizePhase(pClonk)
         engine
             .join_player(crate::JoinPlayerConfig {
                 name: "Tester".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
                 pref_color: 0,
@@ -9844,6 +9862,9 @@ public func ActualizePhase(pClonk)
         engine
             .join_player(crate::JoinPlayerConfig {
                 name: "Tester".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
                 pref_color: 0,
@@ -12728,6 +12749,9 @@ mod game_start_sync {
         engine
             .join_player(crate::JoinPlayerConfig {
                 name: "Test".into(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
                 pref_color: 0,

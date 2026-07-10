@@ -6043,6 +6043,9 @@ impl GameApp {
             });
         let joined = self.engine.join_player(JoinPlayerConfig {
             name: self.player_name.clone(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
             team: None,
             color_dw,
             pref_color,
@@ -14204,6 +14207,7 @@ mod tests {
 
         SimulationSnapshot {
             frame: 0,
+            game_time: 0,
             game_over: false,
             round_results: Default::default(),
             physics: None,
@@ -14910,6 +14914,7 @@ mod tests {
 
         let mut snapshot = SimulationSnapshot {
             frame: 0,
+            game_time: 0,
             game_over: false,
             round_results: Default::default(),
             physics: None,

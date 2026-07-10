@@ -424,6 +424,7 @@ mod tests {
     fn make_snapshot(frame: u64, energy: i32) -> SimulationSnapshot {
         SimulationSnapshot {
             frame,
+            game_time: 0,
             game_over: false,
             round_results: Default::default(),
             physics: None,
