@@ -10452,7 +10452,8 @@ impl GameApp {
             anchor: (f32, f32),
             lines: Vec<MessageLineLayout>,
             has_frame: bool,
-            portrait: Option<Color>,
+            portrait_requested: bool,
+            portrait: Option<ImageData>,
             alignment: HorizontalAlignment,
             vertical_align: VerticalAlignment,
             base_color: Color,
@@ -10466,8 +10467,9 @@ impl GameApp {
 
         const FONT_SIZE: f32 = 18.0;
         const FRAME_PADDING: f32 = 8.0;
-        const PORTRAIT_SIZE: f32 = 42.0;
-        const PORTRAIT_GAP: f32 = 8.0;
+        // C4GameMessage.cpp:95-96.
+        const PORTRAIT_SIZE: f32 = 64.0;
+        const PORTRAIT_GAP: f32 = 10.0;
 
         let mut prepared: Vec<PreparedMessage> = Vec::new();
 
@@ -10543,18 +10545,15 @@ impl GameApp {
                 .as_ref()
                 .map(|decor| !decor.trim().is_empty())
                 .unwrap_or(false);
-            let portrait_color = message
+            let portrait_requested = message
                 .portrait
-                .as_ref()
-                .and_then(|spec| Self::parse_portrait_color(spec))
-                .or_else(|| {
-                    if message.portrait.is_some() {
-                        Some(Color::new(base_color.r, base_color.g, base_color.b, 255))
-                    } else {
-                        None
-                    }
-                });
-            let has_frame = portrait_color.is_some() || has_decoration;
+                .as_deref()
+                .is_some_and(|spec| !spec.is_empty());
+            let portrait = message
+                .portrait
+                .as_deref()
+                .and_then(|spec| resolve_message_portrait(&self.engine, spec));
+            let has_frame = portrait_requested || has_decoration;
 
             let default_alignment = if has_frame {
                 HorizontalAlignment::Left
@@ -10593,7 +10592,7 @@ impl GameApp {
                 let fallback = || {
                     let max_width = (surface_width - 10.0).min(500.0).max(50.0);
                     if has_frame {
-                        if portrait_color.is_some() {
+                        if portrait_requested {
                             Some((surface_width * 0.5).clamp(50.0, max_width))
                         } else {
                             Some((surface_width - 50.0).clamp(50.0, max_width))
@@ -10633,7 +10632,8 @@ impl GameApp {
                 anchor: (anchor_x, anchor_y),
                 lines,
                 has_frame,
-                portrait: portrait_color,
+                portrait_requested,
+                portrait,
                 alignment,
                 vertical_align,
                 base_color,
@@ -10653,7 +10653,7 @@ impl GameApp {
                 }
 
                 let text_height = (message.lines.len() as f32) * line_height;
-                let portrait_space = if message.portrait.is_some() {
+                let portrait_space = if message.portrait_requested {
                     PORTRAIT_SIZE + PORTRAIT_GAP
                 } else {
                     0.0
@@ -10663,7 +10663,12 @@ impl GameApp {
                 if message.has_frame {
                     let frame_width =
                         (text_block_width + portrait_space + FRAME_PADDING * 2.0).max(1.0);
-                    let frame_height = (text_height + FRAME_PADDING * 2.0).max(1.0);
+                    let content_height = if message.portrait_requested {
+                        text_height.max(PORTRAIT_SIZE)
+                    } else {
+                        text_height
+                    };
+                    let frame_height = (content_height + FRAME_PADDING * 2.0).max(1.0);
 
                     let frame_x = match message.alignment {
                         HorizontalAlignment::Left => message.anchor.0,
@@ -10693,15 +10698,25 @@ impl GameApp {
                     );
                     Self::draw_border(surface, rect, border);
 
-                    if let Some(portrait_color) = message.portrait {
+                    if message.portrait_requested {
                         let portrait_rect = Rect::new(
                             rect.x + FRAME_PADDING as i32,
                             rect.y + FRAME_PADDING as i32,
                             PORTRAIT_SIZE as u32,
                             PORTRAIT_SIZE as u32,
                         );
-                        Self::fill_rect(surface, portrait_rect, portrait_color);
-                        Self::draw_border(surface, portrait_rect, border);
+                        if let Some(portrait) = message.portrait.as_ref() {
+                            draw_image(
+                                surface,
+                                &GuiRect::new(
+                                    portrait_rect.x as f32,
+                                    portrait_rect.y as f32,
+                                    portrait_rect.width as f32,
+                                    portrait_rect.height as f32,
+                                ),
+                                portrait,
+                            );
+                        }
                     }
 
                     let text_base_x = frame_x + FRAME_PADDING + portrait_space;
@@ -10763,25 +10778,6 @@ impl GameApp {
                 }
             }
         }
-    }
-
-    fn parse_portrait_color(spec: &str) -> Option<Color> {
-        let trimmed = spec.trim();
-        let rest = trimmed.strip_prefix("Portrait:")?;
-        let mut parts = rest.split("::");
-        let _id = parts.next()?;
-        let color_token = parts.next()?.trim();
-        let hex = color_token.chars().take(6).collect::<String>();
-        if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
-            return None;
-        }
-        let value = u32::from_str_radix(&hex, 16).ok()?;
-        Some(Color::new(
-            ((value >> 16) & 0xff) as u8,
-            ((value >> 8) & 0xff) as u8,
-            (value & 0xff) as u8,
-            255,
-        ))
     }
 
     fn fill_rect(surface: &mut Surface, rect: Rect, color: Color) {
@@ -12184,6 +12180,72 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
             .and_then(|player| player.color.map(|rgb| Color::opaque(rgb.r, rgb.g, rgb.b)))
             .unwrap_or_else(|| default_owner_color(owner))
     }
+}
+
+struct MessagePortraitSpec<'a> {
+    definition_id: &'a str,
+    portrait_name: &'a str,
+    color: Color,
+}
+
+/// C4Portrait::EvaluatePortraitString's `C4ID::dwClr::PortraitName` form
+/// (C4DefGraphics.cpp:575-606), prefixed as required by
+/// C4Game::DrawTextSpecImage (C4Game.cpp:4310-4324).
+fn parse_message_portrait_spec(spec: &str) -> Option<MessagePortraitSpec<'_>> {
+    let rest = spec.trim().strip_prefix("Portrait:")?;
+    let (definition_id, tail) = rest.split_once("::")?;
+    if definition_id.len() != 4 {
+        return None;
+    }
+    let (color, portrait_name) = tail
+        .split_once("::")
+        .map(|(color, name)| {
+            let hex = color.chars().take(6).collect::<String>();
+            let value = (!hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
+                .then(|| u32::from_str_radix(&hex, 16).ok())
+                .flatten()?;
+            Some((
+                Color::new(
+                    ((value >> 16) & 0xff) as u8,
+                    ((value >> 8) & 0xff) as u8,
+                    (value & 0xff) as u8,
+                    255,
+                ),
+                name,
+            ))
+        })
+        .unwrap_or(Some((Color::opaque(0, 0, 0), tail)))?;
+    (!portrait_name.is_empty()).then_some(MessagePortraitSpec {
+        definition_id,
+        portrait_name,
+        color,
+    })
+}
+
+fn resolve_message_portrait(engine: &Engine, spec: &str) -> Option<ImageData> {
+    let spec = parse_message_portrait_spec(spec)?;
+    // The currently retained resource is Portrait1; named portrait variants
+    // stay unresolved exactly like a missing C4PortraitGraphics entry.
+    if !spec.portrait_name.eq_ignore_ascii_case("1") {
+        return None;
+    }
+    let image = engine.definition_portrait_graphics_image(spec.definition_id)?;
+    let width = image.width();
+    let height = image.height();
+    let mut pixels = image.pixels().to_vec();
+    if let Some(mask) = image.color_mask() {
+        for (pixel, mask) in pixels.chunks_exact_mut(4).zip(mask.iter().copied()) {
+            let mask = u16::from(mask);
+            let inverse = 255_u16.saturating_sub(mask);
+            let tint = [spec.color.r, spec.color.g, spec.color.b];
+            for (channel, owner) in pixel[..3].iter_mut().zip(tint) {
+                let base = u16::from(*channel) * inverse / 255;
+                let color = u16::from(owner) * mask / 255;
+                *channel = base.saturating_add(color).min(255) as u8;
+            }
+        }
+    }
+    Some(ImageData::new(width, height, pixels))
 }
 
 /// `C4RankSystem::GetRankName` over the default rank list
@@ -14514,6 +14576,52 @@ mod tests {
         assert_eq!(default_rank_name(10).as_deref(), Some("General"));
         assert_eq!(default_rank_name(99).as_deref(), Some("General"));
         assert_eq!(default_rank_name(-1), None);
+    }
+
+    #[test]
+    fn tutorial_portrait_spec_resolves_the_colorized_definition_image() {
+        // C4Game::DrawTextSpecImage parses Portrait:SCLK::0000ff::1 through
+        // C4Portrait::EvaluatePortraitString, resolves portrait "1", and
+        // applies 0x0000ff through GetBitmap(dwClr) (C4Game.cpp:4310-4324;
+        // C4DefGraphics.cpp:575-606). The tutorial must draw that image, not
+        // the old flat-blue placeholder.
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Sorcerer.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=SCLK\nColorByOwner=1\n",
+        )
+        .expect("DefCore");
+        let mut base = Surface::new(1, 1, lc_graphics::PixelFormat::Rgba8888);
+        base.set_pixel(0, 0, Color::new(0, 0, 0, 0))
+            .expect("base pixel");
+        fs::write(
+            def_dir.join("Portrait1.png"),
+            encode_surface_to_png(&base).expect("encode portrait"),
+        )
+        .expect("portrait png");
+        let mut overlay = Surface::new(1, 1, lc_graphics::PixelFormat::Rgba8888);
+        overlay
+            .set_pixel(0, 0, Color::new(136, 136, 136, 255))
+            .expect("overlay pixel");
+        fs::write(
+            def_dir.join("Overlay1.png"),
+            encode_surface_to_png(&overlay).expect("encode portrait overlay"),
+        )
+        .expect("portrait overlay png");
+        let group = Group::open(&def_dir).expect("open definition");
+        let resource = ResourceDefinitionData::load(&group).expect("load definition");
+        let definition = Definition::from_resource(&resource).expect("compile definition");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("register definition");
+
+        let portrait = resolve_message_portrait(&engine, "Portrait:SCLK::0000ff::1")
+            .expect("portrait resolves");
+        assert_eq!((portrait.width(), portrait.height()), (1, 1));
+        assert_eq!(portrait.pixels(), &[0, 0, 136, 255]);
     }
 
     #[test]
