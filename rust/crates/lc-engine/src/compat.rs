@@ -224,6 +224,8 @@ pub(crate) enum PlayerCommand {
     SetFogOfWar { player_id: i32, enabled: bool },
     /// FnSetPlrShowControlPos's validated C4Player::ShowControlPos write.
     SetShowControlPosition { player_id: i32, position: i32 },
+    /// FnSetPlrShowControl's validated, StringBitEval-encoded ShowControl write.
+    SetShowControl { player_id: i32, mask: i32 },
     /// `FnSetPlrExtraData` (C4Script.cpp:4692-4732): a validated named
     /// slot write on C4Player::ExtraData.
     SetExtraData {
@@ -1746,6 +1748,58 @@ fn set_plr_show_control_pos(args: &[Value]) -> Result<Value, RuntimeError> {
             player_id,
             position,
         });
+        Ok(Value::Bool(true))
+    })
+}
+
+/// `StringBitEval` (C4Script.cpp:209-216): bytes other than underscore and
+/// space set their original position in the 32-bit mask. Tutorial control
+/// strings use the defined 30-bit range consumed by DrawPlayerControls.
+fn string_bit_eval(value: &str) -> i32 {
+    value
+        .bytes()
+        .enumerate()
+        .filter(|(_, byte)| !matches!(byte, b'_' | b' '))
+        .filter_map(|(position, _)| 1u32.checked_shl(position as u32))
+        .fold(0u32, u32::wrapping_add) as i32
+}
+
+fn set_plr_show_control(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "SetPlrShowControl expects at most 2 arguments: player, controls",
+        ));
+    }
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetPlrShowControl",
+        "player",
+    )?;
+    // C4Aul's parameter conversion maps missing/falsy C4String* arguments
+    // to nil before FnStringPar turns them into the empty string
+    // (C4AulExec.cpp:1370-1374; C4Script.cpp:78-81).
+    let controls = match args.get(1) {
+        Some(Value::String(controls)) => controls.as_str(),
+        Some(Value::Nil | Value::Int(0) | Value::Bool(false)) | None => "",
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "SetPlrShowControl: expected string controls, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let mask = string_bit_eval(controls);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(player) = context.player_state_mut(player_id) else {
+            return Ok(Value::Bool(false));
+        };
+        player.show_control = mask;
+        context.record_player_command(PlayerCommand::SetShowControl { player_id, mask });
         Ok(Value::Bool(true))
     })
 }
@@ -5342,6 +5396,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetViewCursor", get_view_cursor);
     script.register_host_function("GetSelectCount", get_select_count);
     script.register_host_function("SetPlrKnowledge", set_plr_knowledge);
+    script.register_host_function("SetPlrShowControl", set_plr_show_control);
     script.register_host_function("SetPlrShowControlPos", set_plr_show_control_pos);
     script.register_host_function("SetAction", set_action);
     script.register_host_function("SetBridgeActionData", set_bridge_action_data);
@@ -23283,6 +23338,7 @@ mod tests {
         "SetPhysical",
         "SetPlrExtraData",
         "SetPlrKnowledge",
+        "SetPlrShowControl",
         "SetPlrShowControlPos",
         "SetPlrView",
         "SetPlrViewRange",
@@ -25028,6 +25084,67 @@ func Trigger(object pOther)
             [PlayerCommand::SetShowControlPosition {
                 player_id: 0,
                 position: 2,
+            }]
+        ));
+    }
+
+    #[test]
+    fn set_player_show_control_encodes_and_validates_like_cpp() {
+        // StringBitEval sets one bit per non-space/non-underscore byte at
+        // its original string position (C4Script.cpp:209-216), while
+        // FnSetPlrShowControl rejects invalid players and otherwise stores
+        // that mask (C4Script.cpp:2546-2551).
+        let player = PlayerState {
+            id: 0,
+            ..PlayerState::default()
+        };
+        assert_eq!(
+            string_bit_eval("x_________x_________x"),
+            1 | 1 << 10 | 1 << 20
+        );
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            let mut script = lc_script::Engine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    "global func Probe(int player, string controls) { return SetPlrShowControl(player, controls); }",
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+
+            let valid = script
+                .call("Probe", &[Value::Int(0), Value::String("x_ x".into())])
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            let encoded = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.player_state(0))
+                    .map(|player| player.show_control)
+            });
+            let invalid = script
+                .call("Probe", &[Value::Int(99), Value::String("xx".into())])
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            let unchanged = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.player_state(0))
+                    .map(|player| player.show_control)
+            });
+            Ok::<_, RuntimeError>((valid, encoded, invalid, unchanged))
+        });
+
+        assert_eq!(
+            result.expect("SetPlrShowControl calls run"),
+            (Value::Bool(true), Some(9), Value::Bool(false), Some(9))
+        );
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [PlayerCommand::SetShowControl {
+                player_id: 0,
+                mask: 9,
             }]
         ));
     }

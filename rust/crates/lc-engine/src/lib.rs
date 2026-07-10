@@ -19286,6 +19286,11 @@ impl Engine {
                         player.show_control_position = position;
                     }
                 }
+                PlayerCommand::SetShowControl { player_id, mask } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.show_control = mask;
+                    }
+                }
                 // FnSetPlrExtraData (C4Script.cpp:4712-4730): update in
                 // place, or append preserving the names-list order.
                 PlayerCommand::SetExtraData {
@@ -54807,6 +54812,43 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert_eq!(flag_snapshot.owner, 1);
         assert_eq!(flag_snapshot.position, Vector2::new(100, 200));
 
+        Ok(())
+    }
+
+    #[test]
+    fn tutorial_show_control_mask_reaches_snapshots_and_save_state() -> Result<(), EngineError> {
+        // FnSetPlrShowControl writes C4Player::ShowControl during
+        // InitializePlayer (C4Script.cpp:2546-2551); C4Player::CompileFunc
+        // persists it as "ShowControl" (C4Player.cpp:1583).
+        const SCRIPT: &str = r#"
+        global func InitializePlayer(player)
+        {
+            SetPlrShowControl(player, "x_ x");
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(5);
+        engine.install_scenario_script_with_convention("Scenario", SCRIPT, true)?;
+        engine.register_player(PlayerConfig::new(0, "Player"))?;
+
+        let snapshot = engine.snapshot();
+        let player = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == 0)
+            .expect("registered player is present");
+        assert_eq!(player.show_control, 9);
+
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("state encodes");
+        let decoded = EngineState::from_json_str(&encoded).expect("state decodes");
+        assert_eq!(decoded.players[0].show_control, 9);
+
+        let mut restored = Engine::with_seed(0);
+        restored.restore_state(&decoded)?;
+        assert_eq!(restored.snapshot().players[0].show_control, 9);
         Ok(())
     }
 
