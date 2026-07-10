@@ -1789,6 +1789,52 @@ fn get_player_name(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// `FnGetTaggedPlayerName` colors a valid player's name with their 24-bit
+/// display color after `C4GUI::MakeColorReadableOnBlack` has raised dark
+/// colors to the legacy lightness floor (C4Script.cpp:1084-1091;
+/// C4Gui.cpp:71-87).
+fn get_tagged_player_name(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetTaggedPlayerName expects at most 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetTaggedPlayerName",
+        "player",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        let mut color = player
+            .color
+            .map(|color| {
+                (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+            })
+            .unwrap_or(0);
+        let red = (color >> 16) & 0xff;
+        let green = (color >> 8) & 0xff;
+        let blue = color & 0xff;
+        let lightness = red * 50 + green * 87 + blue * 27;
+        if lightness < 16_575 {
+            let increment = (16_575 - lightness) / 164;
+            color = ((red + increment).min(255) << 16)
+                | ((green + increment).min(255) << 8)
+                | (blue + increment).min(255);
+        }
+        Ok(Value::String(format!(
+            "<c {color:x}>{}</c>",
+            player.name
+        )))
+    })
+}
+
 /// FnGetPlayerVal reflects the named C4Player fields serialized by
 /// C4Player::CompileFunc (C4Script.cpp:4252-4263). The standard
 /// GetPlrViewX/GetPlrViewY wrappers use the ViewX/ViewY entries
@@ -6251,6 +6297,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerCount", get_player_count);
     script.register_host_function("GetPlayerByIndex", get_player_by_index);
     script.register_host_function("GetPlayerName", get_player_name);
+    script.register_host_function("GetTaggedPlayerName", get_tagged_player_name);
     script.register_host_function("GetPlayerVal", get_player_val);
     script.register_host_function("GetPlayerTeam", get_player_team);
     script.register_host_function("GetTeamCount", get_team_count);
@@ -25955,6 +26002,7 @@ mod tests {
         "GetSeason",
         "GetSelectCount",
         "GetSkyAdjust",
+        "GetTaggedPlayerName",
         "GetTeamByIndex",
         "GetTeamColor",
         "GetTeamCount",
@@ -27892,6 +27940,40 @@ func Trigger(object pOther)
         assert_eq!(
             result.expect("GetPlayerName succeeds"),
             Value::String("Delta".into())
+        );
+    }
+
+    #[test]
+    fn get_tagged_player_name_colors_the_name_like_cpp() {
+        // FnGetTaggedPlayerName wraps a valid player's name in the readable
+        // 24-bit player color and returns nil for an invalid player
+        // (C4Script.cpp:1084-1091; C4Gui.cpp:71-87).
+        let player = PlayerState {
+            id: 5,
+            name: "Delta".into(),
+            color: Some(crate::RgbColor::new(0, 0, 0)),
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let mut script = lc_script::Engine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    "global func Probe() { return [GetTaggedPlayerName(5), GetTaggedPlayerName(99)]; }",
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call("Probe", &[])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(
+            result.expect("GetTaggedPlayerName succeeds"),
+            Value::Array(vec![Value::String("<c 656565>Delta</c>".into()), Value::Nil])
         );
     }
 
