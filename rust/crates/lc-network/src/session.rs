@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -207,8 +208,24 @@ pub async fn connect_client(
     addr: SocketAddr,
     config: ClientConfig,
 ) -> Result<ClientHandle, ClientError> {
-    let mut stream = TcpStream::connect(addr)
+    connect_client_from(TcpStream::connect(addr), config).await
+}
+
+async fn connect_client_from<F>(
+    connection: F,
+    config: ClientConfig,
+) -> Result<ClientHandle, ClientError>
+where
+    F: Future<Output = Result<TcpStream, io::Error>>,
+{
+    let mut stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, connection)
         .await
+        .map_err(|_| {
+            ClientError::Connect(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "connection attempt timed out",
+            ))
+        })?
         .map_err(ClientError::Connect)?;
     stream.set_nodelay(true).ok();
 
@@ -219,13 +236,18 @@ pub async fn connect_client(
         kind,
     };
 
-    write_handshake_request(&mut stream, &request)
-        .await
-        .map_err(|error| ClientError::Handshake(format!("failed to send handshake: {error}")))?;
-
-    let response = read_handshake_response(&mut stream)
-        .await
-        .map_err(|error| ClientError::Handshake(format!("failed to read handshake: {error}")))?;
+    let response = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        write_handshake_request(&mut stream, &request)
+            .await
+            .map_err(|error| {
+                ClientError::Handshake(format!("failed to send handshake: {error}"))
+            })?;
+        read_handshake_response(&mut stream)
+            .await
+            .map_err(|error| ClientError::Handshake(format!("failed to read handshake: {error}")))
+    })
+    .await
+    .map_err(|_| ClientError::Handshake("host handshake timed out".to_string()))??;
 
     if response.version != PROTOCOL_VERSION {
         return Err(ClientError::Handshake(format!(
@@ -1014,6 +1036,7 @@ async fn run_client_loop<S>(
 mod tests {
     use super::*;
     use crate::ParticipantKind;
+    use std::future::{pending, ready};
     use std::time::Duration;
     use tokio::io::duplex;
     use tokio::time::timeout;
@@ -1022,6 +1045,57 @@ mod tests {
     /// runs do not trip it; a genuine failure still fails fast because the
     /// expected event never arrives at all.
     const EVENT_WAIT: Duration = Duration::from_secs(5);
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_connection_attempt_times_out() {
+        // C4Network2IO::CheckTimeout closes unaccepted connections after
+        // C4NetAcceptTimeout (src/C4Network2IO.cpp:1155-1170).
+        let result = timeout(
+            HANDSHAKE_TIMEOUT + Duration::from_secs(1),
+            connect_client_from(
+                pending::<Result<TcpStream, io::Error>>(),
+                ClientConfig::new("Alice", ParticipantKind::Player),
+            ),
+        )
+        .await;
+
+        match result {
+            Ok(Err(ClientError::Connect(error))) => {
+                assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+                assert_eq!(error.to_string(), "connection attempt timed out");
+            }
+            other => panic!("expected bounded connection timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nonresponsive_server_handshake_times_out() {
+        // C4Network2IO::CheckTimeout closes connections which do not reach the
+        // accepted state after C4NetAcceptTimeout (src/C4Network2IO.cpp:1155-1170).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let (connection, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let client_stream = connection.expect("connect client socket");
+        let (_server_stream, _) = accepted.expect("accept client socket");
+
+        let result = timeout(
+            HANDSHAKE_TIMEOUT + Duration::from_secs(1),
+            connect_client_from(
+                ready(Ok(client_stream)),
+                ClientConfig::new("Alice", ParticipantKind::Player),
+            ),
+        )
+        .await;
+
+        match result {
+            Ok(Err(ClientError::Handshake(message))) => {
+                assert_eq!(message, "host handshake timed out");
+            }
+            other => panic!("expected bounded handshake timeout, got {other:?}"),
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_emits_ready_for_single_client() {
