@@ -502,52 +502,72 @@ fn render_engine_normal_menu(
             CLASSIC_COMMAND_HEIGHT as u32,
         );
         draw_border(surface, extra, CLASSIC_EXTRA_FRAME_COLOR);
-        let size = extra.height;
+        let mut remaining = extra;
+        let mut truncate_control = || {
+            // C4Facet::TruncateSection(C4FCT_Left) returns an empty facet
+            // without changing the source once another square no longer
+            // fits (C4Facet.cpp:182-217). A five-column normal menu can
+            // therefore show at most five of the six controls requested by
+            // an item with Command2.
+            let size = remaining.height;
+            (size <= remaining.width && size != 0).then(|| {
+                let cell = Rect::new(remaining.x, remaining.y, size, size);
+                remaining.x += size as i32;
+                remaining.width -= size;
+                cell
+            })
+        };
         let tiny = tiny_font.unwrap_or(font);
-        let mut control_x = extra.x;
-        draw_command_key(
-            surface,
-            gfx,
-            tiny,
-            control_x,
-            extra.y,
-            size,
-            3,
-            &gfx.throw_key,
-        );
-        control_x += size as i32;
-        draw_ok_cancel(surface, gfx, control_x, extra.y, size, 0, 0);
-        control_x += size as i32;
-        if selected
-            .and_then(|selection| menu.items.get(selection))
-            .is_some_and(|item| !item.command2.is_empty())
-        {
+        if let Some(cell) = truncate_control() {
             draw_command_key(
                 surface,
                 gfx,
                 tiny,
-                control_x,
-                extra.y,
-                size,
-                11,
-                &gfx.special2_key,
+                cell.x,
+                cell.y,
+                cell.width,
+                3,
+                &gfx.throw_key,
             );
-            control_x += size as i32;
-            draw_ok_cancel(surface, gfx, control_x, extra.y, size, 2, 1);
-            control_x += size as i32;
         }
-        draw_command_key(
-            surface,
-            gfx,
-            tiny,
-            control_x,
-            extra.y,
-            size,
-            5,
-            &gfx.dig_key,
-        );
-        control_x += size as i32;
-        draw_ok_cancel(surface, gfx, control_x, extra.y, size, 1, 0);
+        if let Some(cell) = truncate_control() {
+            draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 0, 0);
+        }
+        if selected
+            .and_then(|selection| menu.items.get(selection))
+            .is_some_and(|item| !item.command2.is_empty())
+        {
+            if let Some(cell) = truncate_control() {
+                draw_command_key(
+                    surface,
+                    gfx,
+                    tiny,
+                    cell.x,
+                    cell.y,
+                    cell.width,
+                    11,
+                    &gfx.special2_key,
+                );
+            }
+            if let Some(cell) = truncate_control() {
+                draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 2, 1);
+            }
+        }
+        if let Some(cell) = truncate_control() {
+            draw_command_key(
+                surface,
+                gfx,
+                tiny,
+                cell.x,
+                cell.y,
+                cell.width,
+                5,
+                &gfx.dig_key,
+            );
+        }
+        if let Some(cell) = truncate_control() {
+            draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 1, 0);
+        }
     }
 
     if time_on_selection >= 90 {
@@ -1975,9 +1995,17 @@ mod tests {
                 gui_icons[offset..offset + 4].copy_from_slice(&[17, 238, 51, 255]);
             }
         }
+        let mut control = vec![0_u8; 224 * 164 * 4];
+        for y in 100..132 {
+            for x in 160..192 {
+                let offset = (y * 224 + x) * 4;
+                control[offset..offset + 4].copy_from_slice(&[239, 23, 71, 255]);
+            }
+        }
         let gfx = IngameMenuGraphics {
             show_commands: true,
             gui_icons: Some(ImageData::new(240, 240, gui_icons)),
+            control: Some(ImageData::new(224, 164, control)),
             ..IngameMenuGraphics::default()
         };
         let icons = vec![None, None];
@@ -2008,6 +2036,15 @@ mod tests {
             "pointer hit cells must move with the C++-sized command strip"
         );
         let mut surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
+        let overflow_probe = (
+            u32::try_from(layout.bounds.x + layout.bounds.width as i32 + 10)
+                .expect("overflow probe x is positive"),
+            u32::try_from(layout.bounds.y + layout.bounds.height as i32 - 18)
+                .expect("overflow probe y is positive"),
+        );
+        let overflow_before = surface
+            .get_pixel(overflow_probe.0, overflow_probe.1)
+            .expect("overflow probe starts on the surface");
         render_engine_script_menu(
             &mut surface,
             Rect::new(0, 0, 640, 480),
@@ -2020,6 +2057,20 @@ mod tests {
             &icons,
             true,
             0,
+        );
+
+        // Six square controls are requested when Command2 exists, but this
+        // five-column menu only has room for five. C4Facet::TruncateSection
+        // returns an empty facet for the sixth, so the cancel phase must not
+        // leak past the right menu edge (C4Menu.cpp:857-880;
+        // C4Facet.cpp:182-217). This is the red X that visibly hung off the
+        // Dragon Rock difficulty/character menus in Rust.
+        assert_eq!(
+            surface
+                .get_pixel(overflow_probe.0, overflow_probe.1)
+                .expect("overflow probe remains on the surface"),
+            overflow_before,
+            "command cells must be truncated to the C++ menu strip"
         );
 
         // Normal style is always a five-column 35px icon grid. With the
