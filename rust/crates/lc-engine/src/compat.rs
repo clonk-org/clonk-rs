@@ -4505,6 +4505,12 @@ impl FindObjectParams {
         Some(squared_distance(object.position(), self.x, self.y))
     }
 
+    /// Sector-prefiltered candidates for the port-internal fixed-parameter
+    /// FindObjects (modelled on C4FindObject::FindMany's bounded arms —
+    /// this form has no C++ counterpart) and the order-insensitive
+    /// ObjectCount. The legacy single-result FindObject does NOT use this:
+    /// C4Game::FindObject scans the MASTER list for every query form
+    /// (C4Game.cpp:1367-1424).
     fn candidate_ids(&self, world: &impl WorldAccessor) -> Vec<ObjectId> {
         if self.is_closest_query() || self.is_full_range() {
             return world.object_ids();
@@ -14348,9 +14354,12 @@ fn find_object_owner(args: &[Value]) -> Result<Value, RuntimeError> {
     find_object_cpp(&remapped, "FindObjectOwner", Some(owner))
 }
 
+/// C4Game::FindObject (C4Game.cpp:1334-1424): the legacy single-result
+/// search scans the MASTER list for every query form — first master-order
+/// match wins; sectors are never consulted (unlike the criteria form).
 fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let mut skip_until = params.find_next;
-    for object_id in params.candidate_ids(world) {
+    for object_id in world.object_ids() {
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
@@ -30133,6 +30142,38 @@ func ProbeBadIndex(id) {
         ])];
         let (result, _) = with_object_host_context_with_world(world, || object_count2(&args));
         assert_eq!(result.expect("ObjectCount2 succeeds"), Value::Int(3));
+    }
+
+    #[test]
+    fn legacy_find_object_rect_query_walks_the_master_list_not_sectors() {
+        // C4Game::FindObject (C4Game.cpp:1334-1424) — the legacy
+        // fixed-parameter FindObject — scans Objects.First, the MASTER
+        // list, for EVERY query form; the rect arm returns the first
+        // master-order object inside the rect (C4Game.cpp:1414-1416).
+        // Sectors belong only to the criteria form (C4FindObject's
+        // Find(Objs, Sct) arms).
+        let world = sectored_find_world(
+            vec![
+                // ids clear of the harness caller (object 1, self-excluded
+                // per C4Script.cpp:2125)
+                find_world_object(11, "ROCK", 80, 10, 1), // sector (1,0)
+                find_world_object(12, "ROCK", 10, 10, 1), // sector (0,0)
+            ],
+            HashMap::new(),
+        );
+        let args = vec![
+            Value::Nil,      // id
+            Value::Int(0),   // x
+            Value::Int(0),   // y
+            Value::Int(150), // wdt
+            Value::Int(40),  // hgt
+        ];
+        let (result, _) = with_object_host_context_with_world(world, || find_object(&args));
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject succeeds")),
+            Some(ObjectId::new(11)),
+            "first MASTER-order match wins, not the sector-walk first"
+        );
     }
 
     #[test]
