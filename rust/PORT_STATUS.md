@@ -188,7 +188,11 @@ and a recorded new first mismatch.
   and drop the partial outcome (the fail-safe arm predates the recovery
   seam); the Initialize/Construction/Step and menu-entries/-command/
   -callback definition seams attach no recovery (their batch folds drop
-  on error); foreign dir reads stay whole-pixel (snapshot task B); energy
+  on error), EXCEPT Initialize/Construction which now fold their partial
+  outcome on error like call_raw (pre-error creations, burned ids,
+  RNG/audio advance and local writes all persist; see the
+  creation-number bullet); foreign dir reads stay whole-pixel (snapshot
+  task B); energy
   is deliberately not overlaid (active-scope/DoEnergy paths read live
   scope state); FnExit's ObjectComCancelAttach/BoundsCheck arms and the
   Ejection/Departure engine calls stay unmodeled.
@@ -206,14 +210,30 @@ and a recorded new first mismatch.
   entries, engine-internal menus staying invisible to `GetMenu`,
   AutoContextMenu/CloseCommand, and presentation layout.
 
-- **Creation-number skew (the numbering epic):** AH_Predator's Initialize
-  exposes a preview-vs-final id mismatch — the teleporters' deferred
-  SetTransferZone commands record in-flight ids (53/69/84) that the
-  materialized objects never receive, so their zones drop with a WARN
-  (C++-faithful fallback: zones die with their object; the C4TransferZones
-  entry cannot outlive it). The zones SHOULD land — diagnosing why the
-  mid-call preview allocator and spawn materialization disagree in this
-  scenario is the reproducible entry point for the numbering epic.
+- **Creation-number skew (the numbering epic):** the AH_Predator entry is
+  CLOSED — the "preview-vs-final id mismatch" was disproven empirically
+  (every Initialize preview id 4..92 materialized verbatim); the door
+  zones (owners 53/69/84/86) dropped because `apply_scenario_batch`
+  folded the transfer-zone commands BEFORE the same batch's spawns, while
+  C++ has the owner live in Game.Objects before any creation callback can
+  call SetTransferZone (C4Game.cpp:1115-1131, C4Script.cpp:3145-3149).
+  Zones now fold after the spawn loop and land. Also CLOSED: a FAILED
+  Construction/Initialize creation callback used to discard its whole
+  partial outcome (CommandBatch::default() with the PRE-CALL
+  `next_object_id`), erasing pre-error creations and re-minting their
+  burned preview ids (AH_Predator: HZCK's Initialize allocated 94 for
+  its ABAG, failed on unknown `GetHUD`, and CHOS's InitializePlayer
+  re-minted 94 for TIM1); both seams now fold the partial outcome and
+  surface the error as a value, so pre-error creations, burned numbers,
+  RNG/audio advance and local writes persist like C++ (errors roll
+  nothing back, C4AulExec.cpp:1318-1342; `Number =
+  ++ObjectEnumerationIndex`, C4Game.cpp:1119) — the join sequence is now
+  93 HZCK, 94 ABAG, 95 TIM1. What remains of the epic: the GoldRush
+  crosshair skew (cpp 1534-1537 vs rust 1531-1534) stays open and is
+  NEITHER mechanism above: GoldRush startup runs warn-free (nothing was
+  discarded) and triggers no rain-cloud ledger replay (LaunchCloud is
+  not its gap) — three C++ startup creations are missing outright and
+  still need to be identified.
 
 ## Accepted/comparator-only divergences
 
