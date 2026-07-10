@@ -4989,6 +4989,11 @@ pub struct SpawnConfig {
     pub effects: Vec<EffectState>,
     #[serde(default)]
     pub vertices: Vec<ObjectVertex>,
+    /// Explicit per-object `C4Object::Component` list. Loaded Objects.txt
+    /// entries compile this verbatim (C4Object.cpp:2811); fresh objects use
+    /// their definition components scaled to initial Con when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<HashMap<DefinitionId, u32>>,
     pub owner: i32,
     /// Explicit C4Object::Controller: Objects.txt `Controller=` on loads
     /// (compile default NO_OWNER, C4Object.cpp:2739) or the creating
@@ -5084,6 +5089,7 @@ impl SpawnConfig {
             command_direction: CommandDirection::default(),
             effects: Vec::new(),
             vertices: Vec::new(),
+            components: None,
             owner: OWNER_NONE,
             controller: None,
             crew_member: None,
@@ -5225,6 +5231,11 @@ impl SpawnConfig {
 
     pub fn with_vertices(mut self, vertices: Vec<ObjectVertex>) -> Self {
         self.vertices = vertices;
+        self
+    }
+
+    pub fn with_components(mut self, components: HashMap<DefinitionId, u32>) -> Self {
+        self.components = Some(components);
         self
     }
 
@@ -30074,6 +30085,7 @@ impl Engine {
             command_direction,
             effects,
             vertices,
+            components,
             owner,
             controller,
             crew_member,
@@ -30108,6 +30120,7 @@ impl Engine {
             definition_rotateable,
             definition_line,
             definition_blit_mode,
+            definition_components,
         ) = {
             let definition_ref = self
                 .definitions
@@ -30124,6 +30137,7 @@ impl Engine {
                 definition_ref.rotateable(),
                 definition_ref.line(),
                 definition_ref.blit_mode(),
+                definition_ref.components().to_vec(),
             )
         };
         let mut initial_action = match action {
@@ -30263,7 +30277,29 @@ impl Engine {
                     .filter(|mode| *mode != 0)
                     .unwrap_or(definition_blit_mode),
                 contents: Vec::new(),
-                components: HashMap::new(),
+                // C4Object::Init copies Def->Component and immediately
+                // ComponentConCutoff-scales it to Con; NewObject's initial
+                // DoCon then gains the same floor-scaled counts
+                // (C4Object.cpp:197-199,519-526,1428-1464). Loaded objects
+                // bypass Init and compile their saved list verbatim (:2811).
+                components: components.unwrap_or_else(|| {
+                    if loaded {
+                        HashMap::new()
+                    } else {
+                        let construction = construction.clamp(0, FULL_CON) as u64;
+                        definition_components
+                            .iter()
+                            .map(|component| {
+                                (
+                                    component.id.clone(),
+                                    (u64::from(component.count) * construction
+                                        / FULL_CON as u64)
+                                        as u32,
+                                )
+                            })
+                            .collect()
+                    }
+                }),
                 status: status.unwrap_or_default(),
                 owner,
                 controller: initial_controller,

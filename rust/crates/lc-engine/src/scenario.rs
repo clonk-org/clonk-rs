@@ -22,10 +22,10 @@ use serde::Deserialize;
 use crate::landscape::{LandscapeRasterState, RuntimeTexMapMaterial, RuntimeTexMapState};
 use crate::{
     action::ActionSpec, ActionState, CommandDirection, Definition, DefinitionActionFacet,
-    DefinitionActionGraphics, DefinitionComponent, DefinitionPicture, DefinitionPictureImage,
-    DefinitionSpriteImage, Direction, EffectState, Engine, EngineError, EnvironmentSettings,
-    Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings, RgbColor, SkyParallaxMode,
-    SkySettings, SpawnConfig, TeamInfo, Vector2, FULL_CON,
+    DefinitionActionGraphics, DefinitionComponent, DefinitionId, DefinitionPicture,
+    DefinitionPictureImage, DefinitionSpriteImage, Direction, EffectState, Engine, EngineError,
+    EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings,
+    RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, TeamInfo, Vector2, FULL_CON,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -4074,6 +4074,8 @@ struct LegacyObjectRecord {
     layer: Option<u64>,
     /// C4Object::BlitMode (`BlitMode=`, C4Object.cpp:2817).
     blit_mode: Option<u32>,
+    /// Saved C4Object::Component (`Component=WOOD=5;METL=1;`).
+    components: Option<HashMap<DefinitionId, u32>>,
     contained: Option<u64>,
     contents: Vec<u64>,
 }
@@ -4445,6 +4447,9 @@ impl LegacyObjectRecord {
                 })?;
                 self.blit_mode = Some(value as u32);
             }
+            "component" => {
+                self.components = Some(parse_legacy_object_components(trimmed_value, self.line)?);
+            }
             "contained" => {
                 let value = parse_i64(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
@@ -4530,6 +4535,7 @@ impl LegacyObjectRecord {
             action_target2,
             layer,
             blit_mode,
+            components,
             contained,
             contents: _,
         } = self;
@@ -4577,6 +4583,9 @@ impl LegacyObjectRecord {
         }
         if let Some(blit_mode) = blit_mode {
             config = config.with_blit_mode(blit_mode);
+        }
+        if let Some(components) = components {
+            config = config.with_components(components);
         }
 
         if xdir.is_some() || ydir.is_some() {
@@ -5154,6 +5163,43 @@ fn parse_i32_list(value: &str, line: usize, key: &str) -> Result<Vec<i32>, Scena
                     line, key, entry, err
                 ))
             })
+        })
+        .collect()
+}
+
+/// C4IDList::CompileFunc with values (C4IDList.cpp:240-259): semicolon-
+/// separated four-character IDs, each optionally followed by `=count`.
+fn parse_legacy_object_components(
+    value: &str,
+    line: usize,
+) -> Result<HashMap<DefinitionId, u32>, ScenarioError> {
+    value
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (id, count) = entry.split_once('=').unwrap_or((entry, "0"));
+            let id = id.trim();
+            let valid_id = id.len() == 4
+                && id != "NONE"
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+            if !valid_id {
+                return Err(ScenarioError::LegacyObjectsParse(format!(
+                    "Objects.txt line {}: invalid Component id `{}`",
+                    line, id
+                )));
+            }
+            let count = parse_i32(count.trim()).map_err(|err| {
+                ScenarioError::LegacyObjectsParse(format!(
+                    "Objects.txt line {}: invalid Component count `{}` ({})",
+                    line,
+                    count.trim(),
+                    err
+                ))
+            })?;
+            Ok((DefinitionId::from(id), count.max(0) as u32))
         })
         .collect()
 }
