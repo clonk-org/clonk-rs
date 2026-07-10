@@ -7,7 +7,7 @@ slices are recorded in `git log -- rust/ parity/`.
 
 Workspace nextest, strict clippy, snapshots, and parity are green. Scenario
 load/apply and activation are 93/93. The pinned Goldrush comparator first
-diverges at frame 1085 (object 636: subpixel position/velocity).
+diverges at frame 1382 (Rust is missing twelve `FXU1` objects).
 
 ```sh
 cargo nextest run --workspace
