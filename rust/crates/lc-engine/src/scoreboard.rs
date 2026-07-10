@@ -51,8 +51,118 @@ impl ScoreboardState {
         self.show_count
     }
 
+    /// Script-requested visibility (`C4Scoreboard::ShouldBeShown`,
+    /// C4Scoreboard.h:75). The GUI may still suppress the dialog while an
+    /// exclusive or game-over dialog is active.
+    pub fn should_be_shown(&self) -> bool {
+        self.show_count > 0 && self.row_count() != 0 && self.column_count() != 0
+    }
+
+    pub(crate) fn cell_by_key(&self, column_key: i32, row_key: i32) -> Option<&ScoreboardCell> {
+        let column = self
+            .rows
+            .first()?
+            .iter()
+            .position(|cell| cell.value == column_key)?;
+        let row = self
+            .rows
+            .iter()
+            .position(|cells| cells[0].value == row_key)?;
+        self.cell(row, column)
+    }
+
     pub(crate) fn is_default(&self) -> bool {
         self.rows.is_empty() && self.show_count == 0
+    }
+
+    pub(crate) fn set_cell(
+        &mut self,
+        column_key: i32,
+        row_key: i32,
+        text: Option<String>,
+        value: i32,
+    ) {
+        // SetCell first materializes the shared title corner
+        // (C4Scoreboard.cpp:141-147).
+        if self.rows.is_empty() {
+            self.rows = vec![vec![ScoreboardCell {
+                text: None,
+                value: SCOREBOARD_CAPTION,
+            }]];
+        }
+
+        let column = self
+            .rows
+            .first()
+            .and_then(|header| header.iter().position(|cell| cell.value == column_key))
+            .unwrap_or_else(|| {
+                let column = self.column_count();
+                self.rows
+                    .iter_mut()
+                    .for_each(|row| row.push(ScoreboardCell::default()));
+                self.rows[0][column].value = column_key;
+                column
+            });
+        let row = self
+            .rows
+            .iter()
+            .position(|cells| cells[0].value == row_key)
+            .unwrap_or_else(|| {
+                let row = self.rows.len();
+                let columns = self.column_count();
+                self.rows.push(vec![ScoreboardCell::default(); columns]);
+                self.rows[row][0].value = row_key;
+                row
+            });
+
+        let prune = text.as_deref().is_none_or(str::is_empty);
+        self.rows[row][column].text = text;
+        if row != 0 && column != 0 {
+            self.rows[row][column].value = value;
+        }
+
+        if prune {
+            // The scan tests StdStrBuf's pointer truthiness, so an allocated
+            // empty string still keeps its row/column alive
+            // (C4Scoreboard.cpp:161-172; StdBuf.h:527).
+            if row != 0 && self.rows[row][1..].iter().all(|cell| cell.text.is_none()) {
+                self.rows.remove(row);
+            }
+            if column != 0
+                && self
+                    .rows
+                    .iter()
+                    .skip(1)
+                    .all(|row| row[column].text.is_none())
+            {
+                self.rows.iter_mut().for_each(|row| {
+                    row.remove(column);
+                });
+            }
+        }
+    }
+
+    pub(crate) fn adjust_show_count(&mut self, change: i32) {
+        self.show_count = self.show_count.wrapping_add(change);
+    }
+
+    pub(crate) fn sort_by(&mut self, column_key: i32, reverse: bool) -> bool {
+        let Some(column) = self
+            .rows
+            .first()
+            .and_then(|header| header.iter().position(|cell| cell.value == column_key))
+        else {
+            return false;
+        };
+        self.rows[1..].sort_by(|left, right| {
+            let ordering = left[column].value.cmp(&right[column].value);
+            if reverse {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
+        true
     }
 }
 

@@ -5604,7 +5604,8 @@ impl GameApp {
         let sprite_cache = Arc::new(base_sprites.clone());
 
         // Engine starts with default materials; will be updated when boot loading finishes
-        let engine = Engine::new();
+        let mut engine = Engine::new();
+        engine.set_local_players([runtime.player_owner]);
         let snapshot = engine.snapshot();
 
         let scenarios = scenario_discovery
@@ -10745,6 +10746,7 @@ impl GameApp {
         self.save_browser_return_to_menu = false;
         self.game_over_dialog = None;
         self.engine = Engine::new();
+        self.engine.set_local_players([self.local_owner]);
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.ingame_pointer = None;
@@ -10905,6 +10907,7 @@ impl GameApp {
         );
 
         let mut engine = Engine::new();
+        engine.set_local_players([self.local_owner]);
         engine.set_network_game(self.network.is_some());
         self.apply_material_library_to(&mut engine);
 
@@ -11009,6 +11012,7 @@ impl GameApp {
         self.finish_recording();
         self.loading_state = None;
         self.engine = Engine::new();
+        self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.apply_material_library();
         self.input = InputDispatcher::new();
@@ -11087,6 +11091,7 @@ impl GameApp {
 
         self.finish_recording();
         self.engine = Engine::new();
+        self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.apply_material_library();
         self.input = InputDispatcher::new();
@@ -13780,6 +13785,7 @@ mod tests {
                 players: hud_players,
                 messages: Vec::new(),
                 scoreboard: Default::default(),
+                local_players: Vec::new(),
             },
             controls: Vec::new(),
             network_packets: Vec::new(),
@@ -14237,6 +14243,7 @@ mod tests {
                 }],
                 messages: Vec::new(),
                 scoreboard: Default::default(),
+                local_players: Vec::new(),
             },
             controls: Vec::new(),
             network_packets: Vec::new(),

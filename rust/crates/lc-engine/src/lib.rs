@@ -1049,6 +1049,9 @@ pub struct HudSnapshot {
     pub messages: Vec<MessageSnapshot>,
     #[serde(default, skip_serializing_if = "ScoreboardState::is_default")]
     pub scoreboard: ScoreboardState,
+    /// Players controlled by this client (`C4Player::LocalControl`, NO-SAVE).
+    #[serde(skip)]
+    pub local_players: Vec<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -9807,6 +9810,9 @@ pub struct Engine {
     /// network session just as C++ copies `Game.NetworkActive` during
     /// parameter setup (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// Explicit client-local players. `None` is the standalone/headless
+    /// default where every registered player has local control.
+    local_players: Option<HashSet<i32>>,
     /// The C++ master object list (`::Objects`) kept in EXEC order:
     /// C4Game::ExecObjects walks the list from the BACK (C4Game.cpp:1582),
     /// so this vec is the C4ObjectList REVERSED — index 0 executes first.
@@ -11487,6 +11493,7 @@ impl Engine {
             scenario_script_counter: 0,
             random_seed: seed,
             network_game: false,
+            local_players: None,
             exec_list: Vec::new(),
             pending_object_order_commands: Vec::new(),
             exec_cursor: None,
@@ -13020,6 +13027,13 @@ impl Engine {
         self.network_game = network_game;
     }
 
+    pub fn set_local_players<I>(&mut self, players: I)
+    where
+        I: IntoIterator<Item = i32>,
+    {
+        self.local_players = Some(players.into_iter().collect());
+    }
+
     pub fn environment(&self) -> EnvironmentSettings {
         self.environment
     }
@@ -13130,6 +13144,12 @@ impl Engine {
             .values()
             .map(|player| (player.id(), player.to_state()))
             .collect();
+        let local_players: Vec<i32> = self
+            .local_players
+            .as_ref()
+            .map_or_else(|| players.keys().copied().collect(), |players| {
+                players.iter().copied().collect()
+            });
         let crew_selection: HashMap<i32, CrewSelectionState> = self
             .crew_selection
             .iter()
@@ -13215,6 +13235,7 @@ impl Engine {
                 .map(ScenarioScript::script_arc),
         )
         .with_network_game(self.network_game)
+        .with_local_players(local_players)
         .with_scoreboard(Rc::clone(&self.scoreboard))
         .with_scenario_script_counter(self.scenario_script_counter)
         .with_command_settings(self.frame, self.base_buy_enabled, self.base_sell_enabled)
@@ -18214,6 +18235,13 @@ impl Engine {
             .map(|(id, definition)| (id.clone(), definition.category()))
             .collect();
         let message_snapshots = self.messages.snapshot();
+        let mut local_players: Vec<i32> = self
+            .local_players
+            .as_ref()
+            .map_or_else(|| self.players.keys().copied().collect(), |players| {
+                players.iter().copied().collect()
+            });
+        local_players.sort_unstable();
         SimulationSnapshot {
             frame: self.frame,
             game_over: self.game_over_triggered,
@@ -18236,6 +18264,7 @@ impl Engine {
                 players: hud_players,
                 messages: message_snapshots,
                 scoreboard: self.scoreboard.borrow().clone(),
+                local_players,
             },
             controls: Vec::new(),
             network_packets: Vec::new(),
@@ -30020,6 +30049,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
     )
     .with_sky_adjustment(sky_adjustment)
     .with_scoreboard(Rc::new(RefCell::new(snapshot.hud.scoreboard.clone())))
+    .with_local_players(snapshot.hud.local_players.iter().copied())
 }
 
 fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {
@@ -56504,6 +56534,148 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert_eq!(flag_snapshot.owner, 1);
         assert_eq!(flag_snapshot.position, Vector2::new(100, 200));
 
+        Ok(())
+    }
+
+    #[test]
+    fn scenario_scoreboard_writes_preserve_cpp_row_column_order_and_header_keys(
+    ) -> Result<(), EngineError> {
+        // FnSetScoreboardData receives (row, col) but forwards (col, row),
+        // and C4Scoreboard::SetCell appends missing columns/rows while header
+        // cells keep their key instead of iData (C4Script.cpp:5881-5884;
+        // C4Scoreboard.cpp:138-175).
+        const SCRIPT: &str = r#"
+        global func Initialize()
+        {
+            var race = ScoreboardCol(RACE);
+            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Race", 123);
+            SetScoreboardData(SBRD_Caption, race, "{{RACE}}", 456);
+            SetScoreboardData(7, SBRD_Caption, "Team", 789);
+            SetScoreboardData(7, race, "75%", 75);
+        }
+        "#;
+
+        let mut engine = Engine::new();
+        engine.install_scenario_script_with_convention("Scoreboard", SCRIPT, true)?;
+        let scoreboard = engine.snapshot().hud.scoreboard;
+
+        assert_eq!(scoreboard.row_count(), 2);
+        assert_eq!(scoreboard.column_count(), 2);
+        assert_eq!(
+            scoreboard.cell(0, 0).and_then(ScoreboardCell::text),
+            Some("Race")
+        );
+        assert_eq!(scoreboard.cell(0, 0).map(ScoreboardCell::value), Some(-1));
+        assert_eq!(
+            scoreboard.cell(0, 1).and_then(ScoreboardCell::text),
+            Some("{{RACE}}")
+        );
+        assert_eq!(
+            scoreboard.cell(0, 1).map(ScoreboardCell::value),
+            Some(i32::from_le_bytes(*b"RACE"))
+        );
+        assert_eq!(
+            scoreboard.cell(1, 0).and_then(ScoreboardCell::text),
+            Some("Team")
+        );
+        assert_eq!(scoreboard.cell(1, 0).map(ScoreboardCell::value), Some(7));
+        assert_eq!(
+            scoreboard.cell(1, 1).and_then(ScoreboardCell::text),
+            Some("75%")
+        );
+        assert_eq!(scoreboard.cell(1, 1).map(ScoreboardCell::value), Some(75));
+        Ok(())
+    }
+
+    #[test]
+    fn scenario_scoreboard_sort_is_stable_and_keeps_the_caption_row() -> Result<(), EngineError> {
+        // C4Scoreboard::SortBy leaves row zero fixed and cocktail-sorts data
+        // rows by iVal; strict comparisons preserve equal-key insertion
+        // order, and fReverse selects descending order
+        // (C4Scoreboard.cpp:199-225; FnSortScoreboard at C4Script.cpp:5910-5913).
+        const SCRIPT: &str = r#"
+        global func Initialize()
+        {
+            SetScoreboardData(SBRD_Caption, 9, "Value", 0);
+            SetScoreboardData(1, SBRD_Caption, "one", 0);
+            SetScoreboardData(1, 9, "20a", 20);
+            SetScoreboardData(2, SBRD_Caption, "two", 0);
+            SetScoreboardData(2, 9, "10", 10);
+            SetScoreboardData(3, SBRD_Caption, "three", 0);
+            SetScoreboardData(3, 9, "20b", 20);
+            SortScoreboard(9, true);
+        }
+        "#;
+
+        let mut engine = Engine::new();
+        engine.install_scenario_script_with_convention("Scoreboard", SCRIPT, true)?;
+        let scoreboard = engine.snapshot().hud.scoreboard;
+        let row_keys = (0..scoreboard.row_count())
+            .filter_map(|row| scoreboard.cell(row, 0).map(ScoreboardCell::value))
+            .collect::<Vec<_>>();
+        assert_eq!(row_keys, vec![SCOREBOARD_CAPTION, 1, 3, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn scoreboard_nil_prunes_but_empty_string_persists_through_save_restore(
+    ) -> Result<(), EngineError> {
+        // SetCell prunes rows/columns only when every scanned StdStrBuf is
+        // null; Copy("") keeps a non-null empty buffer, so it survives. The
+        // complete matrix and iDlgShow are saved by CompileFunc
+        // (C4Scoreboard.cpp:156-173,266-286; StdBuf.h:438,527).
+        const SCRIPT: &str = r#"
+        global func Initialize()
+        {
+            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores", -1);
+            SetScoreboardData(10, 1, "gone", 10);
+            SetScoreboardData(10, 1);
+            SetScoreboardData(20, 2, "", 20);
+            DoScoreboardShow(3);
+        }
+        "#;
+
+        let mut engine = Engine::new();
+        engine.install_scenario_script_with_convention("Scoreboard", SCRIPT, true)?;
+        let scoreboard = engine.snapshot().hud.scoreboard;
+        assert_eq!(scoreboard.row_count(), 2);
+        assert_eq!(scoreboard.column_count(), 2);
+        assert_eq!(scoreboard.cell(1, 0).map(ScoreboardCell::value), Some(20));
+        assert_eq!(scoreboard.cell(0, 1).map(ScoreboardCell::value), Some(2));
+        assert_eq!(
+            scoreboard.cell(1, 1).and_then(ScoreboardCell::text),
+            Some("")
+        );
+        assert_eq!(scoreboard.show_count(), 3);
+
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("scoreboard state serializes");
+        let decoded = EngineState::from_json_str(&encoded).expect("scoreboard state deserializes");
+        let mut restored = Engine::new();
+        restored.restore_state(&decoded)?;
+        assert_eq!(restored.snapshot().hud.scoreboard, scoreboard);
+        Ok(())
+    }
+
+    #[test]
+    fn scenario_scoreboard_show_respects_the_engine_local_player_set() -> Result<(), EngineError> {
+        // FnDoScoreboardShow returns true but does not touch iDlgShow when
+        // iForPlr names an existing non-local player (C4Script.cpp:5896-5908).
+        const SCRIPT: &str = r#"
+        global func Initialize()
+        {
+            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores", -1);
+            DoScoreboardShow(2, 1);
+        }
+        "#;
+
+        let mut engine = Engine::new();
+        engine.register_player(PlayerConfig::new(0, "Remote"))?;
+        engine.set_local_players([]);
+        engine.install_scenario_script_with_convention("Scoreboard", SCRIPT, true)?;
+        assert_eq!(engine.snapshot().hud.scoreboard.show_count(), 0);
         Ok(())
     }
 

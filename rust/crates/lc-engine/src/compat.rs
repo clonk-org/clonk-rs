@@ -4,8 +4,8 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::command::{
-    CommandData, CommandDefinitionSnapshot, CommandEvent, CommandId, CommandMode,
-    CommandObjectSnapshot, CommandOperation, CommandPlayerSnapshot, CommandRequest,
+    definition_id_to_c4id, CommandData, CommandDefinitionSnapshot, CommandEvent, CommandId,
+    CommandMode, CommandObjectSnapshot, CommandOperation, CommandPlayerSnapshot, CommandRequest,
     CommandRuntimeContext, CommandStack, CommandStackSnapshot, CommandView, MAX_COMMAND_STACK,
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
@@ -576,6 +576,7 @@ pub(crate) struct HostWorldContext {
     transfer_zones: Rc<Vec<TransferZoneState>>,
     players: Rc<HashMap<i32, PlayerState>>,
     player_order: Rc<Vec<i32>>,
+    local_players: Rc<HashSet<i32>>,
     crew_selection: Rc<HashMap<i32, CrewSelectionState>>,
     next_object_id: u64,
     team_home_base_rule: bool,
@@ -640,6 +641,7 @@ impl Default for HostWorldContext {
             transfer_zones: Rc::new(Vec::new()),
             players: Rc::new(HashMap::new()),
             player_order: Rc::new(Vec::new()),
+            local_players: Rc::new(HashSet::new()),
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
             network_game: false,
@@ -784,6 +786,8 @@ impl HostWorldContext {
             lookup.insert(id, object);
         }
         let order = Rc::new(order);
+        let mut player_ids: Vec<_> = players.keys().copied().collect();
+        player_ids.sort_unstable();
         Self {
             objects: Rc::new(lookup),
             master_order: Rc::clone(&order),
@@ -793,11 +797,8 @@ impl HostWorldContext {
             definition_order: Rc::new(Vec::new()),
             sectors,
             transfer_zones: Rc::new(transfer_zones),
-            player_order: Rc::new({
-                let mut ids: Vec<_> = players.keys().copied().collect();
-                ids.sort_unstable();
-                ids
-            }),
+            local_players: Rc::new(player_ids.iter().copied().collect()),
+            player_order: Rc::new(player_ids),
             players: Rc::new(players),
             crew_selection: Rc::new(crew_selection),
             next_object_id,
@@ -834,6 +835,14 @@ impl HostWorldContext {
         scoreboard: Rc<RefCell<ScoreboardState>>,
     ) -> Self {
         self.scoreboard = scoreboard;
+        self
+    }
+
+    pub(crate) fn with_local_players<I>(mut self, players: I) -> Self
+    where
+        I: IntoIterator<Item = i32>,
+    {
+        self.local_players = Rc::new(players.into_iter().collect());
         self
     }
 
@@ -4934,6 +4943,142 @@ fn parse_optional_string(
     }
 }
 
+/// FnSetScoreboardData (C4Script.cpp:5881-5884): script order is row then
+/// column; C4Scoreboard::SetCell receives column then row and returns void.
+fn set_scoreboard_data(args: &[Value]) -> Result<Value, RuntimeError> {
+    let row = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetScoreboardData",
+        "row",
+    )?;
+    let column = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetScoreboardData",
+        "column",
+    )?;
+    let text = parse_optional_string(args.get(2), "SetScoreboardData", "text")?;
+    let data = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "SetScoreboardData",
+        "data",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow().as_ref() {
+            context
+                .world
+                .scoreboard
+                .borrow_mut()
+                .set_cell(column, row, text, data);
+        }
+    });
+    Ok(Value::Nil)
+}
+
+fn scoreboard_cell_keys(args: &[Value], function: &str) -> Result<(i32, i32), RuntimeError> {
+    let row = value_to_i32(args.first().unwrap_or(&Value::Nil), function, "row")?;
+    let column = value_to_i32(args.get(1).unwrap_or(&Value::Nil), function, "column")?;
+    Ok((column, row))
+}
+
+/// FnGetScoreboardString (C4Script.cpp:5886-5889): a null cell string is
+/// returned as nil; allocated empty strings remain strings.
+fn get_scoreboard_string(args: &[Value]) -> Result<Value, RuntimeError> {
+    let (column, row) = scoreboard_cell_keys(args, "GetScoreboardString")?;
+    Ok(HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| {
+                context
+                    .world
+                    .scoreboard
+                    .borrow()
+                    .cell_by_key(column, row)
+                    .and_then(|cell| cell.text().map(str::to_string))
+            })
+            .map(Value::String)
+            .unwrap_or(Value::Nil)
+    }))
+}
+
+/// FnGetScoreboardData (C4Script.cpp:5891-5894): a missing cell reads zero.
+fn get_scoreboard_data(args: &[Value]) -> Result<Value, RuntimeError> {
+    let (column, row) = scoreboard_cell_keys(args, "GetScoreboardData")?;
+    Ok(Value::Int(HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| {
+                context
+                    .world
+                    .scoreboard
+                    .borrow()
+                    .cell_by_key(column, row)
+                    .map(crate::ScoreboardCell::value)
+            })
+            .unwrap_or(0)
+    })))
+}
+
+/// FnDoScoreboardShow (C4Script.cpp:5896-5908): the optional player number is
+/// one-based; remote players report success without changing this client's
+/// local dialog refcount.
+fn do_scoreboard_show(args: &[Value]) -> Result<Value, RuntimeError> {
+    let change = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "DoScoreboardShow",
+        "change",
+    )?;
+    let for_player = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "DoScoreboardShow",
+        "player",
+    )?;
+
+    Ok(HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Value::Bool(false);
+        };
+        if for_player != 0 {
+            let player = for_player.wrapping_sub(1);
+            if !context.world.players.contains_key(&player) {
+                return Value::Bool(false);
+            }
+            if !context.world.local_players.contains(&player) {
+                return Value::Bool(true);
+            }
+        }
+        // The headless engine records the logical C4Scoreboard refcount; the
+        // app presentation owns C4GUI's valid/exclusive/game-over guards.
+        context
+            .world
+            .scoreboard
+            .borrow_mut()
+            .adjust_show_count(change);
+        Value::Bool(true)
+    }))
+}
+
+/// FnSortScoreboard (C4Script.cpp:5910-5913) delegates to the stable
+/// C4Scoreboard row sort and reports whether the key exists.
+fn sort_scoreboard(args: &[Value]) -> Result<Value, RuntimeError> {
+    let column = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SortScoreboard",
+        "column",
+    )?;
+    let reverse = value_to_bool(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SortScoreboard",
+        "reverse",
+    )?;
+    Ok(Value::Bool(HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|context| context.world.scoreboard.borrow_mut().sort_by(column, reverse))
+    })))
+}
+
 fn c4id_to_definition(id: i32) -> Option<String> {
     if id == 0 {
         return None;
@@ -5852,6 +5997,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Hostile", hostile);
     script.register_host_function("SetHostility", set_hostility);
     script.register_host_function("SetFoW", set_fow);
+    script.register_host_function("SetScoreboardData", set_scoreboard_data);
     // Fn[Get/Set]PlrExtraData (C4Script.cpp:4692-4747, AddFunc
     // :6666-6667) — MagiClonk's Recruitment combo preference.
     script.register_host_function("GetPlrExtraData", get_plr_extra_data);
@@ -5859,6 +6005,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetScenarioVal", get_scenario_val);
     script.register_host_function("GetLeague", get_league);
     script.register_host_function("GetScore", get_score);
+    script.register_host_function("GetScoreboardString", get_scoreboard_string);
+    script.register_host_function("GetScoreboardData", get_scoreboard_data);
     script.register_host_function("GetPlrValue", get_plr_value);
     script.register_host_function("GetPlrValueGain", get_plr_value_gain);
     script.register_host_function("GetPlrKnowledge", get_plr_knowledge);
@@ -6084,6 +6232,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     // :6715-6716) — Fantasy's NoMagicEnergy.c4d global overrides chain to
     // these via inherited.
     script.register_host_function("DoMagicEnergy", do_magic_energy);
+    script.register_host_function("DoScoreboardShow", do_scoreboard_show);
     script.register_host_function("GetMagicEnergy", get_magic_energy);
     script.register_host_function("GetPhysical", get_physical);
     script.register_host_function("SetPhysical", set_physical);
@@ -6131,6 +6280,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GrabObjectInfo", grab_object_info);
     script.register_host_function("MakeCrewMember", make_crew_member);
     script.register_host_function("C4Id", c4_id);
+    script.register_host_function("ScoreboardCol", scoreboard_col);
+    script.register_host_function("SortScoreboard", sort_scoreboard);
     script.register_host_function("Pow", pow_func);
     script.register_host_function("BoundBy", bound_by_func);
     script.register_host_function("Sin", sin_func);
@@ -9915,6 +10066,23 @@ fn c4_id(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(name) if !name.is_empty() => Value::C4Id(name),
         _ => Value::Int(0),
     })
+}
+
+/// `C4AulDefCastFunc<C4V_C4ID,C4V_Int>` (C4Script.cpp:6184-6195,
+/// :7042): preserve the four-byte C4ID payload and change only its type tag.
+fn scoreboard_col(args: &[Value]) -> Result<Value, RuntimeError> {
+    let raw = match args.first() {
+        None | Some(Value::Nil) | Some(Value::Int(0)) | Some(Value::Bool(false)) => 0,
+        Some(Value::C4Id(id)) => definition_id_to_c4id(id).unwrap_or(0),
+        Some(Value::Int(raw @ 1..=9999)) => *raw,
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "ScoreboardCol: expected C4ID, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    Ok(Value::Int(raw))
 }
 
 fn pow_func(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -24901,6 +25069,7 @@ mod tests {
         "DoHomebaseMaterial",
         "DoHomebaseProduction",
         "DoMagicEnergy",
+        "DoScoreboardShow",
         "EffectCall",
         "EffectVar",
         "EnergyCheck",
@@ -25007,6 +25176,8 @@ mod tests {
         "GetRDir",
         "GetScenarioVal",
         "GetScore",
+        "GetScoreboardData",
+        "GetScoreboardString",
         "GetSeason",
         "GetSelectCount",
         "GetSkyAdjust",
@@ -25073,6 +25244,7 @@ mod tests {
         "ResetGamma",
         "ResetPhysical",
         "SEqual",
+        "ScoreboardCol",
         "ScriptCounter",
         "ScriptGo",
         "SelectMenuItem",
@@ -25124,6 +25296,7 @@ mod tests {
         "SetPosition",
         "SetR",
         "SetRDir",
+        "SetScoreboardData",
         "SetSeason",
         "SetShape",
         "SetSkyAdjust",
@@ -25143,6 +25316,7 @@ mod tests {
         "ShiftContents",
         "Sin",
         "Smoke",
+        "SortScoreboard",
         "Sound",
         "SoundLevel",
         "Sqrt",
@@ -25164,6 +25338,116 @@ mod tests {
             .map(|name| name.to_string())
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn scoreboard_col_retags_the_c4id_payload_as_an_integer() {
+        // C4AulDefCastFunc returns the unchanged C4ID data with an Int tag
+        // (C4Script.cpp:6184-6195, registered as ScoreboardCol at :7042).
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script("#strict 2\nfunc Probe() { return ScoreboardCol(RACE); }")
+            .expect("scoreboard probe compiles");
+
+        assert_eq!(
+            engine.call("Probe", &[]).expect("ScoreboardCol succeeds"),
+            Value::Int(i32::from_le_bytes(*b"RACE"))
+        );
+    }
+
+    #[test]
+    fn scoreboard_getters_return_cpp_missing_and_present_values() {
+        // FnGetScoreboardString/Data reverse the script row/column pair and
+        // return nil/0 for a missing key (C4Script.cpp:5886-5894;
+        // C4Scoreboard.cpp:177-197).
+        let scoreboard = Rc::new(RefCell::new(ScoreboardState::default()));
+        let world = HostWorldContext::default().with_scoreboard(Rc::clone(&scoreboard));
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                "#strict 2\nfunc Probe() {\n\
+                 SetScoreboardData(7, 1234, \"42\", 42);\n\
+                 return [GetScoreboardString(7, 1234),\n\
+                         GetScoreboardData(7, 1234),\n\
+                         GetScoreboardString(8, 1234),\n\
+                         GetScoreboardData(7, 5678)];\n}",
+            )
+            .expect("scoreboard getter probe compiles");
+
+        let (result, _) = with_effect_context(None, &[], world, 1, || engine.call("Probe", &[]));
+        assert_eq!(
+            result.expect("scoreboard getters succeed"),
+            Value::Array(vec![
+                Value::String("42".into()),
+                Value::Int(42),
+                Value::Nil,
+                Value::Int(0),
+            ])
+        );
+    }
+
+    #[test]
+    fn do_scoreboard_show_targets_one_based_players_and_updates_the_refcount() {
+        // FnDoScoreboardShow looks up iForPlr-1, returns false only for a
+        // missing requested player, and otherwise passes iChange to the
+        // scoreboard refcount (C4Script.cpp:5896-5908;
+        // C4Scoreboard.cpp:234-256).
+        let scoreboard = Rc::new(RefCell::new(ScoreboardState::default()));
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            [PlayerState {
+                id: 0,
+                ..PlayerState::default()
+            }],
+        )
+        .with_scoreboard(Rc::clone(&scoreboard));
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                "#strict 2\nfunc Probe() {\n\
+                 SetScoreboardData(-1, -1, \"Scores\", -1);\n\
+                 return [DoScoreboardShow(2, 1),\n\
+                         DoScoreboardShow(1, 2),\n\
+                         DoScoreboardShow(-1)];\n}",
+            )
+            .expect("scoreboard show probe compiles");
+
+        let (result, _) = with_effect_context(None, &[], world, 1, || engine.call("Probe", &[]));
+        assert_eq!(
+            result.expect("scoreboard show calls succeed"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(true),
+            ])
+        );
+        assert_eq!(scoreboard.borrow().show_count(), 1);
+        assert!(scoreboard.borrow().should_be_shown());
+    }
+
+    #[test]
+    fn do_scoreboard_show_remote_player_is_a_sync_safe_no_op() {
+        // Existing remote players return true without mutating iDlgShow
+        // (C4Script.cpp:5900-5905).
+        let scoreboard = Rc::new(RefCell::new(ScoreboardState::default()));
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            [PlayerState {
+                id: 0,
+                ..PlayerState::default()
+            }],
+        )
+        .with_local_players([])
+        .with_scoreboard(Rc::clone(&scoreboard));
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            do_scoreboard_show(&[Value::Int(3), Value::Int(1)])
+        });
+
+        assert_eq!(result.expect("remote show call succeeds"), Value::Bool(true));
+        assert_eq!(scoreboard.borrow().show_count(), 0);
     }
 
     #[test]
