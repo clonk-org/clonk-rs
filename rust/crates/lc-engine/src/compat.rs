@@ -17088,17 +17088,14 @@ fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     if std::env::var("LC_DIRDBG").is_ok() && !matches!(args.first(), Some(Value::Int(_))) {
         eprintln!("DIRDBG SetDir args={args:?}");
     }
-    // Unfilled ndir is nil -> 0 = DIR_Left (FnSetDir, C4Script.cpp:798).
-    let raw_direction = match args.first().unwrap_or(&Value::Nil) {
-        Value::Int(value) => *value,
-        Value::Nil => 0,
-        other => {
-            return Err(RuntimeError::new(format!(
-                "SetDir: expected int or nil for direction, got {}",
-                other.type_name()
-            )))
-        }
-    };
+    // Unfilled ndir is nil -> 0 = DIR_Left; native int parameters also
+    // accept C4Value bools through CheckConvertFunctionParameters
+    // (C4AulExec.cpp:1364-1396; C4Value.cpp:514-518).
+    let raw_direction = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetDir",
+        "direction",
+    )?;
 
     let direction = Direction::from_raw(raw_direction);
 
@@ -33053,6 +33050,18 @@ func ProbeBadIndex(id) {
         let (result, outcome) = with_walking_host_context(|| set_dir(&[Value::Int(1)]));
         let value = result.expect("SetDir succeeds");
         assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("direction update recorded");
+        assert_eq!(update.direction, Some(Direction::Right));
+    }
+
+    #[test]
+    fn set_dir_converts_bool_to_int_like_cpp() {
+        // Native function parameters use C4Value::ConvertTo before dispatch;
+        // Bool -> Int is CnvOK and preserves the shared 0/1 payload
+        // (C4AulExec.cpp:1364-1396; C4Value.cpp:514-518;
+        // C4Script.cpp:799-803). Epic Voltage calls SetDir(!i).
+        let (result, outcome) = with_walking_host_context(|| set_dir(&[Value::Bool(true)]));
+        assert_eq!(result.expect("SetDir converts bool"), Value::Bool(true));
         let update = outcome.object_update.expect("direction update recorded");
         assert_eq!(update.direction, Some(Direction::Right));
     }
