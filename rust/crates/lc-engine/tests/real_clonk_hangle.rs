@@ -474,6 +474,141 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         engine.object_snapshot(clonk),
         collected_gold,
     );
+
+    // Tutorial01 Script210/215 asks the player to carry GOLD into HUT2,
+    // then fulfills SCRG and selects Tutorial02 (Script.c:171-182). The
+    // normal Up control must take C4ObjectCom's entrance path before Jump
+    // (C4ObjectCom.cpp:335-348); GOLD remains nested in the carried CLNK.
+    engine
+        .apply_object_update(
+            clonk,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(570, 170))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .with_command_direction(CommandDirection::Stop),
+        )
+        .expect("place the gold-carrying CLNK at HUT2's entrance");
+    engine
+        .player_in_com(joined.number, COM_UP, 0)
+        .expect("normal player Up control at HUT2");
+    for _ in 0..30 {
+        if engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.container == Some(hut))
+        {
+            break;
+        }
+        engine.tick().expect("final HUT2 entrance frame");
+    }
+    assert_eq!(
+        engine
+            .object_snapshot(clonk)
+            .expect("CLNK after entering HUT2")
+            .container,
+        Some(hut),
+        "the normal Up control must carry the CLNK into HUT2"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(gold)
+            .expect("GOLD carried into HUT2")
+            .container,
+        Some(clonk),
+        "Tutorial01 carries GOLD inside the entering CLNK rather than dropping it into HUT2"
+    );
+
+    // C4Game::Ticks only raises TimeGo; the external Sec1Timer consumes it
+    // (C4Game.cpp:1755-1759,1899-1913). Pulse exactly seven deterministic
+    // seconds while Script%d advances on its Tick10 cadence
+    // (C4ScriptHost.cpp:222-230).
+    let mut elapsed_seconds = 0;
+    let mut reached_tutorial02 = false;
+    for _ in 0..450 {
+        engine.tick().expect("Script215 approach frame");
+        if elapsed_seconds < 7 {
+            engine.sec1_timer();
+            elapsed_seconds += 1;
+        }
+        if engine.next_mission().path == r"Tutorial.c4f\Tutorial02.c4s" {
+            reached_tutorial02 = true;
+            break;
+        }
+    }
+    assert!(
+        reached_tutorial02,
+        "Script215 must fulfill SCRG and select Tutorial02; frame={}, next_mission={:?}",
+        engine.frame(),
+        engine.next_mission(),
+    );
+    assert_eq!(engine.game_time(), 7);
+
+    // SCRG's GOAL controller checks fulfillment every 250 frames, changes
+    // to the 30-frame Wait4End action, then calls GameOver
+    // (Goal.c4d DefCore.txt:7-8; ActMap.txt:9-15; Script.c:52-81).
+    let mut completed = None;
+    for _ in 0..300 {
+        let snapshot = engine.tick().expect("GOAL completion frame");
+        if snapshot.game_over {
+            completed = Some(snapshot);
+            break;
+        }
+    }
+    let completed = completed.unwrap_or_else(|| {
+        panic!(
+            "fulfilled Tutorial01 must reach GameOver; frame={}, next_mission={:?}",
+            engine.frame(),
+            engine.next_mission(),
+        )
+    });
+
+    // C4Game evaluates players before C4RoundResults freezes the goal list
+    // and Game.Time (C4Game.cpp:845-854,1832-1856;
+    // C4RoundResults.cpp:280-313). The final owned assets are CLNK 25,
+    // FLAG 100, HUT2 35 and GOLD 5: 140 gain over the initial CLNK, plus
+    // C4Player::Evaluate's 100-point winner bonus (C4Player.cpp:84-105,
+    // 930-968).
+    assert_eq!(
+        completed
+            .round_results
+            .goals
+            .iter()
+            .map(|goal| goal.as_str())
+            .collect::<Vec<_>>(),
+        vec!["SCRG"]
+    );
+    assert_eq!(
+        completed
+            .round_results
+            .fulfilled_goals
+            .iter()
+            .map(|goal| goal.as_str())
+            .collect::<Vec<_>>(),
+        vec!["SCRG"]
+    );
+    assert_eq!(completed.round_results.playing_time_seconds, 7);
+
+    let player = completed
+        .players
+        .iter()
+        .find(|player| player.id == joined.number)
+        .expect("Tutorial01 evaluated player");
+    assert!(player.won);
+    assert!(player.evaluated);
+    assert_eq!(player.value, 165);
+    assert_eq!(player.value_gain, 140);
+    assert_eq!(player.score, 240);
+    assert_eq!(player.total_playing_time, 7);
+
+    let result = completed
+        .round_results
+        .players
+        .iter()
+        .find(|result| result.player_info_id == player.player_info_id)
+        .expect("Tutorial01 frozen player result");
+    assert_eq!(result.total_playing_time, 7);
+    assert_eq!(result.score_old, 0);
+    assert_eq!(result.score_new, Some(240));
 }
 
 #[test]
