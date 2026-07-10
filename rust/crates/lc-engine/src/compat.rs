@@ -32335,7 +32335,7 @@ func ProbeBadIndex(id) {
     fn get_effect_converts_bool_index_to_c4valueint() {
         // FnGetEffect declares iIndex as C4ValueInt (C4Script.cpp:5458),
         // and Bool->Int is a direct conversion over the shared Data.Int slot
-        // (C4Value.cpp:512-514). Hazard's Weapon GetFMData passes the boolean
+        // (C4Value.cpp:514-518). Hazard's Weapon GetFMData passes the boolean
         // result of `GetEffect(...) || j == 0` back as this index
         // (Weapon.c4d/Script.c:543-545).
         let state = empty_state();
