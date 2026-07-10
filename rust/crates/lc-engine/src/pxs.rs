@@ -6,7 +6,7 @@
 //! lowest free slot and `Execute()` iterates chunks then slots in order, so
 //! slot reuse determines deterministic execution order.
 
-use crate::math::{itofix, C4Fixed};
+use crate::math::{itofix, C4Fixed, FixedVec2};
 use crate::rng::LcgRng;
 use crate::MaterialId;
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,18 @@ impl PxsSystem {
         false
     }
 
+    /// Draw one cast velocity in the forced C++ evaluation order. Kept
+    /// separate from storage so script-host CastPXS can sample immediately
+    /// while deferring the actual PXS insertion to the engine outcome fold.
+    pub(crate) fn sample_cast_velocity(rng: &mut LcgRng, level: i32) -> FixedVec2 {
+        let r2 = rng.random(level + 1);
+        let r1 = rng.random(level + 1);
+        FixedVec2::new(
+            C4Fixed::from_raw(itofix(r1 - level / 2).val() / 10),
+            C4Fixed::from_raw(itofix(r2 - level).val() / 10),
+        )
+    }
+
     /// `C4PXSSystem::Cast` (C4PXS.cpp:303-316): per particle draw
     /// `Random(level+1)` for ydir FIRST, then for xdir (forced argument
     /// evaluation order), giving xdir = itofix(r1 - level/2)/10 and
@@ -92,14 +104,13 @@ impl PxsSystem {
         level: i32,
     ) {
         for _ in 0..num {
-            let r2 = rng.random(level + 1);
-            let r1 = rng.random(level + 1);
+            let velocity = Self::sample_cast_velocity(rng, level);
             self.create(
                 mat,
                 itofix(tx),
                 itofix(ty),
-                C4Fixed::from_raw(itofix(r1 - level / 2).val() / 10),
-                C4Fixed::from_raw(itofix(r2 - level).val() / 10),
+                velocity.x,
+                velocity.y,
             );
         }
     }
