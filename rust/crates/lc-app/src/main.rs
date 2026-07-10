@@ -92,7 +92,7 @@ use object_menu::{
     EngineScriptMenuPointerTarget, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
     ObjectMenuState,
 };
-use pixels::{Pixels, SurfaceTexture};
+use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
 use startup_player_files::{discover_player_files, persist_activations, StartupPlayerFile};
@@ -1479,7 +1479,14 @@ fn main() -> Result<()> {
 
     let size = enforce_min_size(window.inner_size());
     let surface = SurfaceTexture::new(size.width, size.height, &window);
-    let mut pixels = Pixels::new(size.width, size.height, surface)
+    // Restrict wgpu to the primary backends: the GL backend probes for libEGL,
+    // which does not exist on macOS, and logs a spurious "Unable to open
+    // libEGL" before falling back to Metal.
+    let mut pixels = PixelsBuilder::new(size.width, size.height, surface)
+        .wgpu_backend(
+            pixels::wgpu::util::backend_bits_from_env().unwrap_or(pixels::wgpu::Backends::PRIMARY),
+        )
+        .build()
         .context("failed to create pixel framebuffer")?;
 
     // The app lays out and renders at the GUI resolution; the presenter
