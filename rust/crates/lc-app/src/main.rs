@@ -1931,7 +1931,7 @@ impl AudioContext {
                     target,
                     volume,
                     looped,
-                    multiple: _,
+                    multiple,
                     custom_falloff,
                 } => {
                     if !self.options.sound_enabled {
@@ -1942,6 +1942,7 @@ impl AudioContext {
                         *target,
                         *volume,
                         *looped,
+                        *multiple,
                         *custom_falloff,
                         snapshot,
                         focus,
@@ -2000,6 +2001,7 @@ impl AudioContext {
         target: Option<ObjectId>,
         volume: u8,
         looped: bool,
+        _multiple: bool,
         custom_falloff: Option<i32>,
         snapshot: &SimulationSnapshot,
         focus: Option<&ObjectSnapshot>,
