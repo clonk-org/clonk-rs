@@ -5365,6 +5365,32 @@ impl ScriptGlobalState {
     }
 }
 
+fn denumerate_script_value(value: &Value, object_numbers: &HashSet<u64>) -> Value {
+    match value {
+        Value::Object(id) => object_numbers
+            .get(id)
+            .map_or(Value::Nil, |_| Value::Object(*id)),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| denumerate_script_value(value, object_numbers))
+                .collect(),
+        ),
+        Value::Proplist(entries) => Value::Proplist(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        denumerate_script_value(value, object_numbers),
+                    )
+                })
+                .collect(),
+        ),
+        value => value.clone(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub frame: u64,
@@ -5573,7 +5599,7 @@ impl EngineState {
             crew_selection: snapshot.crew_selection.clone(),
             crew_roles: snapshot.crew_roles.clone(),
             global_effects: snapshot.global_effects.clone(),
-            script_globals: ScriptGlobalState::default(),
+            script_globals: snapshot.script_globals.clone(),
             known_crew_owners,
             eliminated_crew_owners,
             transfer_zones: snapshot.transfer_zones.clone(),
@@ -18297,7 +18323,7 @@ impl Engine {
             sky: sky_snapshot,
             weather_events,
             global_effects: self.global_effects.clone(),
-            script_globals: ScriptGlobalState::default(),
+            script_globals: self.capture_script_globals(),
             particles,
             players: player_states,
             crew_selection,
@@ -18394,6 +18420,67 @@ impl Engine {
         self.remove_old_sync_checks();
     }
 
+    fn capture_script_globals(&self) -> ScriptGlobalState {
+        let numbered = self
+            .script_global_slots
+            .borrow()
+            .iter()
+            .map(|(&index, cell)| (index, cell.borrow().clone()))
+            .collect();
+        let named = self
+            .script_globals
+            .borrow()
+            .iter()
+            .map(|(name, cell)| (name.clone(), cell.borrow().clone()))
+            .collect();
+        ScriptGlobalState { numbered, named }
+    }
+
+    /// C4AulScriptEngine::DenumerateVariablePointers after every object has
+    /// loaded (C4Aul.cpp:506-520; C4Game.cpp:2492): restore numbered slots,
+    /// then map saved GlobalNamed values onto the declarations registered by
+    /// the fresh engine. Obsolete saved names are dropped and new declarations
+    /// stay nil, matching C4ValueMapData::SetNameList.
+    fn restore_script_globals(&mut self, state: &ScriptGlobalState) {
+        let object_numbers: HashSet<u64> = self
+            .objects
+            .iter()
+            .filter(|object| object.state.status != ObjectStatus::Deleted)
+            .map(|object| object.id.as_u64())
+            .collect();
+
+        let mut numbered = self.script_global_slots.borrow_mut();
+        numbered.clear();
+        for (&index, value) in &state.numbered {
+            // Serialized C4ValueList positions are always within MaxSize;
+            // ignore impossible keyed JSON input rather than creating an
+            // unreachable runtime slot.
+            if !(0..1_000_000).contains(&index) {
+                continue;
+            }
+            numbered.insert(
+                index,
+                lc_script::value_cell(denumerate_script_value(value, &object_numbers)),
+            );
+        }
+        drop(numbered);
+
+        let named_cells: HashMap<String, lc_script::ValueCell> = self
+            .script_globals
+            .borrow()
+            .iter()
+            .map(|(name, cell)| (name.clone(), cell.clone()))
+            .collect();
+        for cell in named_cells.values() {
+            *cell.borrow_mut() = Value::Nil;
+        }
+        for (name, value) in &state.named {
+            if let Some(cell) = named_cells.get(name) {
+                *cell.borrow_mut() = denumerate_script_value(value, &object_numbers);
+            }
+        }
+    }
+
     /// `C4GameControl::GetSyncCheck` (C4GameControl.cpp:493-506).
     pub fn get_sync_check(&self, frame: i32) -> Option<&SyncCheckPacket> {
         self.sync_checks.iter().find(|check| check.frame == frame)
@@ -18480,7 +18567,7 @@ impl Engine {
             crew_selection,
             crew_roles,
             global_effects: self.global_effects.clone(),
-            script_globals: ScriptGlobalState::default(),
+            script_globals: self.capture_script_globals(),
             known_crew_owners,
             eliminated_crew_owners,
             transfer_zones: self.transfer_zones.states(),
@@ -18768,6 +18855,8 @@ impl Engine {
                 self.objects[index].state.controller = snapshot.controller;
             }
         }
+
+        self.restore_script_globals(&state.script_globals);
 
         // C++ recomputes OCF on load rather than persisting it
         // (C4Object.cpp:2863, savegame SetOCF).
@@ -39163,6 +39252,273 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
                 .call_object_function(reader_idx, "Read", Vec::new())
                 .expect("read succeeds"),
             Value::Int(41)
+        );
+    }
+
+    #[test]
+    fn script_globals_survive_json_restore_with_live_object_references() {
+        // C4AulScriptEngine::CompileFunc saves `Globals` and `GlobalNamed`,
+        // then DenumerateVariablePointers recursively resolves their object
+        // references after objects load (C4Aul.cpp:506-520;
+        // C4Value.cpp:686-713).
+        let writer_script = r#"
+        static named_scalar, named_refs;
+        func Seed(object target) {
+            Global(2) = 17;
+            Global(8) = [target, [target]];
+            GlobalN("named_scalar") = 23;
+            GlobalN("named_refs") = [target, [target]];
+            return true;
+        }
+        "#;
+        let reader_script = r#"
+        func Read() {
+            return [Global(2), Global(8), GlobalN("named_scalar"), GlobalN("named_refs")];
+        }
+        func Mutate() {
+            Global(2) += 1;
+            GlobalN("named_scalar") += 2;
+            return [Global(2), GlobalN("named_scalar")];
+        }
+        "#;
+        let register = |engine: &mut Engine| {
+            engine
+                .register_definition(
+                    Definition::from_script("WRTR", "Writer", writer_script)
+                        .expect("writer compiles"),
+                )
+                .expect("writer registers");
+            engine
+                .register_definition(
+                    Definition::from_script("READ", "Reader", reader_script)
+                        .expect("reader compiles"),
+                )
+                .expect("reader registers");
+            engine
+                .register_definition(simple_definition("TARG"))
+                .expect("target registers");
+        };
+
+        let mut engine = Engine::with_seed(7);
+        register(&mut engine);
+        let writer = engine
+            .spawn_object(SpawnConfig::new("WRTR"))
+            .expect("writer spawns");
+        let reader = engine
+            .spawn_object(SpawnConfig::new("READ"))
+            .expect("reader spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let writer_idx = engine.find_object_index(writer).expect("writer exists");
+        engine
+            .call_object_function(
+                writer_idx,
+                "Seed",
+                vec![Value::Object(target.as_u64())],
+            )
+            .expect("globals seed");
+
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.script_globals.numbered.keys().copied().collect::<Vec<_>>(),
+            vec![2, 8],
+            "numbered globals stay sparse"
+        );
+        assert_eq!(snapshot.script_globals.named.len(), 2);
+        let object_refs = Value::Array(vec![
+            Value::Object(target.as_u64()),
+            Value::Array(vec![Value::Object(target.as_u64())]),
+        ]);
+        let expected = Value::Array(vec![
+            Value::Int(17),
+            object_refs.clone(),
+            Value::Int(23),
+            object_refs,
+        ]);
+        let read_globals = |engine: &mut Engine| {
+            let reader_idx = engine
+                .find_object_index(reader)
+                .expect("reader restores");
+            engine
+                .call_object_function(reader_idx, "Read", Vec::new())
+                .expect("cross-host read succeeds")
+        };
+
+        let mut snapshot_restored = Engine::with_seed(88);
+        register(&mut snapshot_restored);
+        snapshot_restored
+            .restore_snapshot(&snapshot)
+            .expect("snapshot restores");
+        assert_eq!(read_globals(&mut snapshot_restored), expected);
+
+        let json = engine
+            .capture_state()
+            .to_json_string()
+            .expect("state serializes");
+        let state = EngineState::from_json_str(&json).expect("state deserializes");
+        let mut restored = Engine::with_seed(99);
+        register(&mut restored);
+        restored.restore_state(&state).expect("state restores");
+
+        let reader_idx = restored
+            .find_object_index(reader)
+            .expect("reader restores");
+        assert_eq!(read_globals(&mut restored), expected);
+        assert_eq!(
+            restored
+                .call_object_function(reader_idx, "Mutate", Vec::new())
+                .expect("restored references stay mutable"),
+            Value::Array(vec![Value::Int(18), Value::Int(25)])
+        );
+    }
+
+    #[test]
+    fn global_restore_denumerates_missing_objects_and_maps_declared_names() {
+        // C4ValueMapData loads through a temporary saved name list, then
+        // SetNameList copies only names still registered by the fresh script
+        // engine (C4ValueMap.cpp:236-295). DenumeratePointer clears missing
+        // object references recursively (C4Value.cpp:686-713).
+        let old_script = r#"
+        static kept, obsolete;
+        func Seed(object target) {
+            Global(4) = [target, [target]];
+            GlobalN("kept") = target;
+            GlobalN("obsolete") = 9;
+        }
+        "#;
+        let new_script = r#"
+        static kept, added;
+        func Read() { return [Global(4), GlobalN("kept"), GlobalN("added")]; }
+        func SetAdded() { GlobalN("added") = 5; return GlobalN("added"); }
+        func SetObsolete() { GlobalN("obsolete") = 5; }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("HOLD", "Holder", old_script).expect("old script compiles"),
+            )
+            .expect("old holder registers");
+        engine
+            .register_definition(simple_definition("TARG"))
+            .expect("target registers");
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD"))
+            .expect("holder spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let holder_idx = engine.find_object_index(holder).expect("holder exists");
+        engine
+            .call_object_function(
+                holder_idx,
+                "Seed",
+                vec![Value::Object(target.as_u64())],
+            )
+            .expect("globals seed");
+
+        let mut state = engine.capture_state();
+        state.objects.retain(|object| object.snapshot.id != target);
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(
+                Definition::from_script("HOLD", "Holder", new_script).expect("new script compiles"),
+            )
+            .expect("new holder registers");
+        restored
+            .register_definition(simple_definition("TARG"))
+            .expect("target definition registers");
+        restored.restore_state(&state).expect("state restores");
+
+        let holder_idx = restored
+            .find_object_index(holder)
+            .expect("holder restores");
+        assert_eq!(
+            restored
+                .call_object_function(holder_idx, "Read", Vec::new())
+                .expect("globals read"),
+            Value::Array(vec![
+                Value::Array(vec![Value::Nil, Value::Array(vec![Value::Nil])]),
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+        assert_eq!(
+            restored
+                .call_object_function(holder_idx, "SetAdded", Vec::new())
+                .expect("new declaration owns a live nil cell"),
+            Value::Int(5)
+        );
+        assert!(
+            restored
+                .call_object_function(holder_idx, "SetObsolete", Vec::new())
+                .is_err(),
+            "a saved name absent from the fresh declaration list is dropped"
+        );
+    }
+
+    #[test]
+    fn legacy_state_without_script_globals_restores_defaults() {
+        // Saves from before script-global persistence have no corresponding
+        // C4AulScriptEngine section. Treat that omission as empty `Globals`
+        // and nil values for every declaration in the fresh GlobalNamed name
+        // list (C4Aul.cpp:513-520; C4ValueMap.cpp:236-295).
+        let script = r#"
+        static named;
+        func Seed() { Global(3) = 11; GlobalN("named") = 12; }
+        func Read() { return [Global(3), GlobalN("named")]; }
+        "#;
+        let register = |engine: &mut Engine| {
+            engine
+                .register_definition(
+                    Definition::from_script("HOLD", "Holder", script)
+                        .expect("holder compiles"),
+                )
+                .expect("holder registers");
+        };
+
+        let mut saved = Engine::with_seed(7);
+        register(&mut saved);
+        let holder = saved
+            .spawn_object(SpawnConfig::new("HOLD"))
+            .expect("holder spawns");
+        let mut legacy: serde_json::Value = serde_json::from_str(
+            &saved
+                .capture_state()
+                .to_json_string()
+                .expect("state serializes"),
+        )
+        .expect("state JSON parses");
+        legacy
+            .as_object_mut()
+            .expect("engine state is an object")
+            .remove("script_globals");
+        let legacy: EngineState =
+            serde_json::from_value(legacy).expect("legacy state without globals parses");
+        assert!(legacy.script_globals.is_empty());
+
+        let mut restored = Engine::with_seed(99);
+        register(&mut restored);
+        let stale_holder = restored
+            .spawn_object(SpawnConfig::new("HOLD"))
+            .expect("stale holder spawns");
+        let stale_idx = restored
+            .find_object_index(stale_holder)
+            .expect("stale holder exists");
+        restored
+            .call_object_function(stale_idx, "Seed", Vec::new())
+            .expect("stale globals seed");
+
+        restored.restore_state(&legacy).expect("legacy state restores");
+        let holder_idx = restored
+            .find_object_index(holder)
+            .expect("saved holder restores");
+        assert_eq!(
+            restored
+                .call_object_function(holder_idx, "Read", Vec::new())
+                .expect("default globals read"),
+            Value::Array(vec![Value::Nil, Value::Nil]),
+            "omitted old-save globals clear stale numbered and named values"
         );
     }
 
