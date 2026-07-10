@@ -32,8 +32,8 @@ use crate::{
     EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate,
-    PhysicsSettings, PlayerState, QueuedCommand, ShapeAttachRecord, SpawnConfig, TeamInfo,
-    ScoreboardState, TransferZoneCommand,
+    PhysicsSettings, PlayerControlState, PlayerState, QueuedCommand, ShapeAttachRecord,
+    SpawnConfig, ScoreboardState, TeamInfo, TransferZoneCommand,
     TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER,
     CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
@@ -272,7 +272,7 @@ pub(crate) enum PlayerCommand {
     SetCursor {
         player_id: i32,
         object: Option<ObjectId>,
-        select_crew: bool,
+        control: PlayerControlState,
     },
 }
 
@@ -4602,7 +4602,7 @@ fn get_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
             }
             let selected = context
                 .get_world_object(*crew_id)
-                .map(|object| object.selected)
+                .map(|object| object.selected && !object.crew_disabled)
                 .unwrap_or_else(|| {
                     context
                         .world
@@ -4665,7 +4665,7 @@ fn get_select_count(args: &[Value]) -> Result<Value, RuntimeError> {
             .filter(|id| {
                 context
                     .get_world_object(**id)
-                    .map(|object| object.selected)
+                    .map(|object| object.selected && !object.crew_disabled)
                     .unwrap_or_else(|| {
                         context
                             .world
@@ -6313,6 +6313,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetClrModulation", set_clr_modulation);
     script.register_host_function("GetCrewCount", get_crew_count);
     script.register_host_function("GetCursor", get_cursor_host);
+    script.register_host_function("SelectCrew", select_crew_host);
+    script.register_host_function("UnselectCrew", unselect_crew_host);
     script.register_host_function("GetViewCursor", get_view_cursor);
     script.register_host_function("GetSelectCount", get_select_count);
     script.register_host_function("SetPlrKnowledge", set_plr_knowledge);
@@ -13748,6 +13750,249 @@ fn get_crew_enabled(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// C4Object::Call(PSF_CrewSelection) is fail-safe: callback errors abort the
+/// callback but retain prior mutations and never abort the selecting script
+/// (C4Object.cpp:5815-5832; C4AulExec.cpp:1318-1342).
+fn call_crew_selection_callback(target: ObjectId, unselect: bool, cursor: bool) {
+    if let Some(Err(error)) = call_world_object_own_function(
+        target,
+        "CrewSelection",
+        &[Value::Bool(unselect), Value::Bool(cursor)],
+    ) {
+        tracing::warn!(
+            object = %target,
+            error = %error,
+            "script error in crew selection callback; continuing like the C++ fail-safe exec"
+        );
+    }
+}
+
+/// C4Object::DoSelect (C4Object.cpp:5815-5824). Returns false only for an
+/// unknown target; CrewDisabled is a successful callback-less no-op.
+fn do_select_host_object(target: ObjectId, cursor: bool) -> bool {
+    let disposition = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        context.get_world_object(target)?;
+        if context.object_crew_disabled(target).unwrap_or(false) {
+            return Some(false);
+        }
+        if !cursor && !context.set_object_selected(target, true) {
+            return None;
+        }
+        Some(true)
+    });
+    match disposition {
+        None => false,
+        Some(false) => true,
+        Some(true) => {
+            call_crew_selection_callback(target, false, cursor);
+            true
+        }
+    }
+}
+
+/// C4Object::UnSelect (C4Object.cpp:5827-5832): unlike DoSelect it always
+/// invokes the callback, including on CrewDisabled objects.
+fn unselect_host_object(target: ObjectId, cursor: bool) -> bool {
+    let known = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        if context.get_world_object(target).is_none() {
+            return false;
+        }
+        cursor || context.set_object_selected(target, false)
+    });
+    if !known {
+        return false;
+    }
+    call_crew_selection_callback(target, true, cursor);
+    true
+}
+
+fn hi_rank_active_crew(context: &EffectHostContext, player: &PlayerState, selected: bool) -> Option<ObjectId> {
+    let mut best = None;
+    let mut highest_rank = -2;
+    for &id in &player.crew {
+        let Some(object) = context.get_world_object(id) else {
+            continue;
+        };
+        if !object.status.is_active()
+            || context.object_crew_disabled(id).unwrap_or(false)
+            || (selected && !object.selected)
+        {
+            continue;
+        }
+        let rank = context.world.crew_rank(id.as_u64()).unwrap_or(-1);
+        if best.is_none() || rank > highest_rank {
+            best = Some(id);
+            highest_rank = rank;
+        }
+    }
+    best
+}
+
+fn record_cursor_state(context: &mut EffectHostContext, player_id: i32) {
+    let Some((object, control)) = context
+        .player_state(player_id)
+        .map(|player| (player.cursor, player.control))
+    else {
+        return;
+    };
+    context.record_player_command(PlayerCommand::SetCursor {
+        player_id,
+        object,
+        control,
+    });
+}
+
+/// C4Player::AdjustCursorCommand (C4Player.cpp:1235-1258).
+fn adjust_cursor_host(player_id: i32) -> bool {
+    let Some((previous, next)) = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        let player = context.player_state(player_id)?.clone();
+        let next = hi_rank_active_crew(context, &player, true)
+            .or_else(|| hi_rank_active_crew(context, &player, false));
+        let previous = player.cursor;
+        context.player_state_mut(player_id)?.cursor = next;
+        Some((previous, next))
+    }) else {
+        return false;
+    };
+
+    if previous != next {
+        if let Some(previous) = previous {
+            unselect_host_object(previous, true);
+        }
+    }
+    // A callback above may itself have changed Cursor. C++ reads the live
+    // field again for the final DoSelect call.
+    let cursor = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.player_state(player_id))
+            .and_then(|player| player.cursor)
+    });
+    if let Some(cursor) = cursor {
+        do_select_host_object(cursor, false);
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if let Some(player) = context.player_state_mut(player_id) {
+            player.control.cursor_flash = 30;
+        }
+        record_cursor_state(context, player_id);
+    });
+    true
+}
+
+fn select_crew_host_impl(
+    player_id: i32,
+    target: ObjectId,
+    select: bool,
+    no_cursor_adjust: bool,
+) -> bool {
+    let valid_player = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|context| context.player_state(player_id).is_some())
+    });
+    if !valid_player {
+        return false;
+    }
+    if no_cursor_adjust {
+        return if select {
+            do_select_host_object(target, false)
+        } else {
+            unselect_host_object(target, false)
+        };
+    }
+
+    let is_crew = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.player_state(player_id))
+            .is_some_and(|player| player.crew.contains(&target))
+    });
+    // C4Player::SelectCrew returns early for a target outside Crew, while
+    // FnSelectCrew itself still reports success.
+    if !is_crew {
+        return true;
+    }
+    if select {
+        do_select_host_object(target, false);
+    } else {
+        unselect_host_object(target, false);
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if let Some(player) = context.player_state_mut(player_id) {
+            player.control.select_flash = 30;
+            player.control.cursor_selection = 0;
+            player.control.cursor_toggled = 0;
+        }
+    });
+    adjust_cursor_host(player_id)
+}
+
+fn select_crew_host(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "SelectCrew", "player")?;
+    let target = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "SelectCrew", "object"))
+        .transpose()?
+        .flatten();
+    let select = value_to_bool(args.get(2).unwrap_or(&Value::Nil), "SelectCrew", "select")?;
+    let no_cursor_adjust = value_to_bool(
+        args.get(3).unwrap_or(&Value::Nil),
+        "SelectCrew",
+        "no cursor adjust",
+    )?;
+    Ok(Value::Bool(
+        target.is_some_and(|target| select_crew_host_impl(player_id, target, select, no_cursor_adjust)),
+    ))
+}
+
+fn unselect_crew_host(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "UnselectCrew",
+        "player",
+    )?;
+    let Some((crew, cursor)) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let player = context.player_state(player_id)?;
+        Some((player.crew.clone(), player.cursor))
+    }) else {
+        return Ok(Value::Bool(false));
+    };
+    for &id in &crew {
+        let active = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.get_world_object(id))
+                .is_some_and(|object| object.status.is_active())
+        });
+        if active {
+            unselect_host_object(id, false);
+        }
+    }
+    if let Some(cursor) = cursor.filter(|cursor| !crew.contains(cursor)) {
+        unselect_host_object(cursor, false);
+    }
+    Ok(Value::Bool(true))
+}
+
 /// FnSetCursor (C4Script.cpp:2951-2958): set the player cursor (and
 /// crew selection unless fNoSelectCrew).
 fn set_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -13757,22 +14002,83 @@ fn set_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|arg| parse_object_reference_argument(arg, "SetCursor", "obj"))
         .transpose()?
         .flatten();
-    let no_select_crew = matches!(args.get(4), Some(Value::Bool(true)) | Some(Value::Int(1)));
-    HOST_CONTEXT.with(|cell| {
+    let no_select_mark = value_to_bool(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetCursor",
+        "no select mark",
+    )?;
+    let no_select_arrow = value_to_bool(
+        args.get(3).unwrap_or(&Value::Nil),
+        "SetCursor",
+        "no select arrow",
+    )?;
+    let no_select_crew = value_to_bool(
+        args.get(4).unwrap_or(&Value::Nil),
+        "SetCursor",
+        "no select crew",
+    )?;
+    let Some((previous, disabled)) = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+        let context = borrow.as_mut()?;
         if context.world.player(player_id).is_none() {
-            return Ok(Value::Bool(false));
+            return None;
         }
-        context.record_player_command(PlayerCommand::SetCursor {
-            player_id,
-            object,
-            select_crew: !no_select_crew,
+        if object.is_some_and(|id| {
+            context
+                .get_world_object(id)
+                .is_none_or(|object| !object.status.is_active())
+        }) {
+            return None;
+        }
+        let previous = context.player_state(player_id)?.cursor;
+        let disabled = object.is_some_and(|id| context.object_crew_disabled(id).unwrap_or(false));
+        if !disabled {
+            context.player_state_mut(player_id)?.cursor = object;
+        }
+        Some((previous, disabled))
+    }) else {
+        return Ok(Value::Bool(false));
+    };
+
+    if !disabled {
+        if previous != object {
+            if let Some(previous) = previous {
+                unselect_host_object(previous, true);
+            }
+        }
+        // Like C++ SetCursor, read the live Cursor after the old callback.
+        let current = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.player_state(player_id))
+                .and_then(|player| player.cursor)
         });
-        Ok(Value::Bool(true))
-    })
+        if let Some(current) = current {
+            do_select_host_object(current, true);
+        }
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            if let Some(player) = context.player_state_mut(player_id) {
+                if !no_select_arrow {
+                    player.control.cursor_flash = 30;
+                }
+                if !no_select_mark {
+                    player.control.select_flash = 30;
+                }
+            }
+            record_cursor_state(context, player_id);
+        });
+    }
+
+    if !no_select_crew {
+        if let Some(object) = object {
+            select_crew_host_impl(player_id, object, true, false);
+        }
+    }
+    Ok(Value::Bool(true))
 }
 
 fn set_crew_enabled(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -13799,17 +14105,33 @@ fn set_crew_enabled(args: &[Value]) -> Result<Value, RuntimeError> {
             };
         }
     }
-    HOST_CONTEXT.with(|cell| {
+    let adjust_owner = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
+            return None;
         };
-        let Some(object) = context.object_context_mut() else {
-            return Ok(Value::Bool(false));
+        let Some((id, owner)) = context.object_context_mut().map(|object| {
+            object.pending_update.crew_disabled = Some(!enabled);
+            if !enabled {
+                // FnSetCrewEnabled clears Select silently; only a subsequent
+                // cursor adjustment may emit cursor callbacks
+                // (C4Script.cpp:4814-4836).
+                object.set_selected(false);
+            }
+            (object.id(), object.owner())
+        }) else {
+            return None;
         };
-        object.pending_update.crew_disabled = Some(!enabled);
-        Ok(Value::Bool(true))
-    })
+        (!enabled
+            && context
+                .player_state(owner)
+                .is_some_and(|player| player.cursor == Some(id)))
+        .then_some(owner)
+    });
+    if let Some(owner) = adjust_owner {
+        adjust_cursor_host(owner);
+    }
+    Ok(Value::Bool(adjust_owner.is_some() || active.is_some()))
 }
 
 /// FnFinishCommand (C4Script.cpp:947-957): mark the iCommandNum-th
@@ -23714,6 +24036,26 @@ impl EffectHostContext {
             .map(|state| &mut state.scope)
     }
 
+    fn object_crew_disabled(&self, target: ObjectId) -> Option<bool> {
+        if let Some(disabled) = self
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.crew_disabled)
+        {
+            return Some(disabled);
+        }
+        self.get_world_object(target)
+            .map(|object| object.crew_disabled)
+    }
+
+    fn set_object_selected(&mut self, target: ObjectId, selected: bool) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        self.object_scope_mut(target)
+            .map(|scope| scope.set_selected(selected))
+            .is_some()
+    }
+
     /// Materializes a nested scope for `target` so per-object writes (menus)
     /// can fold through the standard nested-outcome pipeline even when no
     /// script call ever ran on the target this session. False for unknown
@@ -24659,6 +25001,11 @@ impl ObjectScopeContext {
 
     fn selected(&self) -> bool {
         self.pending_update.selected.unwrap_or(self.current_selected)
+    }
+
+    fn set_selected(&mut self, selected: bool) {
+        self.current_selected = selected;
+        self.pending_update.selected = Some(selected);
     }
 
     fn set_owner(&mut self, owner: i32) {
@@ -25674,6 +26021,7 @@ mod tests {
         "ScoreboardCol",
         "ScriptCounter",
         "ScriptGo",
+        "SelectCrew",
         "SelectMenuItem",
         "SetAction",
         "SetActionData",
@@ -25752,6 +26100,7 @@ mod tests {
         "Sub",
         "Sum",
         "TrainPhysical",
+        "UnselectCrew",
         "WildcardMatch",
         "goto",
     ];

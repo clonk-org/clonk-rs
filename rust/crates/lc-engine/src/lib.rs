@@ -14067,22 +14067,19 @@ impl Engine {
             return Ok(());
         }
 
-        let first = validated.first().copied();
         for id in validated {
             if let Some(index) = self.find_object_index(id) {
-                self.objects[index].state.selected = true;
+                self.object_do_select(index, owner, false)?;
             }
-        }
-        let selection = self.crew_selection.entry(owner).or_default();
-        if selection.cursor.is_none() {
-            selection.cursor = first;
         }
         // Crew selection flashes the select marks (C4Player::SelectCrew,
         // C4Player.cpp:1846 / SelectSingleByCursor, :1317).
         if let Some(player) = self.players.get_mut(&owner) {
             player.control.select_flash = 30;
+            player.control.cursor_selection = 0;
+            player.control.cursor_toggled = 0;
         }
-        self.sync_player_cursor(owner);
+        self.player_adjust_cursor_command(owner)?;
         Ok(())
     }
 
@@ -14090,39 +14087,25 @@ impl Engine {
     where
         I: IntoIterator<Item = ObjectId>,
     {
-        let ids: Vec<_> = crew.into_iter().collect();
-        for id in &ids {
-            if let Some(index) = self.find_object_index(*id) {
-                if self.objects[index].state.owner == owner {
-                    self.objects[index].state.selected = false;
+        for id in crew {
+            if let Some(index) = self.find_object_index(id) {
+                if self.objects[index].state.owner == owner
+                    && self.objects[index].state.crew_member
+                {
+                    let _ = self.object_un_select(index, owner, false);
                 }
             }
         }
-        let cursor_was_deselected = self
-            .crew_cursor(owner)
-            .is_some_and(|cursor| ids.contains(&cursor));
-        if cursor_was_deselected {
-            let replacement = self.selected_crew(owner).last().copied();
-            if let Some(selection) = self.crew_selection.get_mut(&owner) {
-                selection.cursor = replacement;
-            }
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.control.select_flash = 30;
+            player.control.cursor_selection = 0;
+            player.control.cursor_toggled = 0;
         }
-        if self
-            .crew_selection
-            .get(&owner)
-            .is_some_and(CrewSelection::is_empty)
-        {
-            self.crew_selection.remove(&owner);
-        }
-        self.sync_player_cursor(owner);
+        let _ = self.player_adjust_cursor_command(owner);
     }
 
     pub fn clear_crew_selection(&mut self, owner: i32) {
-        for object in &mut self.objects {
-            if object.state.owner == owner && object.state.crew_member {
-                object.state.selected = false;
-            }
-        }
+        let _ = self.player_unselect_crew(owner);
         self.crew_selection.remove(&owner);
         self.sync_player_cursor(owner);
     }
@@ -14157,19 +14140,10 @@ impl Engine {
                         detail: format!("object {} is not active", id),
                     });
                 }
-                if let Some(index) = self.find_object_index(id) {
-                    self.objects[index].state.selected = true;
-                }
-                let selection = self.crew_selection.entry(owner).or_default();
-                selection.set_cursor(Some(id));
-                // Cursor changes flash the cursor arrow (C4Player::SetCursor
-                // with fSelectArrow, C4Player.cpp:1836-1845).
-                if let Some(player) = self.players.get_mut(&owner) {
-                    player.control.cursor_flash = 30;
-                }
+                self.player_set_cursor(owner, Some(id), false, true)?;
             }
             None => {
-                self.crew_selection.remove(&owner);
+                self.player_set_cursor(owner, None, false, true)?;
             }
         }
 
@@ -14181,13 +14155,7 @@ impl Engine {
         if self.crew_cursor(owner).is_some() {
             return Ok(());
         }
-        let mut crew = self.crew_members(owner);
-        if crew.is_empty() {
-            return Ok(());
-        }
-        crew.sort_by_key(|id| id.as_u64());
-        let first = crew[0];
-        self.set_crew_cursor(owner, Some(first))
+        self.player_adjust_cursor_command(owner)
     }
 
     pub fn context_menu_entries(
@@ -19899,23 +19867,24 @@ impl Engine {
                 PlayerCommand::SetCursor {
                     player_id,
                     object,
-                    select_crew,
+                    control,
                 } => {
-                    // FnSetCursor (C4Script.cpp:2951-2958).
+                    // FnSetCursor's callbacks and SelectCrew branch already
+                    // ran synchronously inside the host context. This fold
+                    // persists cursor/control metadata only; cursor-only
+                    // calls must never imply C4Object::Select.
                     let valid = object
                         .map(|id| self.find_object_index(id).is_some())
                         .unwrap_or(true);
                     if valid {
                         let selection = self.crew_selection.entry(player_id).or_default();
                         selection.cursor = object;
-                        if select_crew {
-                            if let Some(id) = object {
-                                if let Some(target) =
-                                    self.objects.iter_mut().find(|target| target.id == id)
-                                {
-                                    target.state.selected = true;
-                                }
-                            }
+                        if selection.is_empty() {
+                            self.crew_selection.remove(&player_id);
+                        }
+                        if let Some(player) = self.players.get_mut(&player_id) {
+                            player.set_cursor(object);
+                            player.control = control;
                         }
                     }
                 }
@@ -44624,6 +44593,410 @@ func Activate(inMat, inLength, inStrength)
     }
 
     #[test]
+    fn select_crew_callbacks_are_synchronous_and_see_object_bits() -> Result<(), EngineError> {
+        // FnSelectCrew's no-adjust branch invokes C4Object::DoSelect/
+        // UnSelect directly (C4Script.cpp:2965-2975). The ordinary branch
+        // then runs AdjustCursorCommand, whose exact callback order is target
+        // UnSelect(false), old-cursor UnSelect(true), new-cursor
+        // DoSelect(false) (C4Player.cpp:1996-2006, 1235-1258).
+        let script = r#"#strict
+static iSelectionLog;
+local iCode, iVisibility;
+
+func SetCode(iValue) { iCode = iValue; return 1; }
+func ResetSelectionLog() { iSelectionLog = 0; return 1; }
+func ReadSelectionLog() { return iSelectionLog; }
+func RunSelectCrew(iPlayer, pTarget, fSelect, fNoAdjust)
+{
+    return SelectCrew(iPlayer, pTarget, fSelect, fNoAdjust);
+}
+
+func CrewSelection(fUnselect, fCursor)
+{
+    var iDigit = 0;
+    if (iCode == 1 && fUnselect && !fCursor) iDigit = 1;
+    if (iCode == 1 && fUnselect && fCursor) iDigit = 2;
+    if (iCode == 2 && !fUnselect && !fCursor) iDigit = 3;
+    if (iDigit) iSelectionLog = iSelectionLog * 10 + iDigit;
+
+    // FnGetCursor scans the live C4Object::Select bits directly
+    // (C4Script.cpp:2905-2928), proving the bit changed before callback.
+    if (!fCursor && !fUnselect && GetCursor(GetOwner(), 1) == this())
+        iVisibility = iVisibility * 10 + 1;
+    if (!fCursor && fUnselect && !GetCursor(GetOwner(), 1))
+        iVisibility = iVisibility * 10 + 2;
+    return 1;
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut definition = Definition::from_script("SELC", "Select callback", script)?;
+        definition.set_crew_member(true);
+        engine.register_definition(definition)?;
+        engine.register_player(PlayerConfig::new(1, "Selector"))?;
+        let a = engine.spawn_object(
+            SpawnConfig::new("SELC")
+                .with_owner(1)
+                .with_alive(true),
+        )?;
+        let b = engine.spawn_object(
+            SpawnConfig::new("SELC")
+                .with_owner(1)
+                .with_alive(true),
+        )?;
+
+        let call = |engine: &mut Engine, id: ObjectId, name: &str, args: Vec<Value>| {
+            let index = engine.find_object_index(id).expect("object exists");
+            engine.call_object_function(index, name, args)
+        };
+        call(&mut engine, a, "SetCode", vec![Value::Int(1)])?;
+        call(&mut engine, b, "SetCode", vec![Value::Int(2)])?;
+        engine.select_crew(1, [a])?;
+        engine.set_crew_cursor(1, Some(a))?;
+        call(&mut engine, a, "ResetSelectionLog", Vec::new())?;
+
+        // No cursor adjustment: B appears as selected index 1 inside its
+        // select callback and disappears before its unselect callback.
+        call(
+            &mut engine,
+            a,
+            "RunSelectCrew",
+            vec![
+                Value::Int(1),
+                Value::Object(b.as_u64()),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        )?;
+        call(
+            &mut engine,
+            a,
+            "RunSelectCrew",
+            vec![
+                Value::Int(1),
+                Value::Object(b.as_u64()),
+                Value::Bool(false),
+                Value::Bool(true),
+            ],
+        )?;
+        let b_index = engine.find_object_index(b).expect("B exists");
+        assert_eq!(
+            engine.objects[b_index].state.local_vars.get("iVisibility"),
+            Some(&Value::Int(12))
+        );
+        assert!(!engine.objects[b_index].state.selected);
+
+        // Preselect B without adjustment, then normally unselect A. The
+        // shared log pins target/old-cursor/new-cursor callback order.
+        call(
+            &mut engine,
+            a,
+            "RunSelectCrew",
+            vec![
+                Value::Int(1),
+                Value::Object(b.as_u64()),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        )?;
+        call(&mut engine, a, "ResetSelectionLog", Vec::new())?;
+        call(
+            &mut engine,
+            a,
+            "RunSelectCrew",
+            vec![
+                Value::Int(1),
+                Value::Object(a.as_u64()),
+                Value::Bool(false),
+                Value::Bool(false),
+            ],
+        )?;
+        assert_eq!(
+            call(&mut engine, a, "ReadSelectionLog", Vec::new())?,
+            Value::Int(123)
+        );
+        assert_eq!(engine.crew_cursor(1), Some(b));
+        assert_eq!(engine.selected_crew(1), vec![b]);
+        Ok(())
+    }
+
+    #[test]
+    fn set_cursor_accepts_magi_helper_and_callbacks_see_new_cursor() -> Result<(), EngineError> {
+        // FnSetCursor accepts any active object; C4Player::SetCursor writes
+        // Cursor before old/new cursor-only callbacks (C4Script.cpp:2945-2958;
+        // C4Player.cpp:1831-1845). Magi's ComboMenu/Selector/Aimer depend on
+        // a noncrew helper cursor and fNoSelectCrew preserving Select bits.
+        let script = r#"#strict
+local iCursorSeen;
+func ResetSeen() { iCursorSeen = 0; return 1; }
+func RunSetCursor(iPlayer, pTarget, fNoSelectCrew)
+{
+    return SetCursor(iPlayer, pTarget, true, true, fNoSelectCrew);
+}
+func RunSelectCrew(iPlayer, pTarget, fSelect, fNoAdjust)
+{
+    return SelectCrew(iPlayer, pTarget, fSelect, fNoAdjust);
+}
+func CrewSelection(fUnselect, fCursor)
+{
+    if (fCursor && GetCursor(GetOwner()) == this())
+        iCursorSeen = iCursorSeen * 10 + 1;
+    if (fCursor && GetCursor(GetOwner()) != this())
+        iCursorSeen = iCursorSeen * 10 + 2;
+    return 1;
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut crew_definition = Definition::from_script("MAGE", "Mage", script)?;
+        crew_definition.set_crew_member(true);
+        engine.register_definition(crew_definition)?;
+        engine.register_definition(Definition::from_script("HELP", "Combo helper", script)?)?;
+        engine.register_player(PlayerConfig::new(1, "Mage"))?;
+        let mage = engine.spawn_object(
+            SpawnConfig::new("MAGE")
+                .with_owner(1)
+                .with_alive(true),
+        )?;
+        let helper = engine.spawn_object(
+            SpawnConfig::new("HELP")
+                .with_owner(1)
+                .with_alive(true),
+        )?;
+        engine.select_crew(1, [mage])?;
+        engine.set_crew_cursor(1, Some(mage))?;
+
+        let mage_index = engine.find_object_index(mage).expect("mage exists");
+        engine.call_object_function(mage_index, "ResetSeen", Vec::new())?;
+        let helper_index = engine.find_object_index(helper).expect("helper exists");
+        engine.call_object_function(helper_index, "ResetSeen", Vec::new())?;
+        engine.call_object_function(
+            mage_index,
+            "RunSetCursor",
+            vec![
+                Value::Int(1),
+                Value::Object(helper.as_u64()),
+                Value::Bool(true),
+            ],
+        )?;
+        assert_eq!(engine.crew_cursor(1), Some(helper));
+        assert!(!engine.objects[helper_index].state.selected);
+        assert_eq!(
+            engine.objects[mage_index].state.local_vars.get("iCursorSeen"),
+            Some(&Value::Int(2)),
+            "old cursor observes the already-installed helper cursor"
+        );
+        assert_eq!(
+            engine.objects[helper_index]
+                .state
+                .local_vars
+                .get("iCursorSeen"),
+            Some(&Value::Int(1)),
+            "new helper observes itself as cursor"
+        );
+
+        // Magi's helper then unselects the mage without cursor adjustment.
+        engine.call_object_function(
+            helper_index,
+            "RunSelectCrew",
+            vec![
+                Value::Int(1),
+                Value::Object(mage.as_u64()),
+                Value::Bool(false),
+                Value::Bool(true),
+            ],
+        )?;
+        assert_eq!(engine.crew_cursor(1), Some(helper));
+        assert!(!engine.objects[mage_index].state.selected);
+        Ok(())
+    }
+
+    #[test]
+    fn disabling_cursor_clears_select_silently_then_adjusts() -> Result<(), EngineError> {
+        // FnSetCrewEnabled clears Select without CrewSelection(false/true,
+        // false). If the disabled object was Cursor, AdjustCursorCommand may
+        // subsequently emit old-cursor (true,true) and new-cursor
+        // (false,false) callbacks (C4Script.cpp:4814-4836).
+        let script = r#"#strict
+local iCursorCallbacks, iSelectCallbacks;
+func RunSelectCrew(iPlayer, pTarget, fSelect, fNoAdjust)
+{
+    return SelectCrew(iPlayer, pTarget, fSelect, fNoAdjust);
+}
+func DisableAndCount(iPlayer, pTarget)
+{
+    SetCrewEnabled(false, pTarget);
+    return GetSelectCount(iPlayer);
+}
+func ResetCallbacks()
+{
+    iCursorCallbacks = iSelectCallbacks = 0;
+    return 1;
+}
+func CrewSelection(fUnselect, fCursor)
+{
+    if (fCursor) iCursorCallbacks = iCursorCallbacks + 1;
+    else iSelectCallbacks = iSelectCallbacks + 1;
+    return 1;
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut definition = Definition::from_script("DSBL", "Disable crew", script)?;
+        definition.set_crew_member(true);
+        engine.register_definition(definition)?;
+        engine.register_player(PlayerConfig::new(1, "Selector"))?;
+        let a = engine.spawn_object(
+            SpawnConfig::new("DSBL")
+                .with_owner(1)
+                .with_alive(true),
+        )?;
+        let b = engine.spawn_object(
+            SpawnConfig::new("DSBL")
+                .with_owner(1)
+                .with_alive(true),
+        )?;
+        engine.select_crew(1, [a])?;
+        engine.set_crew_cursor(1, Some(a))?;
+        let call = |engine: &mut Engine, id: ObjectId, name: &str, args: Vec<Value>| {
+            let index = engine.find_object_index(id).expect("object exists");
+            engine.call_object_function(index, name, args)
+        };
+        call(
+            &mut engine,
+            b,
+            "RunSelectCrew",
+            vec![
+                Value::Int(1),
+                Value::Object(b.as_u64()),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        )?;
+        call(&mut engine, a, "ResetCallbacks", Vec::new())?;
+        call(&mut engine, b, "ResetCallbacks", Vec::new())?;
+
+        assert_eq!(
+            call(
+                &mut engine,
+                b,
+                "DisableAndCount",
+                vec![Value::Int(1), Value::Object(a.as_u64())],
+            )?,
+            Value::Int(1),
+            "same-call GetSelectCount excludes the disabled cursor"
+        );
+        let a_index = engine.find_object_index(a).expect("A exists");
+        let b_index = engine.find_object_index(b).expect("B exists");
+        assert!(engine.objects[a_index].state.crew_disabled);
+        assert!(!engine.objects[a_index].state.selected);
+        assert_eq!(engine.crew_cursor(1), Some(b));
+        assert_eq!(
+            engine.objects[a_index]
+                .state
+                .local_vars
+                .get("iCursorCallbacks"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[a_index]
+                .state
+                .local_vars
+                .get("iSelectCallbacks"),
+            Some(&Value::Int(0)),
+            "the silent Select clear did not emit a noncursor callback"
+        );
+        assert_eq!(
+            engine.objects[b_index]
+                .state
+                .local_vars
+                .get("iSelectCallbacks"),
+            Some(&Value::Int(1))
+        );
+
+        // Disabled DoSelect is callback-less; UnSelect still calls.
+        call(&mut engine, a, "ResetCallbacks", Vec::new())?;
+        for select in [true, false] {
+            call(
+                &mut engine,
+                b,
+                "RunSelectCrew",
+                vec![
+                    Value::Int(1),
+                    Value::Object(a.as_u64()),
+                    Value::Bool(select),
+                    Value::Bool(true),
+                ],
+            )?;
+        }
+        assert_eq!(
+            engine.objects[a_index]
+                .state
+                .local_vars
+                .get("iSelectCallbacks"),
+            Some(&Value::Int(1))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn crew_selection_callback_errors_are_fail_safe() -> Result<(), EngineError> {
+        // C4Object::Call is fail-safe by default: the Select write and the
+        // callback's pre-error writes persist, and the selecting script
+        // continues (C4Object.h:240; C4Object.cpp:2224-2227, 5815-5824).
+        let script = r#"#strict
+local iCallbackCalls, iAfter;
+func Run(iPlayer, pTarget)
+{
+    SelectCrew(iPlayer, pTarget, true, true);
+    iAfter = 1;
+    return 1;
+}
+func CrewSelection()
+{
+    iCallbackCalls = iCallbackCalls + 1;
+    MissingCrewSelectionFunction();
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut definition = Definition::from_script("SAFE", "Fail-safe selection", script)?;
+        definition.set_crew_member(true);
+        engine.register_definition(definition)?;
+        engine.register_player(PlayerConfig::new(1, "Selector"))?;
+        let caller = engine.spawn_object(
+            SpawnConfig::new("SAFE")
+                .with_owner(1)
+                .with_alive(true),
+        )?;
+        let target = engine.spawn_object(
+            SpawnConfig::new("SAFE")
+                .with_owner(1)
+                .with_alive(true),
+        )?;
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        assert_eq!(
+            engine.call_object_function(
+                caller_index,
+                "Run",
+                vec![Value::Int(1), Value::Object(target.as_u64())],
+            )?,
+            Value::Int(1)
+        );
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        assert!(engine.objects[target_index].state.selected);
+        assert_eq!(
+            engine.objects[target_index]
+                .state
+                .local_vars
+                .get("iCallbackCalls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[caller_index].state.local_vars.get("iAfter"),
+            Some(&Value::Int(1))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn register_player_populates_snapshot_state() -> Result<(), EngineError> {
         let mut engine = Engine::new();
         engine.register_player(PlayerConfig::new(1, "Alice").with_wealth(75))?;
@@ -44726,12 +45099,15 @@ func Activate(inMat, inLength, inStrength)
         assert_eq!(engine.crew_cursor(1), Some(second));
 
         engine.deselect_crew(1, vec![second]);
-        assert!(engine.selected_crew(1).is_empty());
-        assert_eq!(engine.crew_cursor(1), None);
+        // AdjustCursorCommand never leaves an active crew roster without a
+        // selected cursor: if no Select remains it chooses the high-rank
+        // active crew and DoSelect()s it (C4Player.cpp:1235-1258).
+        assert_eq!(engine.selected_crew(1), vec![first]);
+        assert_eq!(engine.crew_cursor(1), Some(first));
     }
 
     #[test]
-    fn set_cursor_promotes_selection() {
+    fn set_cursor_is_cursor_only_like_cpp() {
         let mut engine = Engine::with_seed(0);
         let mut definition = build_definition();
         definition.set_crew_member(true);
@@ -44754,9 +45130,10 @@ func Activate(inMat, inLength, inStrength)
             .set_crew_cursor(1, Some(second))
             .expect("cursor assignment succeeds");
 
-        let mut selected = engine.selected_crew(1);
-        selected.sort_by_key(|id| id.as_u64());
-        assert_eq!(selected, vec![first, second]);
+        // C4Player::SetCursor calls DoSelect(true): cursor callbacks run but
+        // the object's Select bit is untouched (C4Player.cpp:1831-1845;
+        // C4Object.cpp:5815-5824).
+        assert_eq!(engine.selected_crew(1), vec![first]);
         assert_eq!(engine.crew_cursor(1), Some(second));
     }
 

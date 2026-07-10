@@ -319,7 +319,7 @@ impl Engine {
     /// `C4Object::DoSelect` (C4Object.cpp:5815-5824): CrewDisabled guard,
     /// the Select flag unless cursor-only, and the `~CrewSelection(false,
     /// fCursor)` callback.
-    fn object_do_select(
+    pub(super) fn object_do_select(
         &mut self,
         index: usize,
         _owner: i32,
@@ -340,7 +340,7 @@ impl Engine {
     }
 
     /// `C4Object::UnSelect` (C4Object.cpp:5826-5832).
-    fn object_un_select(
+    pub(super) fn object_un_select(
         &mut self,
         index: usize,
         _owner: i32,
@@ -358,26 +358,36 @@ impl Engine {
     }
 
     /// `C4Player::SetCursor` (C4Player.cpp:1831-1847).
-    fn player_set_cursor(
+    pub(super) fn player_set_cursor(
         &mut self,
         owner: i32,
-        target: ObjectId,
+        target: Option<ObjectId>,
         select_flash: bool,
         select_arrow: bool,
     ) -> Result<(), EngineError> {
-        let Some(target_index) = self.find_object_index(target) else {
-            return Ok(());
-        };
         // Check disabled (:1834).
-        if self.objects[target_index].state.crew_disabled {
+        let target_index = target.and_then(|target| self.find_object_index(target));
+        if target.is_some() && target_index.is_none() {
+            return Ok(());
+        }
+        if target_index.is_some_and(|index| self.objects[index].state.crew_disabled) {
             return Ok(());
         }
         let previous = self.crew_cursor(owner);
-        let changed = previous != Some(target);
-        self.crew_selection
-            .entry(owner)
-            .or_default()
-            .set_cursor(Some(target));
+        let changed = previous != target;
+        if let Some(target) = target {
+            self.crew_selection
+                .entry(owner)
+                .or_default()
+                .set_cursor(Some(target));
+        } else {
+            self.crew_selection.remove(&owner);
+        }
+        // Cursor is assigned before either callback (C4Player.cpp:1838), so
+        // callback-side GetCursor observes the new object/null immediately.
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.set_cursor(target);
+        }
         // Unselect previous (:1841).
         if let Some(previous_index) = previous
             .filter(|_| changed)
@@ -386,7 +396,9 @@ impl Engine {
             self.object_un_select(previous_index, owner, true)?;
         }
         // Select object (:1843).
-        self.object_do_select(target_index, owner, true)?;
+        if let Some(target_index) = target_index {
+            self.object_do_select(target_index, owner, true)?;
+        }
         if let Some(player) = self.players.get_mut(&owner) {
             if select_arrow {
                 player.control.cursor_flash = 30;
@@ -419,7 +431,7 @@ impl Engine {
     }
 
     /// `C4Player::AdjustCursorCommand` (C4Player.cpp:1235-1258).
-    fn player_adjust_cursor_command(&mut self, owner: i32) -> Result<(), EngineError> {
+    pub(super) fn player_adjust_cursor_command(&mut self, owner: i32) -> Result<(), EngineError> {
         // Find hirank Select, else any (:1240-1245).
         let hi_rank = self
             .player_hi_rank_active_crew(owner, true)
@@ -430,6 +442,9 @@ impl Engine {
                 .entry(owner)
                 .or_default()
                 .set_cursor(hi_rank);
+        }
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.set_cursor(hi_rank);
         }
         // UnSelect previous cursor (:1253).
         if let Some(previous_index) = previous
@@ -482,7 +497,7 @@ impl Engine {
             })
             .or_else(|| roster.iter().copied().find(|id| eligible(self, *id)));
         if let Some(target) = next {
-            self.player_set_cursor(owner, target, false, true)?;
+            self.player_set_cursor(owner, Some(target), false, true)?;
         }
         // Updates (:1272-1274).
         if let Some(player) = self.players.get_mut(&owner) {
@@ -493,7 +508,7 @@ impl Engine {
     }
 
     /// `C4Player::UnselectCrew` (C4Player.cpp:1295-1306).
-    fn player_unselect_crew(&mut self, owner: i32) -> Result<(), EngineError> {
+    pub(super) fn player_unselect_crew(&mut self, owner: i32) -> Result<(), EngineError> {
         let cursor = self.crew_cursor(owner);
         let mut cursor_deselected = false;
         for id in self.player_crew_roster(owner) {
