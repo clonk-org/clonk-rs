@@ -125,7 +125,7 @@ use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     object_reference_value, AudioRegistry, DefinitionMetadata, EffectContextOutcome,
     EnvironmentDelta, HostWorldContext, HostWorldObject, LandscapeOperation, PhysicsDelta,
-    PlayerCommand,
+    ObjectOrderCommand, PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use material::{
@@ -5366,6 +5366,10 @@ pub struct EngineState {
     pub landscape: Option<Landscape>,
     #[serde(default)]
     pub objects: Vec<PersistedObject>,
+    /// Main object-list order in execution direction (the C++ list reversed).
+    /// Kept separate so comparator snapshots may retain their normalized order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub object_order: Vec<ObjectId>,
     #[serde(default)]
     pub particles: Vec<ParticleSnapshot>,
     #[serde(default)]
@@ -5471,6 +5475,7 @@ impl EngineState {
             next_object_id,
             landscape: snapshot.landscape.clone(),
             objects,
+            object_order: Vec::new(),
             particles: snapshot.particles.clone(),
             players: snapshot.players.clone(),
             crew_selection: snapshot.crew_selection.clone(),
@@ -7296,6 +7301,7 @@ impl Definition {
             transfer_zones: host_transfer_zones,
             messages: host_messages,
             player_commands: host_player_commands,
+            object_order_commands: host_object_order_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
@@ -7308,6 +7314,7 @@ impl Definition {
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
         }
+        batch.object_order_commands.extend(host_object_order_commands);
 
         if let Some(delta) = physics_from_host {
             merge_physics_delta(&mut physics_delta, &delta);
@@ -7493,6 +7500,7 @@ impl Definition {
             transfer_zones: host_transfer_zones,
             messages: host_messages,
             player_commands: host_player_commands,
+            object_order_commands: host_object_order_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
@@ -7505,6 +7513,7 @@ impl Definition {
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
         }
+        batch.object_order_commands.extend(host_object_order_commands);
 
         if let Some(delta) = physics_from_host {
             merge_physics_delta(&mut physics_delta, &delta);
@@ -7655,6 +7664,7 @@ impl Definition {
             transfer_zones: host_transfer_zones,
             messages: host_messages,
             player_commands: host_player_commands,
+            object_order_commands: host_object_order_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
@@ -7667,6 +7677,7 @@ impl Definition {
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
         }
+        batch.object_order_commands.extend(host_object_order_commands);
 
         if let Some(delta) = environment_from_host {
             merge_environment_delta(&mut environment_delta, &delta);
@@ -9291,6 +9302,7 @@ impl ScenarioScript {
             transfer_zones: host_transfer_zones,
             messages: host_messages,
             player_commands: host_player_commands,
+            object_order_commands: host_object_order_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
@@ -9317,6 +9329,7 @@ impl ScenarioScript {
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
         }
+        batch.object_order_commands.extend(host_object_order_commands);
         if !host_global_effects.is_empty() {
             batch.global_effects.extend(host_global_effects);
         }
@@ -9446,6 +9459,7 @@ impl ScenarioScript {
             transfer_zones: host_transfer_zones,
             messages: host_messages,
             player_commands: host_player_commands,
+            object_order_commands: host_object_order_commands,
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             script_go: host_script_go,
@@ -9459,6 +9473,7 @@ impl ScenarioScript {
             ..ScenarioBatch::default()
         };
         batch.player_commands.extend(host_player_commands);
+        batch.object_order_commands.extend(host_object_order_commands);
         batch.global_effects.extend(host_global_effects);
         batch.landscape_ops.extend(host_landscape_ops);
         if let Some(delta) = environment_from_host {
@@ -9529,6 +9544,7 @@ struct CommandBatch {
     audio: Vec<AudioCommand>,
     messages: Vec<MessageCommand>,
     player_commands: Vec<PlayerCommand>,
+    object_order_commands: Vec<ObjectOrderCommand>,
     trigger_game_over: bool,
     script_go: Option<bool>,
 }
@@ -9548,6 +9564,7 @@ struct ScenarioBatch {
     audio: Vec<AudioCommand>,
     messages: Vec<MessageCommand>,
     player_commands: Vec<PlayerCommand>,
+    object_order_commands: Vec<ObjectOrderCommand>,
     trigger_game_over: bool,
     script_go: Option<bool>,
 }
@@ -9616,6 +9633,9 @@ pub struct Engine {
     /// semantics) on spawn and pruned of removed ids each tick. Enter/Exit
     /// never touch it (C4Object.cpp:1513-1615 only move Contents).
     exec_list: Vec<ObjectId>,
+    /// Deferred FnSetObjectOrder requests (`C4GameObjects::ResortProc`).
+    /// They execute newest-first after CrossCheck or during Synchronize.
+    pending_object_order_commands: Vec<ObjectOrderCommand>,
     /// Next `exec_list` slot during the live reverse-list walk. Insertions
     /// before this cursor have already missed the C++ iterator; insertions at
     /// or after it still execute this frame.
@@ -11272,6 +11292,7 @@ impl Engine {
             scenario_script_counter: 0,
             random_seed: seed,
             exec_list: Vec::new(),
+            pending_object_order_commands: Vec::new(),
             exec_cursor: None,
             frame: 0,
             landscape: None,
@@ -12584,11 +12605,27 @@ impl Engine {
     }
 
     fn rebuild_sectors(&mut self) {
-        let records = self
-            .objects
-            .iter()
-            .filter_map(|object| self.sector_record_for_object(object))
-            .collect::<Vec<_>>();
+        // C4LSectors::Add receives the main-list order. `exec_list` stores
+        // that list reversed, so rebuild each sector front-to-back here;
+        // SetObjectOrder's UpdatePosResort must change area traversal too
+        // (C4GameObjects.cpp:739-769).
+        let mut seen = HashSet::with_capacity(self.objects.len());
+        let mut records = Vec::with_capacity(self.objects.len());
+        for &id in self.exec_list.iter().rev() {
+            let Some(index) = self.find_object_index(id) else {
+                continue;
+            };
+            seen.insert(id);
+            if let Some(record) = self.sector_record_for_object(&self.objects[index]) {
+                records.push(record);
+            }
+        }
+        records.extend(
+            self.objects
+                .iter()
+                .filter(|object| seen.insert(object.id))
+                .filter_map(|object| self.sector_record_for_object(object)),
+        );
         if let Some(sectors) = self.sectors.as_mut() {
             sectors.rebuild(records);
         }
@@ -13434,6 +13471,7 @@ impl Engine {
             audio,
             messages,
             player_commands,
+            object_order_commands,
             trigger_game_over,
             script_go,
         } = batch;
@@ -13441,6 +13479,7 @@ impl Engine {
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
         }
+        self.pending_object_order_commands.extend(object_order_commands);
 
         if !landscape_ops.is_empty() {
             self.apply_landscape_operations(landscape_ops);
@@ -15671,6 +15710,7 @@ impl Engine {
                     audio_events,
                     event_messages,
                     player_commands,
+                    object_order_commands,
                     landscape_ops,
                     effect_spawns,
                     effect_other_objects,
@@ -15717,6 +15757,7 @@ impl Engine {
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
+                self.pending_object_order_commands.extend(object_order_commands);
                 if !audio_events.is_empty() {
                     self.pending_audio.extend(audio_events);
                 }
@@ -16169,6 +16210,7 @@ impl Engine {
                 audio,
                 messages,
                 player_commands,
+                object_order_commands,
                 trigger_game_over,
                 script_go,
             } = command;
@@ -16183,6 +16225,7 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
+            self.pending_object_order_commands.extend(object_order_commands);
 
             if !landscape_ops.is_empty() {
                 self.apply_landscape_operations(landscape_ops);
@@ -16267,6 +16310,7 @@ impl Engine {
                     audio_events,
                     event_messages,
                     player_commands,
+                    object_order_commands,
                     landscape_ops,
                     effect_spawns,
                     effect_other_objects,
@@ -16312,6 +16356,7 @@ impl Engine {
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
+                self.pending_object_order_commands.extend(object_order_commands);
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
                 }
@@ -16427,6 +16472,7 @@ impl Engine {
 
         // C4GameObjects::CrossCheck runs once per frame after object        // execution (C4Game.cpp ExecObjects → Objects.CrossCheck()).
         self.cross_check(frame)?;
+        self.execute_object_order_commands();
 
         for index in 0..self.objects.len() {
             if self.objects[index].destroyed {
@@ -17067,6 +17113,7 @@ impl Engine {
             transfer_zones,
             messages,
             player_commands,
+            object_order_commands,
             audio: outcome_audio,
             trigger_game_over,
             script_go,
@@ -17081,6 +17128,7 @@ impl Engine {
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
         }
+        self.pending_object_order_commands.extend(object_order_commands);
 
         if let Some(update) = environment {
             update.apply(&mut self.environment);
@@ -17244,6 +17292,7 @@ impl Engine {
                 audio_events,
                 event_messages,
                 player_commands,
+                object_order_commands,
                 landscape_ops,
                 effect_spawns,
                 effect_other_objects,
@@ -17282,6 +17331,7 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
+            self.pending_object_order_commands.extend(object_order_commands);
             if !audio_events.is_empty() {
                 self.pending_audio.extend(audio_events);
             }
@@ -17451,6 +17501,7 @@ impl Engine {
                     audio_events,
                     event_messages,
                     player_commands,
+                    object_order_commands,
                     landscape_ops,
                     effect_spawns,
                     effect_other_objects,
@@ -17489,6 +17540,7 @@ impl Engine {
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
+                self.pending_object_order_commands.extend(object_order_commands);
                 if !audio_events.is_empty() {
                     self.pending_audio.extend(audio_events);
                 }
@@ -17883,6 +17935,7 @@ impl Engine {
             next_object_id: self.next_object_id,
             landscape: self.landscape.clone(),
             objects,
+            object_order: self.exec_list.clone(),
             particles,
             players,
             crew_selection,
@@ -17936,6 +17989,7 @@ impl Engine {
         self.rng = state.rng.clone();
         self.objects.clear();
         self.exec_list.clear();
+        self.pending_object_order_commands.clear();
         self.exec_cursor = None;
         self.note_objects_changed();
         self.global_effects = state.global_effects.clone();
@@ -18133,6 +18187,23 @@ impl Engine {
                 container_assignments.push((snapshot.id, container));
             }
         }
+        if !state.object_order.is_empty() {
+            let live: HashSet<ObjectId> = self.exec_list.iter().copied().collect();
+            let mut seen = HashSet::with_capacity(live.len());
+            let mut restored_order: Vec<ObjectId> = state
+                .object_order
+                .iter()
+                .copied()
+                .filter(|id| live.contains(id) && seen.insert(*id))
+                .collect();
+            restored_order.extend(
+                self.exec_list
+                    .iter()
+                    .copied()
+                    .filter(|id| seen.insert(*id)),
+            );
+            self.exec_list = restored_order;
+        }
         self.reset_sectors_from_landscape();
 
         for (object_id, container) in container_assignments {
@@ -18217,6 +18288,7 @@ impl Engine {
         }
 
         self.fix_exec_list_order();
+        self.rebuild_sectors();
         Ok(())
     }
 
@@ -18245,6 +18317,7 @@ impl Engine {
             audio_events,
             event_messages,
             player_commands,
+            object_order_commands,
             landscape_ops,
             effect_spawns,
             effect_other_objects,
@@ -18291,6 +18364,7 @@ impl Engine {
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
         }
+        self.pending_object_order_commands.extend(object_order_commands);
         if !audio_events.is_empty() {
             self.pending_audio.extend(audio_events);
         }
@@ -18337,6 +18411,7 @@ impl Engine {
             Vec<AudioCommand>,
             Vec<MessageCommand>,
             Vec<PlayerCommand>,
+            Vec<ObjectOrderCommand>,
             Vec<LandscapeOperation>,
             Vec<SpawnConfig>,
             Vec<compat::NestedObjectOutcome>,
@@ -18354,6 +18429,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 PhysicsDelta::default(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -18384,6 +18460,7 @@ impl Engine {
         let mut pending_messages = Vec::new();
         let mut current_audio = audio;
         let mut pending_player_commands = Vec::new();
+        let mut pending_object_order_commands = Vec::new();
         let mut pending_landscape_ops = Vec::new();
         // Nested-call mutations to OTHER objects (the copy-in/copy-out
         // model's deferred fold; C++ mutates live state mid-call): the
@@ -18832,6 +18909,7 @@ impl Engine {
                 particles: mut emitted_particles,
                 messages: event_messages,
                 player_commands: effect_player_commands,
+                object_order_commands: effect_object_order_commands,
                 audio: outcome_audio,
                 trigger_game_over,
                 script_go,
@@ -18865,6 +18943,7 @@ impl Engine {
             if !effect_player_commands.is_empty() {
                 pending_player_commands.extend(effect_player_commands);
             }
+            pending_object_order_commands.extend(effect_object_order_commands);
 
             if let Some(update) = environment_update {
                 update.apply(&mut current_environment);
@@ -18948,6 +19027,7 @@ impl Engine {
             pending_audio,
             pending_messages,
             pending_player_commands,
+            pending_object_order_commands,
             pending_landscape_ops,
             pending_spawns,
             pending_other_objects,
@@ -24331,6 +24411,10 @@ impl Engine {
         // brackets fixed before the first tick (FixObjectOrder runs
         // right after Objects.txt load, C4GameObjects.cpp:663).
         self.fix_exec_list_order();
+        // Objects.Synchronize resolves SetObjectOrder calls queued by
+        // scenario/object initialization before InitPlayers (C4Game.cpp:3720;
+        // C4GameObjects.cpp:250-260).
+        self.execute_object_order_commands();
         for object in &mut self.objects {
             object.fixed_position = crate::math::FixedVec2 {
                 x: itofix(object.state.position.x),
@@ -24722,6 +24806,11 @@ impl Engine {
         rows
     }
 
+    #[cfg(test)]
+    fn debug_exec_order(&self) -> Vec<ObjectId> {
+        self.exec_list.clone()
+    }
+
     /// C4ObjectList::Add stMain insertion (C4ObjectList.cpp:110-216) kept
     /// in EXEC order (the C++ list reversed — see the `exec_list` docs).
     /// - Line defs skip sorting (`fUnsorted`, :148): forward-list end =
@@ -24777,6 +24866,90 @@ impl Engine {
         }
         keyed.sort_by_key(|&(sort_bit, position, _)| (sort_bit, position));
         self.exec_list = keyed.into_iter().map(|(_, _, id)| id).collect();
+    }
+
+    /// C4GameObjects::ExecuteResorts (C4GameObjects.cpp:874-886). Requests
+    /// are pushed at the head of ResortProc, hence newest-first. The Rust
+    /// list is the C++ main list reversed, so Before/After are reversed too.
+    fn execute_object_order_commands(&mut self) {
+        if self.pending_object_order_commands.is_empty() {
+            return;
+        }
+        // C4Game resolves SetCategory's Unsorted objects first
+        // (C4Game.cpp:1611-1616). Rust has no transient Unsorted bit;
+        // this stable category fix is its equivalent.
+        self.fix_exec_list_order();
+        let commands = std::mem::take(&mut self.pending_object_order_commands);
+        for command in commands.into_iter().rev() {
+            self.execute_object_order_command(command);
+        }
+        self.rebuild_sectors();
+    }
+
+    fn execute_object_order_command(&mut self, command: ObjectOrderCommand) {
+        let Some(object_index) = self.find_object_index(command.object) else {
+            return;
+        };
+        let Some(relative_index) = self.find_object_index(command.relative_to) else {
+            return;
+        };
+        if self.objects[object_index].destroyed
+            || !self.objects[object_index].state.status.is_active()
+            || self.objects[relative_index].destroyed
+            || !self.objects[relative_index].state.status.is_active()
+        {
+            return;
+        }
+        let object_category = self.objects[object_index].state.category & CATEGORY_SORT_LIMIT;
+        let relative_category = self.objects[relative_index].state.category & CATEGORY_SORT_LIMIT;
+        // C4GameObjects::OrderObjectBefore/After protect category sorting
+        // with opposite one-sided comparisons (C4GameObjects.cpp:749-769).
+        if (!command.after && object_category < relative_category)
+            || (command.after && object_category > relative_category)
+        {
+            return;
+        }
+        let Some(object_position) = self.exec_list.iter().position(|&id| id == command.object)
+        else {
+            return;
+        };
+        let Some(relative_position) = self
+            .exec_list
+            .iter()
+            .position(|&id| id == command.relative_to)
+        else {
+            return;
+        };
+
+        if command.after {
+            // Main-list AFTER is exec-list BEFORE.
+            if object_position < relative_position {
+                return;
+            }
+            self.exec_list.remove(object_position);
+            let Some(relative_position) = self
+                .exec_list
+                .iter()
+                .position(|&id| id == command.relative_to)
+            else {
+                return;
+            };
+            self.exec_list.insert(relative_position, command.object);
+        } else {
+            // Main-list BEFORE is exec-list AFTER.
+            if object_position > relative_position {
+                return;
+            }
+            self.exec_list.remove(object_position);
+            let Some(relative_position) = self
+                .exec_list
+                .iter()
+                .position(|&id| id == command.relative_to)
+            else {
+                return;
+            };
+            self.exec_list.insert(relative_position + 1, command.object);
+        }
     }
 
     fn insert_exec_link(&mut self, position: usize, id: ObjectId) {
@@ -27641,6 +27814,7 @@ impl Engine {
             audio_events,
             messages,
             player_commands,
+            object_order_commands,
             landscape_ops,
             spawns,
             other_objects,
@@ -27665,6 +27839,7 @@ impl Engine {
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
         }
+        self.pending_object_order_commands.extend(object_order_commands);
         if !audio_events.is_empty() {
             self.pending_audio.extend(audio_events);
         }
@@ -27716,6 +27891,7 @@ impl Engine {
         let mut pending_messages = Vec::new();
         let mut current_audio = audio;
         let mut pending_player_commands = Vec::new();
+        let mut pending_object_order_commands = Vec::new();
         let mut pending_landscape_ops = Vec::new();
         let mut pending_other_objects = Vec::new();
         let mut game_over_requested = false;
@@ -27906,6 +28082,7 @@ impl Engine {
                 particles: mut emitted_particles,
                 messages: event_messages,
                 player_commands: effect_player_commands,
+                object_order_commands: effect_object_order_commands,
                 audio: outcome_audio,
                 trigger_game_over,
                 script_go,
@@ -27928,6 +28105,7 @@ impl Engine {
             if !effect_player_commands.is_empty() {
                 pending_player_commands.extend(effect_player_commands);
             }
+            pending_object_order_commands.extend(effect_object_order_commands);
             if let Some(update) = environment_update {
                 update.apply(&mut current_environment);
             }
@@ -27963,6 +28141,7 @@ impl Engine {
             audio_events: pending_audio,
             messages: pending_messages,
             player_commands: pending_player_commands,
+            object_order_commands: pending_object_order_commands,
             landscape_ops: pending_landscape_ops,
             spawns: pending_spawns,
             other_objects: pending_other_objects,
@@ -28330,6 +28509,7 @@ impl Engine {
                     audio,
                     messages,
                     player_commands,
+                    object_order_commands,
                     trigger_game_over,
                     script_go,
                 },
@@ -28385,6 +28565,7 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
+            self.pending_object_order_commands.extend(object_order_commands);
             if destroy {
                 destroy_requested = true;
             }
@@ -28469,6 +28650,7 @@ impl Engine {
                     audio,
                     messages,
                     player_commands,
+                    object_order_commands,
                     trigger_game_over,
                     script_go,
                 },
@@ -28525,6 +28707,7 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
+            self.pending_object_order_commands.extend(object_order_commands);
             if destroy {
                 destroy_requested = true;
             }
@@ -28584,6 +28767,7 @@ impl Engine {
                 audio_events,
                 event_messages,
                 player_commands,
+                object_order_commands,
                 landscape_ops,
                 effect_spawns,
                 effect_other_objects,
@@ -28619,6 +28803,7 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
+            self.pending_object_order_commands.extend(object_order_commands);
             if !landscape_ops.is_empty() {
                 self.apply_landscape_operations(landscape_ops);
             }
@@ -29349,6 +29534,7 @@ struct GlobalEffectRunOutcome {
     audio_events: Vec<AudioCommand>,
     messages: Vec<MessageCommand>,
     player_commands: Vec<PlayerCommand>,
+    object_order_commands: Vec<ObjectOrderCommand>,
     landscape_ops: Vec<LandscapeOperation>,
     spawns: Vec<SpawnConfig>,
     other_objects: Vec<compat::NestedObjectOutcome>,
@@ -55416,6 +55602,106 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             engine.next_object_id, 120,
             "world-side allocations advance the engine counter"
         );
+    }
+
+    #[test]
+    fn set_object_order_defers_lifo_and_persists_exec_order_like_cpp() {
+        // FnSetObjectOrder pushes C4ObjResort at the ResortProc head
+        // (C4Script.cpp:5090-5111); ExecuteResorts consumes head-first after
+        // CrossCheck / during Synchronize (C4Game.cpp:1611-1616,
+        // C4GameObjects.cpp:874-886). Saves serialize the main list in reverse
+        // execution order (C4ObjectList.cpp:506-529).
+        let script = r#"
+#strict
+func Reorder(pRelative, pSort, fAfter) {
+    return SetObjectOrder(pRelative, pSort, fAfter);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine
+            .register_definition(Definition::from_script("A", "A", script).expect("compiles"))
+            .expect("A registers");
+        engine.register_definition(simple_definition("B")).expect("B registers");
+        engine.register_definition(simple_definition("C")).expect("C registers");
+        let a = engine
+            .spawn_object(SpawnConfig::new("A").with_category(CATEGORY_OBJECT))
+            .expect("A spawns");
+        let b = engine
+            .spawn_object(SpawnConfig::new("B").with_category(CATEGORY_OBJECT))
+            .expect("B spawns");
+        let c = engine
+            .spawn_object(SpawnConfig::new("C").with_category(CATEGORY_OBJECT))
+            .expect("C spawns");
+        assert_eq!(engine.debug_exec_order(), vec![a, b, c]);
+
+        let a_index = engine.find_object_index(a).expect("A exists");
+        for args in [
+            vec![Value::Object(c.as_u64()), Value::Object(a.as_u64()), Value::Bool(false)],
+            vec![Value::Object(a.as_u64()), Value::Object(c.as_u64()), Value::Bool(true)],
+        ] {
+            assert_eq!(
+                engine.call_object_function(a_index, "Reorder", args).expect("resort queues"),
+                Value::Bool(true)
+            );
+        }
+        assert_eq!(engine.debug_exec_order(), vec![a, b, c], "resort is deferred");
+
+        engine.game_start_synchronize();
+        assert_eq!(engine.debug_exec_order(), vec![c, a, b], "newest request executes first");
+        assert_eq!(
+            engine
+                .sectors
+                .as_ref()
+                .expect("sector map exists")
+                .object_ids(sector::SectorKey::Inside { x: 0, y: 0 }),
+            &[b, a, c],
+            "sector traversal follows the C++ master-list order"
+        );
+
+        // OrderObjectBefore accepts an already-satisfied relationship
+        // without moving it (C4ObjectList.cpp:777-780).
+        assert_eq!(
+            engine
+                .call_object_function(
+                    a_index,
+                    "Reorder",
+                    vec![
+                        Value::Object(c.as_u64()),
+                        Value::Object(a.as_u64()),
+                        Value::Bool(false),
+                    ],
+                )
+                .expect("satisfied resort queues"),
+            Value::Bool(true)
+        );
+        engine.game_start_synchronize();
+        assert_eq!(engine.debug_exec_order(), vec![c, a, b]);
+
+        // C4ObjResort::Execute skips a sort object that is no longer normal
+        // (C4GameObjects.cpp:360-369).
+        let b_index = engine.find_object_index(b).expect("B exists");
+        engine.objects[b_index].state.status = ObjectStatus::Inactive;
+        engine.pending_object_order_commands.push(ObjectOrderCommand {
+            relative_to: c,
+            object: b,
+            after: true,
+        });
+        engine.execute_object_order_commands();
+        assert_eq!(engine.debug_exec_order(), vec![c, a, b]);
+        engine.objects[b_index].state.status = ObjectStatus::Normal;
+
+        let state = engine.capture_state();
+        assert_eq!(state.object_order, vec![c, a, b]);
+        let mut restored = Engine::with_seed(0);
+        restored.set_landscape(Landscape::flat(100, 100));
+        restored
+            .register_definition(Definition::from_script("A", "A", script).expect("compiles"))
+            .expect("A registers");
+        restored.register_definition(simple_definition("B")).expect("B registers");
+        restored.register_definition(simple_definition("C")).expect("C registers");
+        restored.restore_state(&state).expect("state restores");
+        assert_eq!(restored.debug_exec_order(), vec![c, a, b]);
     }
 
     // The GoldRush intro wall (f22 talker x 30-vs-28): C4ObjectList::Add

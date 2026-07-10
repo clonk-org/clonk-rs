@@ -240,6 +240,15 @@ pub(crate) enum PlayerCommand {
     },
 }
 
+/// One `C4ObjResort` queued by FnSetObjectOrder. C++ defers these until
+/// `C4GameObjects::ExecuteResorts` and executes the newest request first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObjectOrderCommand {
+    pub(crate) relative_to: ObjectId,
+    pub(crate) object: ObjectId,
+    pub(crate) after: bool,
+}
+
 impl HostWorldObject {
     pub(crate) fn with_direction(mut self, direction: i32) -> Self {
         self.direction = direction;
@@ -5477,6 +5486,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetObjectLayer", get_object_layer);
     script.register_host_function("SetObjectLayer", set_object_layer);
+    script.register_host_function("SetObjectOrder", set_object_order);
     script.register_host_function("GetObjectBlitMode", get_object_blit_mode);
     script.register_host_function("SetObjectBlitMode", set_object_blit_mode);
     script.register_host_function("GetOCF", get_ocf);
@@ -7278,6 +7288,7 @@ pub(crate) struct EffectContextOutcome {
     pub transfer_zones: Vec<TransferZoneCommand>,
     pub messages: Vec<MessageCommand>,
     pub player_commands: Vec<PlayerCommand>,
+    pub object_order_commands: Vec<ObjectOrderCommand>,
     pub audio: AudioOutcome,
     pub trigger_game_over: bool,
     pub script_go: Option<bool>,
@@ -7304,6 +7315,7 @@ impl EffectContextOutcome {
         transfer_zones: Vec<TransferZoneCommand>,
         messages: Vec<MessageCommand>,
         player_commands: Vec<PlayerCommand>,
+        object_order_commands: Vec<ObjectOrderCommand>,
         audio: AudioOutcome,
         trigger_game_over: bool,
         script_go: Option<bool>,
@@ -7325,6 +7337,7 @@ impl EffectContextOutcome {
             transfer_zones,
             messages,
             player_commands,
+            object_order_commands,
             audio,
             trigger_game_over,
             script_go,
@@ -7350,6 +7363,7 @@ impl EffectContextOutcome {
             transfer_zones: Vec::new(),
             messages: Vec::new(),
             player_commands: Vec::new(),
+            object_order_commands: Vec::new(),
             audio: AudioOutcome {
                 state: audio,
                 events: Vec::new(),
@@ -19612,6 +19626,53 @@ fn set_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnSetObjectOrder (C4Script.cpp:5090-5111): queue a deferred main-list
+/// resort. A nil sort object means the caller; invalid/self pairs fail.
+fn set_object_order(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "SetObjectOrder expects at most 3 arguments: relative object, sort object and after flag",
+        ));
+    }
+    let relative_to = args
+        .first()
+        .map(|value| parse_object_reference_argument(value, "SetObjectOrder", "relative object"))
+        .transpose()?
+        .flatten();
+    let explicit_object = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "SetObjectOrder", "sort object"))
+        .transpose()?
+        .flatten();
+    let after = args.get(2).map(Value::as_bool).unwrap_or(false);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let object = explicit_object.or_else(|| context.object_context().map(|scope| scope.id()));
+        let Some((relative_to, object)) = relative_to.zip(object) else {
+            return Ok(Value::Bool(false));
+        };
+        if relative_to == object {
+            return Ok(Value::Bool(false));
+        }
+        let resolves = |id| {
+            context.object_scope(id).is_some() || context.get_world_object(id).is_some()
+        };
+        if !resolves(relative_to) || !resolves(object) {
+            return Ok(Value::Bool(false));
+        }
+        context.record_object_order_command(ObjectOrderCommand {
+            relative_to,
+            object,
+            after,
+        });
+        Ok(Value::Bool(true))
+    })
+}
+
 const GFX_BLIT_CUSTOM: u32 = 128;
 
 /// FnGetObjectBlitMode (C4Script.cpp:5663-5679): read the raw base-object
@@ -20606,6 +20667,7 @@ struct EffectHostContext {
     world: HostWorldContext,
     player_overrides: HashMap<i32, PlayerState>,
     player_commands: Vec<PlayerCommand>,
+    object_order_commands: Vec<ObjectOrderCommand>,
     team_home_base_rule: bool,
     pending_spawns: Vec<SpawnConfig>,
     pending_objects: HashMap<ObjectId, HostWorldObject>,
@@ -20753,6 +20815,7 @@ impl EffectHostContext {
             world,
             player_overrides: HashMap::new(),
             player_commands: Vec::new(),
+            object_order_commands: Vec::new(),
             team_home_base_rule,
             pending_spawns: Vec::new(),
             pending_objects: HashMap::new(),
@@ -21532,6 +21595,10 @@ impl EffectHostContext {
         self.player_commands.push(command);
     }
 
+    fn record_object_order_command(&mut self, command: ObjectOrderCommand) {
+        self.object_order_commands.push(command);
+    }
+
     fn team_home_base_rule(&self) -> bool {
         self.team_home_base_rule
     }
@@ -21697,6 +21764,7 @@ impl EffectHostContext {
             self.transfer_zone_commands,
             self.pending_messages,
             self.player_commands,
+            self.object_order_commands,
             AudioOutcome {
                 state: self.audio,
                 events: audio_events,
@@ -23106,6 +23174,7 @@ mod tests {
         "SetObjDrawTransform2",
         "SetObjectBlitMode",
         "SetObjectLayer",
+        "SetObjectOrder",
         "SetObjectStatus",
         "SetOwner",
         "SetPhase",
@@ -23158,6 +23227,69 @@ mod tests {
             .map(|name| name.to_string())
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn set_object_order_is_available_to_legacy_scripts() {
+        // FnSetObjectOrder is registered by C4Script.cpp:6970. Elevator
+        // Initialize calls it before SetAction (Elevator.c4d/Script.c:13),
+        // so a missing host aborts the rest of Initialize.
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script("global func Probe(object) { return SetObjectOrder(object); }")
+            .expect("SetObjectOrder probe compiles");
+
+        let result = engine.call("Probe", &[Value::Object(2)]);
+        assert!(result.is_ok(), "SetObjectOrder must be registered: {result:?}");
+    }
+
+    #[test]
+    fn set_object_order_queues_cpp_pairs_and_rejects_invalid_pairs() {
+        // FnSetObjectOrder (C4Script.cpp:5090-5111): nil pSortObj defaults
+        // to the caller, nil pObjBeforeOrAfter and self-pairs return false,
+        // and a valid request records fSortAfter without sorting inline.
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            ObjectId::new(2),
+            "Dummy",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )]);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            assert_eq!(
+                set_object_order(&[Value::Object(2), Value::Nil, Value::Bool(true)])?,
+                Value::Bool(true)
+            );
+            assert_eq!(set_object_order(&[Value::Object(1)])?, Value::Bool(false));
+            assert_eq!(set_object_order(&[])?, Value::Bool(false));
+            assert_eq!(
+                set_object_order(&[Value::Object(999)])?,
+                Value::Bool(false)
+            );
+            Ok::<_, RuntimeError>(())
+        });
+
+        result.expect("SetObjectOrder calls succeed");
+        assert_eq!(
+            outcome.object_order_commands,
+            [ObjectOrderCommand {
+                relative_to: ObjectId::new(2),
+                object: ObjectId::new(1),
+                after: true,
+            }]
+        );
     }
 
     #[test]
