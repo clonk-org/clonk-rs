@@ -3147,6 +3147,7 @@ impl ObjectUpdate {
         self.custom_name.is_none()
             && self.layer.is_none()
             && self.blit_mode.is_none()
+            && self.solid_mask_override.is_none()
             && self.change_def.is_none()
             && self.position.is_none()
             && self.velocity.is_none()
@@ -17954,6 +17955,9 @@ impl Engine {
                 object.state.base_graphics.clone(),
             )
         };
+        let solid_mask_changed = object_update
+            .as_ref()
+            .is_some_and(|update| update.solid_mask_override.is_some());
 
         // FnChangeDef swaps the definition INLINE at the call site
         // (C4Object::ChangeDef, C4Object.cpp:1205-1231, incl. the
@@ -18153,9 +18157,10 @@ impl Engine {
             self.apply_container_change(object_id, previous, new, false)?;
         }
 
-        if self.objects[index].state.base_graphics != previous_base_graphics {
-            // C4Object::SetGraphics calls UpdateGraphics(true), which removes,
-            // recreates and re-puts the active solid mask (C4Object.cpp:381-402).
+        if solid_mask_changed || self.objects[index].state.base_graphics != previous_base_graphics {
+            // SetSolidMask and SetGraphics both remove, recreate and re-put
+            // the active solid mask immediately (C4Object.cpp:3809-3818,
+            // :381-402).
             self.update_solid_mask(index);
         }
 
@@ -18213,6 +18218,10 @@ impl Engine {
                     object.state.base_graphics.clone(),
                 )
             };
+            let solid_mask_changed = outcome
+                .update
+                .as_ref()
+                .is_some_and(|update| update.solid_mask_override.is_some());
             let mut energy_died = false;
             // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply the
             // def change BEFORE the staged delta so a following
@@ -18385,7 +18394,9 @@ impl Engine {
             for (previous, new) in container_changes {
                 self.apply_container_change(object_id, previous, new, false)?;
             }
-            if self.objects[index].state.base_graphics != previous_base_graphics {
+            if solid_mask_changed
+                || self.objects[index].state.base_graphics != previous_base_graphics
+            {
                 self.update_solid_mask(index);
             }
         }
@@ -55912,6 +55923,105 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             pixels: Arc::from([0, 0, 0, alpha]),
             color_mask: None,
         }
+    }
+
+    fn switching_mask_definition() -> Definition {
+        let mut gate = Definition::from_script(
+            "GATE",
+            "Gate",
+            r#"
+            #strict 2
+            public func SwitchMask() { return SetSolidMask(1, 0, 1, 1); }
+            public func SwitchOther(object target) { return target->SwitchMask(); }
+            "#,
+        )
+        .expect("gate script compiles");
+        gate.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        gate.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        gate.set_sprite_image(Some(DefinitionSpriteImage {
+            width: 2,
+            height: 1,
+            pixels: Arc::from([0, 0, 0, 0, 255, 255, 255, 255]),
+            color_mask: None,
+        }));
+        gate
+    }
+
+    #[test]
+    fn set_solid_mask_callback_rebakes_the_landscape_like_cpp() {
+        // FnSetSolidMask calls C4Object::SetSolidMask, which removes the old
+        // mask and immediately creates and puts the new one
+        // (C4Script.cpp:271-278; C4Object.cpp:3809-3818). Goldrush's CTWR
+        // UpdateTransferZone switches from a transparent saved source pixel
+        // to an opaque one during game-start synchronization.
+        let mut engine = Engine::with_seed(7);
+        engine.set_landscape(vehicle_grid_landscape(20, 20));
+        engine
+            .register_definition(switching_mask_definition())
+            .expect("gate registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("GATE")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("gate spawns");
+        assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
+
+        let idx = engine.find_object_index(id).expect("gate exists");
+        let result = engine
+            .call_object_function(idx, "SwitchMask", Vec::new())
+            .expect("SetSolidMask callback succeeds");
+        assert_eq!(result, Value::Bool(true));
+
+        assert_eq!(
+            engine.debug_solid_mask_override(id.as_u64()),
+            Some(Some((1, 0, 1, 1)))
+        );
+        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+    }
+
+    #[test]
+    fn nested_set_solid_mask_callback_rebakes_the_target_like_cpp() {
+        // An object-targeted script call mutates that same live C4Object in
+        // C++, so its nested SetSolidMask also re-puts the target mask before
+        // returning (C4Script.cpp:271-278; C4Object.cpp:3809-3818).
+        let mut engine = Engine::with_seed(8);
+        engine.set_landscape(vehicle_grid_landscape(20, 20));
+        engine
+            .register_definition(switching_mask_definition())
+            .expect("gate registers");
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("GATE")
+                    .with_position(Vector2::new(5, 5))
+                    .with_loaded(true),
+            )
+            .expect("caller spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("GATE")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("target spawns");
+        assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
+
+        let idx = engine.find_object_index(caller).expect("caller exists");
+        let result = engine
+            .call_object_function(
+                idx,
+                "SwitchOther",
+                vec![Value::Object(target.as_u64())],
+            )
+            .expect("nested SetSolidMask succeeds");
+
+        assert_eq!(result, Value::Bool(true));
+        assert_eq!(
+            engine.debug_solid_mask_override(target.as_u64()),
+            Some(Some((1, 0, 1, 1)))
+        );
+        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
     }
 
     #[test]
