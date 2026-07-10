@@ -1,5 +1,5 @@
 use lc_frontend::classic_gui::{ClassicButtonState, ClassicGuiSkin, IntRect};
-use lc_frontend::ClonkFontSet;
+use lc_frontend::{ClonkFontSet, ImageData};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, Rect, Surface, TextFont};
 
@@ -8,6 +8,21 @@ const CLASSIC_MIN_CAPTION_HEIGHT: i32 = 23;
 const CLASSIC_BUTTON_HEIGHT: i32 = 32;
 const CLASSIC_INDENT_X: i32 = 10;
 const CLASSIC_INDENT_Y: i32 = 6;
+const CLASSIC_GOAL_SIZE: i32 = 64;
+const CLASSIC_GOAL_MARGIN: i32 = 4;
+const CLASSIC_PLAYER_LIST_TOP_INSET: i32 = 12;
+const CLASSIC_PLAYER_ROW_HEIGHT: i32 = 54;
+const CLASSIC_PLAYER_ROW_STEP: i32 = 55;
+const CLASSIC_PLAYER_ROW_LEFT_INSET: i32 = 6;
+const CLASSIC_PLAYER_ROW_RIGHT_INSET: i32 = 19;
+const CLASSIC_PLAYER_ROW_TOP_INSET: i32 = 3;
+const CLASSIC_PLAYER_LABEL_SPACING: i32 = 2;
+pub const CLASSIC_FULFILLED_STAR_SOURCE: IntRect = IntRect {
+    x: 0,
+    y: 320,
+    w: 40,
+    h: 40,
+};
 
 const BACKDROP_COLOR: Color = Color::new(8, 12, 24, 210);
 const PANEL_COLOR: Color = Color::new(22, 32, 52, 240);
@@ -115,15 +130,91 @@ pub struct NextMissionButton {
     pub description: String,
 }
 
+/// One frozen goal row consumed by the classic evaluation dialog.
+///
+/// `picture` is the buffered definition picture created without invoking
+/// scenario callbacks, just like `C4GoalDisplay::GoalPicture`
+/// (`C4GameOverDlg.cpp:25-58`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluationGoal {
+    pub definition_id: String,
+    pub fulfilled: bool,
+    pub picture: Option<ImageData>,
+}
+
+/// Presentation data for one C4PlayerInfo evaluation row.
+///
+/// `player_info_id` deliberately is not the in-round C4Player number:
+/// C4PlayerInfoListBox joins player infos to C4RoundResultsPlayer by info ID
+/// (`C4PlayerInfoListBox.cpp:132-143,344-358`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluationPlayer {
+    pub player_info_id: i32,
+    pub name: String,
+    pub won: bool,
+    pub color_dw: u32,
+    pub total_playing_time: u32,
+    pub score_old: i32,
+    pub score_new: Option<i32>,
+    pub custom_evaluation_strings: String,
+    pub big_icon: Option<ImageData>,
+}
+
+/// Frozen presentation model for C4GameOverDlg.
+///
+/// Player order remains the order supplied by C4PlayerInfos; C++ does not sort
+/// evaluation rows by numeric info ID. Lookups still use the info ID as the
+/// sole join key.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EvaluationViewModel {
+    goals: Vec<EvaluationGoal>,
+    players: Vec<EvaluationPlayer>,
+}
+
+impl EvaluationViewModel {
+    pub fn new(goals: Vec<EvaluationGoal>, players: Vec<EvaluationPlayer>) -> Self {
+        Self { goals, players }
+    }
+
+    pub fn goals(&self) -> &[EvaluationGoal] {
+        &self.goals
+    }
+
+    pub fn players(&self) -> impl ExactSizeIterator<Item = &EvaluationPlayer> {
+        self.players.iter()
+    }
+
+    pub fn player_by_info_id(&self, player_info_id: i32) -> Option<&EvaluationPlayer> {
+        self.players
+            .iter()
+            .find(|player| player.player_info_id == player_info_id)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct GameOverClassicResources<'a> {
     skin: ClassicGuiSkin<'a>,
     fonts: &'a ClonkFontSet,
+    gui_icons: Option<&'a ImageData>,
+    player: Option<&'a ImageData>,
+    score: Option<&'a ImageData>,
 }
 
 impl<'a> GameOverClassicResources<'a> {
-    pub const fn new(skin: ClassicGuiSkin<'a>, fonts: &'a ClonkFontSet) -> Self {
-        Self { skin, fonts }
+    pub const fn new(
+        skin: ClassicGuiSkin<'a>,
+        fonts: &'a ClonkFontSet,
+        gui_icons: Option<&'a ImageData>,
+        player: Option<&'a ImageData>,
+        score: Option<&'a ImageData>,
+    ) -> Self {
+        Self {
+            skin,
+            fonts,
+            gui_icons,
+            player,
+            score,
+        }
     }
 }
 
@@ -133,6 +224,29 @@ struct ClassicGameOverLayout {
     caption: IntRect,
     player_area: IntRect,
     buttons: Vec<IntRect>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassicEvaluationGoalLayout {
+    pub picture: IntRect,
+    pub fulfilled_star: IntRect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassicEvaluationPlayerLayout {
+    pub row: IntRect,
+    pub icon: IntRect,
+    pub name_anchor: (i32, i32),
+    pub score_anchor: (i32, i32),
+    pub time_anchor: (i32, i32),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassicEvaluationLayout {
+    pub goal_display: Option<IntRect>,
+    pub goals: Vec<ClassicEvaluationGoalLayout>,
+    pub player_list: IntRect,
+    pub players: Vec<ClassicEvaluationPlayerLayout>,
 }
 
 #[derive(Debug)]
@@ -147,6 +261,7 @@ pub struct GameOverState {
     title: String,
     subtitle: String,
     entries: Vec<GameOverEntry>,
+    evaluation: EvaluationViewModel,
     buttons: Vec<GameOverButton>,
     selected_button: usize,
     pressed_button: Option<usize>,
@@ -222,6 +337,7 @@ impl GameOverState {
             title,
             subtitle,
             entries,
+            evaluation: EvaluationViewModel::default(),
             buttons,
             selected_button: 0,
             pressed_button: None,
@@ -236,6 +352,14 @@ impl GameOverState {
 
     pub fn subtitle(&self) -> &str {
         &self.subtitle
+    }
+
+    pub fn set_evaluation(&mut self, evaluation: EvaluationViewModel) {
+        self.evaluation = evaluation;
+    }
+
+    pub fn evaluation(&self) -> &EvaluationViewModel {
+        &self.evaluation
     }
 
     #[allow(dead_code)]
@@ -478,6 +602,110 @@ impl GameOverState {
             caption,
             player_area,
             buttons,
+        }
+    }
+
+    fn classic_evaluation_layout(
+        &self,
+        surface_width: u32,
+        surface_height: u32,
+        fonts: &ClonkFontSet,
+    ) -> ClassicEvaluationLayout {
+        let chrome = self.classic_layout(surface_width, surface_height, fonts);
+        let goal_area_height = CLASSIC_GOAL_SIZE + 2 * CLASSIC_GOAL_MARGIN;
+        let goal_count = self.evaluation.goals().len() as i32;
+        let goals_per_row = (chrome.dialog.w / goal_area_height).max(1);
+        let goal_rows = if goal_count == 0 {
+            0
+        } else {
+            (goal_count - 1) / goals_per_row + 1
+        };
+        let goal_display = (goal_rows > 0).then_some(IntRect {
+            x: chrome.dialog.x,
+            y: chrome.player_area.y,
+            w: chrome.dialog.w,
+            h: goal_rows * goal_area_height,
+        });
+        let goals = (0..goal_count)
+            .map(|index| {
+                let row = index / goals_per_row;
+                let column = index % goals_per_row;
+                let row_start = row * goals_per_row;
+                let goals_in_row = (goal_count - row_start).min(goals_per_row);
+                let group_width = goals_in_row * goal_area_height;
+                let picture = IntRect {
+                    x: chrome.dialog.x + (chrome.dialog.w - group_width) / 2
+                        + column * goal_area_height
+                        + CLASSIC_GOAL_MARGIN,
+                    y: chrome.player_area.y
+                        + row * goal_area_height
+                        + CLASSIC_GOAL_MARGIN,
+                    w: CLASSIC_GOAL_SIZE,
+                    h: CLASSIC_GOAL_SIZE,
+                };
+                ClassicEvaluationGoalLayout {
+                    fulfilled_star: IntRect {
+                        x: picture.x + picture.w / 2,
+                        y: picture.y + picture.h / 2,
+                        w: picture.w / 2,
+                        h: picture.h / 2,
+                    },
+                    picture,
+                }
+            })
+            .collect();
+
+        // C4PlayerInfoListBox's scroll window keeps the same top inset and
+        // hidden-scrollbar column even when no scrollbar is visible
+        // (C4GameOverDlg.cpp:210-220; C4Gui.cpp:1346-1384).
+        let player_list_y = chrome.player_area.y
+            + goal_rows * goal_area_height
+            + CLASSIC_PLAYER_LIST_TOP_INSET;
+        let player_list = IntRect {
+            x: chrome.player_area.x,
+            y: player_list_y,
+            w: chrome.player_area.w,
+            h: (chrome.player_area.y + chrome.player_area.h - player_list_y).max(0),
+        };
+        let row_width =
+            (player_list.w - CLASSIC_PLAYER_ROW_LEFT_INSET - CLASSIC_PLAYER_ROW_RIGHT_INSET)
+                .max(0);
+        let players = self
+            .evaluation
+            .players()
+            .enumerate()
+            .map(|(index, _)| {
+                let row = IntRect {
+                    x: player_list.x + CLASSIC_PLAYER_ROW_LEFT_INSET,
+                    y: player_list.y
+                        + CLASSIC_PLAYER_ROW_TOP_INSET
+                        + index as i32 * CLASSIC_PLAYER_ROW_STEP,
+                    w: row_width,
+                    h: CLASSIC_PLAYER_ROW_HEIGHT,
+                };
+                let right_anchor = row.x + row.w - CLASSIC_PLAYER_LABEL_SPACING;
+                ClassicEvaluationPlayerLayout {
+                    row,
+                    icon: IntRect {
+                        w: CLASSIC_PLAYER_ROW_HEIGHT,
+                        h: CLASSIC_PLAYER_ROW_HEIGHT,
+                        ..row
+                    },
+                    name_anchor: (
+                        row.x + CLASSIC_PLAYER_ROW_HEIGHT + CLASSIC_PLAYER_LABEL_SPACING,
+                        row.y + CLASSIC_PLAYER_LABEL_SPACING,
+                    ),
+                    score_anchor: (right_anchor, row.y + CLASSIC_PLAYER_LABEL_SPACING),
+                    time_anchor: (right_anchor, row.y + 26),
+                }
+            })
+            .collect();
+
+        ClassicEvaluationLayout {
+            goal_display,
+            goals,
+            player_list,
+            players,
         }
     }
 
@@ -997,6 +1225,33 @@ mod tests {
     }
 
     #[test]
+    fn classic_resources_carry_cpp_evaluation_icon_sheets() {
+        // C4GoalDisplay uses GUIIcons for Ico_Star, while evaluation player
+        // rows use GraphicsResource Player and Score facets
+        // (C4GameOverDlg.cpp:68-71; C4PlayerInfoListBox.cpp:261-322,
+        // 344-425; C4GraphicsResource.cpp:265-268).
+        let caption = solid_image(96, 23, [1, 2, 3, 255]);
+        let button = solid_image(128, 32, [4, 5, 6, 255]);
+        let button_down = solid_image(128, 32, [7, 8, 9, 255]);
+        let gui_icons = solid_image(240, 360, [10, 11, 12, 255]);
+        let player = solid_image(48, 48, [13, 14, 15, 255]);
+        let score = solid_image(60, 30, [16, 17, 18, 255]);
+        let fonts = endeavour_fonts();
+        let resources = GameOverClassicResources::new(
+            ClassicGuiSkin::new(&caption, &button, &button_down, None),
+            &fonts,
+            Some(&gui_icons),
+            Some(&player),
+            Some(&score),
+        );
+
+        assert_eq!(resources.gui_icons.map(|image| (image.width(), image.height())), Some((240, 360)));
+        assert_eq!(CLASSIC_FULFILLED_STAR_SOURCE, IntRect { x: 0, y: 320, w: 40, h: 40 });
+        assert_eq!(resources.player.map(|image| (image.width(), image.height())), Some((48, 48)));
+        assert_eq!(resources.score.map(|image| (image.width(), image.height())), Some((60, 30)));
+    }
+
+    #[test]
     fn subtitle_prefers_local_outcome() {
         let entries = vec![
             entry(1, "Observer", GameOverOutcome::Observer, false),
@@ -1157,6 +1412,115 @@ mod tests {
         );
     }
 
+    fn evaluation_player(player_info_id: i32, name: &str) -> EvaluationPlayer {
+        EvaluationPlayer {
+            player_info_id,
+            name: name.to_string(),
+            won: true,
+            color_dw: 0x00f4_0000,
+            total_playing_time: 165,
+            score_old: 0,
+            score_new: Some(100),
+            custom_evaluation_strings: String::new(),
+            big_icon: None,
+        }
+    }
+
+    fn evaluation_state(screen_width: u32) -> GameOverState {
+        let evaluation = EvaluationViewModel::new(
+            vec![EvaluationGoal {
+                definition_id: "SCRG".to_string(),
+                fulfilled: true,
+                picture: None,
+            }],
+            vec![
+                evaluation_player(41, "Player"),
+                evaluation_player(7, "Second"),
+            ],
+        );
+        let mut state = GameOverState::with_next_mission(
+            "A Clonk".into(),
+            Vec::new(),
+            screen_width,
+            Some(NextMissionButton {
+                label: "Next tutorial".into(),
+                description: "Continue learning".into(),
+            }),
+        );
+        state.set_evaluation(evaluation);
+        state
+    }
+
+    #[test]
+    fn evaluation_players_are_keyed_by_cpp_player_info_id() {
+        // C4PlayerInfoListBox looks up C4RoundResultsPlayer with the
+        // C4PlayerInfo ID, never the runtime C4Player number
+        // (C4PlayerInfoListBox.cpp:132-143,344-358).
+        let state = evaluation_state(1024);
+
+        assert_eq!(
+            state
+                .evaluation()
+                .player_by_info_id(41)
+                .map(|player| player.name.as_str()),
+            Some("Player")
+        );
+        assert!(state.evaluation().player_by_info_id(0).is_none());
+        assert_eq!(
+            state
+                .evaluation()
+                .players()
+                .map(|player| player.player_info_id)
+                .collect::<Vec<_>>(),
+            vec![41, 7],
+            "C4PlayerInfo order must not become numeric info-ID order"
+        );
+    }
+
+    #[test]
+    fn classic_evaluation_content_layout_matches_cpp_at_audited_resolutions() {
+        // C4GameOverDlg takes a 64px goal strip, C4GoalDisplay adds 4px
+        // margins around each goal, and C4PlayerInfoListBox reserves its
+        // hidden 16px scrollbar while positioning 54px evaluation rows
+        // (C4GameOverDlg.cpp:145-220; C4PlayerInfoListBox.cpp:79-154,
+        // 184-231; C4Gui.h:106-129).
+        let fonts = endeavour_fonts();
+
+        let state = evaluation_state(1024);
+        let chrome = state.classic_layout(1024, 600, &fonts);
+        let content = state.classic_evaluation_layout(1024, 600, &fonts);
+        assert_eq!(chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(), vec![65, 399, 733]);
+        assert_eq!(content.goal_display, Some(IntRect { x: 5, y: 34, w: 1014, h: 72 }));
+        assert_eq!(content.goals[0].picture, IntRect { x: 480, y: 38, w: 64, h: 64 });
+        assert_eq!(content.goals[0].fulfilled_star, IntRect { x: 512, y: 70, w: 32, h: 32 });
+        assert_eq!(content.player_list, IntRect { x: 15, y: 118, w: 994, h: 403 });
+        assert_eq!(content.players[0].row, IntRect { x: 21, y: 121, w: 969, h: 54 });
+        assert_eq!(content.players[0].icon, IntRect { x: 21, y: 121, w: 54, h: 54 });
+        assert_eq!(content.players[0].name_anchor, (77, 123));
+        assert_eq!(content.players[0].score_anchor, (988, 123));
+        assert_eq!(content.players[0].time_anchor, (988, 147));
+
+        let state = evaluation_state(1280);
+        let chrome = state.classic_layout(1280, 720, &fonts);
+        let content = state.classic_evaluation_layout(1280, 720, &fonts);
+        assert_eq!(chrome.dialog, IntRect { x: 75, y: 75, w: 1130, h: 570 });
+        assert_eq!(chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(), vec![108, 388, 668, 948]);
+        assert!(chrome.buttons.iter().all(|rect| rect.y == 583));
+        assert_eq!(content.goals[0].picture, IntRect { x: 608, y: 108, w: 64, h: 64 });
+        assert_eq!(content.player_list, IntRect { x: 85, y: 188, w: 1110, h: 383 });
+        assert_eq!(content.players[0].row, IntRect { x: 91, y: 191, w: 1085, h: 54 });
+
+        let state = evaluation_state(1920);
+        let chrome = state.classic_layout(1920, 1080, &fonts);
+        let content = state.classic_evaluation_layout(1920, 1080, &fonts);
+        assert_eq!(chrome.dialog, IntRect { x: 320, y: 180, w: 1280, h: 720 });
+        assert_eq!(chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(), vec![371, 688, 1005, 1322]);
+        assert!(chrome.buttons.iter().all(|rect| rect.y == 838));
+        assert_eq!(content.goals[0].picture, IntRect { x: 928, y: 213, w: 64, h: 64 });
+        assert_eq!(content.player_list, IntRect { x: 330, y: 293, w: 1260, h: 533 });
+        assert_eq!(content.players[0].row, IntRect { x: 336, y: 296, w: 1235, h: 54 });
+    }
+
     #[test]
     fn classic_render_uses_skin_without_scrim_or_footer() {
         // Dialog, WoodenLabel and Button draw the standard C4GUI skin; only
@@ -1169,6 +1533,9 @@ mod tests {
         let button = solid_image(128, 32, [0, 120, 0, 255]);
         let button_down = solid_image(128, 32, [0, 0, 180, 255]);
         let highlight = solid_image(16, 16, [80, 0, 0, 255]);
+        let gui_icons = solid_image(240, 360, [0, 0, 0, 0]);
+        let player = solid_image(48, 48, [0, 0, 0, 0]);
+        let score = solid_image(60, 30, [0, 0, 0, 0]);
         let skin = lc_frontend::classic_gui::ClassicGuiSkin::new(
             &caption,
             &button,
@@ -1194,7 +1561,13 @@ mod tests {
         state.render(
             &mut surface,
             &fallback,
-            Some(GameOverClassicResources::new(skin, &fonts)),
+            Some(GameOverClassicResources::new(
+                skin,
+                &fonts,
+                Some(&gui_icons),
+                Some(&player),
+                Some(&score),
+            )),
         );
 
         assert_eq!(

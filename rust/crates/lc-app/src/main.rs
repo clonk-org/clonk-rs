@@ -663,6 +663,9 @@ impl FrontendAssets {
                 Some(button_highlight),
             ),
             fonts,
+            self.startup_dialog_images.get("GUIIcons.png"),
+            self.startup_dialog_images.get("Player.png"),
+            self.hud_graphics.score.as_ref(),
         ))
     }
 
