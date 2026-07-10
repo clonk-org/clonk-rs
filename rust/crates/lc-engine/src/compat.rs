@@ -32,7 +32,7 @@ use crate::{
     EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate,
-    PhysicsSettings, PlayerState, QueuedCommand, ShapeAttachRecord, SpawnConfig,
+    PhysicsSettings, PlayerState, QueuedCommand, ShapeAttachRecord, SpawnConfig, TeamInfo,
     ScoreboardState, TransferZoneCommand,
     TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER,
     CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
@@ -576,6 +576,7 @@ pub(crate) struct HostWorldContext {
     transfer_zones: Rc<Vec<TransferZoneState>>,
     players: Rc<HashMap<i32, PlayerState>>,
     player_order: Rc<Vec<i32>>,
+    teams: Rc<Vec<TeamInfo>>,
     local_players: Rc<HashSet<i32>>,
     crew_selection: Rc<HashMap<i32, CrewSelectionState>>,
     next_object_id: u64,
@@ -641,6 +642,7 @@ impl Default for HostWorldContext {
             transfer_zones: Rc::new(Vec::new()),
             players: Rc::new(HashMap::new()),
             player_order: Rc::new(Vec::new()),
+            teams: Rc::new(Vec::new()),
             local_players: Rc::new(HashSet::new()),
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
@@ -800,6 +802,7 @@ impl HostWorldContext {
             local_players: Rc::new(player_ids.iter().copied().collect()),
             player_order: Rc::new(player_ids),
             players: Rc::new(players),
+            teams: Rc::new(Vec::new()),
             crew_selection: Rc::new(crew_selection),
             next_object_id,
             team_home_base_rule,
@@ -844,6 +847,15 @@ impl HostWorldContext {
     {
         self.local_players = Rc::new(players.into_iter().collect());
         self
+    }
+
+    pub(crate) fn with_teams(mut self, teams: Rc<Vec<TeamInfo>>) -> Self {
+        self.teams = teams;
+        self
+    }
+
+    pub(crate) fn teams(&self) -> &[TeamInfo] {
+        self.teams.as_slice()
     }
 
     /// Attach the scenario script for GameCall/GameCallEx resolution.

@@ -672,6 +672,24 @@ pub struct JoinPlayerConfig {
     pub startup_player_count: i32,
 }
 
+/// One ordered entry from the scenario's `Teams.txt` list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamInfo {
+    pub id: i32,
+    pub name: String,
+    pub color: u32,
+}
+
+impl TeamInfo {
+    pub fn new(id: i32, name: impl Into<String>, color: u32) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            color,
+        }
+    }
+}
+
 /// `Engine::join_player` outcome: the assigned number plus the start
 /// position and base that ScenarioInit passed to InitializePlayer
 /// (C4Player.cpp:769-775).
@@ -5486,6 +5504,8 @@ pub struct EngineState {
     pub particles: Vec<ParticleSnapshot>,
     #[serde(default)]
     pub players: Vec<PlayerState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teams: Vec<TeamInfo>,
     #[serde(default)]
     pub crew_selection: HashMap<i32, CrewSelectionState>,
     #[serde(default)]
@@ -5596,6 +5616,7 @@ impl EngineState {
             object_order: Vec::new(),
             particles: snapshot.particles.clone(),
             players: snapshot.players.clone(),
+            teams: Vec::new(),
             crew_selection: snapshot.crew_selection.clone(),
             crew_roles: snapshot.crew_roles.clone(),
             global_effects: snapshot.global_effects.clone(),
@@ -9909,6 +9930,8 @@ pub struct Engine {
     objective_check_counter: u8,
     players_registered: bool,
     players: HashMap<i32, Player>,
+    /// Ordered `Game.Teams` entries loaded from the scenario's Teams.txt.
+    teams: Rc<Vec<TeamInfo>>,
     crew_selection: HashMap<i32, CrewSelection>,
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     /// The four C4SPlrStart slots retained from the scenario: consumed at
@@ -11571,6 +11594,7 @@ impl Engine {
             objective_check_counter: 0,
             players_registered: false,
             players: HashMap::new(),
+            teams: Rc::new(Vec::new()),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
             player_starts: vec![scenario::PlayerStart::default(); scenario::MAX_PLAYER_STARTS],
@@ -11654,6 +11678,10 @@ impl Engine {
         self.player_starts = starts;
         self.player_starts
             .resize_with(scenario::MAX_PLAYER_STARTS, Default::default);
+    }
+
+    pub(crate) fn set_teams(&mut self, teams: Vec<TeamInfo>) {
+        self.teams = Rc::new(teams);
     }
 
     /// One C4SPlrStart slot; `None` past `C4S_MaxPlayer` (4). Joining
@@ -13287,6 +13315,7 @@ impl Engine {
             self.next_object_id,
             self.team_home_base_rule,
         )
+        .with_teams(Rc::clone(&self.teams))
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
         // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
         // execution. FindBase is one of the APIs that explicitly walks the
@@ -18564,6 +18593,7 @@ impl Engine {
             object_order: self.exec_list.clone(),
             particles,
             players,
+            teams: self.teams.as_ref().clone(),
             crew_selection,
             crew_roles,
             global_effects: self.global_effects.clone(),
@@ -18889,6 +18919,7 @@ impl Engine {
             .map(Player::from_state)
             .map(|player| (player.id(), player))
             .collect();
+        self.teams = Rc::new(state.teams.clone());
         self.players_registered = !self.players.is_empty();
         self.next_mission = state.next_mission.clone();
         *self.scoreboard.borrow_mut() = state.scoreboard.clone();

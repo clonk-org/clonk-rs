@@ -24,7 +24,7 @@ use crate::{
     DefinitionActionGraphics, DefinitionComponent, DefinitionPicture, DefinitionPictureImage,
     DefinitionSpriteImage, Direction, EffectState, Engine, EngineError, EnvironmentSettings,
     Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings, RgbColor, SkyParallaxMode,
-    SkySettings, SpawnConfig, Vector2, FULL_CON,
+    SkySettings, SpawnConfig, TeamInfo, Vector2, FULL_CON,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -204,6 +204,8 @@ pub struct Scenario {
     /// The four C4SPlrStart slots, consumed by joining players
     /// (C4Player::ScenarioInit, C4Player.cpp:670-777).
     player_starts: Vec<PlayerStart>,
+    /// Ordered `Game.Teams` entries from the scenario's Teams.txt.
+    teams: Vec<TeamInfo>,
     /// The scenario's own Names.txt, overriding the standard clonk names
     /// in Game.Names (C4Game.cpp:3288-3289).
     standard_names: Option<String>,
@@ -520,6 +522,7 @@ impl Scenario {
             definition_load_steps,
             scenario_system_scripts: load_scenario_system_scripts(group)?,
             player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
+            teams: Vec::new(),
             standard_names: group
                 .read_file("Names.txt")
                 .ok()
@@ -601,6 +604,7 @@ impl Scenario {
         // C4SPlrStart outlives scenario load: ScenarioInit reads it when a
         // player joins (C4Player.cpp:670-777).
         engine.set_player_starts(self.player_starts.clone());
+        engine.set_teams(self.teams.clone());
         engine.set_map_zoom(self.map_zoom);
         // A scenario Names.txt overrides the standard clonk names
         // (C4Game.cpp:3288-3289); without one the installer's choice (the
@@ -1263,6 +1267,7 @@ impl Scenario {
             definition_load_steps,
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
+            teams: Vec::new(),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
             init_placement: None,
@@ -7233,6 +7238,7 @@ global func Step(state, frame, random)
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
+            teams: Vec::new(),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
             init_placement: None,
@@ -7330,6 +7336,7 @@ global func Step(state, frame, random)
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
+            teams: Vec::new(),
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
             init_placement: None,
