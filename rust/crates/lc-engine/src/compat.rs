@@ -8913,21 +8913,17 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         },
     };
 
-    let desired_index = match args.get(2) {
-        Some(Value::Int(value)) if *value >= 0 => *value as usize,
-        Some(Value::Int(_)) => {
-            return Err(RuntimeError::new(
-                "GetEffect: index argument must be >= 0 when provided",
-            ))
-        }
-        Some(Value::Nil) | None => 0,
-        Some(other) => {
-            return Err(RuntimeError::new(format!(
-                "GetEffect: expected int for index, got {}",
-                other.type_name()
-            )))
-        }
-    };
+    let desired_index = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "GetEffect",
+        "index",
+    )?;
+    if desired_index < 0 {
+        return Err(RuntimeError::new(
+            "GetEffect: index argument must be >= 0 when provided",
+        ));
+    }
+    let desired_index = desired_index as usize;
 
     let query = match args.get(3) {
         Some(Value::Int(value)) => *value,
@@ -32337,6 +32333,39 @@ func ProbeBadIndex(id) {
 
         let value = result.expect("GetEffect succeeds");
         assert_eq!(value, Value::String("Glow".into()));
+    }
+
+    #[test]
+    fn get_effect_converts_bool_index_to_c4valueint() {
+        // FnGetEffect declares iIndex as C4ValueInt (C4Script.cpp:5458),
+        // and Bool->Int is a direct conversion over the shared Data.Int slot
+        // (C4Value.cpp:512-514). Hazard's Weapon GetFMData passes the boolean
+        // result of `GetEffect(...) || j == 0` back as this index
+        // (Weapon.c4d/Script.c:543-545).
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[
+                Value::String("Bonus".into()),
+                state.clone(),
+                Value::Int(100),
+            ])?;
+            add_effect(&[
+                Value::String("Bonus".into()),
+                state.clone(),
+                Value::Int(100),
+            ])?;
+            get_effect(&[
+                Value::String("Bonus".into()),
+                state,
+                Value::Bool(true),
+            ])
+        });
+
+        assert_eq!(
+            result.expect("bool index converts to one"),
+            Value::Int(1),
+            "equal-priority effect #2 is list index 0, so bool true selects #1"
+        );
     }
 
     #[test]
