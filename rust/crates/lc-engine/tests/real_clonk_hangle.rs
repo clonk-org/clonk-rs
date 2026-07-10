@@ -5,9 +5,10 @@ use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ocf, CommandDirection, Definition, DefinitionTargetRect, Direction, Engine, JoinPlayerConfig,
     Landscape, ObjectUpdate, PhysicalsUpdate, Scenario, ScenarioError, SpawnConfig, Vector2,
-    CATEGORY_STATIC_BACK, CNAT_TOP, COM_DIG, COM_LEFT, COM_THROW, COM_UP,
+    CATEGORY_STATIC_BACK, CNAT_TOP, COM_DIG, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
 };
 use lc_resources::Group;
+use lc_script::Value;
 
 struct ContentResolver {
     root: PathBuf,
@@ -40,6 +41,7 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp() {
             pref_position: 0,
             crew: Vec::new(),
             control_style: false,
+            auto_context_menu: false,
             startup_player_count: 1,
         })
         .expect("Tutorial01 player joins");
@@ -115,6 +117,149 @@ fn content_root() -> PathBuf {
 }
 
 #[test]
+fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
+    // Tutorial03 waits for C4MN_Context=14, C4MN_Buy=4, then
+    // C4MN_Contents=18 (Script.c:120-184). These are the engine-owned
+    // permanent menus created/refilled by C4Object/C4ObjectMenu
+    // (C4Object.cpp:1919-1980,2044-2062; C4ObjectMenu.cpp:207-435).
+    let content = content_root();
+    let tutorial = content.join("Tutorial.c4f/Tutorial03.c4s");
+    let resolver = ContentResolver {
+        root: content.clone(),
+    };
+    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
+        .expect("Tutorial03 and the real Objects.c4d load");
+    let mut engine = Engine::with_seed(0);
+    scenario.apply(&mut engine).expect("Tutorial03 applies");
+    let joined = engine
+        .join_player(JoinPlayerConfig {
+            name: "Building-menu tester".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0xff_00_00,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            auto_context_menu: true,
+            startup_player_count: 1,
+        })
+        .expect("Tutorial03 player joins");
+    let clonk = engine
+        .crew_cursor(joined.number)
+        .expect("Tutorial03 joins one selected CLNK");
+    // ReadyMaterial FLAG enters the ready HUT3 during ScenarioInit, then
+    // C4Object::ExecBase assigns Base on Tick10 (C4Object.cpp:1000-1018).
+    // Do not enter early: the pre-base context correctly lacks Buy/Sell.
+    for _ in 0..20 {
+        engine.tick().expect("ready-base initialization frame");
+        if engine.snapshot().objects.iter().any(|object| {
+            object.definition_id == "HUT3" && object.base == joined.number
+        }) {
+            break;
+        }
+    }
+    let hut = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .find(|object| object.definition_id == "HUT3" && object.base == joined.number)
+        .expect("Tick10 assigns the ready HUT3 as this player's base");
+    assert_ne!(
+        hut.ocf & ocf::ENTRANCE,
+        0,
+        "full-con HUT3 exposes its DefCore entrance"
+    );
+    // C4Player::PlaceReadyCrew enters freshly joined crew into the ready
+    // base before gameplay (C4Player.cpp:695-730). Keep that real join
+    // path intact: forcing containment here would hide a player-placement
+    // or auto-context regression like the one visible in the app.
+    assert_eq!(
+        engine
+            .object_snapshot(clonk)
+            .expect("joined Tutorial03 clonk")
+            .container,
+        Some(hut.id),
+        "ready crew starts inside the real HUT3"
+    );
+
+    engine.tick().expect("auto-context frame");
+    let context = engine
+        .debug_object_menu(clonk.as_u64())
+        .expect("clonk exists")
+        .unwrap_or_else(|| {
+            let clonk = engine.object_snapshot(clonk).expect("clonk snapshot");
+            panic!(
+                "HUT3 opens C4MN_Context: container={:?}, crew={}, commands={:?}",
+                clonk.container,
+                clonk.crew_member,
+                clonk.command_stack.command_names()
+            )
+        });
+    assert_eq!(
+        engine.object_snapshot(hut.id).expect("hut survives").base,
+        joined.number,
+        "the auto-context frame must retain the ready-base owner"
+    );
+    assert_eq!(context.identification, Value::Int(14));
+    assert_eq!(
+        context
+            .items
+            .iter()
+            .map(|item| item.caption.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Contents", "Buy", "Sell", "Info", "Exit"]
+    );
+
+    engine
+        .player_in_com(joined.number, COM_RIGHT, 0)
+        .expect("select Buy");
+    engine
+        .player_in_com(joined.number, COM_THROW, 0)
+        .expect("open Buy");
+    let buy = engine
+        .debug_object_menu(clonk.as_u64())
+        .expect("clonk exists")
+        .expect("Buy menu opens");
+    assert_eq!(buy.identification, Value::Int(4));
+    assert_eq!(
+        buy.items
+            .iter()
+            .map(|item| (item.item_id.as_str(), item.count, item.value))
+            .collect::<Vec<_>>(),
+        vec![("LORY", 1, Some(20))]
+    );
+
+    engine
+        .player_in_com(joined.number, COM_THROW, 0)
+        .expect("buy LORY");
+    assert_eq!(engine.player(joined.number).expect("player").wealth(), 5);
+    engine
+        .player_in_com(joined.number, COM_DIG, 0)
+        .expect("close Buy");
+    engine.tick().expect("auto-context reopens");
+    assert_eq!(
+        engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("Context reopens")
+            .identification,
+        Value::Int(14)
+    );
+    engine
+        .player_in_com(joined.number, COM_THROW, 0)
+        .expect("open Contents");
+    let contents = engine
+        .debug_object_menu(clonk.as_u64())
+        .expect("clonk exists")
+        .expect("Contents menu opens");
+    assert_eq!(contents.identification, Value::Int(18));
+    assert!(contents.items.iter().any(|item| item.item_id == "LORY"));
+}
+
+#[test]
 fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
     // HUT2's DefCore Entrance=-18,8,16,17 must reach SetOCF's full-Con
     // OCF_Entrance bit (C4Object.cpp:586-589). ObjectComUp at the real
@@ -141,6 +286,7 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
             pref_position: 0,
             crew: Vec::new(),
             control_style: false,
+            auto_context_menu: false,
             startup_player_count: 1,
         })
         .expect("Tutorial01 player joins");
@@ -260,6 +406,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
             pref_position: 0,
             crew: Vec::new(),
             control_style: false,
+            auto_context_menu: false,
             startup_player_count: 1,
         })
         .expect("Tutorial01 player joins");
@@ -646,6 +793,7 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp() {
             pref_position: 0,
             crew: Vec::new(),
             control_style: false,
+            auto_context_menu: false,
             startup_player_count: 1,
         })
         .expect("Tutorial01 player joins");
@@ -763,6 +911,7 @@ fn tutorial_clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick() {
             pref_position: 0,
             crew: Vec::new(),
             control_style: false,
+            auto_context_menu: false,
             startup_player_count: 1,
         })
         .expect("Tutorial01 player joins");

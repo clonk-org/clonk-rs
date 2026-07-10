@@ -180,6 +180,10 @@ pub struct PlayerControlState {
     /// (C4Player.cpp:2373; default 0 = classic, C4InfoCore.cpp:84).
     #[serde(default)]
     pub control_style: bool,
+    /// Effective C4Player::AutoContextMenu preference after the scenario
+    /// ForcedAutoContextMenu override (C4Player.cpp:2369-2375).
+    #[serde(default)]
+    pub auto_context_menu: bool,
     /// `CursorFlash` — frames the cursor arrow above the cursor clonk stays
     /// visible (C4Game::DrawCursors gate, C4Game.cpp:1863; set to 30 on
     /// cursor changes, decremented in C4Player::Execute, C4Player.cpp:242).
@@ -840,7 +844,11 @@ impl Player {
             let decrease = delta.saturating_abs() as u32;
             if let Some(entry) = self.home_base_material.get_mut(&definition_id) {
                 if *entry <= decrease {
-                    self.home_base_material.remove(&definition_id);
+                    // C4Player::Buy calls DecreaseIDCount(id, false): the
+                    // C4IDList slot survives at zero so the permanent Buy
+                    // menu keeps its row (C4Player.cpp:850-852;
+                    // C4IDList.cpp:121-137).
+                    *entry = 0;
                     0
                 } else {
                     *entry -= decrease;

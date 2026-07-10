@@ -1,4 +1,4 @@
-use crate::{GraphicsImage, Group, GroupError};
+use crate::{decode_legacy_script_text, GraphicsImage, Group, GroupError};
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -59,7 +59,7 @@ impl Definition {
     pub fn load(group: &Group) -> Result<Self, DefinitionError> {
         let core = DefCore::load(group)?;
 
-        let script = load_scripts(group)?;
+        let mut script = load_scripts(group)?;
 
         let action_map = match group.read_file("ActMap.txt") {
             Ok(bytes) => Some(parse_act_map(&bytes)?),
@@ -67,6 +67,7 @@ impl Definition {
             Err(GroupError::Io(ref err)) if err.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(DefinitionError::Resources(error)),
         };
+        script.definition_description = load_definition_description(group)?;
 
         let (graphics_image, color_by_owner_mask, additional_graphics) =
             load_definition_graphics(group, core.color_by_owner);
@@ -104,6 +105,29 @@ impl Definition {
             rank_symbols_image,
         })
     }
+
+    /// Trimmed localized definition description exposed by
+    /// `C4Def::GetDesc` (C4Def.cpp:713-717).
+    pub fn description(&self) -> Option<&str> {
+        self.script.definition_description.as_deref()
+    }
+}
+
+/// Loads the default US entry from `C4CFN_DefDesc = "Desc{}.txt"`.
+///
+/// The C++ runtime receives a language sequence and ultimately falls back to
+/// US (`C4Language::LoadLanguage`, C4Language.cpp:250-263). Resource loading
+/// does not yet carry a locale, so selecting that hardcoded fallback keeps the
+/// retained description deterministic.
+fn load_definition_description(group: &Group) -> Result<Option<String>, DefinitionError> {
+    const DESCRIPTION: &str = "DescUS.txt";
+    if !group.exists(DESCRIPTION) {
+        return Ok(None);
+    }
+
+    let bytes = group.read_file(DESCRIPTION)?;
+    let description = decode_legacy_script_text(&bytes).trim().to_string();
+    Ok((!description.is_empty()).then_some(description))
 }
 
 /// Decodes a single named image from the def group, `None` when absent.
@@ -292,6 +316,9 @@ pub struct DefCore {
     /// RotatedSolidmasks (C4Def.cpp:414, default 0): solid masks stay put
     /// while the object is rotated (C4Object.cpp:5655).
     pub rotated_solid_masks: bool,
+    /// `AutoContextMenu` (C4Def.cpp:416, default 0): entering this container
+    /// may automatically open its context menu (C4Object.cpp:2049-2056).
+    pub auto_context_menu: bool,
     /// `NoComponentMass` (C4Def compile): contents mass does not add to
     /// the live Mass (C4Object::UpdateMass, C4Object.cpp:497-501).
     pub no_component_mass: bool,
@@ -364,6 +391,10 @@ impl DefCore {
 pub struct DefinitionScript {
     files: Vec<DefinitionScriptFile>,
     combined: String,
+    /// Loaded alongside the other definition text components. Keeping this
+    /// private preserves `Definition`'s public resource-parts shape while the
+    /// accessor above exposes the C4Def-level description.
+    definition_description: Option<String>,
 }
 
 impl DefinitionScript {
@@ -596,6 +627,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut upright_attach: u32 = 0;
     // RotatedSolidmasks (C4Def.cpp:414, default 0).
     let mut rotated_solid_masks = false;
+    // AutoContextMenu (C4Def.cpp:416, default 0).
+    let mut auto_context_menu = false;
     let mut no_component_mass = false;
     // NoStabilize (C4Def.cpp:402, default 0): opts out of C4Object::Stabilize.
     let mut no_stabilize = false;
@@ -844,6 +877,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "rotatedsolidmasks" => {
                 rotated_solid_masks = parse_bool(value);
             }
+            "autocontextmenu" => {
+                auto_context_menu = parse_bool(value);
+            }
             "nocomponentmass" => {
                 no_component_mass = parse_bool(value);
             }
@@ -966,6 +1002,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         border_bound,
         upright_attach,
         rotated_solid_masks,
+        auto_context_menu,
         no_component_mass,
         no_stabilize,
         timer,
@@ -1053,6 +1090,7 @@ fn load_scripts(group: &Group) -> Result<DefinitionScript, DefinitionError> {
         return Ok(DefinitionScript {
             files,
             combined: String::new(),
+            definition_description: None,
         });
     }
 
@@ -1072,7 +1110,11 @@ fn load_scripts(group: &Group) -> Result<DefinitionScript, DefinitionError> {
         }
     }
 
-    Ok(DefinitionScript { files, combined })
+    Ok(DefinitionScript {
+        files,
+        combined,
+        definition_description: None,
+    })
 }
 
 fn collect_script_files(
@@ -2223,6 +2265,24 @@ mod tests {
     }
 
     #[test]
+    fn definition_loads_nonempty_legacy_us_description() {
+        // C4Def loads Desc{}.txt into C4Def::Desc and trims it before
+        // exposing C4Def::GetDesc (C4Def.cpp:713-717). The Context menu
+        // adds Info only for a nonempty GetDesc (C4ObjectMenu.cpp:410-423).
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Hut3.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=HUT3\n").expect("DefCore");
+        fs::write(def_dir.join("DescUS.txt"), b"  A safe home base.\r\n")
+            .expect("US description");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let definition = Definition::load(&group).expect("load definition");
+
+        assert_eq!(definition.description(), Some("A safe home base."));
+    }
+
+    #[test]
     fn load_definition_with_scripts_and_actions() {
         let temp = tempdir().unwrap();
         let def_dir = temp.path().join("Example.ocd");
@@ -2748,6 +2808,26 @@ Attach=1
 
         let defaulted = parse_def_core(b"[DefCore]\nid=HUT0\n").expect("defcore parsed");
         assert!(!defaulted.rotated_solid_masks);
+    }
+
+    #[test]
+    fn parse_def_core_auto_context_menu_flag_like_cpp() {
+        // Mirrors src/C4Def.cpp:416: DefCore `AutoContextMenu` compiles as
+        // an integer flag. StdCompilerINIRead matches field names without
+        // regard to case, so a value of 1 enables the flag.
+        let parsed = parse_def_core(b"[DefCore]\nid=HUT3\naUtOcOnTeXtMeNu=1\n")
+            .expect("defcore parsed");
+
+        assert!(parsed.auto_context_menu);
+    }
+
+    #[test]
+    fn parse_def_core_auto_context_menu_defaults_off_like_cpp() {
+        // Mirrors the default argument in src/C4Def.cpp:416: an omitted
+        // `AutoContextMenu` field compiles as zero.
+        let parsed = parse_def_core(b"[DefCore]\nid=CLNK\n").expect("defcore parsed");
+
+        assert!(!parsed.auto_context_menu);
     }
 
     #[test]

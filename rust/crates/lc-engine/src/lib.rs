@@ -677,6 +677,10 @@ pub struct JoinPlayerConfig {
     /// (C4Player::InitControl, C4Player.cpp:2371-2380). The scenario-wide
     /// `ForcedControlStyle` is stored separately from this preference.
     pub control_style: bool,
+    /// `PrefAutoContextMenu` after the player-file `-1` fallback. The
+    /// scenario-wide ForcedAutoContextMenu override is stored separately
+    /// (C4Player::ApplyForcedControl, C4Player.cpp:2369-2375).
+    pub auto_context_menu: bool,
     /// `Game.Parameters.StartupPlayerCount` — gates the standard-position
     /// distribution (C4Player.cpp:719).
     pub startup_player_count: i32,
@@ -5563,6 +5567,9 @@ pub struct EngineState {
     /// after a save restore receive the same scenario override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forced_control_style: Option<bool>,
+    /// Scenario `[Head] ForcedAutoContextMenu`; retained for later joins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forced_auto_context_menu: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teams: Vec<TeamInfo>,
     #[serde(default)]
@@ -5693,6 +5700,7 @@ impl EngineState {
                 .unwrap_or(0)
                 .max(0),
             forced_control_style: None,
+            forced_auto_context_menu: None,
             teams: Vec::new(),
             crew_selection: snapshot.crew_selection.clone(),
             crew_roles: snapshot.crew_roles.clone(),
@@ -6000,6 +6008,8 @@ pub struct DefinitionComponent {
 pub struct Definition {
     id: DefinitionId,
     name: String,
+    /// Trimmed localized C4Def description (`C4Def::GetDesc`).
+    description: Option<String>,
     /// Shared compiled script: `host_world_context()` hands clones of this
     /// `Arc` to host functions so nested script calls (Find_Func, GameCall)
     /// can execute another definition's functions mid-VM-call.
@@ -6077,6 +6087,9 @@ pub struct Definition {
     /// C4Object.cpp:5655) and bakes through the rotated branch of
     /// C4SolidMask::Put (C4SolidMask.cpp:108-174).
     rotated_solid_masks: bool,
+    /// DefCore `AutoContextMenu` (C4Def.cpp:416): entering this container
+    /// may automatically open its context menu (C4Object.cpp:2049-2056).
+    auto_context_menu: bool,
     no_component_mass: bool,
     /// NoStabilize=1 opts out of the small-tilt upright snap
     /// (C4Object::Stabilize, C4Movement.cpp:491).
@@ -6221,6 +6234,7 @@ impl Definition {
         Ok(Self {
             id,
             name,
+            description: None,
             script: Arc::new(script),
             script_source: source.to_string(),
             includes,
@@ -6267,6 +6281,7 @@ impl Definition {
             border_bound: 0,
             upright_attach: 0,
             rotated_solid_masks: false,
+            auto_context_menu: false,
             no_component_mass: false,
             no_stabilize: false,
             timer: 35,
@@ -6307,6 +6322,14 @@ impl Definition {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    pub fn set_description(&mut self, description: Option<String>) {
+        self.description = description.filter(|text| !text.is_empty());
     }
 
     pub fn has_function(&self, name: &str) -> bool {
@@ -6352,6 +6375,7 @@ impl Definition {
             .unwrap_or_else(|| resource.core.id.clone());
         let mut definition =
             Definition::from_script(resource.core.id.clone(), name, resource.script.combined())?;
+        definition.description = resource.description().map(str::to_owned);
         // Real content gets the C++ callback arguments (no parameters;
         // AbortCall gets the last phase — C4Object.cpp:4154-4182).
         definition.set_c4_callback_convention(true);
@@ -6458,6 +6482,7 @@ impl Definition {
         definition.set_border_bound(resource.core.border_bound);
         definition.set_upright_attach(resource.core.upright_attach);
         definition.set_rotated_solid_masks(resource.core.rotated_solid_masks);
+        definition.set_auto_context_menu(resource.core.auto_context_menu);
         definition.set_no_component_mass(resource.core.no_component_mass);
         definition.set_no_stabilize(resource.core.no_stabilize);
         definition.set_timer(resource.core.timer);
@@ -7161,6 +7186,10 @@ impl Definition {
         self.rotated_solid_masks
     }
 
+    pub fn auto_context_menu(&self) -> bool {
+        self.auto_context_menu
+    }
+
     pub fn no_component_mass(&self) -> bool {
         self.no_component_mass
     }
@@ -7171,6 +7200,10 @@ impl Definition {
 
     pub fn set_rotated_solid_masks(&mut self, rotated_solid_masks: bool) {
         self.rotated_solid_masks = rotated_solid_masks;
+    }
+
+    pub fn set_auto_context_menu(&mut self, auto_context_menu: bool) {
+        self.auto_context_menu = auto_context_menu;
     }
 
     pub fn collection_rect(&self) -> Option<DefinitionRect> {
@@ -7562,6 +7595,7 @@ impl Definition {
             object_update,
             object_commands,
             command_operations,
+            command_events: _,
             destroy_object,
             environment: environment_from_host,
             physics: physics_from_host,
@@ -7771,6 +7805,7 @@ impl Definition {
             object_update,
             object_commands,
             command_operations,
+            command_events: _,
             destroy_object,
             environment: environment_from_host,
             physics: physics_from_host,
@@ -7945,6 +7980,7 @@ impl Definition {
             object_update,
             object_commands,
             command_operations,
+            command_events: _,
             destroy_object,
             environment: environment_from_host,
             physics: physics_from_host,
@@ -9625,6 +9661,7 @@ impl ScenarioScript {
             object_update,
             object_commands,
             command_operations,
+            command_events: _,
             destroy_object,
             environment: environment_from_host,
             physics: physics_from_host,
@@ -9791,6 +9828,7 @@ impl ScenarioScript {
             object_update: _,
             object_commands: _,
             command_operations: _,
+            command_events: _,
             destroy_object: _,
             environment: environment_from_host,
             physics: physics_from_host,
@@ -10065,6 +10103,9 @@ pub struct Engine {
     /// Scenario `[Head] ForcedAutoStopControl`, separate from each player's
     /// effective `PlayerControlState::control_style` preference.
     forced_control_style: Option<bool>,
+    /// Scenario `[Head] ForcedAutoContextMenu`, separate from each player's
+    /// effective `PlayerControlState::auto_context_menu` preference.
+    forced_auto_context_menu: Option<bool>,
     /// Ordered `Game.Teams` entries loaded from the scenario's Teams.txt.
     teams: Rc<Vec<TeamInfo>>,
     crew_selection: HashMap<i32, CrewSelection>,
@@ -11735,6 +11776,7 @@ impl Engine {
             players: HashMap::new(),
             last_player_info_id: 0,
             forced_control_style: None,
+            forced_auto_context_menu: None,
             teams: Rc::new(Vec::new()),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
@@ -11820,6 +11862,13 @@ impl Engine {
         self.forced_control_style = control_style;
     }
 
+    /// Installs `[Head] ForcedAutoContextMenu` before players join. The
+    /// effective per-player value is selected in `join_player`, matching
+    /// C4Player::ApplyForcedControl (C4Player.cpp:2369-2375).
+    pub(crate) fn set_forced_auto_context_menu(&mut self, enabled: Option<bool>) {
+        self.forced_auto_context_menu = enabled;
+    }
+
     /// Installs the scenario's C4SPlrStart slots (set by `Scenario::apply`;
     /// C4Player::ScenarioInit reads them at join, C4Player.cpp:670-777).
     pub fn set_player_starts(&mut self, starts: Vec<scenario::PlayerStart>) {
@@ -11889,6 +11938,9 @@ impl Engine {
         player.control.select_flash = 30;
         player.control.cursor_flash = 30;
         player.control.control_style = self.forced_control_style.unwrap_or(config.control_style);
+        player.control.auto_context_menu = self
+            .forced_auto_context_menu
+            .unwrap_or(config.auto_context_menu);
         self.players.insert(number, player);
         self.players_registered = true;
         self.crew_rosters.insert(number, config.crew.clone());
@@ -14848,8 +14900,8 @@ impl Engine {
         // C4ObjectMenu::MenuCommand CB_Object (C4ObjectMenu.cpp:519-521):
         // DirectExec on the command object, fail-safe (fPassErrors=false).
         // CB_Scenario (Game.Script.DirectExec, :523-526) is unported —
-        // see PORT_STATUS. The AutoContextMenu tail (:528) needs
-        // Def->AutoContextMenu + the player pref, also unported.
+        // see PORT_STATUS. C4Player::Execute performs the later
+        // AutoContextMenu pass through execute_player_controls.
         match menu.command_object.and_then(|id| self.find_object_index(id)) {
             Some(command_index) => {
                 tolerate_script_error(self.direct_exec_on_object(
@@ -14864,6 +14916,40 @@ impl Engine {
                     command,
                     "menu Enter without a command object (CB_Scenario MenuCommand unported)"
                 );
+            }
+        }
+        // Internal permanent inventory/base menus are refill-driven. The
+        // selected command may have changed stock or contents
+        // synchronously, so rebuild immediately like C4ObjectMenu::Execute
+        // (C4ObjectMenu.cpp:124-129, 207-326, 450-459).
+        if !menu.user_menu
+            && menu.permanent
+            && matches!(
+                &menu.identification,
+                Value::Int(4) | Value::Int(5) | Value::Int(17) | Value::Int(18)
+            )
+        {
+            let indices = self
+                .find_object_index(object_id)
+                .and_then(|crew_index| {
+                    self.objects[crew_index]
+                        .state
+                        .container
+                        .and_then(|base_id| self.find_object_index(base_id))
+                        .map(|base_index| (crew_index, base_index))
+                });
+            if let Some((crew_index, base_index)) = indices {
+                match menu.identification {
+                    Value::Int(4) => self.open_base_buy_menu(crew_index, base_index)?,
+                    Value::Int(5) => self.open_base_sell_menu(crew_index, base_index)?,
+                    Value::Int(17) => {
+                        self.open_container_contents_menu(crew_index, base_index, 17)?;
+                    }
+                    Value::Int(18) => {
+                        self.open_container_contents_menu(crew_index, base_index, 18)?;
+                    }
+                    _ => {}
+                }
             }
         }
         Ok(true)
@@ -16234,6 +16320,8 @@ impl Engine {
             direction: object.state.direction,
             physical: self.object_physical(index),
             owner: object.state.owner,
+            controller: object.state.controller,
+            base: object.state.base,
             crew_member: object.state.crew_member,
             selected: object.state.selected,
             alive: object.state.alive,
@@ -16479,6 +16567,8 @@ impl Engine {
                         })
                         .unwrap_or_default(),
                     owner: object.state.owner,
+                    controller: object.state.controller,
+                    base: object.state.base,
                     crew_member: object.state.crew_member,
                     selected: selected_objects.contains(&object.id),
                     alive: object.state.alive,
@@ -17536,6 +17626,8 @@ impl Engine {
                     direction: self.objects[idx].state.direction,
                     physical: self.object_physical(idx),
                     owner: self.objects[idx].state.owner,
+                    controller: self.objects[idx].state.controller,
+                    base: self.objects[idx].state.base,
                     crew_member: self.objects[idx].state.crew_member,
                     selected: self.objects[idx].state.selected,
                     alive: self.objects[idx].state.alive,
@@ -18201,8 +18293,9 @@ impl Engine {
             object: object_effects,
             global: global_effects,
             object_update,
-            object_commands,
+            mut object_commands,
             command_operations,
+            command_events,
             destroy_object,
             other_objects,
             environment,
@@ -18230,6 +18323,32 @@ impl Engine {
         if !host_landscape_ops.is_empty() {
             self.apply_landscape_operations(host_landscape_ops);
         }
+
+        // FnExecuteCommand executes one command synchronously
+        // (C4Script.cpp:922-929). Its object/player/spawn events therefore
+        // become visible before this host callback returns, not on the next
+        // simulation tick.
+        for event in &command_events {
+            self.apply_command_event(event.clone())?;
+        }
+        // Other callback consumers still use the historical zero-delay
+        // event queue. This path applied the same events synchronously, so
+        // remove only those pure carrier commands before they reach the
+        // object's next-tick queue.
+        object_commands.retain(|command| {
+            !(command.delay == 0
+                && command.update.is_empty()
+                && command.effects.is_empty()
+                && !command.events.is_empty()
+                && command
+                    .events
+                    .iter()
+                    .all(|event| command_events.contains(event))
+                && !command.destroy
+                && command.spawns.is_empty()
+                && command.landscape.is_empty()
+                && command.particles.is_empty())
+        });
 
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
@@ -18261,11 +18380,43 @@ impl Engine {
                 self.messages.apply_command(command);
             }
         }
-        let menu_requests = menu_requests
-            .into_iter()
-            .filter(|request| self.find_object_index(request.crew_id).is_some())
-            .collect::<Vec<_>>();
-        self.pending_menu_requests.extend(menu_requests);
+        for request in menu_requests {
+            let MenuRequest {
+                crew_id,
+                owner,
+                kind,
+            } = request;
+            let Some(crew_index) = self.find_object_index(crew_id) else {
+                continue;
+            };
+            match kind {
+                MenuRequestKind::Buy { base } => {
+                    if let Some(base_index) = self.find_object_index(base) {
+                        self.open_base_buy_menu(crew_index, base_index)?;
+                    }
+                }
+                MenuRequestKind::Sell { base } => {
+                    if let Some(base_index) = self.find_object_index(base) {
+                        self.open_base_sell_menu(crew_index, base_index)?;
+                    }
+                }
+                MenuRequestKind::Contents { container } => {
+                    if let Some(container_index) = self.find_object_index(container) {
+                        self.open_container_contents_menu(crew_index, container_index, 18)?;
+                    }
+                }
+                MenuRequestKind::Info { target } => {
+                    if let Some(target_index) = self.find_object_index(target) {
+                        self.open_object_info_menu(crew_index, target_index)?;
+                    }
+                }
+                kind => self.pending_menu_requests.push(MenuRequest {
+                    crew_id,
+                    owner,
+                    kind,
+                }),
+            }
+        }
 
         if let Some(go) = script_go {
             self.scenario_script_go = go;
@@ -19180,6 +19331,7 @@ impl Engine {
             players,
             last_player_info_id: self.last_player_info_id,
             forced_control_style: self.forced_control_style,
+            forced_auto_context_menu: self.forced_auto_context_menu,
             teams: self.teams.as_ref().clone(),
             crew_selection,
             crew_roles,
@@ -19548,6 +19700,7 @@ impl Engine {
             )
             .max(0);
         self.forced_control_style = state.forced_control_style;
+        self.forced_auto_context_menu = state.forced_auto_context_menu;
         self.teams = Rc::new(state.teams.clone());
         self.players_registered = !self.players.is_empty();
         self.next_mission = state.next_mission.clone();
@@ -25159,8 +25312,7 @@ impl Engine {
     /// `C4Object::ExecBase` (C4Object.cpp:1000-1031): the Tick10 new-base
     /// assignment by contained flag and the Tick35 lost-flag clear. The
     /// BASEFUNC_AutoSellContents arm (:1028) and the Tick35 structure
-    /// snow-dig (:1034-1043) stay unported (see PORT_STATUS); the
-    /// Contents.CloseMenus calls are app-side menu presentation.
+    /// snow-dig (:1034-1043) stay unported (see PORT_STATUS).
     fn exec_object_base(&mut self, idx: usize, frame: u64) -> Result<(), EngineError> {
         // New base assignment by flag, no old base removal (:1005-1018).
         if frame % 10 == 0 {
@@ -25196,10 +25348,15 @@ impl Engine {
                                 base_id,
                             )?;
                         }
-                        // Assign new base (:1013-1018); Contents.CloseMenus
-                        // is app-side.
+                        // Assign new base and force-close every remaining
+                        // contained object's menu (:1013-1017;
+                        // C4ObjectList::CloseMenus, C4ObjectList.cpp:705-710).
                         if let Some(idx) = self.find_object_index(base_id) {
                             self.objects[idx].state.base = flag_owner;
+                            let contents = self.objects[idx].state.contents.clone();
+                            for content in contents {
+                                self.close_object_menu(content, true)?;
+                            }
                             self.pending_audio.push(AudioCommand::PlaySound {
                                 name: "Trumpet".to_string(),
                                 target: Some(base_id),
@@ -25236,7 +25393,11 @@ impl Engine {
                         && flag.state.action.target == Some(self_id)
                 });
                 if !has_flag {
+                    let contents = self.objects[idx].state.contents.clone();
                     self.objects[idx].state.base = OWNER_NONE;
+                    for content in contents {
+                        self.close_object_menu(content, true)?;
+                    }
                 }
             }
         }
@@ -25993,6 +26154,7 @@ impl Engine {
         definition.set_border_bound(core.border_bound);
         definition.set_upright_attach(core.upright_attach);
         definition.set_rotated_solid_masks(core.rotated_solid_masks);
+        definition.set_auto_context_menu(core.auto_context_menu);
         definition.set_no_stabilize(core.no_stabilize);
         definition.set_timer(core.timer);
         definition.set_timer_call(core.timer_call.clone());
@@ -27299,6 +27461,20 @@ impl Engine {
             CommandEvent::ApplyObjectUpdate { object_id, update } => {
                 self.apply_object_update(object_id, update)?;
             }
+            CommandEvent::SetObjectCommand {
+                object_id,
+                controller,
+                request,
+            } => {
+                if let Some(index) = self.find_object_index(object_id) {
+                    self.objects[index].state.controller = controller;
+                    self.objects[index].apply_command_operations([
+                        CommandOperation::DecrementNoCollectDelay,
+                        CommandOperation::Clear,
+                        CommandOperation::PushFront(request),
+                    ]);
+                }
+            }
             CommandEvent::ControlCommandAcquire {
                 caller,
                 target,
@@ -27363,8 +27539,35 @@ impl Engine {
                 }
             }
             CommandEvent::OpenMenu(request) => {
-                if self.find_object_index(request.crew_id).is_some() {
-                    self.pending_menu_requests.push(request);
+                let Some(crew_index) = self.find_object_index(request.crew_id) else {
+                    return Ok(());
+                };
+                match request.kind {
+                    MenuRequestKind::Buy { base } => {
+                        if let Some(base_index) = self.find_object_index(base) {
+                            self.open_base_buy_menu(crew_index, base_index)?;
+                        }
+                    }
+                    MenuRequestKind::Sell { base } => {
+                        if let Some(base_index) = self.find_object_index(base) {
+                            self.open_base_sell_menu(crew_index, base_index)?;
+                        }
+                    }
+                    MenuRequestKind::Contents { container } => {
+                        if let Some(container_index) = self.find_object_index(container) {
+                            self.open_container_contents_menu(crew_index, container_index, 18)?;
+                        }
+                    }
+                    MenuRequestKind::Info { target } => {
+                        if let Some(target_index) = self.find_object_index(target) {
+                            self.open_object_info_menu(crew_index, target_index)?;
+                        }
+                    }
+                    kind => self.pending_menu_requests.push(MenuRequest {
+                        crew_id: request.crew_id,
+                        owner: request.owner,
+                        kind,
+                    }),
                 }
             }
             CommandEvent::AdjustPlayerHomeBaseMaterial {
@@ -35907,6 +36110,7 @@ global func MenuCommand(state, kind, selection)
                     pref_position: 0,
                     crew: Vec::new(),
                     control_style: false,
+                    auto_context_menu: false,
                     startup_player_count: 1,
                 })
                 .expect("player joins");
@@ -44718,6 +44922,25 @@ protected func Activity() { SetActionTargets(); return(1); }
     }
 
     #[test]
+    fn engine_state_retains_forced_auto_context_menu_for_later_joins() {
+        // Savegame restoration preserves C4S.Head, which remains the source
+        // for both preferences in C4Player::ApplyForcedControl
+        // (C4Player.cpp:2369-2375).
+        let mut state = Engine::new().capture_state();
+        state.forced_auto_context_menu = Some(true);
+
+        let encoded = state.to_json_string().expect("state serializes");
+        let decoded = EngineState::from_json_str(&encoded).expect("state deserializes");
+        let mut restored = Engine::new();
+        restored.restore_state(&decoded).expect("state restores");
+
+        assert_eq!(
+            restored.capture_state().forced_auto_context_menu,
+            Some(true)
+        );
+    }
+
+    #[test]
     fn forced_control_style_overrides_player_preference_both_ways() {
         // C4Player::ApplyForcedControl chooses C4S.Head.ForcedControlStyle
         // whenever it is non-negative, regardless of PrefControlStyle
@@ -44737,6 +44960,7 @@ protected func Activity() { SetActionTargets(); return(1); }
                     pref_position: 0,
                     crew: Vec::new(),
                     control_style: preference,
+                    auto_context_menu: preference,
                     startup_player_count: 1,
                 })
                 .expect("player joins");
@@ -44745,6 +44969,41 @@ protected func Activity() { SetActionTargets(); return(1); }
                     .player(joined.number)
                     .expect("joined player")
                     .control_style(),
+                forced
+            );
+        }
+    }
+
+    #[test]
+    fn forced_auto_context_menu_overrides_player_preference_both_ways() {
+        // C4Player::ApplyForcedControl chooses
+        // C4S.Head.ForcedAutoContextMenu whenever it is non-negative,
+        // otherwise it keeps PrefAutoContextMenu (C4Player.cpp:2369-2375).
+        for (forced, preference) in [(true, false), (false, true)] {
+            let mut engine = Engine::new();
+            engine.set_forced_auto_context_menu(Some(forced));
+            let joined = engine
+                .join_player(JoinPlayerConfig {
+                    name: "Tester".into(),
+                    player_info_id: 0,
+                    score: 0,
+                    total_playing_time: 0,
+                    team: None,
+                    color_dw: 0xff0000,
+                    pref_color: 0,
+                    pref_position: 0,
+                    crew: Vec::new(),
+                    control_style: preference,
+                    auto_context_menu: preference,
+                    startup_player_count: 1,
+                })
+                .expect("player joins");
+            assert_eq!(
+                engine
+                    .player(joined.number)
+                    .expect("joined player")
+                    .control
+                    .auto_context_menu,
                 forced
             );
         }
@@ -46940,6 +47199,7 @@ func CrewSelection()
                 pref_position: 0,
                 crew: Vec::new(),
                 control_style: false,
+                auto_context_menu: false,
                 startup_player_count: 1,
             })
             .unwrap_or_else(|error| panic!("player joins: {error}"));
@@ -47014,6 +47274,7 @@ func CrewSelection()
             pref_position: 0,
             crew: Vec::new(),
             control_style: false,
+            auto_context_menu: false,
             startup_player_count: 1,
         };
         let mut joined = Engine::new();
@@ -57025,6 +57286,27 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         Ok(())
     }
 
+    #[test]
+    fn definition_from_resource_carries_auto_context_menu_like_cpp() -> Result<(), EngineError> {
+        // C4DefCore::CompileFunc reads AutoContextMenu into the definition
+        // (src/C4Def.cpp:416); C4Object::AutoContextMenu consults that flag
+        // on the containing definition (src/C4Object.cpp:2049-2056).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Hut.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=HUT3\nName=Hut\nCategory=C4D_Structure\nAutoContextMenu=1\n",
+        )
+        .expect("write defcore");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource)?;
+
+        assert!(definition.auto_context_menu());
+        Ok(())
+    }
+
     /// A pixel-grid landscape whose texmap carries a Vehicle slot (byte
     /// 2) so C4SolidMask baking is active (grid mode, `put_solid_mask`);
     /// byte 1 is solid Earth, byte 0 sky.
@@ -57547,6 +57829,30 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             .bytes()
             .to_vec();
         assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn definition_from_resource_retains_description_for_context_info() -> Result<(), EngineError> {
+        // C4Def exposes the loaded Desc text through GetDesc
+        // (C4Def.h:321,355); Context offers Info only when that text is
+        // nonempty (C4ObjectMenu.cpp:410-423).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Hut3.c4d");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=HUT3\nName=Wooden Hut\n",
+        )
+        .expect("write DefCore");
+        std::fs::write(def_dir.join("DescUS.txt"), b"A safe home base.\n")
+            .expect("write description");
+
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource)?;
+
+        assert_eq!(definition.description(), Some("A safe home base."));
+        Ok(())
     }
 
     #[test]
@@ -62878,6 +63184,28 @@ protected func FlyBaseStart()
         }
         let hut_index = engine.find_object_index(hut).expect("hut exists");
         assert_eq!(engine.objects[hut_index].state.base, 1);
+        let occupant = engine.spawn_object(SpawnConfig::new("FLAG").with_container(hut))?;
+        engine.apply_object_update(
+            occupant,
+            ObjectUpdate {
+                menu: Some(Some(ObjectMenuState {
+                    caption: "Base".to_string(),
+                    symbol_id: "HUT1".to_string(),
+                    identification: Value::Int(14),
+                    style: 1,
+                    permanent: true,
+                    selection: -1,
+                    user_menu: false,
+                    command_object: Some(occupant),
+                    items: Vec::new(),
+                    columns: 1,
+                    lines: 0,
+                    text_progress: None,
+                    decoration: None,
+                })),
+                ..ObjectUpdate::default()
+            },
+        )?;
 
         engine.apply_object_update(
             flag,
@@ -62890,6 +63218,11 @@ protected func FlyBaseStart()
         assert_eq!(
             engine.objects[hut_index].state.base, OWNER_NONE,
             "lost flag clears Base (C4Object.cpp:1027-1030)"
+        );
+        assert_eq!(
+            engine.debug_object_menu(occupant.as_u64()),
+            Some(None),
+            "lost flag closes every contained menu (C4Object.cpp:1029; C4ObjectList.cpp:705-710)"
         );
         Ok(())
     }

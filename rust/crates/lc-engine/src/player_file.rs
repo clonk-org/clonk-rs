@@ -81,6 +81,10 @@ pub struct PlayerFile {
     /// `[Preferences] AutoStopControl` — PrefControlStyle: Jump'n'Run
     /// control when 1 (C4InfoCore.cpp:170; default 0 = classic, :84).
     pub pref_control_style: bool,
+    /// `[Preferences] AutoContextMenu` — automatically open context menus
+    /// when entering opted-in containers. If omitted, C++ defaults this to
+    /// `pref_control_style` (C4InfoCore.cpp:103-115,171).
+    pub pref_auto_context_menu: bool,
     /// Crew roster, `*.c4i` entries in group order then subfolder recursion
     /// (C4ObjectInfoList.cpp:56-83).
     pub crew: Vec<CrewInfo>,
@@ -112,6 +116,11 @@ impl PlayerFile {
 
         let mut crew = Vec::new();
         collect_crew(group, &mut crew)?;
+        let pref_control_style = int("Preferences", "AutoStopControl", 0) != 0;
+        let pref_auto_context_menu = match int("Preferences", "AutoContextMenu", -1) {
+            -1 => pref_control_style,
+            value => value != 0,
+        };
 
         Ok(Self {
             name: entry("Player", "Name").unwrap_or_else(|| "Neuling".to_string()),
@@ -123,7 +132,8 @@ impl PlayerFile {
                 .map(|value| value as u32)
                 .unwrap_or(0xff),
             pref_position: int("Preferences", "Position", 0),
-            pref_control_style: int("Preferences", "AutoStopControl", 0) != 0,
+            pref_control_style,
+            pref_auto_context_menu,
             crew,
         })
     }
@@ -297,6 +307,47 @@ mod tests {
             !player.pref_control_style,
             "AutoStopControl defaults to 0 = classic (C4InfoCore.cpp:84)"
         );
+        assert!(
+            !player.pref_auto_context_menu,
+            "AutoContextMenu inherits the default classic style (C4InfoCore.cpp:103-115)"
+        );
         assert!(player.crew.is_empty());
+    }
+
+    #[test]
+    fn loads_explicit_auto_context_menu_preference_like_cpp() {
+        // C4PlayerInfoCore::CompileFunc reads [Preferences] AutoContextMenu
+        // as PrefAutoContextMenu (src/C4InfoCore.cpp:164-172).
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("AutoMenu.c4p");
+        std::fs::create_dir_all(&root).expect("player dir");
+        std::fs::write(
+            root.join("Player.txt"),
+            "[Player]\nName=Tyler\n\n[Preferences]\nAutoContextMenu=1\n",
+        )
+        .expect("write core");
+
+        let player = PlayerFile::load_from_path(&root).expect("player file loads");
+
+        assert!(player.pref_auto_context_menu);
+    }
+
+    #[test]
+    fn omitted_auto_context_menu_defaults_to_control_style_like_cpp() {
+        // C4PlayerInfoCore::CompileFunc defaults AutoContextMenu to -1;
+        // C4PlayerInfoCore::Load then replaces -1 with PrefControlStyle
+        // (src/C4InfoCore.cpp:103-115,164-172).
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("DefaultAutoMenu.c4p");
+        std::fs::create_dir_all(&root).expect("player dir");
+        std::fs::write(
+            root.join("Player.txt"),
+            "[Player]\nName=Tyler\n\n[Preferences]\nAutoStopControl=1\n",
+        )
+        .expect("write core");
+
+        let player = PlayerFile::load_from_path(&root).expect("player file loads");
+
+        assert!(player.pref_auto_context_menu);
     }
 }

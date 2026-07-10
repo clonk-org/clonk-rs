@@ -222,7 +222,7 @@ pub(crate) fn engine_script_menu_pointer_target(
     show_close_button: bool,
     point: GuiPoint,
 ) -> Option<EngineScriptMenuPointerTarget> {
-    if menu.style != 0 {
+    if !matches!(menu.style, 0 | 1) {
         return None;
     }
     let layout = engine_script_menu_layout(area, font_line_height, menu, show_commands);
@@ -356,7 +356,7 @@ pub fn render_engine_script_menu(
     let selected = usize::try_from(menu.selection)
         .ok()
         .filter(|selection| *selection < menu.items.len());
-    if menu.style == 0 {
+    if matches!(menu.style, 0 | 1) {
         render_engine_normal_menu(
             surface,
             area,
@@ -1950,6 +1950,78 @@ mod tests {
         // unrelated 35px C4SymbolSize used by normal-menu items
         // (src/C4Menu.h:32-35,262; src/C4Menu.cpp:843-880).
         assert_eq!(CLASSIC_COMMAND_HEIGHT, 16);
+    }
+
+    #[test]
+    fn engine_script_context_menu_uses_classic_geometry_and_pointer_targeting() {
+        // C4Menu::InitMenu gives context style 1 one column
+        // (src/C4Menu.cpp:359-365), then the same classic menu location,
+        // size, drawing, and GUI element path handles its items
+        // (src/C4Menu.cpp:642-880). C4Object::ActivateMenu selects that
+        // style for C4MN_Context (src/C4Object.cpp:1961-1980).
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Context", 0, 1);
+            AddMenuItem("Action", "Choose()", MENU, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        assert_eq!(menu.style, 1);
+        assert_eq!(menu.columns, 1);
+
+        let font = lc_graphics::BitmapFont::new();
+        let hud_font = HudFont::Fallback(&font);
+        let area = Rect::new(0, 0, 640, 480);
+        let layout = engine_script_menu_layout(area, hud_font.line_height(), &menu, false);
+        let item = layout.item_rect(0).expect("context item is visible");
+        assert_eq!((item.width, item.height), (35, 35));
+        let point = GuiPoint::new(item.x as f32 + 1.0, item.y as f32 + 1.0);
+        assert_eq!(
+            engine_script_menu_pointer_target(
+                area,
+                hud_font.line_height(),
+                &menu,
+                false,
+                true,
+                point,
+            ),
+            Some(EngineScriptMenuPointerTarget::Item(0))
+        );
+
+        let gfx = IngameMenuGraphics::default();
+        let mut surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
+        render_engine_script_menu(
+            &mut surface,
+            area,
+            &hud_font,
+            &font,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &[None],
+            true,
+            0,
+        );
+        assert_eq!(
+            surface
+                .get_pixel(item.x as u32 + 1, item.y as u32 + 1)
+                .expect("selected context cell pixel"),
+            CLASSIC_SELECTION_COLOR
+        );
     }
 
     #[test]

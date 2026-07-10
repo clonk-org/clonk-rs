@@ -42,6 +42,11 @@ pub struct CommandObjectSnapshot {
     /// The resolved GetPhysical view (temporary→info→definition).
     pub physical: PhysicalInfo,
     pub owner: i32,
+    /// C4Object::Controller, used when commands arm work on a target.
+    pub controller: i32,
+    /// C4Object::Base: the player whose home-base material and wealth this
+    /// object brokers, independently of the object's owner.
+    pub base: i32,
     pub crew_member: bool,
     pub selected: bool,
     pub alive: bool,
@@ -74,8 +79,14 @@ impl CommandObjectSnapshot {
 }
 
 impl CommandObjectSnapshot {
+    /// C4Object::Status without C4Object::Alive. Structures and ordinary
+    /// items are active command targets even though they are not living.
+    pub fn is_status_active(&self) -> bool {
+        !self.destroyed && self.status.is_active()
+    }
+
     pub fn is_active(&self) -> bool {
-        !self.destroyed && self.status.is_active() && self.alive
+        self.is_status_active() && self.alive
     }
 }
 
@@ -263,6 +274,8 @@ mod tests {
             direction: Direction::Left,
             physical: PhysicalInfo::default(),
             owner: OWNER_NONE,
+            controller: OWNER_NONE,
+            base: OWNER_NONE,
             crew_member: false,
             selected: false,
             alive: true,
@@ -4752,13 +4765,14 @@ mod tests {
     }
 
     #[test]
-    fn activate_releases_target_when_inside_container() {
+    fn activate_sets_exit_command_on_target_inside_container() {
         let actor_id = ObjectId::new(5);
         let container_id = ObjectId::new(6);
         let target_id = ObjectId::new(7);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.owner = 42;
+        actor.controller = 23;
         actor.position = Vector2::new(15, 5);
         actor.container = Some(container_id);
 
@@ -4804,12 +4818,14 @@ mod tests {
         assert_eq!(result.status, CommandStatus::Completed);
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
-            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+            CommandEvent::SetObjectCommand {
+                object_id,
+                controller,
+                request,
+            } => {
                 assert_eq!(*object_id, target_id);
-                assert_eq!(update.container, Some(None));
-                assert_eq!(update.position, Some(Vector2::new(12, 4)));
-                assert_eq!(update.velocity, Some(Vector2::ZERO));
-                assert_eq!(update.owner, Some(42));
+                assert_eq!(*controller, 23);
+                assert_eq!(request.id, CommandId::Exit);
             }
             other => panic!("unexpected event: {:?}", other),
         }
@@ -6119,6 +6135,7 @@ mod tests {
 
         let mut base = snapshot_with_id(base_id.as_u64());
         base.owner = 42;
+        base.base = 42;
         base.position = Vector2::new(20, 10);
         base.category = CATEGORY_STRUCTURE;
         base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
@@ -6237,6 +6254,7 @@ mod tests {
         builder.command_direction = CommandDirection::Right;
 
         let mut target = snapshot_with_id(target_id.as_u64());
+        target.base = 42;
         target.position = Vector2::new(100, 0);
         target.category = CATEGORY_STRUCTURE;
         target.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
@@ -6316,9 +6334,12 @@ mod tests {
     }
 
     #[test]
-    fn sell_requires_definition() {
+    fn sell_without_definition_is_the_internal_menu_command() {
+        // C4Command::Sell treats Data=0 as "open C4MN_Sell" rather than
+        // rejecting the command (C4Command.cpp:2052-2057).
         let request = CommandRequest::new(CommandId::Sell);
-        assert!(SellState::from_request(&request).is_err());
+        let state = SellState::from_request(&request).expect("menu command is valid");
+        assert!(state.definition_id.is_empty());
     }
 
     #[test]
@@ -6334,6 +6355,7 @@ mod tests {
 
         let mut base = snapshot_with_id(base_id.as_u64());
         base.owner = 7;
+        base.base = 7;
         base.position = Vector2::new(0, 0);
         base.category = CATEGORY_STRUCTURE;
         base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
@@ -6424,6 +6446,7 @@ mod tests {
 
         let mut base = snapshot_with_id(base_id.as_u64());
         base.owner = 11;
+        base.base = 11;
         base.position = Vector2::new(0, 0);
         base.category = CATEGORY_STRUCTURE;
         base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
@@ -6543,6 +6566,7 @@ mod tests {
 
         let mut base = snapshot_with_id(base_id.as_u64());
         base.owner = 5;
+        base.base = 5;
         base.position = Vector2::new(0, 0);
         base.category = CATEGORY_STRUCTURE;
         base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
@@ -6604,6 +6628,7 @@ mod tests {
         builder.command_direction = CommandDirection::Left;
 
         let mut target = snapshot_with_id(target_id.as_u64());
+        target.base = 7;
         target.position = Vector2::new(0, 0);
         target.category = CATEGORY_STRUCTURE;
         target.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
@@ -6690,6 +6715,7 @@ mod tests {
         builder.container = Some(target_id);
 
         let mut target = snapshot_with_id(target_id.as_u64());
+        target.base = 5;
         target.position = Vector2::new(0, 0);
         target.category = CATEGORY_STRUCTURE;
         target.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
@@ -7213,6 +7239,11 @@ pub enum MenuRequestKind {
     Get {
         container: ObjectId,
     },
+    /// ActivateMenu(C4MN_Contents) (C4Command::Get Data=2,
+    /// C4Command.cpp:1129-1135).
+    Contents {
+        container: ObjectId,
+    },
     /// ActivateMenu(C4MN_Buy) with the base container as target
     /// (ContainedControl COM_Up, C4Object.cpp:3269-3274; ActivateMenu,
     /// C4Object.cpp:1919-1930).
@@ -7223,6 +7254,11 @@ pub enum MenuRequestKind {
     /// C4Object.cpp:3275-3280; ActivateMenu, C4Object.cpp:1932-1943).
     Sell {
         base: ObjectId,
+    },
+    /// ShowInfo(target) -> ActivateMenu(C4MN_Info) on the calling object
+    /// (C4Script.cpp:3332-3336; C4Object.cpp:2008-2027).
+    Info {
+        target: ObjectId,
     },
 }
 
@@ -7238,6 +7274,14 @@ pub enum CommandEvent {
     ApplyObjectUpdate {
         object_id: ObjectId,
         update: ObjectUpdate,
+    },
+    /// Assign a fresh command stack to another object. C4CMD_Activate
+    /// uses `Target->SetCommand(C4CMD_Exit)` rather than exiting the
+    /// target inline (C4Command.cpp:1335-1362).
+    SetObjectCommand {
+        object_id: ObjectId,
+        controller: i32,
+        request: CommandRequest,
     },
     ControlCommandAcquire {
         caller: ObjectId,
@@ -9646,27 +9690,9 @@ impl ActivateState {
     fn release_target(
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
-        container_id: ObjectId,
         target_id: ObjectId,
         update: Option<ObjectUpdate>,
     ) -> CommandStepResult {
-        let container_position = if container_id == ctx.object.id {
-            ctx.position
-        } else {
-            ctx.resolve(container_id)
-                .map(|snapshot| snapshot.position)
-                .unwrap_or(ctx.position)
-        };
-
-        let mut target_update = ObjectUpdate::new();
-        target_update.position = Some(container_position);
-        target_update.velocity = Some(Vector2::ZERO);
-        target_update.container = Some(None);
-        target_update.command_direction = Some(CommandDirection::Stop);
-        if ctx.object.owner != OWNER_NONE {
-            target_update.owner = Some(ctx.object.owner);
-        }
-
         let mut result = if self.remaining > 1 {
             self.remaining -= 1;
             if self.definition_id.is_some() {
@@ -9677,9 +9703,10 @@ impl ActivateState {
             CommandStepResult::completed(update)
         };
 
-        result.events.push(CommandEvent::ApplyObjectUpdate {
+        result.events.push(CommandEvent::SetObjectCommand {
             object_id: target_id,
-            update: target_update,
+            controller: ctx.object.controller,
+            request: CommandRequest::new(CommandId::Exit),
         });
 
         result
@@ -9770,7 +9797,7 @@ impl ActivateState {
             let mut candidate = None;
             for object_id in &container_snapshot.contents {
                 if let Some(snapshot) = ctx.resolve(*object_id) {
-                    if snapshot.is_active()
+                    if snapshot.is_status_active()
                         && snapshot.definition_id == definition_id
                         && snapshot.container == Some(container_id)
                     {
@@ -9791,7 +9818,7 @@ impl ActivateState {
             None => return CommandStepResult::failed(update),
         };
 
-        if !target_snapshot.is_active() {
+        if !target_snapshot.is_status_active() {
             return CommandStepResult::failed(update);
         }
 
@@ -9808,7 +9835,7 @@ impl ActivateState {
         }
 
         if ctx.object.id == container_id || ctx.object.container == Some(container_id) {
-            return self.release_target(ctx, container_id, target_id, update);
+            return self.release_target(ctx, target_id, update);
         }
 
         if let Some(current_container) = ctx.object.container {
@@ -10615,6 +10642,8 @@ struct GetState {
     target: Option<ObjectId>,
     fallback_container: Option<ObjectId>,
     definition_id: Option<DefinitionId>,
+    #[serde(default)]
+    menu_identification: Option<i32>,
     remaining: i32,
     update_interval: u32,
     last_evaluated: Option<u64>,
@@ -10628,7 +10657,15 @@ struct GetState {
 
 impl GetState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
-        let definition_id = command_data_to_definition_id(&request.data);
+        let menu_identification = match (&request.data, request.target) {
+            (CommandData::Integer(1), Some(_)) => Some(17),
+            (CommandData::Integer(2), Some(_)) => Some(18),
+            _ => None,
+        };
+        let definition_id = menu_identification
+            .is_none()
+            .then(|| command_data_to_definition_id(&request.data))
+            .flatten();
         if request.target.is_none() && definition_id.is_none() {
             return Err(CommandError::Unsupported);
         }
@@ -10640,6 +10677,7 @@ impl GetState {
             target: request.target,
             fallback_container: request.target2,
             definition_id,
+            menu_identification,
             remaining,
             update_interval: request.update_interval.max(1),
             last_evaluated: None,
@@ -10880,6 +10918,23 @@ impl GetState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if let (Some(identification), Some(container)) =
+            (self.menu_identification, self.target)
+        {
+            let kind = if identification == 18 {
+                MenuRequestKind::Contents { container }
+            } else {
+                MenuRequestKind::Get { container }
+            };
+            return CommandStepResult::completed(self.prepare_update(ctx)).with_events(vec![
+                CommandEvent::OpenMenu(MenuRequest {
+                    crew_id: ctx.object.id,
+                    owner: ctx.object.owner,
+                    kind,
+                }),
+            ]);
+        }
+
         let interval = self.update_interval as u64;
         if let Some(last) = self.last_evaluated {
             if ctx.frame.saturating_sub(last) < interval {
@@ -11954,8 +12009,9 @@ struct SellState {
 
 impl SellState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
-        let definition_id =
-            command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
+        // Data==0 is the internal "open C4MN_Sell" command
+        // (C4Command.cpp:2052-2057); a nonzero ID performs a sale.
+        let definition_id = command_data_to_definition_id(&request.data).unwrap_or_default();
         let remaining = request.tx.unwrap_or(1).max(1);
         Ok(Self {
             definition_id,
@@ -11985,8 +12041,8 @@ impl SellState {
     }
 
     fn is_base(snapshot: &CommandObjectSnapshot, owner: i32) -> bool {
-        snapshot.is_active()
-            && snapshot.owner == owner
+        snapshot.is_status_active()
+            && snapshot.base == owner
             && (snapshot.category & CATEGORY_STRUCTURE) != 0
             && (snapshot.ocf & ocf::ENTRANCE) != 0
             && !snapshot.collectible
@@ -12028,7 +12084,7 @@ impl SellState {
     ) -> Option<ObjectId> {
         if let Some(candidate_id) = self.preferred {
             if let Some(snapshot) = ctx.resolve(candidate_id) {
-                if snapshot.is_active()
+                if snapshot.is_status_active()
                     && snapshot.container == Some(base.id)
                     && snapshot.definition_id == self.definition_id
                 {
@@ -12040,7 +12096,7 @@ impl SellState {
 
         for item_id in &base.contents {
             if let Some(snapshot) = ctx.resolve(*item_id) {
-                if snapshot.is_active()
+                if snapshot.is_status_active()
                     && snapshot.container == Some(base.id)
                     && snapshot.definition_id == self.definition_id
                 {
@@ -12054,6 +12110,23 @@ impl SellState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.definition_id.is_empty() {
+            let update = self.update_to_stop(ctx);
+            if !ctx.base_sell_enabled {
+                return CommandStepResult::failed(update);
+            }
+            let Some(base) = self.resolve_base(ctx) else {
+                return CommandStepResult::failed(update);
+            };
+            return CommandStepResult::completed(update).with_events(vec![
+                CommandEvent::OpenMenu(MenuRequest {
+                    crew_id: ctx.object.id,
+                    owner: ctx.object.owner,
+                    kind: MenuRequestKind::Sell { base },
+                }),
+            ]);
+        }
+
         if self.remaining <= 0 {
             return CommandStepResult::completed(self.update_to_stop(ctx));
         }
@@ -12082,7 +12155,7 @@ impl SellState {
             None => return CommandStepResult::failed(update_to_stop),
         };
 
-        let base_owner = base_snapshot.owner;
+        let base_owner = base_snapshot.base;
         if base_owner == OWNER_NONE {
             return CommandStepResult::failed(update_to_stop);
         }
@@ -12174,8 +12247,9 @@ struct BuyState {
 
 impl BuyState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
-        let definition_id =
-            command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
+        // Data==0 is the internal "open C4MN_Buy" command
+        // (C4Command.cpp:1999-2004); a nonzero ID performs a purchase.
+        let definition_id = command_data_to_definition_id(&request.data).unwrap_or_default();
         Ok(Self {
             definition_id,
             target: request.target,
@@ -12210,7 +12284,7 @@ impl BuyState {
         target_id: ObjectId,
         target_snapshot: &CommandObjectSnapshot,
     ) -> Option<CommandStepResult> {
-        if !target_snapshot.is_active() || target_snapshot.collectible {
+        if !target_snapshot.is_status_active() || target_snapshot.collectible {
             return None;
         }
 
@@ -12261,7 +12335,7 @@ impl BuyState {
         let mut candidate = None;
         for item_id in &target_snapshot.contents {
             if let Some(item_snapshot) = ctx.resolve(*item_id) {
-                if item_snapshot.is_active()
+                if item_snapshot.is_status_active()
                     && item_snapshot.definition_id == self.definition_id
                     && item_snapshot.collectible
                     && item_snapshot.construction >= FULL_CON
@@ -12275,7 +12349,8 @@ impl BuyState {
         let item_id = candidate?;
 
         let buyer_owner = ctx.object.owner;
-        let player = match ctx.player(buyer_owner) {
+        let base_owner = target_snapshot.base;
+        let player = match ctx.player(base_owner) {
             Some(player) if player.is_active() => player,
             _ => {
                 return Some(CommandStepResult::failed(update_to_stop));
@@ -12294,7 +12369,7 @@ impl BuyState {
         let mut events = Vec::new();
         if price != 0 {
             events.push(CommandEvent::AdjustPlayerWealth {
-                player_id: buyer_owner,
+                player_id: base_owner,
                 delta: -price,
             });
         }
@@ -12314,7 +12389,7 @@ impl BuyState {
     fn resolve_base(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
         if let Some(target) = self.target {
             if let Some(snapshot) = ctx.resolve(target) {
-                if snapshot.is_active() {
+                if snapshot.is_status_active() {
                     return Some(target);
                 }
             }
@@ -12324,8 +12399,8 @@ impl BuyState {
         ctx.objects
             .values()
             .filter(|snapshot| {
-                snapshot.is_active()
-                    && snapshot.owner == buyer_owner
+                snapshot.is_status_active()
+                    && snapshot.base == buyer_owner
                     && (snapshot.category & CATEGORY_STRUCTURE) != 0
                     && (snapshot.ocf & ocf::ENTRANCE) != 0
                     && !snapshot.collectible
@@ -12339,6 +12414,22 @@ impl BuyState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.definition_id.is_empty() {
+            let update = self.update_to_stop(ctx);
+            if !ctx.base_buy_enabled {
+                return CommandStepResult::failed(update);
+            }
+            let Some(base) = self.resolve_base(ctx) else {
+                return CommandStepResult::failed(update);
+            };
+            return CommandStepResult::completed(update).with_events(vec![
+                CommandEvent::OpenMenu(MenuRequest {
+                    crew_id: ctx.object.id,
+                    owner: ctx.object.owner,
+                    kind: MenuRequestKind::Buy { base },
+                }),
+            ]);
+        }
         if let Some(last) = self.last_evaluated {
             if ctx.frame.saturating_sub(last) < self.update_interval as u64 {
                 if let Some(target_id) = self.target {
@@ -12386,7 +12477,7 @@ impl BuyState {
             None => return CommandStepResult::failed(update),
         };
 
-        let base_owner = base_snapshot.owner;
+        let base_owner = base_snapshot.base;
         if base_owner == OWNER_NONE {
             return CommandStepResult::failed(update);
         }

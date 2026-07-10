@@ -241,6 +241,249 @@ impl Engine {
         for (owner, com) in pending_singles {
             self.player_direct_com(owner, com, 0)?;
         }
+        self.refill_player_contents_menus()?;
+        self.open_player_auto_context_menus()?;
+        Ok(())
+    }
+
+    /// Player-menu execution notices refill-container content-count
+    /// changes after objects have run (C4Player.cpp:206-212;
+    /// C4ObjectMenu.cpp:448-459). Rebuild Get/Contents menus before the
+    /// AutoContextMenu tail so exited vehicles disappear immediately.
+    fn refill_player_contents_menus(&mut self) -> Result<(), EngineError> {
+        let mut pending = self
+            .players
+            .keys()
+            .filter_map(|owner| self.crew_cursor(*owner))
+            .filter_map(|crew_id| {
+                let crew_index = self.find_object_index(crew_id)?;
+                let menu = self.objects[crew_index].state.menu.as_ref()?;
+                let identification = match menu.identification {
+                    Value::Int(17) => 17,
+                    Value::Int(18) => 18,
+                    _ => return None,
+                };
+                let container_id = self.objects[crew_index].state.container?;
+                Some((crew_id, container_id, identification))
+            })
+            .collect::<Vec<_>>();
+        pending.sort_unstable_by_key(|(crew_id, _, _)| crew_id.as_u64());
+        for (crew_id, container_id, identification) in pending {
+            let Some(crew_index) = self.find_object_index(crew_id) else {
+                continue;
+            };
+            let Some(container_index) = self.find_object_index(container_id) else {
+                continue;
+            };
+            self.open_container_contents_menu(crew_index, container_index, identification)?;
+        }
+        Ok(())
+    }
+
+    /// C4Player::Execute's cursor AutoContextMenu tail
+    /// (C4Player.cpp:206-212; C4Object.cpp:2044-2062).
+    fn open_player_auto_context_menus(&mut self) -> Result<(), EngineError> {
+        let mut owners = self
+            .players
+            .iter()
+            .filter_map(|(&owner, player)| player.control.auto_context_menu.then_some(owner))
+            .collect::<Vec<_>>();
+        owners.sort_unstable();
+        for owner in owners {
+            let Some(crew_index) = self
+                .crew_cursor(owner)
+                .and_then(|crew| self.find_object_index(crew))
+            else {
+                continue;
+            };
+            if !self.objects[crew_index].commands.is_empty()
+                || self.objects[crew_index].state.menu.is_some()
+                || !self.objects[crew_index].state.crew_member
+            {
+                continue;
+            }
+            let Some(base_index) = self.objects[crew_index]
+                .state
+                .container
+                .and_then(|base| self.find_object_index(base))
+            else {
+                continue;
+            };
+            let auto_context = self
+                .definitions
+                .get(&self.objects[base_index].definition_id)
+                .is_some_and(|definition| definition.auto_context_menu());
+            if auto_context {
+                self.open_contained_context_menu(crew_index, base_index)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Internal C4MN_Context refill for a crew member contained in a
+    /// structure (C4Object.cpp:1961-1980; C4ObjectMenu.cpp:328-435).
+    fn open_contained_context_menu(
+        &mut self,
+        crew_index: usize,
+        base_index: usize,
+    ) -> Result<(), EngineError> {
+        const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
+        let crew_id = self.objects[crew_index].id;
+        let crew_owner = self.objects[crew_index].state.owner;
+        let base = &self.objects[base_index];
+        let base_id = base.id;
+        let base_definition = base.definition_id.clone();
+        let base_player = base.state.base;
+        let base_is_container = base.state.ocf & ocf::CONTAINER != 0;
+        let mut items = Vec::new();
+        let item = |caption: &str, command: String, item_id: String| crate::ObjectMenuItem {
+            caption: caption.to_string(),
+            info_caption: String::new(),
+            command,
+            command2: String::new(),
+            count: C4MN_ITEM_NO_COUNT,
+            item_id,
+            selectable: true,
+            value: None,
+        };
+
+        if base_is_container && self.objects[crew_index].state.container == Some(base_id) {
+            items.push(item(
+                "Contents",
+                format!(
+                    "SetCommand(this,\"Get\",Object({}),0,0,,2)&&ExecuteCommand()",
+                    base_id.as_u64()
+                ),
+                base_definition.clone(),
+            ));
+        }
+        if self.players.contains_key(&base_player)
+            && !self.players_hostile(base_player, crew_owner)
+        {
+            if self.base_buy_enabled {
+                items.push(item(
+                    "Buy",
+                    format!(
+                        "SetCommand(this,\"Buy\",Object({}))&&ExecuteCommand()",
+                        base_id.as_u64()
+                    ),
+                    "NONE".to_string(),
+                ));
+            }
+            if self.base_sell_enabled {
+                items.push(item(
+                    "Sell",
+                    format!(
+                        "SetCommand(this,\"Sell\",Object({}))&&ExecuteCommand()",
+                        base_id.as_u64()
+                    ),
+                    "NONE".to_string(),
+                ));
+            }
+        }
+        if self
+            .definitions
+            .get(&base_definition)
+            .and_then(|definition| definition.description())
+            .is_some()
+        {
+            items.push(item(
+                "Info",
+                format!("ShowInfo(Object({}))", base_id.as_u64()),
+                base_definition.clone(),
+            ));
+        }
+        if base_is_container && self.objects[crew_index].state.container == Some(base_id) {
+            items.push(item(
+                "Exit",
+                "PlayerObjectCommand(GetOwner(),\"Exit\")&&ExecuteCommand()".to_string(),
+                "NONE".to_string(),
+            ));
+        }
+        let selection = i32::from(!items.is_empty()) - 1;
+        let caption = self
+            .definitions
+            .get(&base_definition)
+            .map(|definition| definition.name().to_string())
+            .unwrap_or_else(|| base_definition.clone());
+
+        let _ = self.close_object_menu(crew_id, true)?;
+        let Some(crew_index) = self.find_object_index(crew_id) else {
+            return Ok(());
+        };
+        self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
+            caption,
+            symbol_id: base_definition,
+            identification: Value::Int(14),
+            style: 1,
+            permanent: true,
+            selection,
+            user_menu: false,
+            command_object: Some(crew_id),
+            items,
+            columns: 1,
+            lines: 0,
+            text_progress: None,
+            decoration: None,
+        });
+        Ok(())
+    }
+
+    /// ShowInfo -> C4Object::ActivateMenu(C4MN_Info): a permanent
+    /// information-style menu with the target picture/name and info text
+    /// (C4Script.cpp:3332-3336; C4Object.cpp:2008-2027).
+    pub(crate) fn open_object_info_menu(
+        &mut self,
+        crew_index: usize,
+        target_index: usize,
+    ) -> Result<(), EngineError> {
+        const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
+        let crew_id = self.objects[crew_index].id;
+        let target = &self.objects[target_index];
+        let definition_id = target.definition_id.clone();
+        let definition = self.definitions.get(&definition_id);
+        let name = target
+            .state
+            .custom_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .or_else(|| definition.map(|definition| definition.name().to_string()))
+            .unwrap_or_else(|| definition_id.clone());
+        let info_caption = definition
+            .and_then(|definition| definition.description())
+            .unwrap_or_default()
+            .to_string();
+        let item = crate::ObjectMenuItem {
+            caption: name.clone(),
+            info_caption,
+            command: String::new(),
+            command2: String::new(),
+            count: C4MN_ITEM_NO_COUNT,
+            item_id: definition_id.clone(),
+            selectable: false,
+            value: None,
+        };
+
+        let _ = self.close_object_menu(crew_id, false)?;
+        let Some(crew_index) = self.find_object_index(crew_id) else {
+            return Ok(());
+        };
+        self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
+            caption: name,
+            symbol_id: "NONE".to_string(),
+            identification: Value::Int(15),
+            style: 2,
+            permanent: true,
+            selection: -1,
+            user_menu: false,
+            command_object: Some(crew_id),
+            items: vec![item],
+            columns: 1,
+            lines: 0,
+            text_progress: None,
+            decoration: None,
+        });
         Ok(())
     }
 
@@ -775,7 +1018,17 @@ impl Engine {
                 self.menu_user_enter(object_id, true)?;
             }
             COM_MENU_CLOSE => {
-                let _ = self.close_object_menu(object_id, false)?;
+                let auto_context_exit = !menu.user_menu
+                    && menu.permanent
+                    && menu.identification == Value::Int(14);
+                if self.close_object_menu(object_id, false)? && auto_context_exit {
+                    // C4Object::AutoContextMenu's CloseCommand is invoked
+                    // only for a control close (C4Menu.cpp:327-331), not
+                    // when another menu force-replaces the context menu.
+                    let owner = self.objects[index].state.owner;
+                    self.player_object_command(owner, CommandId::Exit, None, 0, 0)?;
+                    self.execute_object_command_now(object_id)?;
+                }
             }
             COM_MENU_LEFT => {
                 let delta = if menu.selection - 1 < 0 {
@@ -1412,7 +1665,7 @@ impl Engine {
     /// (C4Object.cpp:3269-3280): ValidPlr(Contained->Base), not hostile to
     /// the clonk's Owner, and the scenario's BASEFUNC bit set →
     /// ActivateMenu(C4MN_Buy/C4MN_Sell) on the clonk with the container as
-    /// target. The menu itself is app-side; the engine emits the request.
+    /// target. C4Object owns this permanent menu directly.
     fn contained_base_menu(&mut self, index: usize, buy: bool) -> Result<(), EngineError> {
         // Re-resolve the container: the early Contained{Com} script may
         // have moved the clonk.
@@ -1440,16 +1693,309 @@ impl Engine {
         if !enabled {
             return Ok(());
         }
-        let base_id = self.objects[container_index].id;
-        let kind = if buy {
-            crate::MenuRequestKind::Buy { base: base_id }
+        if buy {
+            self.open_base_buy_menu(index, container_index)?;
         } else {
-            crate::MenuRequestKind::Sell { base: base_id }
+            self.open_base_sell_menu(index, container_index)?;
+        }
+        Ok(())
+    }
+
+    /// C4Object::ActivateMenu(C4MN_Buy) plus the immediate
+    /// C4ObjectMenu::SetRefillObject/Refill pass (C4Object.cpp:1919-1930;
+    /// C4ObjectMenu.cpp:207-237).
+    pub(crate) fn open_base_buy_menu(
+        &mut self,
+        crew_index: usize,
+        base_index: usize,
+    ) -> Result<(), EngineError> {
+        let crew_id = self.objects[crew_index].id;
+        let base_id = self.objects[base_index].id;
+        let base_player = self.objects[base_index].state.base;
+        let mut material = self
+            .players
+            .get(&base_player)
+            .map(|player| {
+                player
+                    .home_base_material()
+                    .iter()
+                    .map(|(definition_id, count)| (definition_id.clone(), *count))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // C4IDList has a stable order. Player currently stores this list in
+        // a HashMap, so impose a deterministic order until that model is
+        // replaced by the C++ ordered list.
+        material.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let items = material
+            .into_iter()
+            .filter_map(|(definition_id, count)| {
+                let definition = self.definitions.get(&definition_id)?;
+                let count = i32::try_from(count).unwrap_or(i32::MAX);
+                let command = format!(
+                    "AppendCommand(this,\"Buy\",Object({}),1,0,,0,{})&&ExecuteCommand()",
+                    base_id.as_u64(), definition_id
+                );
+                let command2 = format!(
+                    "AppendCommand(this,\"Buy\",Object({}),{},0,,0,{})&&ExecuteCommand()",
+                    base_id.as_u64(), count, definition_id
+                );
+                Some(crate::ObjectMenuItem {
+                    caption: format!("Buy {}", definition.name()),
+                    info_caption: String::new(),
+                    command,
+                    command2,
+                    count,
+                    item_id: definition_id,
+                    selectable: true,
+                    value: Some(definition.value()),
+                })
+            })
+            .collect::<Vec<_>>();
+        let selection = i32::from(!items.is_empty()) - 1;
+
+        let _ = self.close_object_menu(crew_id, true)?;
+        let Some(crew_index) = self.find_object_index(crew_id) else {
+            return Ok(());
         };
-        self.pending_menu_requests.push(crate::MenuRequest {
-            crew_id: self.objects[index].id,
-            owner,
-            kind,
+        self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
+            caption: "There is nothing to buy.".to_string(),
+            symbol_id: String::new(),
+            identification: Value::Int(4),
+            style: 0,
+            permanent: true,
+            selection,
+            user_menu: false,
+            command_object: Some(crew_id),
+            items,
+            columns: 5,
+            lines: 0,
+            text_progress: None,
+            decoration: None,
+        });
+        Ok(())
+    }
+
+    /// C4Object::ActivateMenu(C4MN_Sell) plus C4ObjectMenu's immediate
+    /// refill over the base's stContents list (C4Object.cpp:1932-1943;
+    /// C4ObjectMenu.cpp:238-277).
+    pub(crate) fn open_base_sell_menu(
+        &mut self,
+        crew_index: usize,
+        base_index: usize,
+    ) -> Result<(), EngineError> {
+        const CATEGORY_TRADE_LIVING: i32 = 1 << 16;
+        let crew_id = self.objects[crew_index].id;
+        let base_id = self.objects[base_index].id;
+        let base_definition = self.objects[base_index].definition_id.clone();
+        let contents = self.objects[base_index].state.contents.clone();
+        let sell_category = crate::CATEGORY_STATIC_BACK
+            | crate::CATEGORY_STRUCTURE
+            | crate::CATEGORY_VEHICLE
+            | crate::CATEGORY_OBJECT
+            | CATEGORY_TRADE_LIVING;
+        let mut seen_definitions = Vec::new();
+        let mut items = Vec::new();
+
+        for item_id in contents.iter().copied() {
+            let Some(item_index) = self.find_object_index(item_id) else {
+                continue;
+            };
+            let item = &self.objects[item_index];
+            if item.destroyed
+                || !item.state.status.is_active()
+                || item.state.category & sell_category == 0
+                || seen_definitions.contains(&item.definition_id)
+            {
+                continue;
+            }
+            let definition_id = item.definition_id.clone();
+            seen_definitions.push(definition_id.clone());
+            let count = contents
+                .iter()
+                .filter_map(|candidate| self.find_object_index(*candidate))
+                .filter(|&candidate| {
+                    let candidate = &self.objects[candidate];
+                    !candidate.destroyed
+                        && candidate.state.status.is_active()
+                        && candidate.definition_id == definition_id
+                })
+                .count();
+            let count = i32::try_from(count).unwrap_or(i32::MAX);
+            let Some(definition) = self.definitions.get(&definition_id) else {
+                continue;
+            };
+            let command = format!(
+                "AppendCommand(this,\"Sell\",Object({}),1,0,Object({}),0,{})&&ExecuteCommand()",
+                base_id.as_u64(),
+                item_id.as_u64(),
+                definition_id
+            );
+            let command2 = format!(
+                "AppendCommand(this,\"Sell\",Object({}),{},0,,0,{})&&ExecuteCommand()",
+                base_id.as_u64(),
+                count,
+                definition_id
+            );
+            items.push(crate::ObjectMenuItem {
+                caption: format!("Sell {}", definition.name()),
+                info_caption: String::new(),
+                command,
+                command2,
+                count,
+                item_id: definition_id,
+                selectable: true,
+                value: Some(definition.value()),
+            });
+        }
+
+        let selection = i32::from(!items.is_empty()) - 1;
+        let base_name = self
+            .definitions
+            .get(&base_definition)
+            .map(|definition| definition.name().to_string())
+            .unwrap_or_else(|| base_definition.clone());
+        let _ = self.close_object_menu(crew_id, true)?;
+        let Some(crew_index) = self.find_object_index(crew_id) else {
+            return Ok(());
+        };
+        self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
+            caption: format!("{} is empty.", base_name),
+            symbol_id: String::new(),
+            identification: Value::Int(5),
+            style: 0,
+            permanent: true,
+            selection,
+            user_menu: false,
+            command_object: Some(crew_id),
+            items,
+            columns: 5,
+            lines: 0,
+            text_progress: None,
+            decoration: None,
+        });
+        Ok(())
+    }
+
+    /// C4Object::ActivateMenu(C4MN_Get/C4MN_Contents) plus the immediate
+    /// contents refill (C4Object.cpp:1945-1959; C4ObjectMenu.cpp:279-326).
+    pub(crate) fn open_container_contents_menu(
+        &mut self,
+        crew_index: usize,
+        container_index: usize,
+        identification: i32,
+    ) -> Result<(), EngineError> {
+        const CATEGORY_TRADE_LIVING: i32 = 1 << 16;
+        let crew_id = self.objects[crew_index].id;
+        let selected_definition = self.objects[crew_index]
+            .state
+            .menu
+            .as_ref()
+            .filter(|menu| menu.identification == Value::Int(identification))
+            .and_then(|menu| usize::try_from(menu.selection).ok().zip(Some(menu)))
+            .and_then(|(selection, menu)| menu.items.get(selection))
+            .map(|item| item.item_id.clone());
+        let container_id = self.objects[container_index].id;
+        let container_definition = self.objects[container_index].definition_id.clone();
+        let has_entrance = self.objects[container_index].state.ocf & ocf::ENTRANCE != 0;
+        let contents = self.objects[container_index].state.contents.clone();
+        let mut seen_definitions = Vec::new();
+        let mut items = Vec::new();
+
+        for item_id in contents.iter().copied() {
+            let Some(item_index) = self.find_object_index(item_id) else {
+                continue;
+            };
+            let item = &self.objects[item_index];
+            let get_category = crate::CATEGORY_STATIC_BACK
+                | crate::CATEGORY_STRUCTURE
+                | crate::CATEGORY_VEHICLE
+                | crate::CATEGORY_OBJECT
+                | CATEGORY_TRADE_LIVING;
+            if item.destroyed
+                || !item.state.status.is_active()
+                || item.state.category & get_category == 0
+                || seen_definitions.contains(&item.definition_id)
+            {
+                continue;
+            }
+            let definition_id = item.definition_id.clone();
+            seen_definitions.push(definition_id.clone());
+            let count = contents
+                .iter()
+                .filter_map(|candidate| self.find_object_index(*candidate))
+                .filter(|&candidate| {
+                    let candidate = &self.objects[candidate];
+                    !candidate.destroyed
+                        && candidate.state.status.is_active()
+                        && candidate.definition_id == definition_id
+                })
+                .count();
+            let count = i32::try_from(count).unwrap_or(i32::MAX);
+            let carryable = item.state.ocf & ocf::CARRYABLE != 0;
+            let get = carryable || !has_entrance;
+            let command_name = if get { "Get" } else { "Activate" };
+            let item_name = self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| definition.name())
+                .unwrap_or(definition_id.as_str());
+            let command = format!(
+                "SetCommand(this, \"{}\", Object({})) && ExecuteCommand()",
+                command_name,
+                item_id.as_u64()
+            );
+            let command2 = (count > 1)
+                .then(|| {
+                    format!(
+                        "SetCommand(this, \"{}\", , {},0, Object({}), {}) && ExecuteCommand()",
+                        command_name,
+                        count,
+                        container_id.as_u64(),
+                        definition_id
+                    )
+                })
+                .unwrap_or_default();
+            items.push(crate::ObjectMenuItem {
+                caption: format!("{} {}", command_name, item_name),
+                info_caption: String::new(),
+                command,
+                command2,
+                count,
+                item_id: definition_id,
+                selectable: true,
+                value: None,
+            });
+        }
+
+        let selection = selected_definition
+            .as_ref()
+            .and_then(|selected| items.iter().position(|item| &item.item_id == selected))
+            .and_then(|selection| i32::try_from(selection).ok())
+            .unwrap_or_else(|| i32::from(!items.is_empty()) - 1);
+        let container_name = self
+            .definitions
+            .get(&container_definition)
+            .map(|definition| definition.name().to_string())
+            .unwrap_or_else(|| container_definition.clone());
+        let _ = self.close_object_menu(crew_id, true)?;
+        let Some(crew_index) = self.find_object_index(crew_id) else {
+            return Ok(());
+        };
+        self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
+            caption: format!("{} is empty.", container_name),
+            symbol_id: container_definition,
+            identification: Value::Int(identification),
+            style: 0,
+            permanent: true,
+            selection,
+            user_menu: false,
+            command_object: Some(crew_id),
+            items,
+            columns: 5,
+            lines: 0,
+            text_progress: None,
+            decoration: None,
         });
         Ok(())
     }
@@ -2976,14 +3522,564 @@ protected func ControlCommand(szCommand) { return(1); }
         let (crew, hut) = contained_base_fixture(&mut engine, 1);
 
         engine.player_in_com(1, COM_UP, 0).expect("in_com");
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("COM_Up opens a menu")
+                .identification,
+            Value::Int(4),
+            "COM_Up activates C4MN_Buy on the clonk"
+        );
         assert!(
-            engine.pending_menu_requests.iter().any(|request| {
-                request.crew_id == crew
-                    && request.owner == 1
-                    && matches!(request.kind,
-                        crate::MenuRequestKind::Buy { base } if base == hut)
-            }),
-            "COM_Up in a friendly base activates the buy menu"
+            engine.pending_menu_requests.is_empty(),
+            "C4Object::ActivateMenu is engine-owned, not an app-side request"
+        );
+        assert_eq!(engine.object_snapshot(crew).expect("crew").container, Some(hut));
+    }
+
+    #[test]
+    fn contained_buy_menu_refills_from_the_base_players_material() {
+        // C4Object::ActivateMenu(C4MN_Buy) creates a permanent menu on the
+        // clonk (C4Object.cpp:1919-1930), and C4ObjectMenu::Refill adds the
+        // base player's HomeBaseMaterial with its count, value and Buy
+        // commands (C4ObjectMenu.cpp:207-237).
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 1);
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", "#strict\n").expect("lorry compiles");
+        lorry.set_value(25);
+        engine.register_definition(lorry).expect("register lorry");
+        engine
+            .set_player_home_base_material(1, HashMap::from([("LORY".to_string(), 1)]))
+            .expect("home-base material");
+
+        engine.player_in_com(1, COM_UP, 0).expect("in_com");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("buy menu opens");
+        assert_eq!(menu.identification, Value::Int(4), "C4MN_Buy");
+        assert!(menu.permanent);
+        assert_eq!(menu.command_object, Some(crew));
+        assert_eq!(menu.selection, 0);
+        assert_eq!(menu.items.len(), 1);
+        let item = &menu.items[0];
+        assert_eq!(item.caption, "Buy Lorry");
+        assert_eq!(item.count, 1);
+        assert_eq!(item.item_id, "LORY");
+        assert_eq!(item.value, Some(25));
+        assert_eq!(
+            item.command,
+            format!(
+                "AppendCommand(this,\"Buy\",Object({}),1,0,,0,LORY)&&ExecuteCommand()",
+                hut.as_u64()
+            )
+        );
+        assert_eq!(item.command2, item.command);
+    }
+
+    #[test]
+    fn contained_buy_menu_enter_purchases_and_refills() {
+        // C4Player::InCom converts Throw to MenuEnter while a menu is open
+        // (C4Player.cpp:1502-1513; C4Menu.cpp:1051-1057). The Buy row then
+        // queues and executes C4CMD_Buy against Target->Base, consuming its
+        // stock and the buyer's wealth (C4Command.cpp:2005-2035), while the
+        // permanent menu refills (C4ObjectMenu.cpp:124-129,207-237).
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 1);
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", "#strict\n").expect("lorry compiles");
+        lorry.set_value(25);
+        engine.register_definition(lorry).expect("register lorry");
+        engine.set_player_wealth(1, 25).expect("wealth");
+        engine
+            .set_player_home_base_material(1, HashMap::from([("LORY".to_string(), 1)]))
+            .expect("home-base material");
+
+        engine.player_in_com(1, COM_UP, 0).expect("open buy menu");
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("enter selected row");
+
+        let player = engine.player(1).expect("player");
+        assert_eq!(
+            player.wealth(),
+            0,
+            "post-enter command stack: {:?}",
+            engine
+                .object_snapshot(crew)
+                .expect("crew snapshot")
+                .command_stack
+                .command_names()
+        );
+        assert_eq!(
+            player.home_base_material().get("LORY"),
+            Some(&0),
+            "C4Player::Buy leaves the C4IDList entry at zero"
+        );
+        let snapshot = engine.snapshot();
+        let bought = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "LORY" && object.status.is_active())
+            .expect("bought lorry exists");
+        assert_eq!(bought.owner, 1);
+        assert_eq!(bought.container, Some(hut));
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("permanent buy menu remains");
+        assert_eq!(menu.identification, Value::Int(4));
+        assert_eq!(menu.items.len(), 1, "zero-count IDs remain visible");
+        assert_eq!(menu.items[0].item_id, "LORY");
+        assert_eq!(menu.items[0].count, 0);
+        assert_eq!(menu.selection, 0);
+    }
+
+    #[test]
+    fn player_execute_opens_the_contained_buildings_auto_context_menu() {
+        // C4Player::Execute calls Cursor->AutoContextMenu after controls
+        // (C4Player.cpp:206-212). A crew member inside an opted-in building
+        // with the player's preference enabled gets a permanent C4MN_Context
+        // menu populated in Contents/Buy/Sell/Exit order
+        // (C4Object.cpp:2044-2062; C4ObjectMenu.cpp:328-435).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        hut.set_auto_context_menu(true);
+        engine.register_definition(hut).expect("register hut");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine.player_mut(1).expect("player").control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.category = crate::CATEGORY_LIVING;
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+
+        engine.execute_player_controls().expect("player execute");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("context menu opens");
+        assert_eq!(menu.identification, Value::Int(14), "C4MN_Context");
+        assert_eq!(menu.style, 1, "C4MN_Style_Context");
+        assert!(menu.permanent);
+        assert!(!menu.user_menu);
+        assert_eq!(menu.command_object, Some(crew));
+        assert_eq!(menu.columns, 1);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Contents", "Buy", "Sell", "Exit"]
+        );
+    }
+
+    #[test]
+    fn contained_context_buy_entry_opens_the_buy_menu() {
+        // The C4MN_Context Buy row runs a data-less C4CMD_Buy, which opens
+        // C4MN_Buy on its Target before succeeding (C4ObjectMenu.cpp:
+        // 376-387; C4Command.cpp:1987-2004). Menu controls are converted
+        // ahead of gameplay by C4Player::InCom (C4Player.cpp:1502-1513).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        hut.set_auto_context_menu(true);
+        engine.register_definition(hut).expect("register hut");
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", "#strict\n").expect("lorry compiles");
+        lorry.set_value(25);
+        engine.register_definition(lorry).expect("register lorry");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine.player_mut(1).expect("player").control.auto_context_menu = true;
+        engine
+            .set_player_home_base_material(1, HashMap::from([("LORY".to_string(), 1)]))
+            .expect("home-base material");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+        engine.execute_player_controls().expect("player execute");
+
+        engine.player_in_com(1, COM_RIGHT, 0).expect("select Buy");
+        engine.player_in_com(1, COM_THROW, 0).expect("enter Buy");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("buy menu opens");
+        assert_eq!(menu.identification, Value::Int(4), "C4MN_Buy");
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.items[0].item_id, "LORY");
+    }
+
+    #[test]
+    fn contained_context_info_entry_opens_the_info_menu() {
+        // The Context Info row executes ShowInfo(target), which calls
+        // ActivateMenu(C4MN_Info) on the command object and adds the
+        // target's info string (C4ObjectMenu.cpp:410-423;
+        // C4Script.cpp:3332-3336; C4Object.cpp:2008-2027).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        hut.set_auto_context_menu(true);
+        hut.set_description(Some("A sturdy wooden hut.".to_string()));
+        engine.register_definition(hut).expect("register hut");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine.player_mut(1).expect("player").control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+        engine.execute_player_controls().expect("player execute");
+        for _ in 0..3 {
+            engine.player_in_com(1, COM_RIGHT, 0).expect("navigate");
+        }
+
+        engine.player_in_com(1, COM_THROW, 0).expect("open Info");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("Info menu opens");
+        assert_eq!(menu.identification, Value::Int(15), "C4MN_Info");
+        assert_eq!(menu.style, 2, "C4MN_Style_Info");
+        assert!(menu.permanent);
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.items[0].caption, "Hut");
+        assert_eq!(menu.items[0].info_caption, "A sturdy wooden hut.");
+    }
+
+    #[test]
+    fn contained_context_contents_entry_opens_the_contents_menu() {
+        // The C4MN_Context Contents row runs C4CMD_Get with Data=2,
+        // which immediately activates C4MN_Contents on the target
+        // (C4ObjectMenu.cpp:361-373; C4Command.cpp:1129-1135).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        hut.set_auto_context_menu(true);
+        engine.register_definition(hut).expect("register hut");
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", "#strict\n").expect("lorry compiles");
+        lorry.set_category(crate::CATEGORY_VEHICLE);
+        engine.register_definition(lorry).expect("register lorry");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine.player_mut(1).expect("player").control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.category = crate::CATEGORY_LIVING;
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        let lorry = engine
+            .spawn_object(SpawnConfig::new("LORY").with_container(hut))
+            .expect("spawn contained lorry");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+        engine.execute_player_controls().expect("player execute");
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("enter Contents");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("contents menu opens");
+        assert_eq!(menu.identification, Value::Int(18), "C4MN_Contents");
+        assert_eq!(
+            menu.items.len(),
+            1,
+            "contents rows: {:?}",
+            menu.items
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(menu.items[0].item_id, "LORY");
+        assert!(
+            menu.items[0]
+                .command
+                .contains(&format!("\"Activate\", Object({})", lorry.as_u64())),
+            "non-carryable vehicles activate out of the base"
+        );
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("activate the selected lorry");
+        let lorry_after_activate = engine.object_snapshot(lorry).expect("lorry survives");
+        assert_eq!(
+            lorry_after_activate.container,
+            Some(hut),
+            "C4CMD_Activate arms the target's Exit command before it runs"
+        );
+        assert_eq!(
+            lorry_after_activate.command_stack.command_names(),
+            vec!["Exit"]
+        );
+        engine.tick().expect("target Exit command frame");
+        assert_eq!(
+            engine.object_snapshot(lorry).expect("lorry survives").container,
+            None,
+            "the vehicle exits on its own object execution"
+        );
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("permanent contents menu refills");
+        assert_eq!(menu.identification, Value::Int(18));
+        assert!(menu.items.is_empty());
+    }
+
+    #[test]
+    fn contents_refill_preserves_the_selected_definition() {
+        // C4ObjectMenu::Refill stores the selected item's C4ID and
+        // checkIDSelection restores it after rebuilding the rows
+        // (C4ObjectMenu.cpp:274,325,448-458).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        hut.set_auto_context_menu(true);
+        engine.register_definition(hut).expect("register hut");
+        for (id, name) in [("LORY", "Lorry"), ("FLAG", "Flag")] {
+            let mut definition =
+                Definition::from_script(id, name, "#strict\n").expect("item compiles");
+            definition.set_category(crate::CATEGORY_VEHICLE);
+            engine
+                .register_definition(definition)
+                .expect("register item");
+        }
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine.player_mut(1).expect("player").control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        engine
+            .spawn_object(SpawnConfig::new("LORY").with_container(hut))
+            .expect("spawn lorry");
+        engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(hut))
+            .expect("spawn flag");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+        engine.execute_player_controls().expect("player execute");
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("open Contents");
+        engine.player_in_com(1, COM_RIGHT, 0).expect("select second");
+        let selected_definition = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("contents menu is open")
+            .items[1]
+            .item_id
+            .clone();
+
+        engine.execute_player_controls().expect("refill frame");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("contents menu remains open");
+        assert_eq!(menu.selection, 1);
+        assert_eq!(menu.items[1].item_id, selected_definition);
+    }
+
+    #[test]
+    fn contained_context_sell_entry_opens_the_grouped_sell_menu() {
+        // The C4MN_Context Sell row runs a data-less C4CMD_Sell and opens
+        // C4MN_Sell. Refill walks the base's stContents order, groups
+        // equal definitions, and carries both preferred-object and bulk
+        // commands (C4ObjectMenu.cpp:238-277; C4Command.cpp:2040-2057).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        hut.set_auto_context_menu(true);
+        engine.register_definition(hut).expect("register hut");
+        let mut flag =
+            Definition::from_script("FLAG", "Flag", "#strict\n").expect("flag compiles");
+        flag.set_category(crate::CATEGORY_OBJECT);
+        flag.set_value(100);
+        engine.register_definition(flag).expect("register flag");
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", "#strict\n").expect("lorry compiles");
+        lorry.set_category(crate::CATEGORY_VEHICLE);
+        lorry.set_value(20);
+        engine.register_definition(lorry).expect("register lorry");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine.player_mut(1).expect("player").control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.category = crate::CATEGORY_LIVING;
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        let first_flag = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(hut))
+            .expect("spawn first flag");
+        let second_flag = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(hut))
+            .expect("spawn second flag");
+        let lorry = engine
+            .spawn_object(SpawnConfig::new("LORY").with_container(hut))
+            .expect("spawn lorry");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+        engine.execute_player_controls().expect("player execute");
+
+        engine.player_in_com(1, COM_RIGHT, 0).expect("select Buy");
+        engine.player_in_com(1, COM_RIGHT, 0).expect("select Sell");
+        engine.player_in_com(1, COM_THROW, 0).expect("enter Sell");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("sell menu opens");
+        assert_eq!(menu.identification, Value::Int(5), "C4MN_Sell");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| (item.item_id.as_str(), item.count, item.value))
+                .collect::<Vec<_>>(),
+            vec![("FLAG", 2, Some(100)), ("LORY", 1, Some(20))]
+        );
+        assert!(menu.items[0].command.contains(&format!(
+            "Object({})",
+            second_flag.as_u64()
+        )) || menu.items[0]
+            .command
+            .contains(&format!("Object({})", first_flag.as_u64())));
+        assert!(menu.items[0].command2.contains(",2,0,,0,FLAG"));
+        assert!(menu.items[1]
+            .command
+            .contains(&format!("Object({})", lorry.as_u64())));
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("sell the selected flag");
+        assert_eq!(engine.player(1).expect("player").wealth(), 100);
+        assert_eq!(
+            engine
+                .player(1)
+                .expect("player")
+                .home_base_material()
+                .get("FLAG"),
+            Some(&1)
+        );
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("permanent sell menu refills");
+        assert_eq!(menu.identification, Value::Int(5));
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| (item.item_id.as_str(), item.count))
+                .collect::<Vec<_>>(),
+            vec![("FLAG", 1), ("LORY", 1)]
+        );
+    }
+
+    #[test]
+    fn closing_auto_context_menu_exits_the_building() {
+        // AutoContextMenu installs a close command that issues Exit for
+        // selected clonks; COM_MenuClose invokes it after closing
+        // (C4Object.cpp:2044-2062; C4Menu.cpp:317-331).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        hut.set_auto_context_menu(true);
+        engine.register_definition(hut).expect("register hut");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine.player_mut(1).expect("player").control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+        engine.execute_player_controls().expect("player execute");
+
+        engine.player_in_com(1, COM_DIG, 0).expect("close menu");
+
+        let crew_snapshot = engine.object_snapshot(crew).expect("crew survives");
+        assert_eq!(
+            crew_snapshot.container, None,
+            "the context close command exits"
+        );
+        assert_eq!(
+            engine.debug_object_menu(crew.as_u64()),
+            Some(None),
+            "the context menu remains closed"
         );
     }
 
@@ -2995,14 +4091,17 @@ protected func ControlCommand(szCommand) { return(1); }
         let (crew, hut) = contained_base_fixture(&mut engine, 1);
 
         engine.player_in_com(1, COM_DIG, 0).expect("in_com");
-        assert!(
-            engine.pending_menu_requests.iter().any(|request| {
-                request.crew_id == crew
-                    && matches!(request.kind,
-                        crate::MenuRequestKind::Sell { base } if base == hut)
-            }),
-            "COM_Dig in a friendly base activates the sell menu"
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("COM_Dig opens a menu")
+                .identification,
+            Value::Int(5),
+            "COM_Dig activates C4MN_Sell on the clonk"
         );
+        assert!(engine.pending_menu_requests.is_empty());
+        assert_eq!(engine.object_snapshot(crew).expect("crew").container, Some(hut));
     }
 
     #[test]

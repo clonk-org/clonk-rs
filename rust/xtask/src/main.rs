@@ -505,7 +505,7 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
     // ScenarioInit): crew and player-owned objects arrive here, then
     // InitializePlayer runs. Tries build/Tyler.c4p for the crew roster.
     let player_file = repo_root.join("build/Tyler.c4p");
-    let (name, color_dw, pref_color, pref_position, control_style, crew) =
+    let (name, color_dw, pref_color, pref_position, control_style, auto_context_menu, crew) =
         match player_file.exists() {
             true => match lc_engine::player_file::PlayerFile::load_from_path(&player_file) {
                 Ok(file) => (
@@ -514,14 +514,31 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
                     file.pref_color,
                     file.pref_position,
                     file.pref_control_style,
+                    file.pref_auto_context_menu,
                     file.crew,
                 ),
                 Err(error) => {
                     tracing::warn!(%error, "Tyler.c4p failed to load; joining a default player");
-                    ("Tester".to_string(), 0xff0000, 0, 0, false, Vec::new())
+                    (
+                        "Tester".to_string(),
+                        0xff0000,
+                        0,
+                        0,
+                        false,
+                        false,
+                        Vec::new(),
+                    )
                 }
             },
-            false => ("Tester".to_string(), 0xff0000, 0, 0, false, Vec::new()),
+            false => (
+                "Tester".to_string(),
+                0xff0000,
+                0,
+                0,
+                false,
+                false,
+                Vec::new(),
+            ),
         };
     if std::env::var("LC_XTASK_CREW_DUMP").is_ok() {
         for info in &crew {
@@ -544,6 +561,7 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
             crew,
             startup_player_count: 1,
             control_style,
+            auto_context_menu,
         })
         .map_err(|error| anyhow!("join_player failed: {error}"))?;
     tracing::info!(

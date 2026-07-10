@@ -6162,6 +6162,7 @@ impl GameApp {
             pref_position,
             crew,
             control_style,
+            auto_context_menu,
             score,
             total_playing_time,
         ) = self
@@ -6180,6 +6181,7 @@ impl GameApp {
                     player.pref_position,
                     player.crew.clone(),
                     player.pref_control_style,
+                    player.pref_auto_context_menu,
                     player.score,
                     player.total_playing_time,
                 )
@@ -6187,7 +6189,17 @@ impl GameApp {
             .unwrap_or_else(|| {
                 // The C++ new-player dialog opts fresh players into
                 // Jump'n'Run controls (C4StartupPlrSelDlg.cpp:1103-1113).
-                (self.player_name.clone(), 0xff, 0, 0, Vec::new(), true, 0, 0)
+                (
+                    self.player_name.clone(),
+                    0xff,
+                    0,
+                    0,
+                    Vec::new(),
+                    true,
+                    true,
+                    0,
+                    0,
+                )
             });
         let joined = self.engine.join_player(JoinPlayerConfig {
             name,
@@ -6201,6 +6213,7 @@ impl GameApp {
             crew,
             startup_player_count: 1,
             control_style,
+            auto_context_menu,
         })?;
         self.local_owner = joined.number;
         Ok(())
@@ -9923,11 +9936,12 @@ impl GameApp {
                         self.object_menu = Some(menu);
                     }
                 }
-                MenuRequestKind::Buy { .. } | MenuRequestKind::Sell { .. } => {
-                    // The engine's ContainedControl base check now emits
-                    // these (C4Object.cpp:3269-3280); the C4MN_Buy/C4MN_Sell
-                    // refill-driven menu UI (C4Object.cpp:1919-1943) is not
-                    // built yet — see PORT_STATUS Controls.
+                MenuRequestKind::Buy { .. }
+                | MenuRequestKind::Sell { .. }
+                | MenuRequestKind::Contents { .. }
+                | MenuRequestKind::Info { .. } => {
+                    // Internal C4ObjectMenu requests are consumed by the
+                    // engine. Ignore a stale serialized request here.
                 }
             }
         }
@@ -16578,6 +16592,57 @@ mod tests {
         })
         .expect("enter release");
         assert_eq!(app.engine.debug_object_menu(cursor.as_u64()), Some(None));
+    }
+
+    #[test]
+    fn engine_context_menu_is_visible_and_navigable_through_the_app() {
+        // C4Player::Execute installs C4MN_Context as style 1 on the cursor;
+        // C4Viewport draws that engine-owned menu and C4Player::InCom routes
+        // navigation to it before gameplay (C4Object.cpp:1961-1980,
+        // 2044-2062; C4Viewport.cpp:983-995; C4Player.cpp:1502-1513).
+        lc_core::logging::init();
+        let mut app = new_running_sandbox_app();
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let mut menu = two_item_script_menu(cursor);
+        menu.caption = "Hut".to_string();
+        menu.identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
+            .expect("integer menu identification deserializes");
+        menu.style = 1;
+        menu.permanent = true;
+        menu.user_menu = false;
+        menu.columns = 1;
+
+        let mut baseline = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut baseline).expect("baseline render");
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install context menu");
+        let mut with_menu = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut with_menu).expect("context render");
+        assert_ne!(with_menu, baseline, "style-1 context menu must be visible");
+
+        app.dispatch_control_event(ControlEvent::Press(ControlButton::Right))
+            .expect("right press");
+        app.dispatch_control_event(ControlEvent::Release(ControlButton::Right))
+            .expect("right release");
+        let menu = app
+            .engine
+            .debug_object_menu(cursor.as_u64())
+            .expect("cursor exists")
+            .expect("context remains open");
+        assert_eq!(menu.selection, 1);
+        let context_identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
+            .expect("integer menu identification deserializes");
+        assert_eq!(menu.identification, context_identification);
     }
 
     #[test]

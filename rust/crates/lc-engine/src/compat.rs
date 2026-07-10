@@ -30,7 +30,8 @@ use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, AudioCommand,
     CommandDirection, CrewSelectionState, DefinitionId, DefinitionRect, Direction, DrawTransform,
     EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectBaseGraphics,
-    ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
+    MenuRequest, MenuRequestKind, ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus,
+    ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate,
     PhysicsSettings, PlayerControlState, PlayerState, QueuedCommand, ShapeAttachRecord,
     SpawnConfig, ScoreboardState, TeamInfo, TransferZoneCommand,
@@ -1642,6 +1643,9 @@ fn parse_command_request(
             )))
         }
         (_, Value::Nil) => CommandData::Integer(0),
+        (_, Value::C4Id(id)) => {
+            CommandData::Integer(definition_id_to_c4id(id).unwrap_or_default())
+        }
         (_, other) => CommandData::Integer(value_to_i32(other, function, "data")?),
     };
 
@@ -3354,6 +3358,40 @@ fn get_menu(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(menu
         .map(|menu| menu.identification)
         .unwrap_or(Value::Int(0)))
+}
+
+/// FnShowInfo (C4Script.cpp:3332-3336): open C4MN_Info on the calling
+/// object, using the explicit object or the caller itself as target.
+fn show_info(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(command_object) = active_object_id() else {
+        return Ok(Value::Bool(false));
+    };
+    let explicit = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "ShowInfo",
+        "object",
+    )?;
+    let target = explicit.unwrap_or(command_object);
+    let queued = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        if context.get_world_object(target).is_none() {
+            return false;
+        }
+        let owner = context
+            .get_world_object(command_object)
+            .map(|object| object.owner)
+            .unwrap_or(OWNER_NONE);
+        context.pending_menu_requests.push(MenuRequest {
+            crew_id: command_object,
+            owner,
+            kind: MenuRequestKind::Info { target },
+        });
+        true
+    });
+    Ok(Value::Bool(queued))
 }
 
 /// FnGetMenuSelection (C4Script.cpp:4310-4316): -1 without an object or an
@@ -6520,6 +6558,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CloseMenu", close_menu);
     script.register_host_function("CreateMenu", create_menu);
     script.register_host_function("GetMenu", get_menu);
+    script.register_host_function("ShowInfo", show_info);
     script.register_host_function("GetMenuSelection", get_menu_selection);
     script.register_host_function("SelectMenuItem", select_menu_item);
     script.register_host_function("SetMenuDecoration", set_menu_decoration);
@@ -8600,6 +8639,10 @@ pub(crate) struct EffectContextOutcome {
     pub object_update: Option<ObjectUpdate>,
     pub object_commands: Vec<QueuedCommand>,
     pub command_operations: Vec<CommandOperation>,
+    /// Events produced by a synchronous FnExecuteCommand step. C++ applies
+    /// these before FnExecuteCommand returns (C4Script.cpp:922-929), so the
+    /// engine folds them with this callback rather than the next object tick.
+    pub command_events: Vec<CommandEvent>,
     pub destroy_object: bool,
     /// Mutations nested script calls made to other objects, in first-call
     /// order. C++ mutates live state during the call; the copy-in/copy-out
@@ -8658,6 +8701,7 @@ impl EffectContextOutcome {
             object_update,
             object_commands,
             command_operations,
+            command_events: Vec::new(),
             destroy_object,
             other_objects: Vec::new(),
             environment,
@@ -8687,6 +8731,7 @@ impl EffectContextOutcome {
             object_update: None,
             object_commands: Vec::new(),
             command_operations: Vec::new(),
+            command_events: Vec::new(),
             destroy_object: false,
             other_objects: Vec::new(),
             environment: None,
@@ -24024,6 +24069,9 @@ struct EffectHostContext {
     transfer_zone_commands: Vec<TransferZoneCommand>,
     pending_messages: Vec<MessageCommand>,
     pending_menu_requests: Vec<crate::MenuRequest>,
+    /// Non-menu events emitted by FnExecuteCommand, kept in call order for
+    /// the synchronous callback-outcome fold.
+    pending_command_events: Vec<CommandEvent>,
     pending_landscape_ops: Vec<LandscapeOperation>,
     /// Live C4TextureMap preview for synchronous GetIndexMatTex return
     /// values. DrawMaterialQuad/DrawMap operations still fold into the real
@@ -24204,6 +24252,7 @@ impl EffectHostContext {
             transfer_zone_commands: Vec::new(),
             pending_messages: Vec::new(),
             pending_menu_requests: Vec::new(),
+            pending_command_events: Vec::new(),
             pending_landscape_ops: Vec::new(),
             runtime_texmap,
             sky_adjustment,
@@ -24475,6 +24524,13 @@ impl EffectHostContext {
                         .or_else(|| metadata.map(|metadata| metadata.physical))
                         .unwrap_or_default(),
                     owner,
+                    controller: scope
+                        .map(ObjectScopeContext::controller)
+                        .unwrap_or_else(|| object.controller()),
+                    base: object
+                        .full_state()
+                        .map(|state| state.base)
+                        .unwrap_or(OWNER_NONE),
                     crew_member: scope
                         .map(|scope| scope.crew_member)
                         .or_else(|| object.full_state().map(|state| state.crew_member))
@@ -24600,9 +24656,11 @@ impl EffectHostContext {
             }
         }
         if !deferred_events.is_empty() {
-            self.object_scope_mut(target)?
-                .queued_commands
-                .push(QueuedCommand::immediate(ObjectUpdate::default()).with_events(deferred_events));
+            self.object_scope_mut(target)?.queued_commands.push(
+                QueuedCommand::immediate(ObjectUpdate::default())
+                    .with_events(deferred_events.clone()),
+            );
+            self.pending_command_events.extend(deferred_events);
         }
         Some(finished)
     }
@@ -25445,6 +25503,7 @@ impl EffectHostContext {
             self.next_object_id,
         );
         outcome.menu_requests = self.pending_menu_requests;
+        outcome.command_events = self.pending_command_events;
         outcome.particles = self.pending_particles;
         outcome.next_mission_commands = self.next_mission_commands;
         outcome.other_objects = other_objects;
@@ -27042,6 +27101,7 @@ mod tests {
         "SetYDir",
         "ShakeFree",
         "ShiftContents",
+        "ShowInfo",
         "Sin",
         "Smoke",
         "SortScoreboard",
@@ -29635,6 +29695,7 @@ func Trigger(object pOther)
             last_com_down_double: 9,
             pressed_coms: 11,
             control_style: true,
+            auto_context_menu: false,
             cursor_flash: 13,
             select_flash: 15,
             cursor_selection: 17,
@@ -33487,6 +33548,35 @@ func ProbeBadIndex(id) {
                 assert_eq!(request.id, CommandId::MoveTo);
                 assert_eq!(request.tx, Some(3));
                 assert_eq!(request.ty, Some(4));
+            }
+            other => panic!("expected PushBack operation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_command_converts_c4id_data_to_its_integer_payload() {
+        // FnAppendCommand uses C4Value::getIntOrID for non-Call command data,
+        // preserving the four-byte C4ID payload (C4Script.cpp:903-913).
+        let args = vec![
+            Value::String("Buy".into()),
+            Value::Nil,
+            Value::Int(1),
+            Value::Int(0),
+            Value::Nil,
+            Value::Int(0),
+            Value::C4Id("LORY".into()),
+        ];
+        let (result, outcome) = with_object_host_context(|| append_command(&args));
+
+        assert_eq!(result.expect("AppendCommand succeeds"), Value::Bool(true));
+        match &outcome.command_operations[0] {
+            CommandOperation::PushBack(request) => {
+                assert_eq!(
+                    request.data,
+                    CommandData::Integer(
+                        definition_id_to_c4id("LORY").expect("four-byte definition id")
+                    )
+                );
             }
             other => panic!("expected PushBack operation, got {:?}", other),
         }

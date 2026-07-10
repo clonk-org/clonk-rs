@@ -97,6 +97,7 @@ pub enum ScenarioError {
 struct ScenarioDefinition {
     id: String,
     name: Option<String>,
+    description: Option<String>,
     script: String,
     actions: Option<DefinitionActions>,
     crew_member: bool,
@@ -197,6 +198,10 @@ pub struct Scenario {
     base_buy_enabled: bool,
     base_sell_enabled: bool,
     landscape_insert_thrust: bool,
+    /// `[Head] ForcedAutoContextMenu`: `None` keeps the player-file
+    /// preference; `Some` forces automatic context menus for all players
+    /// (C4Player::ApplyForcedControl, C4Player.cpp:2369-2375).
+    forced_auto_context_menu: Option<bool>,
     /// `[Head] ForcedAutoStopControl`: `None` keeps the player-file
     /// preference; `Some` forces classic/Jump'n'Run control for all players
     /// (C4Player::ApplyForcedControl, C4Player.cpp:2369-2389).
@@ -534,6 +539,8 @@ impl Scenario {
             base_buy_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_BUY) != 0,
             base_sell_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_SELL) != 0,
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
+            forced_auto_context_menu: (manifest.core.head.forced_auto_context_menu >= 0)
+                .then_some(manifest.core.head.forced_auto_context_menu != 0),
             forced_control_style: (manifest.core.head.forced_control_style >= 0)
                 .then_some(manifest.core.head.forced_control_style != 0),
             definition_load_steps,
@@ -602,6 +609,12 @@ impl Scenario {
         self.forced_control_style
     }
 
+    /// The scenario-wide `ForcedAutoContextMenu` override, or `None` when
+    /// joining players should retain their player-file preference.
+    pub fn forced_auto_context_menu(&self) -> Option<bool> {
+        self.forced_auto_context_menu
+    }
+
     pub fn physics(&self) -> Option<PhysicsSettings> {
         self.physics
     }
@@ -627,6 +640,7 @@ impl Scenario {
         // C4Player::InitControl applies the scenario head override to every
         // subsequent join (C4Player.cpp:1747,2369-2389).
         engine.set_forced_control_style(self.forced_control_style);
+        engine.set_forced_auto_context_menu(self.forced_auto_context_menu);
         // C4SPlrStart outlives scenario load: ScenarioInit reads it when a
         // player joins (C4Player.cpp:670-777).
         engine.set_player_starts(self.player_starts.clone());
@@ -724,6 +738,7 @@ impl Scenario {
             // Real content gets the C++ callback arguments (no parameters;
             // AbortCall gets the last phase — C4Object.cpp:4154-4182).
             compiled.set_c4_callback_convention(true);
+            compiled.set_description(definition.description.clone());
             // Legacy defs carry the FULL DefCore: apply it wholesale
             // (physicals, Float, Timer/TimerCall, Grab, fire properties,
             // ... — the hand-picked setters below only cover the DSL
@@ -1081,6 +1096,7 @@ impl Scenario {
                 ScenarioDefinition {
                     id: id.clone(),
                     name: name_override.clone(),
+                    description: None,
                     script: script_source,
                     actions: None,
                     crew_member,
@@ -1300,6 +1316,7 @@ impl Scenario {
             base_buy_enabled: false,
             base_sell_enabled: false,
             landscape_insert_thrust: false,
+            forced_auto_context_menu: None,
             forced_control_style: None,
             definition_load_steps,
             scenario_system_scripts: Vec::new(),
@@ -5317,6 +5334,7 @@ fn scenario_definition_from_resource(
     resource: ResourceDefinitionData,
     source_group: Option<Group>,
 ) -> ScenarioDefinition {
+    let description = resource.description().map(str::to_owned);
     let ResourceDefinitionData {
         core,
         script,
@@ -5337,6 +5355,7 @@ fn scenario_definition_from_resource(
     ScenarioDefinition {
         id: core.id,
         name: core.name,
+        description,
         script: script.combined().to_string(),
         actions,
         crew_member: core.crew_member,
@@ -7285,6 +7304,7 @@ global func Step(state, frame, random)
             definitions: vec![ScenarioDefinition {
                 id: "Mover".into(),
                 name: Some("Mover".into()),
+                description: None,
                 script: TEST_SCRIPT.to_string(),
                 actions: None,
                 crew_member: false,
@@ -7332,6 +7352,7 @@ global func Step(state, frame, random)
             base_buy_enabled: true,
             base_sell_enabled: true,
             landscape_insert_thrust: false,
+            forced_auto_context_menu: None,
             forced_control_style: None,
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
             scenario_system_scripts: Vec::new(),
@@ -7386,6 +7407,7 @@ global func Step(state, frame, random)
             definitions: vec![ScenarioDefinition {
                 id: "Mover".into(),
                 name: Some("Mover".into()),
+                description: None,
                 script: TEST_SCRIPT.to_string(),
                 actions: None,
                 crew_member: false,
@@ -7433,6 +7455,7 @@ global func Step(state, frame, random)
             base_buy_enabled: true,
             base_sell_enabled: true,
             landscape_insert_thrust: false,
+            forced_auto_context_menu: None,
             forced_control_style: None,
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
             scenario_system_scripts: Vec::new(),
@@ -7753,6 +7776,7 @@ global func Step(state, frame, random)
                 crew: Vec::new(),
                 startup_player_count: 1,
                 control_style: false,
+                auto_context_menu: false,
             })
             .expect("join succeeds");
         engine
@@ -7809,6 +7833,7 @@ global func Step(state, frame, random)
                 }],
                 startup_player_count: 1,
                 control_style: false,
+                auto_context_menu: false,
             })
             .expect("join succeeds");
 
@@ -7917,6 +7942,7 @@ global func Step(state, frame, random)
                 crew: Vec::new(),
                 startup_player_count: 1,
                 control_style: false,
+                auto_context_menu: false,
             })
             .expect("join succeeds");
         assert_eq!(joined.number, 0);
@@ -9142,6 +9168,7 @@ public func ActualizePhase(pClonk)
                 crew: Vec::new(),
                 startup_player_count: 1,
                 control_style: false,
+                auto_context_menu: false,
             })
             .expect("join succeeds");
         assert_eq!(
@@ -9416,6 +9443,7 @@ public func ActualizePhase(pClonk)
                 crew: Vec::new(),
                 startup_player_count: 1,
                 control_style: false,
+                auto_context_menu: false,
             })
             .expect("join succeeds");
         assert_eq!(engine.rng, replay, "draw ledger matches");
@@ -9613,6 +9641,7 @@ public func ActualizePhase(pClonk)
                 crew: Vec::new(),
                 startup_player_count: 1,
                 control_style: false,
+                auto_context_menu: false,
             })
             .expect("join succeeds");
         let snapshot = engine.snapshot();
@@ -9872,6 +9901,7 @@ public func ActualizePhase(pClonk)
                 crew: Vec::new(),
                 startup_player_count: 1,
                 control_style: false,
+                auto_context_menu: false,
             })
             .expect("the join itself succeeds");
         let lingering = engine
@@ -10295,7 +10325,7 @@ public func ActualizePhase(pClonk)
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=Legacy Test\nForcedAutoStopControl=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Foo=2\nPosition=120,160\n",
+            "[Head]\nTitle=Legacy Test\nForcedAutoStopControl=1\nForcedAutoContextMenu=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Foo=2\nPosition=120,160\n",
         )
         .expect("write legacy scenario core");
         std::fs::write(
@@ -10319,6 +10349,9 @@ public func ActualizePhase(pClonk)
         // C4SHead::ForcedControlStyle is retained past scenario parsing for
         // C4Player::ApplyForcedControl at join (C4Player.cpp:2369-2389).
         assert_eq!(scenario.forced_control_style(), Some(true));
+        // ForcedAutoContextMenu uses the same scenario-over-preference
+        // precedence (C4Player.cpp:2369-2375).
+        assert_eq!(scenario.forced_auto_context_menu(), Some(true));
 
         let mut engine = Engine::with_seed(0);
         let created = scenario
@@ -10333,6 +10366,14 @@ public func ActualizePhase(pClonk)
         assert!(
             engine.player(0).expect("joined player").control_style(),
             "ForcedAutoStopControl=1 overrides the player's classic preference"
+        );
+        assert!(
+            engine
+                .player(0)
+                .expect("joined player")
+                .control
+                .auto_context_menu,
+            "ForcedAutoContextMenu=1 overrides the player's classic preference"
         );
         for id in &joined {
             let object = engine.object_snapshot(*id).expect("spawned object present");
@@ -12759,6 +12800,7 @@ mod game_start_sync {
                 crew: Vec::new(),
                 startup_player_count: 1,
                 control_style: false,
+                auto_context_menu: false,
             })
             .expect("join succeeds");
 
