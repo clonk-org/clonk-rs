@@ -137,8 +137,28 @@ and a recorded new first mismatch.
   of the C4Fixed sum with truncating fixed squares, Mass reads the live
   UpdateMass value; Sort_Value still reads the definition value where C++
   calls C4Object::GetValue — see the definitions bullet's CalcDefValue gap).
-  Still open: permanent object info training; DFA_CONNECT line walking;
-  sector-bounds FindMany traversal order.
+  Sector-bounds Find traversal order is CLOSED 2026-07-09: the criteria
+  drivers (FindObject2/FindObjects/ObjectCount2) port the exact
+  C4FindObject bounded-vs-full decision — GetBounds/UseShapes incl. the
+  And/Or constructor bounds combination with exact C4Rect Intersect/Add
+  (C4FindObject.cpp:411-434,477-496) and the construction-time pruning
+  (And drops ensured children, Or drops impossible ones,
+  C4FindObject.cpp:400-410,466-476) — and the exact enumeration order:
+  bounded FindMany walks the C4LArea sector lists (shape lists with
+  Marker-style first-encounter dedup when UseShapes,
+  C4FindObject.cpp:310-355), bounded Find-with-sort nests per sector
+  list (inner Find(*pLst) best, then list winners vs the running best;
+  NO marker, so shapes spanning sectors compare in every holding list —
+  Sort_Random draw pairing pinned, C4FindObject.cpp:272-308); the
+  legacy fixed-parameter FindObject scans the MASTER list for every
+  query form (C4Game.cpp:1334-1424, sectors never consulted).
+  Residuals: FindObject2 without a sort collects all matches then takes
+  the first (C++ Find early-exits — Func-condition side-effect/draw
+  counts diverge past the first match); mid-call created objects trail
+  the sector walk as one extra list filtered by the query rect (C++
+  registers them in sectors immediately); worlds without a landscape
+  (fixture contexts) fall back to the master walk.
+  Still open: permanent object info training; DFA_CONNECT line walking.
   The engine explosion fallback trio FnExplode/Explosion/Game::BlastObjects +
   FnShakeObjects stays unported (System.c4g overrides make it unreachable for
   shipped content); the host-path incinerate does not add the "Fire" C4Effect
