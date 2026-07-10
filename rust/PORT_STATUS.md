@@ -81,18 +81,39 @@ shadow, recording the new first mismatch.
   the Rust throttle (invented tolerance 5 + dwell); FlightControl's Disabled
   gate and Def->Pathfinder alternative; Acquire defaults apply at Set rather
   than first Execute; Put's live Ty reminder rewrite.
-- **Controls:** contents-wheel shifting; `NoCollectDelay`; base buy/sell menus
-  and immediate contained throw; DefCore version gates; VehicleControl
-  overload; exact crew cycling; linekit DigDouble construction.
+- **Controls:** main gaps CLOSED 2026-07-09 — NoCollectDelay end-to-end
+  (ObjectComDrop arms 2 + SetCommand entry decrement travels as a
+  CommandOperation, C4ObjectCom.cpp:668-671 / C4Object.cpp:3941-3942);
+  wheel-com ShiftContents + COM_Contents target shift with the
+  ControlContents/Selection callbacks (C4Object.cpp:3364-3396, 5751-5797);
+  C4Object::Base modeled via ExecBase flag assignment / lost-flag clear
+  (C4Object.cpp:1000-1031) and the ContainedControl COM_Up/COM_Dig arms
+  emit MenuRequestKind::Buy/Sell after the ValidPlr/hostility/BASEFUNC
+  checks (C4Object.cpp:3269-3280); DefCore VehicleControl parses and both
+  SetCommand ControlCommand overloads run on the control Set path
+  (C4Object.cpp:3944-3969); the exact C4Player cursor selection model
+  (CursorLeft/Right/Toggle, SelectAllCrew, UpdateSelectionToggleStatus,
+  AdjustCursorCommand w/ rank-less hirank, CrewSelection callbacks,
+  C4Player.cpp:1235-1365 + C4Object.cpp:5815-5832) replaced the frontend
+  approximation. Residuals: contained COM_Throw still executes on the next
+  command tick — the immediate ExecuteCommand (C4Object.cpp:3267) needs the
+  tick's command-step block extracted into a one-shot; FnSetCommand skips
+  the vehicle overloads (C++ runs them for EVERY SetCommand, fControl or
+  not); linekit DigDouble line construction (C4ObjectCom.cpp:379-529) is
+  blocked on the DFA_CONNECT line model; ExecBase leaves
+  BASEFUNC_AutoSellContents and the Tick35 structure snow-dig unported;
+  the C4MN_Buy/C4MN_Sell refill menu UI is unbuilt app-side (requests are
+  emitted, arms are no-ops); DefCore version gates (fCallSfEarly,
+  grab-control 4,9,5,0) still treat every def as modern; crew Info->Rank is
+  unmodeled so hirank = first eligible roster entry.
 - **Objects / find / OCF:** the SetOCF computation gap is CLOSED 2026-07-09 —
   all 30 C4Object::SetOCF bits compute per C4Object.cpp:526-666 (with new
   DefCore Entrance/RotatedEntrance/Exclusive/Prey/Edible/Chop/
   AttractLightning/NoFight ingest, ActMap ObjectDisabled, GetOCFForPos area
   checks in at_object, and cached-OCF reads for script GetOCF/snapshots);
   residuals: SetOCF's InMat update (InMat/ClosedContainer unmodeled),
-  NoCollectDelay is never armed (ObjectComDrop=2 and the SetCommand decrement
-  live with the command layer), mid-call creation previews stay preview-grade,
-  C4Object::At lacks addtop. Still open: permanent object info training;
+  mid-call creation previews stay preview-grade, C4Object::At lacks addtop
+  (NoCollectDelay arming/decrement landed 2026-07-09 with the Controls work). Still open: permanent object info training;
   DFA_CONNECT line walking; sector traversal and i32 sort-key wrap.
   The engine explosion fallback trio FnExplode/Explosion/Game::BlastObjects +
   FnShakeObjects stays unported (System.c4g overrides make it unreachable for
