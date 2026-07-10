@@ -19437,6 +19437,13 @@ impl Engine {
                     let Some(function_name) = contact_callback_name(cnat) else {
                         continue;
                     };
+                    // C4Object::Call with no matching Contact* function is
+                    // a no-op. In particular it must not run the outcome
+                    // fold and its SetOCF emulation: C++ keeps Execute's
+                    // pre-movement OCF cached for the later Splash gate.
+                    if !definition.has_function(function_name) {
+                        continue;
+                    }
                     if coach_debug_id() == Some(object.id.as_u64()) {
                         crate::rng::rng_trace_line(&format!(
                             "CONTACTCB {function_name} at ({},{})",
@@ -52052,6 +52059,139 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
         assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn missing_contact_callback_preserves_liquid_entry_splash_like_cpp() {
+        // C4Object::Execute computes OCF once before command/action/movement
+        // (src/C4Object.cpp:1058-1066). ContactCheck may Call a missing
+        // Contact* function during movement (src/C4Movement.cpp:112-119,
+        // :166-182), but that empty call does not invoke SetOCF. The later
+        // liquid-entry Splash therefore still reads the pre-collision
+        // OCF_HitSpeed2 bit (src/C4Movement.cpp:449-456). Goldrush's WIPF
+        // #564 freezes this sequence at frame 403.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Instable=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+
+        let mut mover_definition =
+            Definition::from_script("Mover", "Mover", "").expect("script compiles");
+        mover_definition.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 5).with_cnat(CNAT_BOTTOM)]);
+        mover_definition.set_contact_density(50);
+        mover_definition.set_contact_function_calls(true);
+        mover_definition.set_float_line(1);
+        mover_definition.set_mass(20);
+
+        let mut engine = Engine::with_seed(67);
+        engine.set_materials(materials);
+        let mut bytes = vec![0u8; 40 * 40];
+        for y in 20..26 {
+            for x in 0..40 {
+                bytes[y * 40 + x] = 20;
+            }
+        }
+        for x in 0..40 {
+            bytes[26 * 40 + x] = 30;
+        }
+        let mut densities = vec![0; 128];
+        densities[20] = 25;
+        densities[30] = 100;
+        let mut names = vec![None; 128];
+        names[20] = Some("Water".into());
+        names[30] = Some("Earth".into());
+        let grid = landscape::PixelGrid::new(
+            40,
+            40,
+            bytes,
+            densities,
+            names,
+            vec![None; 128],
+        );
+        let mut landscape = Landscape::new(40, vec![0; 40]).expect("landscape builds");
+        landscape.set_world_height(40);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(simple_definition("FXU1"))
+            .expect("bubble definition registers");
+        engine
+            .register_definition(mover_definition)
+            .expect("mover definition registers");
+        assert!(
+            !engine
+                .definitions
+                .get("Mover")
+                .expect("mover definition exists")
+                .has_function("ContactBottom"),
+            "the regression requires a genuinely missing callback"
+        );
+
+        let mover_id = engine
+            .spawn_object(
+                SpawnConfig::new("Mover")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(20, 18))
+                    .with_fixed_position(FixedVec2::from_ints(20, 18))
+                    .with_loaded(true),
+            )
+            .expect("mover spawns");
+        let idx = engine.find_object_index(mover_id).expect("mover exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(3)));
+        engine.objects[idx].state.mobile = true;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(
+            engine.objects[idx].state.ocf & crate::ocf::HIT_SPEED2,
+            0,
+            "the pre-movement OCF carries HitSpeed2"
+        );
+        let definition_id = engine.objects[idx].definition_id.clone();
+        let actions = engine
+            .definitions
+            .get(&definition_id)
+            .expect("mover definition exists")
+            .action_library()
+            .clone();
+        let rng_before = engine.rng.count;
+
+        assert!(
+            engine
+                .exec_object_movement(idx, &actions, &definition_id, &[])
+                .expect("movement succeeds")
+        );
+
+        let idx = engine.find_object_index(mover_id).expect("mover survives");
+        assert_eq!(engine.objects[idx].state.position, Vector2::new(20, 20));
+        assert_eq!(
+            movement_hit_speed_flags(engine.objects[idx].fixed_velocity)
+                & crate::ocf::HIT_SPEED2,
+            0,
+            "the collision must first reduce the live velocity below HitSpeed2"
+        );
+        assert!(engine.objects[idx].state.in_liquid);
+        assert!(
+            engine.rng.count - rng_before >= 20,
+            "Splash amount 10 must consume at least its 10 pairs of BubbleOut draws"
+        );
+        assert!(
+            engine
+                .objects
+                .iter()
+                .any(|object| object.definition_id == "FXU1"),
+            "the cached HitSpeed2 gate must create submerged FXU1 bubbles"
+        );
     }
 
     #[test]

@@ -5,9 +5,8 @@
 
 ## Current state
 
-- Before this merge, pinned Goldrush (`LC_PIN_SEED=424242`) matched through frame
-  402; frame 403 lacked seven C++ `FXU1` bubbles. The merged fire/bubble work may
-  move that wall, so the combined live run must remeasure it.
+- Pinned Goldrush (`LC_PIN_SEED=424242`) matches through frame 409; frame 410
+  first differs at object 582's integer/subpixel position.
 - Foundational motion and RNG gaps are closed: object motion uses signed 16.16
   `C4Fixed`; `Random()` uses the shared C++ LCG/draw ledger.
 - Scenarios load/apply 93/93; audit is 92/93. CTF_DeepSea's animal result is
@@ -20,7 +19,7 @@
 Every finished slice:
 
 ```sh
-cargo test --workspace
+cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask engine-snapshots verify
 cargo xtask parity verify
@@ -63,15 +62,16 @@ and a recorded new first mismatch.
   elimination presentation/script-player flag; control sync and protocol/auth/
   league completeness.
 - **Definitions/values:** `Oversize`, numeric ActMap, GetComponents/CalcDefValue,
-  remaining DefCore fields; Goldrush's three missing startup creations/C++ +3 ID
-  skew; C4Value interning/serialization and strict host conversion.
+  remaining DefCore fields; C4Value interning/serialization and strict host
+  conversion.
 - **Script host:** partial-error recovery for effects and remaining definition/menu
   seams; foreign fixed-dir precision; FnExit cancel-attach/bounds and
   Ejection/Departure.
 - **Weather/config/resources:** remaining sky presentation/LaunchCloud; control
   preferences; names/promotions/locales; group write/gzip/CRC/directory order.
-- **Hosts/menus:** exact `CanConcatPictureWith` and object-info payloads; app menu
-  routing, engine-menu visibility, AutoContextMenu/CloseCommand, and layout.
+- **Hosts/menus:** exact `CanConcatPictureWith` and object-info payloads; route
+  visible engine-created menus (Dragon Rock blocks controls on its mandatory
+  hidden choices), AutoContextMenu/CloseCommand, and layout.
 
 ## Accepted/comparator-only divergences
 
