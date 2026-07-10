@@ -621,6 +621,9 @@ impl Scenario {
     ) -> Result<Vec<ObjectId>, ScenarioError> {
         engine.clear_scenario_script();
         engine.configure_objectives(self.objectives.clone());
+        // C4Player::InitControl applies the scenario head override to every
+        // subsequent join (C4Player.cpp:1747,2369-2389).
+        engine.set_forced_control_style(self.forced_control_style);
         // C4SPlrStart outlives scenario load: ScenarioInit reads it when a
         // player joins (C4Player.cpp:670-777).
         engine.set_player_starts(self.player_starts.clone());
@@ -10317,6 +10320,10 @@ public func ActualizePhase(pClonk)
         // exact placement positions are pinned by the draw-ledger test.
         let joined = join_test_player(&mut engine);
         assert_eq!(joined.len(), 2, "two ready-crew members at join");
+        assert!(
+            engine.player(0).expect("joined player").control_style(),
+            "ForcedAutoStopControl=1 overrides the player's classic preference"
+        );
         for id in &joined {
             let object = engine.object_snapshot(*id).expect("spawned object present");
             assert_eq!(object.definition_id, "FOOO");

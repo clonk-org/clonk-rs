@@ -6489,6 +6489,25 @@ impl GameApp {
                 return Ok(());
             }
         }
+        // C4Game::LocalControlKeyUp only creates a synchronized control for
+        // AutoStopControl players. Classic control keeps the press active
+        // until another direction arrives (C4Game.cpp:3578-3592).
+        let is_release = matches!(
+            event,
+            ControlEvent::Release(_)
+                | ControlEvent::Command {
+                    kind: CommandKind::Release,
+                    ..
+                }
+        );
+        if is_release
+            && self
+                .engine
+                .player(self.local_owner)
+                .is_some_and(|player| !player.control_style())
+        {
+            return Ok(());
+        }
         if let Some(network) = self.network.as_ref() {
             let frame = self.engine.frame();
             let tick = u32::try_from(frame).unwrap_or(u32::MAX);
@@ -13483,8 +13502,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn selected_player_autostop_stops_horizontal_keys_on_release() {
+    fn assert_selected_player_horizontal_release(auto_stop: bool) {
         // C4Game takes Config.General.Participants as PlayerFilenames
         // (C4Game.cpp:362-366), and C4Player::InitControl copies the player
         // file's AutoStopControl preference (C4Player.cpp:2371-2380).
@@ -13495,7 +13513,10 @@ mod tests {
         fs::create_dir_all(&player_dir).expect("create player file group");
         fs::write(
             player_dir.join("Player.txt"),
-            "[Player]\nName=Tyler\n\n[Preferences]\nAutoStopControl=1\n",
+            format!(
+                "[Player]\nName=Tyler\n\n[Preferences]\nAutoStopControl={}\n",
+                i32::from(auto_stop)
+            ),
         )
         .expect("write player core");
         let user_dir = install.path().join("user-data");
@@ -13546,7 +13567,7 @@ mod tests {
 
         app.join_local_player().expect("join selected player");
 
-        assert!(
+        assert_eq!(
             app.engine
                 .snapshot()
                 .players
@@ -13555,7 +13576,8 @@ mod tests {
                 .expect("joined player")
                 .control
                 .control_style,
-            "AutoStopControl=1 must enable Jump'n'Run release semantics"
+            auto_stop,
+            "the selected player's AutoStopControl preference must reach C4Player"
         );
 
         let cursor = app
@@ -13586,10 +13608,41 @@ mod tests {
                     .object_snapshot(cursor)
                     .expect("cursor after release")
                     .command_direction,
-                CommandDirection::Stop,
-                "AutoStopControl release must stop horizontal movement"
+                if auto_stop {
+                    CommandDirection::Stop
+                } else {
+                    held_direction
+                },
+                "C4Game::LocalControlKeyUp only synchronizes releases in AutoStopControl mode"
+            );
+            assert_eq!(
+                app.engine
+                    .snapshot()
+                    .players
+                    .iter()
+                    .find(|player| player.id == app.local_owner)
+                    .expect("joined player after release")
+                    .control
+                    .pressed_coms
+                    == 0,
+                auto_stop,
+                "classic key-up is not synchronized, so C4Player::PressedComs remains held"
             );
         }
+    }
+
+    #[test]
+    fn selected_player_autostop_stops_horizontal_keys_on_release() {
+        // LocalControlKeyUp forwards key-up in AutoStopControl mode
+        // (C4Game.cpp:3578-3592).
+        assert_selected_player_horizontal_release(true);
+    }
+
+    #[test]
+    fn selected_player_classic_control_ignores_horizontal_key_release() {
+        // Classic control has no synchronized key-up command: movement keeps
+        // its direction until the next press (C4Game.cpp:3578-3592).
+        assert_selected_player_horizontal_release(false);
     }
 
     #[test]

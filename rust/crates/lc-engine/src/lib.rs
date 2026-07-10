@@ -11661,6 +11661,13 @@ impl Engine {
         self.landscape_insert_thrust = enabled;
     }
 
+    /// Installs `[Head] ForcedAutoStopControl` before players join. The
+    /// effective per-player value is selected in `join_player`, matching
+    /// C4Player::ApplyForcedControl (C4Player.cpp:2369-2389).
+    pub(crate) fn set_forced_control_style(&mut self, control_style: Option<bool>) {
+        self.forced_control_style = control_style;
+    }
+
     /// Installs the scenario's C4SPlrStart slots (set by `Scenario::apply`;
     /// C4Player::ScenarioInit reads them at join, C4Player.cpp:670-777).
     pub fn set_player_starts(&mut self, starts: Vec<scenario::PlayerStart>) {
@@ -11721,10 +11728,10 @@ impl Engine {
         }
         let mut player = player_config.with_color(Some(color)).build();
         // C4Player::InitControl (C4Player.cpp:1747, 2371-2380): flash both
-        // markers at the join and take the AutoStopControl preference.
+        // markers and let ForcedControlStyle override the player preference.
         player.control.select_flash = 30;
         player.control.cursor_flash = 30;
-        player.control.control_style = config.control_style;
+        player.control.control_style = self.forced_control_style.unwrap_or(config.control_style);
         self.players.insert(number, player);
         self.players_registered = true;
         self.crew_rosters.insert(number, config.crew.clone());
@@ -43569,6 +43576,36 @@ protected func Activity() { SetActionTargets(); return(1); }
         restored.restore_state(&decoded).expect("state restores");
 
         assert_eq!(restored.capture_state().forced_control_style, Some(true));
+    }
+
+    #[test]
+    fn forced_control_style_overrides_player_preference_both_ways() {
+        // C4Player::ApplyForcedControl chooses C4S.Head.ForcedControlStyle
+        // whenever it is non-negative, regardless of PrefControlStyle
+        // (C4Player.cpp:2369-2374).
+        for (forced, preference) in [(true, false), (false, true)] {
+            let mut engine = Engine::new();
+            engine.set_forced_control_style(Some(forced));
+            let joined = engine
+                .join_player(JoinPlayerConfig {
+                    name: "Tester".into(),
+                    team: None,
+                    color_dw: 0xff0000,
+                    pref_color: 0,
+                    pref_position: 0,
+                    crew: Vec::new(),
+                    control_style: preference,
+                    startup_player_count: 1,
+                })
+                .expect("player joins");
+            assert_eq!(
+                engine
+                    .player(joined.number)
+                    .expect("joined player")
+                    .control_style(),
+                forced
+            );
+        }
     }
 
     #[test]
