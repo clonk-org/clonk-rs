@@ -41,8 +41,9 @@ rebuilt pinned live comparison.
 
 Comma expressions are accepted out of context; `mrfScript` uses scenario scope.
 Presentation RNG is ignored unless `LC_RUST_ENGINE_COMPARE_PARTICLES=1`.
-Message/render fields compare only when both bridges expose them. Same-seed
-landscape is 99.66% byte-equal; C++ bakes MCVehic masks while Rust overlays them.
+Message/render fields compare only when both bridges expose them; the bridge
+does not export client-local player flags. Same-seed landscape is 99.66%
+byte-equal; C++ bakes MCVehic masks while Rust overlays them.
 
 ## Preserve
 
