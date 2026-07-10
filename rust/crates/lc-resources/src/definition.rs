@@ -28,6 +28,14 @@ pub struct Definition {
     /// src/C4ObjectInfo.cpp:398-425); the Rust HUD deterministically shows
     /// the first.
     pub portrait_image: Option<GraphicsImage>,
+    /// ColorByOwner-aware form of `portrait_image`. Kept separately so
+    /// existing portrait consumers can migrate without changing while the
+    /// C++ text-image path gains its required owner-color surface.
+    pub portrait_graphics_image: Option<GraphicsImage>,
+    /// ColorByOwner mask paired with `portrait_graphics_image`. C++ maps
+    /// Portrait1.png to Overlay1.png while loading definition graphics
+    /// (C4DefGraphics.cpp:166-205).
+    pub portrait_color_by_owner_mask: Option<ColorByOwnerMask>,
     /// The def's own rank symbol strip (`C4Def::pRankSymbols` from
     /// Rank.png, src/C4Def.cpp:684-691).
     pub rank_symbols_image: Option<GraphicsImage>,
@@ -75,6 +83,10 @@ impl Definition {
             color_by_owner_mask.as_ref(),
         );
         let portrait_image = load_plain_image(group, "Portrait1.png");
+        let (portrait_graphics_image, portrait_color_by_owner_mask) =
+            load_graphics_entry(group, Path::new("Portrait1.png"), core.color_by_owner)
+                .map(|(image, mask)| (Some(image), mask))
+                .unwrap_or((None, None));
         let rank_symbols_image = load_plain_image(group, "Rank.png");
 
         Ok(Self {
@@ -87,6 +99,8 @@ impl Definition {
             color_by_owner_mask,
             additional_graphics,
             portrait_image,
+            portrait_graphics_image,
+            portrait_color_by_owner_mask,
             rank_symbols_image,
         })
     }
@@ -1594,12 +1608,13 @@ fn load_color_by_owner_overlay(group: &Group, graphics_path: &Path) -> Option<im
 
     if let Some(parent) = graphics_path.parent() {
         if let Some(name) = graphics_path.file_name().and_then(|n| n.to_str()) {
-            if let Some(stripped) = name.strip_prefix("Graphics") {
-                if !stripped.is_empty() {
-                    let mut candidate = parent.to_path_buf();
-                    candidate.push(format!("Overlay{}", stripped));
-                    candidates.push(candidate);
-                }
+            let suffix = name
+                .strip_prefix("Graphics")
+                .or_else(|| name.strip_prefix("Portrait"));
+            if let Some(stripped) = suffix.filter(|stripped| !stripped.is_empty()) {
+                let mut candidate = parent.to_path_buf();
+                candidate.push(format!("Overlay{}", stripped));
+                candidates.push(candidate);
             }
         }
         let mut overlay_name = parent.to_path_buf();
@@ -2134,6 +2149,42 @@ mod tests {
         let mask = definition
             .picture_color_by_owner_mask
             .expect("picture must retain owner-color mask");
+        assert_eq!((mask.width, mask.height), (1, 1));
+        assert_eq!(mask.pixels, vec![136]);
+    }
+
+    #[test]
+    fn definition_portrait_carries_its_color_by_owner_mask() {
+        // C4DefGraphics::LoadAllGraphics maps Portrait1.png to Overlay1.png
+        // and loads both with ColorByOwner enabled (C4DefGraphics.cpp:166-205,
+        // C4Def.cpp:1250-1264). DrawTextSpecImage later applies the requested
+        // portrait color through GetBitmap(dwClr) (C4Game.cpp:4310-4324).
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Sorcerer.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=SCLK\nColorByOwner=1\n",
+        )
+        .expect("DefCore");
+
+        let base = image::RgbaImage::from_pixel(1, 1, image::Rgba([80, 50, 20, 0]));
+        base.save(def_dir.join("Portrait1.png"))
+            .expect("portrait png");
+        let overlay = image::RgbaImage::from_pixel(1, 1, image::Rgba([136, 136, 136, 255]));
+        overlay
+            .save(def_dir.join("Overlay1.png"))
+            .expect("portrait overlay png");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let definition = Definition::load(&group).expect("load definition");
+        let portrait = definition
+            .portrait_graphics_image
+            .expect("color-aware portrait image");
+        assert_eq!(portrait.pixels(), &[0, 0, 0, 255]);
+        let mask = definition
+            .portrait_color_by_owner_mask
+            .expect("portrait must retain owner-color mask");
         assert_eq!((mask.width, mask.height), (1, 1));
         assert_eq!(mask.pixels, vec![136]);
     }

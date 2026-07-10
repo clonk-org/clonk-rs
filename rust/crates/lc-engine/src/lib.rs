@@ -5965,6 +5965,9 @@ pub struct Definition {
     /// First def portrait (C4CFN_Portraits, src/C4Components.h:88) — HUD
     /// cursor info only (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-320).
     portrait_image: Option<DefinitionPictureImage>,
+    /// ColorByOwner-aware portrait surface retained for
+    /// C4Game::DrawTextSpecImage portrait specifications.
+    portrait_graphics_image: Option<DefinitionPictureImage>,
     /// Def rank symbols (C4Def::pRankSymbols from Rank.png,
     /// src/C4Def.cpp:684-691) — HUD cursor info only.
     rank_symbols_image: Option<DefinitionPictureImage>,
@@ -6166,6 +6169,7 @@ impl Definition {
             picture: None,
             picture_image: None,
             portrait_image: None,
+            portrait_graphics_image: None,
             rank_symbols_image: None,
             sprite_image: None,
             sprite_variants: HashMap::new(),
@@ -6308,6 +6312,12 @@ impl Definition {
         }
         if let Some(image) = resource.portrait_image.as_ref() {
             definition.set_portrait_image(Some(DefinitionPictureImage::from_resource(image, None)));
+        }
+        if let Some(image) = resource.portrait_graphics_image.as_ref() {
+            definition.set_portrait_graphics_image(Some(DefinitionPictureImage::from_resource(
+                image,
+                resource.portrait_color_by_owner_mask.as_ref(),
+            )));
         }
         if let Some(image) = resource.rank_symbols_image.as_ref() {
             definition
@@ -6796,6 +6806,14 @@ impl Definition {
 
     pub fn set_portrait_image(&mut self, image: Option<DefinitionPictureImage>) {
         self.portrait_image = image;
+    }
+
+    pub fn portrait_graphics_image(&self) -> Option<&DefinitionPictureImage> {
+        self.portrait_graphics_image.as_ref()
+    }
+
+    pub fn set_portrait_graphics_image(&mut self, image: Option<DefinitionPictureImage>) {
+        self.portrait_graphics_image = image;
     }
 
     /// Def rank symbols (C4Def::pRankSymbols, src/C4Def.cpp:684-691).
@@ -15360,6 +15378,15 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .and_then(|definition| definition.portrait_image().cloned())
+    }
+
+    pub fn definition_portrait_graphics_image(
+        &self,
+        definition_id: &str,
+    ) -> Option<DefinitionPictureImage> {
+        self.definitions
+            .get(definition_id)
+            .and_then(|definition| definition.portrait_graphics_image().cloned())
     }
 
     /// The def's own rank symbol strip (`pDef->pRankSymbols`,
@@ -55945,12 +55972,15 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         std::fs::create_dir(&def_dir).expect("create definition directory");
         std::fs::write(
             def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=CRWT\nName=CrewTest\nCategory=C4D_Object\n",
+            b"[DefCore]\nid=CRWT\nName=CrewTest\nCategory=C4D_Object\nColorByOwner=1\n",
         )
         .expect("write defcore");
-        image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 0]))
             .save(def_dir.join("Portrait1.png"))
             .expect("write portrait");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([136, 136, 136, 255]))
+            .save(def_dir.join("Overlay1.png"))
+            .expect("write portrait overlay");
         image::RgbaImage::from_pixel(4, 2, image::Rgba([40, 50, 60, 255]))
             .save(def_dir.join("Rank.png"))
             .expect("write rank symbols");
@@ -55962,10 +55992,23 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         let mut engine = Engine::new();
         engine.register_definition(definition)?;
 
-        let portrait = engine
+        let raw_portrait = engine
             .definition_portrait_image("CRWT")
-            .expect("portrait exposed");
+            .expect("HUD portrait exposed");
+        assert_eq!(
+            raw_portrait.pixels().as_ref(),
+            [10_u8, 20, 30, 0].repeat(4).as_slice(),
+            "structural color-mask retention does not alter existing HUD pixels"
+        );
+        let portrait = engine
+            .definition_portrait_graphics_image("CRWT")
+            .expect("color-aware portrait exposed");
         assert_eq!((portrait.width(), portrait.height()), (2, 2));
+        assert_eq!(
+            portrait.color_mask().as_deref(),
+            Some([136, 136, 136, 136].as_slice()),
+            "Portrait1's Overlay1 owner-color mask reaches presentation"
+        );
         let rank = engine
             .definition_rank_symbols_image("CRWT")
             .expect("rank symbols exposed");
