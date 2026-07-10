@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 use lc_engine::scenario::LegacyDefinitionResolver;
-use lc_engine::{Engine, JoinPlayerConfig, Scenario, ScenarioError};
+use lc_engine::{Engine, JoinPlayerConfig, Scenario, ScenarioError, COM_DOWN};
 use lc_resources::Group;
 
 struct ContentResolver {
@@ -139,4 +139,60 @@ fn tutorial02_ready_crew_exits_the_first_base() {
         None,
         "the queued Exit must move the CLNK out of HUT3"
     );
+}
+
+#[test]
+fn tutorial02_ready_objects_exit_then_the_clonk_grabs_the_real_balloon() {
+    // The first Tutorial02 lesson requires the normal classic-control route:
+    // a repeated Down becomes COM_Down_D and queues Grab
+    // (C4Player.cpp:1532-1533; C4ObjectCom.cpp:573-588), then the completed
+    // Grab switches the CLNK to Push (C4ObjectCom.cpp:247-259).
+    let (mut engine, player) = load_tutorial(2);
+    let clonk = engine
+        .crew_cursor(player)
+        .expect("Tutorial02 joins one selected CLNK");
+    let balloon = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .find(|object| object.definition_id == "BALN")
+        .expect("Tutorial02 places BALN")
+        .id;
+
+    for _ in 0..160 {
+        if engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.container.is_none() && object.action.name == "Walk")
+            && engine
+                .object_snapshot(balloon)
+                .is_some_and(|object| object.container.is_none())
+        {
+            break;
+        }
+        engine.tick().expect("ready object Exit frame");
+    }
+    let ready_clonk = engine.object_snapshot(clonk).expect("ready CLNK survives");
+    let ready_balloon = engine
+        .object_snapshot(balloon)
+        .expect("ready BALN survives");
+    assert_eq!(ready_clonk.container, None);
+    assert_eq!(ready_clonk.action.name, "Walk");
+    assert_eq!(ready_balloon.container, None);
+    engine
+        .player_in_com(player, COM_DOWN, 0)
+        .expect("first classic Down press");
+    engine
+        .player_in_com(player, COM_DOWN, 0)
+        .expect("second classic Down press");
+    for _ in 0..80 {
+        if engine.object_snapshot(clonk).is_some_and(|object| {
+            object.action.name == "Push" && object.action.target == Some(balloon)
+        }) {
+            break;
+        }
+        engine.tick().expect("Grab command frame");
+    }
+    let pushing = engine.object_snapshot(clonk).expect("CLNK survives Grab");
+    assert_eq!(pushing.action.name, "Push");
+    assert_eq!(pushing.action.target, Some(balloon));
 }
