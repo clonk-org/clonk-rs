@@ -239,6 +239,14 @@ pub(crate) enum PlayerCommand {
     SetShowControlPosition { player_id: i32, position: i32 },
     /// FnSetPlrShowControl's validated, StringBitEval-encoded ShowControl write.
     SetShowControl { player_id: i32, mask: i32 },
+    /// `FnSetHostility`'s validated `C4Player::Hostility` update. Callback
+    /// rejection and same-call visibility are resolved before this command is
+    /// emitted; the engine applies the surviving declaration afterward.
+    SetHostility {
+        player_id: i32,
+        opponent: i32,
+        hostile: bool,
+    },
     /// `FnSetPlrExtraData` (C4Script.cpp:4692-4732): a validated named
     /// slot write on C4Player::ExtraData.
     SetExtraData {

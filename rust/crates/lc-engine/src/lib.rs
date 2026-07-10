@@ -19580,6 +19580,15 @@ impl Engine {
                         player.show_control = mask;
                     }
                 }
+                PlayerCommand::SetHostility {
+                    player_id,
+                    opponent,
+                    hostile,
+                } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.set_hostile_towards(opponent, hostile);
+                    }
+                }
                 // FnSetPlrExtraData (C4Script.cpp:4712-4730): update in
                 // place, or append preserving the names-list order.
                 PlayerCommand::SetExtraData {
