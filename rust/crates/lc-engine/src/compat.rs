@@ -1902,6 +1902,207 @@ fn set_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// `C4GameScriptHost::GRBroadcast` for the hostility callbacks
+/// (C4ScriptHost.cpp:234-248): live goal/rule/environment objects in the
+/// forward master-list order, followed by the scenario script. Rejection
+/// broadcasts stop at the first truthy result.
+fn broadcast_hostility_callback(
+    function: &str,
+    args: &[Value],
+    reject_test: bool,
+) -> Result<Value, RuntimeError> {
+    const BROADCAST_MASK: i32 = (1 << 5) | (1 << 6) | (1 << 19);
+    let targets = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| {
+                context
+                    .master_object_ids()
+                    .into_iter()
+                    .filter(|id| {
+                        context
+                            .get_world_object(*id)
+                            .is_some_and(|object| {
+                                object.status().is_active()
+                                    && object.category() & BROADCAST_MASK != 0
+                            })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    for target in targets {
+        let active = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|context| context.object_status_active(target))
+        });
+        if !active {
+            continue;
+        }
+        if let Some(result) = call_world_object_script_function(target, function, args) {
+            let value = result?;
+            if reject_test && value_raw_truthy(&value) {
+                return Ok(value);
+            }
+        }
+    }
+
+    let script = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.world.scenario_script().cloned())
+    });
+    match script {
+        Some(script) => call_scoped_script_function(script, function, args).unwrap_or(Ok(Value::Nil)),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// FnHostile (C4Script.cpp:2511-2519): the ordinary form is symmetric — one
+/// player's declaration makes both directions hostile — while the third
+/// argument requests the directed declaration only.
+fn hostile(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "Hostile expects at most 3 arguments: player, opponent, one-way flag",
+        ));
+    }
+    let player = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "Hostile",
+        "player",
+    )?;
+    let opponent = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "Hostile",
+        "opponent",
+    )?;
+    let one_way = value_to_bool(
+        args.get(2).unwrap_or(&Value::Nil),
+        "Hostile",
+        "one-way flag",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Bool(false));
+        };
+        let (Some(player_state), Some(opponent_state)) = (
+            context.player_state(player),
+            context.player_state(opponent),
+        ) else {
+            return Ok(Value::Bool(false));
+        };
+        if player == opponent {
+            return Ok(Value::Bool(false));
+        }
+        let declared = player_state.hostility.contains(&opponent);
+        let hostile = declared
+            || (!one_way && opponent_state.hostility.contains(&player));
+        Ok(Value::Bool(hostile))
+    })
+}
+
+/// FnSetHostility (C4Script.cpp:2521-2537): reject callbacks run before
+/// validation of the opponent, the declaration becomes visible immediately,
+/// and OnHostilityChange runs afterward even when `no_calls` skipped rejection.
+fn set_hostility(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 5 {
+        return Err(RuntimeError::new(
+            "SetHostility expects at most 5 arguments: player, opponent, hostile, silent, no-calls",
+        ));
+    }
+    let player = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetHostility",
+        "player",
+    )?;
+    let opponent = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetHostility",
+        "opponent",
+    )?;
+    let new_hostility = value_to_bool(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetHostility",
+        "hostile",
+    )?;
+    let _silent = value_to_bool(
+        args.get(3).unwrap_or(&Value::Nil),
+        "SetHostility",
+        "silent",
+    )?;
+    let no_calls = value_to_bool(
+        args.get(4).unwrap_or(&Value::Nil),
+        "SetHostility",
+        "no-calls",
+    )?;
+
+    let player_exists = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|context| context.player_state(player).is_some())
+    });
+    if !player_exists {
+        return Ok(Value::Bool(false));
+    }
+
+    let reject_args = [
+        Value::Int(player),
+        Value::Int(opponent),
+        Value::Bool(new_hostility),
+    ];
+    if !no_calls
+        && value_raw_truthy(&broadcast_hostility_callback(
+            "RejectHostilityChange",
+            &reject_args,
+            true,
+        )?)
+    {
+        return Ok(Value::Bool(false));
+    }
+
+    let old_hostility = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return None;
+        };
+        if player == opponent || context.player_state(opponent).is_none() {
+            return None;
+        }
+        let state = context.player_state_mut(player)?;
+        let old = state.hostility.contains(&opponent);
+        if new_hostility {
+            if !old {
+                state.hostility.push(opponent);
+                state.hostility.sort_unstable();
+            }
+        } else {
+            state.hostility.retain(|entry| *entry != opponent);
+        }
+        context.record_player_command(PlayerCommand::SetHostility {
+            player_id: player,
+            opponent,
+            hostile: new_hostility,
+        });
+        Some(old)
+    });
+    let Some(old_hostility) = old_hostility else {
+        return Ok(Value::Bool(false));
+    };
+
+    let changed_args = [
+        Value::Int(player),
+        Value::Int(opponent),
+        Value::Bool(new_hostility),
+        Value::Bool(old_hostility),
+    ];
+    broadcast_hostility_callback("OnHostilityChange", &changed_args, false)?;
+    Ok(Value::Bool(true))
+}
+
 /// `FnSetFoW` (C4Script.cpp:3671-3678): validate the player, immediately
 /// persist the requested flag through `C4Player::SetFoW`, and return an
 /// integer success value. C4Aul nil-fills both omitted parameters.
@@ -5565,6 +5766,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerID", get_player_id);
     script.register_host_function("GetWealth", get_wealth);
     script.register_host_function("SetWealth", set_wealth);
+    script.register_host_function("Hostile", hostile);
+    script.register_host_function("SetHostility", set_hostility);
     script.register_host_function("SetFoW", set_fow);
     // Fn[Get/Set]PlrExtraData (C4Script.cpp:4692-4747, AddFunc
     // :6666-6667) — MagiClonk's Recruitment combo preference.
@@ -24742,6 +24945,7 @@ mod tests {
         "GrabContents",
         "GrabObjectInfo",
         "GreaterThan",
+        "Hostile",
         "InLiquid",
         "Incinerate",
         "IncinerateLandscape",
@@ -24811,6 +25015,7 @@ mod tests {
         "SetGamma",
         "SetGraphics",
         "SetGravity",
+        "SetHostility",
         "SetKiller",
         "SetMass",
         "SetMenuDecoration",
@@ -26424,6 +26629,64 @@ func Trigger(object pOther)
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || get_player_count(&[]));
         assert_eq!(result.expect("GetPlayerCount succeeds"), Value::Int(2));
+    }
+
+    #[test]
+    fn hostile_observes_declared_and_mutated_player_relations_like_cpp() {
+        // FnHostile selects symmetric C4PlayerList::Hostile or the directed
+        // HostilityDeclared query (C4Script.cpp:2511-2519;
+        // C4PlayerList.cpp:82-104). FnSetHostility rejects missing/self
+        // opponents and mutates immediately (C4Script.cpp:2521-2537;
+        // C4Player.cpp:981-1003).
+        let alice = PlayerState {
+            id: 1,
+            hostility: vec![2],
+            ..PlayerState::default()
+        };
+        let bob = PlayerState {
+            id: 2,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![alice, bob],
+        );
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            let mut script = lc_script::Engine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    "global func Probe() { return [Hostile(1, 2), Hostile(2, 1), Hostile(1, 2, true), Hostile(2, 1, true), Hostile(1, 1), Hostile(1, 99), SetHostility(2, 1, true, true, true), Hostile(2, 1, true), SetHostility(2, 2, true, true, true), SetHostility(2, 99, true, true, true)]; }",
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call("Probe", &[])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(
+            result.expect("hostility functions run"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(false),
+            ])
+        );
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [PlayerCommand::SetHostility {
+                player_id: 2,
+                opponent: 1,
+                hostile: true,
+            }]
+        ));
     }
 
     #[test]

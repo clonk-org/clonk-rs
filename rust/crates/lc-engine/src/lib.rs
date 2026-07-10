@@ -39383,6 +39383,119 @@ func Trigger() {
     }
 
     #[test]
+    fn set_hostility_runs_reject_and_change_broadcasts_like_cpp() {
+        // FnSetHostility performs a rejecting GRBroadcast before the write,
+        // then broadcasts OnHostilityChange after the live declaration is
+        // visible (C4Script.cpp:2521-2537). GRBroadcast visits live
+        // goal/rule/environment objects before the scenario host
+        // (C4ScriptHost.cpp:234-248).
+        let caller_script = r#"
+        func TryHostile() { return SetHostility(1, 2, true, true, false); }
+        func ForceHostile() { return SetHostility(1, 2, true, true, true); }
+        func ReadHostile() { return Hostile(1, 2, true); }
+        "#;
+        let rule_script = r#"
+        local reject, seen_new, seen_old, seen_live;
+        func SetReject(value) { reject = value; }
+        func RejectHostilityChange(player, opponent, hostile) { return reject; }
+        func OnHostilityChange(player, opponent, hostile, old) {
+            seen_new = hostile;
+            seen_old = old;
+            seen_live = Hostile(player, opponent, true);
+        }
+        func Seen() { return [seen_new, seen_old, seen_live]; }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let mut rule =
+            Definition::from_script("RULE", "Rule", rule_script).expect("rule compiles");
+        rule.set_category(1 << 19); // C4D_Rule
+        engine.register_definition(rule).expect("rule registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Alice"))
+            .expect("Alice registers");
+        engine
+            .register_player(PlayerConfig::new(2, "Bob"))
+            .expect("Bob registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let rule = engine
+            .spawn_object(SpawnConfig::new("RULE"))
+            .expect("rule spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, id: ObjectId, function: &str, args: Vec<Value>| {
+            let index = engine.find_object_index(id).expect("object exists");
+            engine
+                .call_object_function(index, function, args)
+                .expect("script call succeeds")
+        };
+        assert_eq!(
+            call(&mut engine, rule, "SetReject", vec![Value::Int(1)]),
+            Value::Nil
+        );
+        assert_eq!(
+            call(&mut engine, caller, "TryHostile", Vec::new()),
+            Value::Bool(false),
+            "a truthy rule callback rejects the declaration"
+        );
+        assert_eq!(
+            call(&mut engine, caller, "ReadHostile", Vec::new()),
+            Value::Bool(false)
+        );
+
+        assert_eq!(
+            call(&mut engine, rule, "SetReject", vec![Value::Int(0)]),
+            Value::Nil
+        );
+        assert_eq!(
+            call(&mut engine, caller, "TryHostile", Vec::new()),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call(&mut engine, rule, "Seen", Vec::new()),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(true),
+            ]),
+            "OnHostilityChange receives old/new state and observes the live write"
+        );
+
+        // fNoCalls skips only the rejection test. The post-change callback
+        // still runs and receives old=true (C4Script.cpp:2526-2536).
+        assert_eq!(
+            call(&mut engine, rule, "SetReject", vec![Value::Int(1)]),
+            Value::Nil
+        );
+        assert_eq!(
+            call(&mut engine, caller, "ForceHostile", Vec::new()),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call(&mut engine, rule, "Seen", Vec::new()),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+            ])
+        );
+        assert!(
+            engine
+                .players()
+                .find(|player| player.id() == 1)
+                .is_some_and(|player| player.is_hostile_towards(2)),
+            "the accepted declaration persists in C4Player state"
+        );
+    }
+
+    #[test]
     fn create_menu_opens_a_script_menu_and_get_menu_reads_it_like_cpp() {
         // FnCreateMenu (C4Script.cpp:1426-1459): inits the object's menu with
         // Identification = idMenuID ? idMenuID : iSymbol (C4Menu::InitMenu,
