@@ -6551,6 +6551,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DigFree", dig_free);
     script.register_host_function("DigFreeRect", dig_free_rect);
     script.register_host_function("FreeRect", free_rect);
+    script.register_host_function("DrawMap", draw_map);
     script.register_host_function("DrawMaterialQuad", draw_material_quad);
     script.register_host_function("ScriptGo", script_go);
     script.register_host_function("ScriptCounter", script_counter);
@@ -8477,6 +8478,23 @@ pub(crate) enum LandscapeOperation {
         material_texture: String,
         vertices: [Vector2; 4],
         ift: bool,
+    },
+    /// FnDrawMap -> C4Landscape::DrawMap/MapToLandscape
+    /// (C4Script.cpp:4851-4855; C4Landscape.cpp:2636-2668,482-510).
+    /// The callback already rendered these exact indexed bytes through the
+    /// live synced RNG; the engine fold must not parse or draw RNG again.
+    DrawMap {
+        origin: Vector2,
+        bitmap: lc_resources::bitmap::IndexedBitmap,
+        map_width: i32,
+        map_height: i32,
+        texmap: crate::landscape::RuntimeTexMapState,
+    },
+    /// DrawMap parsing can allocate a live TextureMap entry before
+    /// Render(nullptr) finds no map. C++ retains that allocation despite the
+    /// false DrawMap result (C4Landscape.cpp:2659-2663; C4Texture.cpp:319-369).
+    SyncRuntimeTexMap {
+        texmap: crate::landscape::RuntimeTexMapState,
     },
     BlastCircle {
         center: Vector2,
@@ -15448,6 +15466,106 @@ fn draw_material_quad(args: &[Value]) -> Result<Value, RuntimeError> {
             ift,
         });
         Ok(Value::Bool(true))
+    })
+}
+
+/// FnDrawMap/C4Landscape::DrawMap (C4Script.cpp:4851-4855;
+/// C4Landscape.cpp:2636-2668): clip the GLOBAL destination first, then make
+/// an exact-size temporary S2 map through the callback's live synced RNG.
+/// The resulting indexed bytes are queued verbatim so the later engine fold
+/// cannot consume the map's size/range/seed draws a second time.
+fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "DrawMap", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "DrawMap", "y")?;
+    let width = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "DrawMap", "wdt")?;
+    let height = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "DrawMap", "hgt")?;
+    let Some(source) = parse_optional_string(args.get(4), "DrawMap", "map-definition")? else {
+        return Ok(Value::Int(0));
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Int(0));
+        };
+        let Some((landscape_width, landscape_height, map_zoom, retained_creator)) = context
+            .world
+            .landscape_ref()
+            .and_then(|landscape| {
+                let (landscape_width, landscape_height) = landscape.grid_dimensions()?;
+                let raster = landscape.raster_state()?;
+                Some((
+                    landscape_width,
+                    landscape_height,
+                    raster.map_zoom(),
+                    raster.map_creator().cloned(),
+                ))
+            })
+        else {
+            return Ok(Value::Int(0));
+        };
+        if map_zoom <= 0 {
+            return Ok(Value::Int(0));
+        }
+
+        // C4Landscape::ClipRect (C4Landscape.cpp:2698-2707) is the half-open
+        // intersection with the landscape. i64 intermediates retain those
+        // semantics without overflowing on hostile script integers.
+        let left = i64::from(x).max(0);
+        let top = i64::from(y).max(0);
+        let right = (i64::from(x) + i64::from(width)).min(i64::from(landscape_width));
+        let bottom = (i64::from(y) + i64::from(height)).min(i64::from(landscape_height));
+        if right <= left || bottom <= top {
+            return Ok(Value::Int(0));
+        }
+        let clipped_x = left as i32;
+        let clipped_y = top as i32;
+        let clipped_width = (right - left) as i32;
+        let clipped_height = (bottom - top) as i32;
+        let map_width = (clipped_width - 1) / map_zoom + 1;
+        let map_height = (clipped_height - 1) / map_zoom + 1;
+
+        let Some(texmap) = context.runtime_texmap.take() else {
+            return Ok(Value::Int(0));
+        };
+        let texmap_before = texmap.clone();
+        let mut classifier = crate::scenario::MapPixelClassifier::from_runtime_state(texmap);
+        let rendered = RANDOM_CONTEXT.with(|random_cell| {
+            let random_context = random_cell
+                .borrow()
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| RuntimeError::new("DrawMap: random context unavailable"))?;
+            let mut rng = random_context.rng.borrow_mut();
+            Ok(crate::map_creator_s2::render_runtime_s2_map(
+                retained_creator.as_ref(),
+                &source,
+                &mut classifier,
+                map_width,
+                map_height,
+                &mut rng,
+            ))
+        });
+        let texmap = classifier.into_runtime_state();
+        // Parser-side texture allocations are live to later calls in this
+        // VM session even if Render found no map.
+        context.runtime_texmap = Some(texmap.clone());
+        let Some(bitmap) = rendered? else {
+            if texmap != texmap_before {
+                context.register_landscape_operation(LandscapeOperation::SyncRuntimeTexMap {
+                    texmap,
+                });
+            }
+            return Ok(Value::Int(0));
+        };
+        context.register_landscape_operation(LandscapeOperation::DrawMap {
+            origin: Vector2::new(clipped_x, clipped_y),
+            bitmap,
+            map_width,
+            map_height,
+            texmap,
+        });
+        Ok(Value::Int(1))
     })
 }
 
@@ -23597,9 +23715,11 @@ struct EffectHostContext {
     pending_menu_requests: Vec<crate::MenuRequest>,
     pending_landscape_ops: Vec<LandscapeOperation>,
     /// Live C4TextureMap preview for synchronous GetIndexMatTex return
-    /// values. DrawMaterialQuad operations still fold into the real engine,
-    /// but later calls in this same VM session must see slots allocated by
-    /// earlier calls (C4Texture.cpp:319-369).
+    /// values. DrawMaterialQuad/DrawMap operations still fold into the real
+    /// engine, but later calls in this same VM session must see slots
+    /// allocated by earlier calls (C4Texture.cpp:319-369). DrawMap's pixel
+    /// plane is still deferred: same-callback GBack* visibility needs a
+    /// separate structural landscape-preview layer and remains explicit.
     runtime_texmap: Option<crate::landscape::RuntimeTexMapState>,
     /// Live script-visible sky values. Host writes update this before their
     /// deferred landscape operation is folded into the engine.
@@ -26342,6 +26462,7 @@ mod tests {
         "DoHomebaseProduction",
         "DoMagicEnergy",
         "DoScoreboardShow",
+        "DrawMap",
         "DrawMaterialQuad",
         "EffectCall",
         "EffectVar",
@@ -28104,6 +28225,270 @@ func Trigger(object pOther)
             1,
             false,
         )
+    }
+
+    fn draw_map_world(
+        width: u32,
+        height: u32,
+        zoom: i32,
+        retain_creator: bool,
+    ) -> HostWorldContext {
+        let mut densities = vec![0; 128];
+        densities[1] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Earth".to_string());
+        let mut texture_names = vec![None; 128];
+        texture_names[1] = Some("Rough".to_string());
+        let mut shapes = vec![None; 128];
+        shapes[1] = Some(crate::chunky::ChunkShape::Flat);
+        let mut texmap = crate::landscape::RuntimeTexMapState {
+            densities: densities.clone(),
+            material_names: material_names.clone(),
+            texture_names: texture_names.clone(),
+            match_texture_names: texture_names.clone(),
+            shapes,
+            materials: vec![crate::landscape::RuntimeTexMapMaterial {
+                name: "Earth".to_string(),
+                density: 100,
+                shape: crate::chunky::ChunkShape::Flat,
+            }],
+            texture_inventory: vec!["Rough".to_string(), "Ridge".to_string()],
+            default_material_entries: Vec::new(),
+        };
+        texmap.set_default_material_entry("Earth", 1);
+
+        let mut classifier =
+            crate::scenario::MapPixelClassifier::from_runtime_state(texmap);
+        let mut setup_rng = LcgRng::new(1);
+        let retained = crate::map_creator_s2::create_s2_map_with_state(
+            "overlay Named { mat = Earth; tex = Rough; wdt = 50; seed = 7; }; \
+             map Original { seed = 5; Named; };",
+            &mut classifier,
+            crate::scenario::LegacyC4SVal::new(8, 0, 8, 8),
+            crate::scenario::LegacyC4SVal::new(4, 0, 4, 4),
+            false,
+            1,
+            &mut setup_rng,
+        )
+        .creator;
+        let texmap = classifier.into_runtime_state();
+        let mut landscape = Landscape::new(width, vec![height as i32; width as usize])
+            .expect("landscape builds");
+        landscape.set_world_height(height as i32);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            width,
+            height,
+            vec![0; width as usize * height as usize],
+            densities,
+            material_names,
+            texture_names,
+        ));
+        let mut raster = crate::landscape::LandscapeRasterState::new(zoom, 0, texmap);
+        raster.set_map_creator(retain_creator.then_some(retained));
+        landscape.set_raster_state(raster);
+        landscape.refresh_all_raster_columns();
+        HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+    }
+
+    #[test]
+    fn draw_map_clips_before_rounding_and_resolves_retained_template() {
+        // FnDrawMap passes GLOBAL coordinates through unchanged
+        // (C4Script.cpp:4851-4855). DrawMap first ClipRects the requested
+        // pixel rect, then builds a temporary map of ceil(w/MapZoom) by
+        // ceil(h/MapZoom) and clones pMapCreator so named templates resolve
+        // (C4Landscape.cpp:2636-2663,2698-2707).
+        let args = [
+            Value::Int(-2),
+            Value::Int(1),
+            Value::Int(7),
+            Value::Int(5),
+            Value::String("map Runtime { seed = 9; Named; };".to_string()),
+        ];
+        let guard = enter_random_context(LcgRng::new(17));
+        let (result, outcome) =
+            with_effect_context(None, &[], draw_map_world(8, 7, 3, true), 1, || {
+                draw_map(&args)
+            });
+        let final_rng = guard.finish();
+
+        assert_eq!(result.expect("DrawMap succeeds"), Value::Int(1));
+        assert_eq!(final_rng.count, 2, "exact FakeLS size draws occur once");
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::DrawMap {
+                origin,
+                bitmap,
+                map_width,
+                map_height,
+                texmap,
+            } => {
+                assert_eq!(*origin, Vector2::new(0, 1));
+                assert_eq!((*map_width, *map_height), (2, 2));
+                assert_eq!((bitmap.width, bitmap.height), (2, 2));
+                // The clipped request is 5x5, but MapToLandscape paints the
+                // full 6x6 zoomed map-cell extent (C4Landscape.cpp:496-506).
+                assert_eq!(bitmap.indices, vec![1 | 0x80, 0, 1 | 0x80, 0]);
+                assert_eq!(texmap.default_material_entry("Earth"), Some(1));
+            }
+            other => panic!("unexpected landscape operation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_map_carries_requested_segment_when_rendered_map_is_larger() {
+        // An empty source on a cloned retained creator renders its last
+        // scenario map at the original dimensions, but DrawMap still passes
+        // the new requested iMapWdt/iMapHgt segment to MapToLandscape
+        // (C4Landscape.cpp:2642-2666,482-506; C4MapCreatorS2.cpp:773-815).
+        let args = [
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(1),
+            Value::String(String::new()),
+        ];
+        let guard = enter_random_context(LcgRng::new(19));
+        let (result, outcome) =
+            with_effect_context(None, &[], draw_map_world(8, 7, 3, true), 1, || {
+                draw_map(&args)
+            });
+        let _ = guard.finish();
+
+        assert_eq!(result.expect("DrawMap succeeds"), Value::Int(1));
+        match &outcome.landscape[0] {
+            LandscapeOperation::DrawMap {
+                bitmap,
+                map_width,
+                map_height,
+                ..
+            } => {
+                assert_eq!((bitmap.width, bitmap.height), (8, 4));
+                assert_eq!((*map_width, *map_height), (1, 1));
+            }
+            other => panic!("unexpected landscape operation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_map_consumes_all_map_draws_before_later_script_random() {
+        // C4Landscape::DrawMap constructs and renders synchronously before
+        // FnDrawMap returns (C4Landscape.cpp:2642-2668), so its two exact
+        // FakeLS size draws precede a later Random in the same script call.
+        let seed = 23;
+        let mut expected_rng = LcgRng::new(seed);
+        let _ = expected_rng.random(1);
+        let _ = expected_rng.random(1);
+        let expected_random = expected_rng.random(1_000);
+        let guard = enter_random_context(LcgRng::new(seed));
+        let args = [
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(3),
+            Value::Int(3),
+            Value::String("map Runtime { seed = 9; Named; };".to_string()),
+        ];
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            draw_map_world(8, 7, 3, true),
+            1,
+            || {
+                let drew = draw_map(&args)?;
+                let after = random(&[Value::Int(1_000)])?;
+                Ok::<_, RuntimeError>((drew, after))
+            },
+        );
+        let final_rng = guard.finish();
+
+        assert_eq!(
+            result.expect("DrawMap and Random succeed"),
+            (Value::Int(1), Value::Int(expected_random))
+        );
+        assert_eq!(final_rng, expected_rng);
+        assert_eq!(outcome.landscape.len(), 1, "render queues exact bytes once");
+    }
+
+    #[test]
+    fn draw_map_render_none_still_queues_texture_map_allocation() {
+        // ReadScript evaluates a complete top-level overlay immediately, so
+        // GetIndexMatTex may allocate a TextureMap slot before Render finds
+        // no map. The allocation survives even though DrawMap returns false
+        // (C4MapCreatorS2.cpp:1201-1203,773-815; C4Landscape.cpp:2659-2663;
+        // C4Texture.cpp:319-369).
+        let args = [
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(3),
+            Value::Int(3),
+            Value::String(
+                "overlay Added { mat = Earth; tex = Ridge; seed = 7; };".to_string(),
+            ),
+        ];
+        let guard = enter_random_context(LcgRng::new(31));
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            draw_map_world(8, 7, 3, false),
+            1,
+            || draw_map(&args),
+        );
+        let _ = guard.finish();
+
+        assert_eq!(result.expect("DrawMap false result succeeds"), Value::Int(0));
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::SyncRuntimeTexMap { texmap } => {
+                assert_eq!(texmap.material_names[2].as_deref(), Some("Earth"));
+                assert_eq!(texmap.match_texture_names[2].as_deref(), Some("Ridge"));
+            }
+            other => panic!("unexpected landscape operation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_map_false_paths_do_not_render_or_queue() {
+        // DrawMap returns false before constructing C4MapCreatorS2 for a
+        // null definition or an empty ClipRect (C4Landscape.cpp:2636-2641,
+        // 2698-2707), so neither path may consume synced random values.
+        for args in [
+            vec![
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Nil,
+            ],
+            vec![
+                Value::Int(8),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(1),
+                Value::String("map Runtime { Named; };".to_string()),
+            ],
+        ] {
+            let initial_rng = LcgRng::new(29);
+            let guard = enter_random_context(initial_rng.clone());
+            let (result, outcome) = with_effect_context(
+                None,
+                &[],
+                draw_map_world(8, 7, 3, true),
+                1,
+                || draw_map(&args),
+            );
+            let final_rng = guard.finish();
+            assert_eq!(result.expect("DrawMap false path succeeds"), Value::Int(0));
+            assert!(outcome.landscape.is_empty());
+            assert_eq!(final_rng, initial_rng);
+        }
     }
 
     #[test]

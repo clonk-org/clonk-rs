@@ -2906,6 +2906,102 @@ impl crate::Engine {
         // clipping leaves the polygon wholly outside the landscape.
         true
     }
+
+    /// C4Landscape::DrawMap -> MapToLandscape/MapToSurface
+    /// (C4Landscape.cpp:2636-2668,337-510): expand the callback-rendered
+    /// indexed map by MapZoom, clear the complete rounded destination to sky,
+    /// draw material chunks with their IFT bits, and bracket the authoritative
+    /// write with the shared PrepareChange/FinishChange transaction seam.
+    pub(crate) fn draw_indexed_map(
+        &mut self,
+        origin: Vector2,
+        bitmap: &lc_resources::bitmap::IndexedBitmap,
+        requested_map_width: i32,
+        requested_map_height: i32,
+        texmap: RuntimeTexMapState,
+    ) -> bool {
+        let Some((map_zoom, map_seed)) = self
+            .landscape
+            .as_ref()
+            .and_then(Landscape::raster_state)
+            .map(|state| (state.map_zoom(), state.map_seed()))
+        else {
+            return false;
+        };
+        let (Ok(map_width), Ok(map_height)) =
+            (i32::try_from(bitmap.width), i32::try_from(bitmap.height))
+        else {
+            return false;
+        };
+        let Some(expected_len) = (map_width as usize).checked_mul(map_height as usize) else {
+            return false;
+        };
+        if map_zoom <= 0 || bitmap.indices.len() != expected_len {
+            return false;
+        }
+        let map_segment_width = requested_map_width.min(map_width);
+        let map_segment_height = requested_map_height.min(map_height);
+        if map_segment_width <= 0 || map_segment_height <= 0 {
+            // MapToLandscape treats an empty post-source-clip segment as a
+            // successful no-op (C4Landscape.cpp:485-494).
+            return true;
+        }
+        let (Some(target_width), Some(target_height)) = (
+            map_segment_width.checked_mul(map_zoom),
+            map_segment_height.checked_mul(map_zoom),
+        ) else {
+            return false;
+        };
+        let Some(synthesized_width) = map_width.checked_mul(map_zoom) else {
+            return false;
+        };
+        let surface = crate::chunky::synthesize_landscape(
+            &bitmap.indices,
+            map_width,
+            map_height,
+            map_zoom,
+            map_seed,
+            &texmap.shapes,
+        );
+        let bytes = surface.into_bytes();
+        let bounds = RasterChangeRect::new(origin.x, origin.y, target_width, target_height);
+        self.landscape_raster_transaction(bounds, move |grid, state| {
+            *state.texmap_mut() = texmap;
+            // SkyToLandscape clears the entire rounded target before any
+            // material pass. Copy zero bytes too; skipping them would leave
+            // old landscape under sky cells (C4Landscape.cpp:441-461).
+            for local_y in 0..target_height {
+                for local_x in 0..target_width {
+                    let index = (local_y * synthesized_width + local_x) as usize;
+                    grid.write_byte(origin.x + local_x, origin.y + local_y, bytes[index]);
+                }
+            }
+        })
+        .is_some()
+    }
+
+    /// Apply parser-side C4TextureMap allocations when DrawMap has no
+    /// renderable map. AddEntry immediately runs HandleTexMapUpdate in C++,
+    /// so keep retained state and pixel lookup tables synchronized without a
+    /// landscape pixel transaction (C4Texture.cpp:116-135,319-369).
+    pub(crate) fn replace_runtime_texmap(&mut self, texmap: RuntimeTexMapState) -> bool {
+        let Some(landscape) = self.landscape.as_mut() else {
+            return false;
+        };
+        let Landscape {
+            pixels,
+            raster_state,
+            ..
+        } = landscape;
+        let Some(state) = raster_state.as_mut() else {
+            return false;
+        };
+        *state.texmap_mut() = texmap;
+        if let Some(pixels) = pixels {
+            pixels.sync_runtime_texmap(state.texmap());
+        }
+        true
+    }
 }
 
 impl LandscapeCommand {
@@ -3323,6 +3419,43 @@ mod tests {
         assert!(state.map_creator().is_none());
     }
 
+    #[test]
+    fn runtime_texmap_only_fold_updates_pixel_lookup_tables() {
+        // DrawMap's ReadScript can call GetIndexMatTex/AddEntry before a null
+        // Render result. AddEntry invokes HandleTexMapUpdate immediately, so
+        // the retained map and Pix2* tables change without any landscape
+        // pixels changing (C4Texture.cpp:116-135,319-369).
+        let landscape = raster_grid_landscape(2, 2, vec![0; 4]);
+        let revision = landscape.pixel_grid().expect("pixel grid").revision();
+        let mut texmap = landscape
+            .raster_state()
+            .expect("raster state")
+            .texmap()
+            .clone();
+        texmap.texture_inventory.push("Ridge".to_string());
+        let slot = texmap.get_index("Earth", Some("Ridge"), true);
+        assert_eq!(slot, 4);
+
+        let mut engine = crate::Engine::with_seed(3);
+        engine.set_landscape(landscape);
+        assert!(engine.replace_runtime_texmap(texmap));
+
+        let landscape = engine.landscape().expect("landscape");
+        assert_eq!(
+            landscape
+                .raster_state()
+                .expect("raster state")
+                .texmap()
+                .match_texture_names[slot as usize]
+                .as_deref(),
+            Some("Ridge")
+        );
+        let grid = landscape.pixel_grid().expect("pixel grid");
+        assert_eq!(grid.material_names()[slot as usize].as_deref(), Some("Earth"));
+        assert_eq!(grid.texture_names()[slot as usize].as_deref(), Some("Ridge"));
+        assert_eq!(grid.revision(), revision, "texmap sync writes no pixels");
+    }
+
     fn raster_grid_landscape(width: u32, height: u32, bytes: Vec<u8>) -> Landscape {
         let mut densities = vec![0; 128];
         densities[1] = 100;
@@ -3646,6 +3779,84 @@ mod tests {
                 .and_then(|landscape| landscape.grid_byte_at(mask_x, mask_y)),
             Some(3 | 0x80),
             "removing the mask reveals the changed background"
+        );
+    }
+
+    #[test]
+    fn draw_map_writes_zoomed_ift_pixels_and_repairs_solid_mask() {
+        // DrawMap hands its full indexed map to MapToLandscape, whose target
+        // is map-size * MapZoom and whose MapToSurface preserves each source
+        // cell's IFT bit (C4Landscape.cpp:337-376,453-510,2636-2668).
+        // PrepareChange/FinishChange must also repair an intersecting solid
+        // mask over the newly written background (C4Landscape.cpp:2851-2880;
+        // C4SolidMask.cpp:323-342,365-385).
+        let mut definition = crate::Definition::from_script("MASK", "Mask", "")
+            .expect("definition compiles");
+        definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
+        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+
+        let mut landscape = raster_grid_landscape(7, 5, vec![1; 35]);
+        let mut texmap = landscape
+            .raster_state()
+            .expect("raster state")
+            .texmap()
+            .clone();
+        texmap.shapes[3] = Some(crate::chunky::ChunkShape::Flat);
+        landscape.set_raster_state(LandscapeRasterState::new(2, 0, texmap.clone()));
+        let mut engine = crate::Engine::with_seed(11);
+        engine.set_landscape(landscape);
+        engine.register_definition(definition).expect("definition registers");
+        let id = engine
+            .spawn_object(crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1)))
+            .expect("mask spawns");
+        let index = engine.find_object_index(id).expect("mask exists");
+        engine.update_solid_mask(index);
+        let (mask_x, mask_y) = engine.objects[index]
+            .solid_mask_bake
+            .as_ref()
+            .map(|bake| (bake.x, bake.y))
+            .expect("mask is put");
+
+        let bitmap = lc_resources::bitmap::IndexedBitmap {
+            width: 3,
+            height: 1,
+            indices: vec![3 | 0x80, 0, 3 | 0x80],
+        };
+        assert!(engine.draw_indexed_map(
+            Vector2::new(mask_x, mask_y),
+            &bitmap,
+            2,
+            1,
+            texmap
+        ));
+
+        let landscape = engine.landscape().expect("landscape");
+        assert_eq!(landscape.grid_byte_at(mask_x, mask_y), Some(2));
+        assert_eq!(landscape.grid_byte_at(mask_x + 1, mask_y), Some(3 | 0x80));
+        assert_eq!(landscape.grid_byte_at(mask_x, mask_y + 1), Some(3 | 0x80));
+        assert_eq!(landscape.grid_byte_at(mask_x + 1, mask_y + 1), Some(3 | 0x80));
+        assert_eq!(
+            landscape.grid_byte_at(mask_x + 3, mask_y),
+            Some(0),
+            "SkyToLandscape clears old material under zero map cells"
+        );
+        assert_eq!(
+            landscape.grid_byte_at(mask_x + 4, mask_y),
+            Some(1),
+            "MapToLandscape does not copy rendered cells past the requested segment"
+        );
+        for x in mask_x..=mask_x + 1 {
+            assert!(landscape.liquids()[x as usize].contains(mask_y));
+            assert!(landscape.is_tunnel_at(x, mask_y));
+        }
+
+        engine.remove_solid_mask(index);
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(mask_x, mask_y)),
+            Some(3 | 0x80),
+            "removing the mask reveals DrawMap's changed background"
         );
     }
 

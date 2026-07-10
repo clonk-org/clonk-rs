@@ -27066,6 +27066,24 @@ impl Engine {
                 } => {
                     let _ = self.draw_material_quad(&material_texture, vertices, ift);
                 }
+                LandscapeOperation::DrawMap {
+                    origin,
+                    bitmap,
+                    map_width,
+                    map_height,
+                    texmap,
+                } => {
+                    let _ = self.draw_indexed_map(
+                        origin,
+                        &bitmap,
+                        map_width,
+                        map_height,
+                        texmap,
+                    );
+                }
+                LandscapeOperation::SyncRuntimeTexMap { texmap } => {
+                    let _ = self.replace_runtime_texmap(texmap);
+                }
                 LandscapeOperation::BlastCircle {
                     center,
                     radius,
