@@ -1690,6 +1690,42 @@ fn toggle_fullscreen(window: &Window, display_options: &mut DisplayOptions) {
     }
 }
 
+#[derive(Debug)]
+struct MusicControlState {
+    generation: u64,
+    configured_volume: f32,
+    scenario_level: Option<u8>,
+}
+
+impl MusicControlState {
+    fn new(configured_volume: f32) -> Self {
+        Self {
+            generation: 0,
+            configured_volume: configured_volume.clamp(0.0, 1.0),
+            scenario_level: None,
+        }
+    }
+
+    fn advance_generation(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    fn set_scenario_level(&mut self, level: Option<u8>) {
+        self.scenario_level = level.map(|level| level.min(100));
+    }
+
+    fn effective_volume(&self) -> f32 {
+        self.scenario_level.map_or(self.configured_volume, |level| {
+            self.configured_volume * f32::from(level) / 100.0
+        })
+    }
+
+    fn start_volume(&self, generation: u64) -> Option<f32> {
+        (self.generation == generation).then(|| self.effective_volume())
+    }
+}
+
 struct AudioContext {
     system: AudioSystem,
     options: AudioOptions,
@@ -1698,42 +1734,42 @@ struct AudioContext {
     /// never blocks C++'s streamed SDL_mixer playback). The generation
     /// counter cancels a pending load when the music is stopped/replaced
     /// before the decode finishes; the slot carries the finished handle.
-    music_generation: Arc<std::sync::atomic::AtomicU64>,
+    music_control: Arc<std::sync::Mutex<MusicControlState>>,
     pending_music: Arc<std::sync::Mutex<Option<MusicHandle>>>,
     loaded_sounds: HashMap<String, SoundHandle>,
     active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
     resolver: SoundResolver,
+    music_resolver: MusicResolver,
     missing_sounds: HashSet<String>,
 }
 
 impl AudioContext {
     fn try_new(options: AudioOptions) -> Result<Self, AudioError> {
+        let music_control = Arc::new(std::sync::Mutex::new(MusicControlState::new(
+            options.music_volume,
+        )));
         Ok(Self {
             system: AudioSystem::new(options.max_channels)?,
             options,
-            music_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            music_control,
             pending_music: Arc::new(std::sync::Mutex::new(None)),
             loaded_sounds: HashMap::new(),
             active_channels: HashMap::new(),
             resolver: SoundResolver::new(),
+            music_resolver: MusicResolver::discover(),
             missing_sounds: HashSet::new(),
         })
     }
 
     fn play_music(&mut self, data: &[u8], looped: bool) -> Result<(), AudioError> {
-        use std::sync::atomic::Ordering;
         self.stop_music();
-        if !self.options.music_enabled {
-            return Ok(());
-        }
         // Decode off-thread: a MIDI track is a full FluidSynth render and
         // was the single largest scenario-activation cost. C++ streams
         // music through SDL_mixer with zero load-time work.
-        let generation = self.music_generation.load(Ordering::SeqCst);
+        let generation = self.music_control.lock().unwrap().generation;
         let worker = self.system.worker_handle();
-        let volume = self.options.music_volume;
         let data = data.to_vec();
-        let generation_ref = Arc::clone(&self.music_generation);
+        let control = Arc::clone(&self.music_control);
         let slot = Arc::clone(&self.pending_music);
         std::thread::spawn(move || {
             let music = match worker.load_music(&data) {
@@ -1743,29 +1779,31 @@ impl AudioContext {
                     return;
                 }
             };
-            if generation_ref.load(Ordering::SeqCst) != generation {
-                return; // stopped or replaced while decoding
-            }
+            let control = control.lock().unwrap();
+            let Some(volume) = control.start_volume(generation) else {
+                return;
+            };
             if let Err(error) = worker.play_music(&music, looped) {
                 tracing::warn!(%error, "music playback failed");
                 return;
             }
             worker.music_set_volume(volume);
-            if generation_ref.load(Ordering::SeqCst) != generation {
-                // A stop raced the play call: honor it.
-                worker.halt_music();
-                return;
-            }
             *slot.lock().unwrap() = Some(music);
         });
         Ok(())
     }
 
     fn stop_music(&mut self) {
-        self.music_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut control = self.music_control.lock().unwrap();
+        control.advance_generation();
         self.system.halt_music();
         self.pending_music.lock().unwrap().take();
+    }
+
+    fn set_scenario_music_level(&mut self, level: Option<u8>) {
+        let mut control = self.music_control.lock().unwrap();
+        control.set_scenario_level(level);
+        self.system.music_set_volume(control.effective_volume());
     }
 
     fn process_audio(
@@ -1793,6 +1831,40 @@ impl AudioContext {
             self.loaded_sounds.clear();
             self.missing_sounds.clear();
         }
+        match self.music_resolver.configure_scenario(path) {
+            Ok(true) => self.set_scenario_music_level(path.map(|_| 100)),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = ?path,
+                    %error,
+                    "failed to configure scenario music catalog"
+                );
+            }
+        }
+    }
+
+    fn load_default_music(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        self.music_resolver
+            .first_default()
+            .map(MusicAsset::load_audio)
+            .transpose()
+            .context("failed to read default music asset")
+    }
+
+    fn play_named_music(&mut self, name: &str, looped: bool) -> anyhow::Result<bool> {
+        let data = self
+            .music_resolver
+            .resolve(name)
+            .map(MusicAsset::load_audio)
+            .transpose()
+            .with_context(|| format!("failed to read named music asset `{name}`"))?;
+        let Some(data) = data else {
+            return Ok(false);
+        };
+        self.play_music(&data, looped)
+            .with_context(|| format!("failed to play named music asset `{name}`"))?;
+        Ok(true)
     }
 
     fn register_definition_sounds(&mut self, definition_id: &str, group: &Group) {
@@ -10814,7 +10886,7 @@ impl GameApp {
                 audio.stop_music();
                 return;
             }
-            match load_scenario_music_bytes(path) {
+            match audio.load_default_music() {
                 Ok(Some(bytes)) => {
                     // C4MusicSystem::PlayScenarioMusic calls Play() with its
                     // non-looping default. Do not repeat one asset forever.
@@ -12455,6 +12527,219 @@ fn scenario_root_key(path: &Path) -> String {
     key
 }
 
+const MUSIC_FILE_EXTENSIONS: [&str; 7] = ["it", "mid", "mod", "mp3", "ogg", "s3m", "xm"];
+
+struct MusicCatalog {
+    assets: Vec<MusicAsset>,
+}
+
+impl MusicCatalog {
+    fn from_group(group: Group) -> Result<Self, lc_resources::GroupError> {
+        let mut catalog = Self::empty();
+        catalog.extend_group(group)?;
+        Ok(catalog)
+    }
+
+    fn empty() -> Self {
+        Self { assets: Vec::new() }
+    }
+
+    fn extend_group(&mut self, group: Group) -> Result<(), lc_resources::GroupError> {
+        let source = Arc::new(group);
+        let mut entries: Vec<_> = source
+            .entries()?
+            .into_iter()
+            .filter(|entry| !entry.is_directory && is_music_path(&entry.relative_path))
+            .map(|entry| entry.relative_path)
+            .collect();
+        entries.sort_by_cached_key(|path| path.to_string_lossy().to_ascii_lowercase());
+        let assets = entries
+            .into_iter()
+            .map(|relative_path| MusicAsset::new(Arc::clone(&source), relative_path))
+            .collect::<Vec<_>>();
+        self.assets.extend(assets);
+        Ok(())
+    }
+
+    fn resolve(&self, name: &str) -> Option<&MusicAsset> {
+        self.assets
+            .iter()
+            .find(|asset| asset.full_path == name)
+            .or_else(|| self.assets.iter().find(|asset| asset.file_name == name))
+            .or_else(|| {
+                self.assets.iter().find(|asset| {
+                    MUSIC_FILE_EXTENSIONS
+                        .iter()
+                        .any(|extension| format!("{name}.{extension}") == asset.file_name)
+                })
+            })
+    }
+
+    fn first_default(&self) -> Option<&MusicAsset> {
+        self.assets.iter().find(|asset| {
+            !["@", "Credits.", "Frontend."]
+                .iter()
+                .any(|prefix| asset.file_name.starts_with(prefix))
+        })
+    }
+}
+
+struct MusicAsset {
+    source: Arc<Group>,
+    relative_path: PathBuf,
+    full_path: String,
+    file_name: String,
+}
+
+impl MusicAsset {
+    fn new(source: Arc<Group>, relative_path: PathBuf) -> Self {
+        let full_path = source
+            .root()
+            .join(&relative_path)
+            .to_string_lossy()
+            .into_owned();
+        let file_name = relative_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| relative_path.to_string_lossy().into_owned());
+        Self {
+            source,
+            relative_path,
+            full_path,
+            file_name,
+        }
+    }
+
+    fn load_audio(&self) -> Result<Vec<u8>, lc_resources::GroupError> {
+        self.source.read_file(&self.relative_path)
+    }
+}
+
+struct MusicResolver {
+    global: MusicCatalog,
+    scenario: MusicCatalog,
+    scenario_has_local_sources: bool,
+    scenario_root: Option<PathBuf>,
+}
+
+impl MusicResolver {
+    fn discover() -> Self {
+        let global = (|| -> anyhow::Result<MusicCatalog> {
+            let paths = AppPaths::discover()?;
+            let path = find_music_group(&paths)?;
+            let group = Group::open(&path)
+                .with_context(|| format!("failed to open music group at {}", path.display()))?;
+            MusicCatalog::from_group(group).map_err(anyhow::Error::from)
+        })();
+        match global {
+            Ok(global) => Self {
+                global,
+                scenario: MusicCatalog::empty(),
+                scenario_has_local_sources: false,
+                scenario_root: None,
+            },
+            Err(error) => {
+                tracing::warn!(%error, "global music catalog discovery skipped");
+                Self {
+                    global: MusicCatalog::empty(),
+                    scenario: MusicCatalog::empty(),
+                    scenario_has_local_sources: false,
+                    scenario_root: None,
+                }
+            }
+        }
+    }
+
+    fn with_global_group(group: Group) -> Result<Self, lc_resources::GroupError> {
+        Ok(Self {
+            global: MusicCatalog::from_group(group)?,
+            scenario: MusicCatalog::empty(),
+            scenario_has_local_sources: false,
+            scenario_root: None,
+        })
+    }
+
+    fn configure_scenario(
+        &mut self,
+        path: Option<&Path>,
+    ) -> Result<bool, lc_resources::GroupError> {
+        if self.scenario_root.as_deref() == path {
+            return Ok(false);
+        }
+        let (scenario, has_local_sources) = path
+            .map(build_scenario_music_catalog)
+            .transpose()?
+            .unwrap_or_else(|| (MusicCatalog::empty(), false));
+        self.scenario = scenario;
+        self.scenario_has_local_sources = has_local_sources;
+        self.scenario_root = path.map(Path::to_path_buf);
+        Ok(true)
+    }
+
+    fn active_catalog(&self) -> &MusicCatalog {
+        if self.scenario_has_local_sources {
+            &self.scenario
+        } else {
+            &self.global
+        }
+    }
+
+    fn resolve(&self, name: &str) -> Option<&MusicAsset> {
+        self.active_catalog().resolve(name)
+    }
+
+    fn first_default(&self) -> Option<&MusicAsset> {
+        self.active_catalog().first_default()
+    }
+}
+
+fn build_scenario_music_catalog(
+    path: &Path,
+) -> Result<(MusicCatalog, bool), lc_resources::GroupError> {
+    let scenario = Group::open(path)?;
+    let mut catalog = MusicCatalog::empty();
+    let scenario_has_tracks = scenario
+        .entries()?
+        .into_iter()
+        .any(|entry| !entry.is_directory && is_music_path(&entry.relative_path));
+    if scenario_has_tracks {
+        catalog.extend_group(scenario.clone())?;
+    }
+
+    let mut has_local_sources = scenario_has_tracks;
+    if let Some(group) = open_music_child(&scenario)? {
+        has_local_sources = true;
+        catalog.extend_group(group)?;
+    }
+
+    let mut parent = path.parent();
+    while let Some(folder_path) = parent.filter(|parent| has_extension(parent, "c4f")) {
+        let folder = Group::open(folder_path)?;
+        if let Some(group) = open_music_child(&folder)? {
+            has_local_sources = true;
+            catalog.extend_group(group)?;
+        }
+        parent = folder_path.parent();
+    }
+
+    Ok((catalog, has_local_sources))
+}
+
+fn open_music_child(group: &Group) -> Result<Option<Group>, lc_resources::GroupError> {
+    group
+        .entries()?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .relative_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("Music.c4g"))
+        })
+        .map(|entry| group.open_child(entry.relative_path))
+        .transpose()
+}
+
 fn load_scenario_music_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
     let scenario = Group::open(path)
         .with_context(|| format!("failed to open scenario group at {}", path.display()))?;
@@ -12494,31 +12779,18 @@ fn load_scenario_music_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
 fn find_music_asset(group: &Group) -> Result<Option<Vec<u8>>, lc_resources::GroupError> {
     // C4MusicSystem's FindEntry/LoadDir searches one group level only. Never
     // descend into definitions: their WAV files are sound effects.
-    let mut candidates: Vec<_> = group
-        .entries()?
-        .into_iter()
-        .filter(|entry| !entry.is_directory && is_music_path(&entry.relative_path))
-        .map(|entry| entry.relative_path)
-        .collect();
-    candidates.sort_by_cached_key(|path| path.to_string_lossy().to_ascii_lowercase());
-    candidates
-        .first()
-        .map(|path| group.read_file(path))
+    let catalog = MusicCatalog::from_group(group.clone())?;
+    catalog
+        .first_default()
+        .map(MusicAsset::load_audio)
         .transpose()
 }
 
 fn find_music_group_asset(group: &Group) -> Result<Option<Vec<u8>>, lc_resources::GroupError> {
-    let music_group = group.entries()?.into_iter().find(|entry| {
-        entry
-            .relative_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.eq_ignore_ascii_case("Music.c4g"))
-    });
-    let Some(music_group) = music_group else {
+    let Some(music_group) = open_music_child(group)? else {
         return Ok(None);
     };
-    find_music_asset(&group.open_child(music_group.relative_path)?)
+    find_music_asset(&music_group)
 }
 
 fn has_extension(path: &Path, expected: &str) -> bool {
@@ -12528,16 +12800,14 @@ fn has_extension(path: &Path, expected: &str) -> bool {
 }
 
 fn is_music_path(path: &Path) -> bool {
-    match path
+    path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
-        .as_deref()
-    {
-        // C4MusicSystem.cpp:31-32. WAV belongs to the sound-effect resolver.
-        Some("it" | "mid" | "mod" | "mp3" | "ogg" | "s3m" | "xm") => true,
-        _ => false,
-    }
+        .is_some_and(|extension| {
+            // C4MusicSystem.cpp:31-32. WAV belongs to the sound-effect resolver.
+            MUSIC_FILE_EXTENSIONS.contains(&extension.as_str())
+        })
 }
 
 fn is_audio_path(path: &Path) -> bool {
@@ -13844,6 +14114,180 @@ mod tests {
         let decoded = decode_audio(audio).expect("sandbox music decodes");
         assert_eq!(decoded.sample_rate, 44_100);
         assert!(decoded.frames.len() > 2_000);
+    }
+
+    #[test]
+    fn music_catalog_resolves_exact_filename_and_cpp_stem_names() {
+        // C4MusicSystem::FindSong tries exact filename, then the requested
+        // stem plus every supported extension (C4MusicSystem.cpp:312-333).
+        let dir = tempdir().expect("tempdir");
+        let music = dir.path().join("Music.c4g");
+        fs::create_dir_all(&music).expect("create music group");
+        fs::write(music.join("Frontend.ogg"), b"frontend").expect("write frontend");
+        fs::write(music.join("Pizza Strings.ogg"), b"pizza").expect("write pizza");
+
+        let group = Group::open(&music).expect("open music group");
+        let catalog = MusicCatalog::from_group(group).expect("build music catalog");
+
+        assert_eq!(
+            catalog
+                .resolve("Frontend.ogg")
+                .expect("exact filename")
+                .load_audio()
+                .expect("read exact filename"),
+            b"frontend"
+        );
+        assert_eq!(
+            catalog
+                .resolve("Frontend")
+                .expect("frontend stem")
+                .load_audio()
+                .expect("read frontend stem"),
+            b"frontend"
+        );
+        assert_eq!(
+            catalog
+                .resolve("Pizza Strings")
+                .expect("pizza stem")
+                .load_audio()
+                .expect("read pizza stem"),
+            b"pizza"
+        );
+    }
+
+    #[test]
+    fn music_resolver_keeps_global_catalog_when_scenario_has_no_music_source() {
+        // PlayScenarioMusic only clears the constructor-loaded global catalog
+        // when it discovers at least one local music directory
+        // (C4MusicSystem.cpp:139-165).
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        fs::write(global.join("Frontend.ogg"), b"frontend").expect("write frontend");
+        fs::write(global.join("Pizza Strings.ogg"), b"pizza").expect("write pizza");
+        let scenario = dir
+            .path()
+            .join("Tutorial.c4f")
+            .join("Tutorial01.c4s");
+        fs::create_dir_all(&scenario).expect("create tutorial scenario");
+
+        let global = Group::open(&global).expect("open global music");
+        let mut resolver =
+            MusicResolver::with_global_group(global).expect("build global resolver");
+        resolver
+            .configure_scenario(Some(&scenario))
+            .expect("configure tutorial scenario");
+
+        assert_eq!(
+            resolver
+                .resolve("Frontend")
+                .expect("global Frontend fallback")
+                .load_audio()
+                .expect("read global Frontend"),
+            b"frontend"
+        );
+        assert_eq!(
+            resolver
+                .resolve("Pizza Strings")
+                .expect("global Pizza Strings fallback")
+                .load_audio()
+                .expect("read global Pizza Strings"),
+            b"pizza"
+        );
+        assert_eq!(
+            resolver
+                .first_default()
+                .expect("default global scenario track")
+                .load_audio()
+                .expect("read default global track"),
+            b"pizza",
+            "Frontend is explicitly addressable but excluded from the default playlist"
+        );
+    }
+
+    #[test]
+    fn music_resolver_replaces_global_catalog_when_parent_has_music_group() {
+        // A discovered local music directory clears the global song list
+        // before local tracks are loaded (C4MusicSystem.cpp:152-166).
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        fs::write(global.join("Frontend.ogg"), b"frontend").expect("write frontend");
+
+        let folder = dir.path().join("Fantasy.c4f");
+        let scenario = folder.join("Scenario.c4s");
+        let local = folder.join("Music.c4g");
+        fs::create_dir_all(&scenario).expect("create scenario");
+        fs::create_dir_all(&local).expect("create local music group");
+        fs::write(local.join("Local Theme.ogg"), b"local").expect("write local theme");
+
+        let global = Group::open(&global).expect("open global music");
+        let mut resolver =
+            MusicResolver::with_global_group(global).expect("build global resolver");
+        resolver
+            .configure_scenario(Some(&scenario))
+            .expect("configure local scenario");
+
+        assert!(
+            resolver.resolve("Frontend").is_none(),
+            "a local catalog replaces rather than extends global music"
+        );
+        assert_eq!(
+            resolver
+                .resolve("Local Theme")
+                .expect("local theme")
+                .load_audio()
+                .expect("read local theme"),
+            b"local"
+        );
+    }
+
+    #[test]
+    fn music_control_combines_config_and_scenario_volume() {
+        // C4MusicSystem::UpdateVolume multiplies Config.Sound.MusicVolume by
+        // Game.iMusicLevel only while a game is running
+        // (C4MusicSystem.cpp:281-290).
+        let mut control = MusicControlState::new(0.8);
+        assert!((control.effective_volume() - 0.8).abs() < f32::EPSILON);
+
+        control.set_scenario_level(Some(30));
+        assert!((control.effective_volume() - 0.24).abs() < f32::EPSILON);
+
+        control.set_scenario_level(Some(0));
+        assert_eq!(control.effective_volume(), 0.0);
+
+        control.set_scenario_level(None);
+        assert!((control.effective_volume() - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn music_control_rejects_stale_decode_and_uses_latest_level() {
+        // A replacement/stop invalidates an in-flight decode. A MusicLevel
+        // call made while the replacement decodes must supply the volume used
+        // when that generation finally starts.
+        let mut control = MusicControlState::new(1.0);
+        control.set_scenario_level(Some(100));
+        let stale = control.advance_generation();
+        let current = control.advance_generation();
+        control.set_scenario_level(Some(30));
+
+        assert_eq!(control.start_volume(stale), None);
+        assert_eq!(control.start_volume(current), Some(0.3));
+    }
+
+    #[test]
+    fn missing_named_music_does_not_invalidate_current_generation() {
+        // C4MusicSystem::Play returns before Stop when FindSong cannot resolve
+        // the requested name (C4MusicSystem.cpp:65-97).
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        let before = audio.music_control.lock().unwrap().generation;
+
+        assert!(!audio
+            .play_named_music("__definitely_missing__", true)
+            .expect("missing lookup succeeds"));
+
+        let after = audio.music_control.lock().unwrap().generation;
+        assert_eq!(after, before, "a miss must leave current playback intact");
     }
 
     #[test]
