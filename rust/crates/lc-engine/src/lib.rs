@@ -16622,6 +16622,11 @@ impl Engine {
                         ActionProcedure::Swim => {
                             math::fixtoi(math::val_by_physical(160, physical_for_advance.swim) * 10)
                         }
+                        ActionProcedure::Dig
+                            if object.state.command_direction == CommandDirection::Stop =>
+                        {
+                            0
+                        }
                         ActionProcedure::Dig => {
                             math::fixtoi(math::val_by_physical(125, physical_for_advance.dig) * 40)
                         }
@@ -43688,6 +43693,49 @@ protected func Activity() { SetActionTargets(); return(1); }
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 32768);
         assert_eq!(engine.objects[idx].fixed_velocity.y.val(), -16384);
         assert_eq!(engine.objects[idx].state.direction, Direction::Right);
+    }
+
+    #[test]
+    fn stopped_dig_freezes_phase_but_counts_action_time_like_cpp() {
+        let mut definition =
+            Definition::from_script("Digger", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Dig".to_string(),
+            ActionSpec::default()
+                .with_procedure("dig")
+                .with_length(16)
+                .with_delay(15)
+                .with_next("Dig"),
+        );
+        definition.configure_actions(Some("Dig".to_string()), actions);
+        definition.set_physical(PhysicalInfo {
+            dig: 40_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Digger")
+                    .with_action(ActionState::new("Dig"))
+                    .with_command_direction(CommandDirection::Stop),
+            )
+            .expect("digger spawns");
+
+        engine.tick().expect("tick succeeds");
+
+        // DFA_DIG COMD_Stop sets iPhaseAdvance=0 (C4Object.cpp:4906-4935),
+        // while Action.Time still increments before phase handling (:4763,
+        // :5463-5471). The action remains Dig on its current visual frame.
+        let action = &engine.object_snapshot(id).expect("digger exists").action;
+        assert_eq!(action.phase, 0);
+        assert_eq!(action.ticks, 0);
+        assert_eq!(action.time, 1);
     }
 
     #[test]
