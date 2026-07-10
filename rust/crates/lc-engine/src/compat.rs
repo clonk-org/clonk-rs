@@ -6621,6 +6621,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("FindObjectOwner", find_object_owner);
     script.register_host_function("FindObject2", find_object2);
     script.register_host_function("FindObjects", find_objects_dispatch);
+    script.register_host_function("Find_AtPoint", find_at_point);
     script.register_host_function("Find_Category", find_category);
     script.register_host_function("Find_ID", find_id);
     script.register_host_function("ObjectNumber", object_number);
@@ -16937,6 +16938,33 @@ fn find_objects_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 }
 
+/// `System.c4g/FindObject.c`'s `Find_AtPoint` wrapper: its coordinates are
+/// relative to the calling object, or to the world origin in global context.
+fn find_at_point(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "Find_AtPoint",
+        "x",
+    )?;
+    let y = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "Find_AtPoint",
+        "y",
+    )?;
+    let origin = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(EffectHostContext::object_context)
+            .map(ObjectScopeContext::effective_position)
+            .unwrap_or(Vector2::ZERO)
+    });
+    Ok(Value::Array(vec![
+        Value::Int(11),
+        Value::Int(origin.x.wrapping_add(x)),
+        Value::Int(origin.y.wrapping_add(y)),
+    ]))
+}
+
 /// `System.c4g/FindObject.c`'s `Find_Category` wrapper: construct the
 /// two-cell C4FO_Category criterion consumed by `FindObjects`.
 fn find_category(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -26767,6 +26795,7 @@ mod tests {
         "FindObjectOwner",
         "FindObjects",
         "FindOtherContents",
+        "Find_AtPoint",
         "Find_Category",
         "Find_ID",
         "FinishCommand",
@@ -27106,6 +27135,62 @@ mod tests {
             let error = find_id(&[rejected]).expect_err("strict C4ID conversion rejects value");
             assert!(error.message().contains("expected id"));
         }
+    }
+
+    #[test]
+    fn find_at_point_adds_the_calling_object_position() {
+        // System.c4g/FindObject.c:41-43 adds GetX()/GetY() to the typed-int
+        // offsets. FnGetX/FnGetY use cthr->Obj and return nil without one
+        // (C4Script.cpp:1198-1202,1293-1297), so global calls use origin zero.
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script("#strict 2\nfunc Probe(x, y) { return Find_AtPoint(x, y); }")
+            .expect("Find_AtPoint probe compiles");
+        let object = HostObjectContext::new(
+            ObjectId::new(1),
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::new(320, -50),
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+        let (local, _) = with_effect_context(
+            Some(object),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || engine.call("Probe", &[Value::Int(45), Value::Int(194)]),
+        );
+        assert_eq!(
+            local.expect("object-relative Find_AtPoint succeeds"),
+            Value::Array(vec![Value::Int(11), Value::Int(365), Value::Int(144)])
+        );
+
+        let (global, _) = with_effect_context(
+            None,
+            &[],
+            HostWorldContext::default(),
+            1,
+            || engine.call("Probe", &[Value::Int(-5), Value::Int(7)]),
+        );
+        assert_eq!(
+            global.expect("global Find_AtPoint succeeds"),
+            Value::Array(vec![Value::Int(11), Value::Int(-5), Value::Int(7)])
+        );
     }
 
     #[test]
