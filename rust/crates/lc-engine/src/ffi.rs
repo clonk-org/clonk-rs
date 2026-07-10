@@ -1676,10 +1676,10 @@ fn runtime_snapshot_mismatch(
         ));
     }
 
-    // The bridge does not export C4GameMessageList (messages) — an
-    // empty cpp list against rust-posted messages is a comparator
-    // asymmetry, not a sim divergence. Compare hud with messages
-    // normalized out when the actual side carries none.
+    // The bridge does not export C4GameMessageList or C4Player::LocalControl.
+    // Empty cpp fields against populated Rust state are comparator
+    // asymmetries, not simulation divergences. Compare the transported HUD
+    // fields only (RustEngineBridge.cpp:1343-1399).
     {
         let mut expected_hud = expected.hud.clone();
         let mut actual_hud = actual.hud.clone();
@@ -1687,6 +1687,8 @@ fn runtime_snapshot_mismatch(
             expected_hud.messages.clear();
             actual_hud.messages.clear();
         }
+        expected_hud.local_players.clear();
+        actual_hud.local_players.clear();
         if expected_hud != actual_hud {
             problems.push(format!(
                 "hud mismatch (rust {expected_hud:?}, cpp {actual_hud:?})"
@@ -3993,6 +3995,40 @@ global func Step(state, frame, random)
             detail.contains("hud mismatch"),
             "detail did not mention hud: {detail}"
         );
+    }
+
+    #[test]
+    fn runtime_mismatch_ignores_cpp_unexported_local_players() {
+        // C4Player::LocalControl is client-local/no-save state
+        // (C4Player.h:81), but RustEngineBridge's HUD ABI exports no local
+        // flag (RustEngineBridge.cpp:1343-1399; lc_engine_ffi.h:113-122).
+        let actual = unsafe {
+            call_make_snapshot(
+                2,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+        let mut expected = actual.clone();
+        expected.hud.local_players.push(0);
+
+        assert_eq!(runtime_snapshot_mismatch(&expected, &actual), None);
     }
 
     #[test]
