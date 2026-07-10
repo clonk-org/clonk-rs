@@ -10,7 +10,7 @@ use lc_resources::definition::{
     ActionFacet as ResourceActionFacet, DefinitionGraphicsVariant as ResourceGraphicsVariant,
 };
 use lc_resources::{
-    decode_legacy_script_text, localize_quoted_script_strings, localize_script_source,
+    decode_legacy_script_text, localize_script_source,
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap, ColorByOwnerMask,
     DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
     ResourceDefinition as ResourceDefinitionData,
@@ -5283,8 +5283,7 @@ fn collect_definitions_from_group<S: AsRef<str>>(
         if !skip_ids.contains(&resource.core.id.to_ascii_uppercase()) {
             primary_definition = true;
             let mut definition = scenario_definition_from_resource(resource, Some(group.clone()));
-            definition.script =
-                localize_quoted_script_strings(group, &definition.script, languages)?;
+            definition.script = localize_script_source(group, &definition.script, languages)?;
             output.push(CollectedDefinition::Definition(definition));
         }
     }
@@ -7637,6 +7636,53 @@ global func Step(state, frame, random)
                 .call_object_function(index, "Label", Vec::new())
                 .expect("Label runs"),
             lc_script::Value::String("Reloaded %dx {{%i}}.".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_definition_script_localizes_unquoted_array_values() {
+        // C4Def::Load gives each definition script its local StringTbl and
+        // C4ScriptHost::MakeScript replaces `$key$` across the whole source
+        // before Preparse (C4Def.cpp:625-633; C4ScriptHost.cpp:46-82).
+        // Hazard's HHKS definition relies on an unquoted key expanding to a
+        // C4Script array literal (Killstats.c4d/StringTblUS.txt:1-6).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_definition_localization_fixture(
+            dir.path(),
+            "#strict\nfunc Messages() { return $Messages$; }\n",
+            "Messages=[\"first\",\"second\"]\n",
+        );
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let definition = scenario
+            .definitions
+            .iter()
+            .find(|definition| definition.id == "GOOD")
+            .expect("GOOD definition exists");
+
+        assert!(definition.script.contains("return [\"first\",\"second\"]"));
+        assert!(!definition.script.contains("$Messages$"));
+        let mut engine = Engine::with_seed(0);
+        scenario
+            .apply(&mut engine)
+            .expect("localized definition compiles");
+        let id = engine
+            .spawn_object(SpawnConfig::new("GOOD"))
+            .expect("GOOD spawns");
+        let index = engine.find_object_index(id).expect("GOOD object index");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Messages", Vec::new())
+                .expect("Messages runs"),
+            lc_script::Value::Array(vec![
+                lc_script::Value::String("first".to_string()),
+                lc_script::Value::String("second".to_string()),
+            ])
         );
     }
 
