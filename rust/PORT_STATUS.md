@@ -168,9 +168,11 @@ and a recorded new first mismatch.
   and drop the partial outcome (the fail-safe arm predates the recovery
   seam); the Initialize/Construction/Step and menu-entries/-command/
   -callback definition seams attach no recovery (their batch folds drop
-  on error — including the in-flight preview id ledger, which then
-  re-mints burned ids; see the creation-number bullet); foreign dir
-  reads stay whole-pixel (snapshot task B); energy
+  on error), EXCEPT Initialize/Construction which now fold their partial
+  outcome on error like call_raw (pre-error creations, burned ids,
+  RNG/audio advance and local writes all persist; see the
+  creation-number bullet); foreign dir reads stay whole-pixel (snapshot
+  task B); energy
   is deliberately not overlaid (active-scope/DoEnergy paths read live
   scope state); FnExit's ObjectComCancelAttach/BoundsCheck arms and the
   Ejection/Departure engine calls stay unmodeled.
@@ -195,22 +197,23 @@ and a recorded new first mismatch.
   folded the transfer-zone commands BEFORE the same batch's spawns, while
   C++ has the owner live in Game.Objects before any creation callback can
   call SetTransferZone (C4Game.cpp:1115-1131, C4Script.cpp:3145-3149).
-  Zones now fold after the spawn loop and land. What remains of the epic:
-  (a) a FAILED Construction/Initialize creation callback discards its
-  whole partial outcome — `call_construction`/`call_initialize` attach no
-  recovery payload (the `recovery: None` map_err) and the spawn_single
-  arms fall back to `CommandBatch::default()` with the PRE-CALL
-  `next_object_id` — so pre-error creations vanish and their burned
-  preview ids get re-minted (AH_Predator: HZCK's Initialize allocates 94
-  then fails on unknown `GetHUD`; CHOS's InitializePlayer re-mints 94 for
-  its TIM1). C++ keeps both the created object and the advanced
-  `ObjectEnumerationIndex` (errors roll nothing back,
-  C4AulExec.cpp:1318-1342; `Number = ++ObjectEnumerationIndex`,
-  C4Game::NewObject). (b) the GoldRush crosshair skew (cpp 1534-1537 vs
-  rust 1531-1534) stays open and is NOT mechanism (a): GoldRush startup
-  runs warn-free, so nothing is discarded — three C++ startup creations
-  are missing outright (not the rain LaunchCloud stubs either; GoldRush
-  triggers no rain-cloud ledger replay).
+  Zones now fold after the spawn loop and land. Also CLOSED: a FAILED
+  Construction/Initialize creation callback used to discard its whole
+  partial outcome (CommandBatch::default() with the PRE-CALL
+  `next_object_id`), erasing pre-error creations and re-minting their
+  burned preview ids (AH_Predator: HZCK's Initialize allocated 94 for
+  its ABAG, failed on unknown `GetHUD`, and CHOS's InitializePlayer
+  re-minted 94 for TIM1); both seams now fold the partial outcome and
+  surface the error as a value, so pre-error creations, burned numbers,
+  RNG/audio advance and local writes persist like C++ (errors roll
+  nothing back, C4AulExec.cpp:1318-1342; `Number =
+  ++ObjectEnumerationIndex`, C4Game.cpp:1119) — the join sequence is now
+  93 HZCK, 94 ABAG, 95 TIM1. What remains of the epic: the GoldRush
+  crosshair skew (cpp 1534-1537 vs rust 1531-1534) stays open and is
+  NEITHER mechanism above: GoldRush startup runs warn-free (nothing was
+  discarded) and triggers no rain-cloud ledger replay (LaunchCloud is
+  not its gap) — three C++ startup creations are missing outright and
+  still need to be identified.
 
 ## Accepted/comparator-only divergences
 
