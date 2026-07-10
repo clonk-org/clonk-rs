@@ -1,0 +1,147 @@
+use std::env;
+use std::path::PathBuf;
+
+use lc_engine::scenario::LegacyDefinitionResolver;
+use lc_engine::{
+    CommandDirection, Definition, DefinitionTargetRect, Direction, Engine, JoinPlayerConfig,
+    Landscape, ObjectUpdate, Scenario, ScenarioError, SpawnConfig, Vector2, CATEGORY_STATIC_BACK,
+    CNAT_TOP, COM_UP,
+};
+use lc_resources::Group;
+
+struct ContentResolver {
+    root: PathBuf,
+}
+
+impl LegacyDefinitionResolver for ContentResolver {
+    fn resolve_definition_groups(
+        &self,
+        _scenario: &Group,
+        identifier: &str,
+    ) -> Result<Vec<Group>, ScenarioError> {
+        let path = self.root.join(identifier.replace('\\', "/"));
+        Group::open(path)
+            .map(|group| vec![group])
+            .map_err(ScenarioError::Resources)
+    }
+}
+
+fn content_root() -> PathBuf {
+    env::var_os("LC_CONTENT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../content"))
+}
+
+#[test]
+fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp() {
+    // C4PhysicalInfo::PromotionUpdate enables CanHangle for every ranked
+    // crew member (C4InfoCore.cpp:207-213). A low-speed DFA_FLIGHT contact
+    // through the CLNK top vertex then enters Hangle without changing its
+    // facing (C4Object.cpp:4369-4404; C4ObjectCom.cpp:112-118).
+    let content = content_root();
+    let tutorial = content.join("Tutorial.c4f/Tutorial01.c4s");
+    assert!(
+        tutorial.is_dir(),
+        "Tutorial01 content is required at {}; set LC_CONTENT_ROOT for an isolated worktree",
+        content.display()
+    );
+
+    let resolver = ContentResolver {
+        root: content.clone(),
+    };
+    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
+        .expect("Tutorial01 and the real Objects.c4d load");
+    let mut engine = Engine::with_seed(0);
+    scenario
+        .apply_before_players(&mut engine)
+        .expect("Tutorial01 definitions apply");
+    let joined = engine
+        .join_player(JoinPlayerConfig {
+            name: "Ceiling tester".to_string(),
+            team: None,
+            color_dw: 0xff_00_00,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            startup_player_count: 1,
+        })
+        .expect("Tutorial01 player joins");
+    let clonk = engine
+        .crew_cursor(joined.number)
+        .expect("Tutorial01 joins one selected CLNK");
+
+    let loaded = engine.object_snapshot(clonk).expect("joined CLNK exists");
+    assert_eq!(loaded.definition_id.as_str(), "CLNK");
+    assert!(
+        loaded
+            .vertices
+            .iter()
+            .any(|vertex| vertex.x == 0 && vertex.y == -7 && vertex.cnat & CNAT_TOP != 0),
+        "the real CLNK DefCore top-contact vertex must survive loading"
+    );
+
+    // The real CLNK stands at (30,20): its bottom vertex is y=29 beside
+    // the floor at y=30, while its top vertex starts below the y=5 ceiling.
+    // The gap guarantees one observable Jump/FLIGHT frame before contact.
+    engine.set_landscape(Landscape::flat(60, 30));
+    engine
+        .apply_object_update(
+            clonk,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(30, 20))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .with_direction(Direction::Right)
+                .with_command_direction(CommandDirection::Stop),
+        )
+        .expect("place the real CLNK in the fixture");
+    let mut ceiling = Definition::from_script("TSTC", "Test ceiling", "#strict\n")
+        .expect("ceiling definition compiles");
+    ceiling.set_category(CATEGORY_STATIC_BACK);
+    ceiling.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 60, 1, 0, 0)));
+    engine
+        .register_definition(ceiling)
+        .expect("ceiling definition registers");
+    engine
+        .spawn_object(SpawnConfig::new("TSTC").with_position(Vector2::new(0, 5)))
+        .expect("ceiling solid mask spawns");
+
+    engine
+        .player_in_com(joined.number, COM_UP, 0)
+        .expect("normal player Up control");
+    assert_eq!(
+        engine
+            .object_snapshot(clonk)
+            .expect("CLNK after input")
+            .command_stack
+            .command_names(),
+        vec!["Jump".to_string()],
+        "COM_Up must take the normal WALK -> Jump command path"
+    );
+
+    engine.tick().expect("first jump frame");
+    assert_eq!(
+        engine
+            .object_snapshot(clonk)
+            .expect("CLNK in flight")
+            .action
+            .name,
+        "Jump",
+        "the real action map must reach DFA_FLIGHT before ceiling contact"
+    );
+
+    for _ in 0..4 {
+        if engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.action.name == "Hangle")
+        {
+            break;
+        }
+        engine.tick().expect("ceiling approach frame");
+    }
+    let hangle = engine.object_snapshot(clonk).expect("CLNK after contact");
+    assert_eq!(hangle.action.name, "Hangle");
+    assert_eq!(hangle.direction, Direction::Right);
+    assert_eq!(hangle.velocity, Vector2::ZERO);
+}
