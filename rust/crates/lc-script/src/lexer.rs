@@ -419,6 +419,35 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Skip the remainder of a function-description block after its opening
+    /// bracket has already been tokenized. C++ treats this as raw text and
+    /// balances only `[`/`]` (C4AulParse.cpp:1825-1853).
+    pub(crate) fn skip_function_description(
+        &mut self,
+        opening_line: usize,
+        opening_column: usize,
+    ) -> Result<(), ParseError> {
+        let mut brackets_open = 1usize;
+        while let Some((_, ch, _, _)) = self.bump_char() {
+            match ch {
+                '[' => brackets_open += 1,
+                ']' => {
+                    brackets_open -= 1;
+                    if brackets_open == 0 {
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Err(ParseError::new(
+            "function desc not closed",
+            opening_line,
+            opening_column,
+        ))
+    }
+
     fn bump_char(&mut self) -> Option<(usize, char, usize, usize)> {
         if let Some((idx, ch, line, column)) = self.peeked.take() {
             // Return cached character with its original position

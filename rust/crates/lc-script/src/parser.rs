@@ -168,6 +168,7 @@ impl<'a> Parser<'a> {
         let params = self.parse_parameter_list()?;
         self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
         self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
+        self.skip_function_description()?;
         let body = self.parse_block_statements()?;
         self.expect_symbol(Symbol::RBrace, "expected '}' after function body")?;
 
@@ -198,6 +199,7 @@ impl<'a> Parser<'a> {
             ));
         }
         self.expect_symbol(Symbol::Colon, "expected ':' after old-style function name")?;
+        self.skip_function_description()?;
 
         let mut body = Vec::new();
         while !self.is_eof()? && !self.is_old_style_function_boundary()? {
@@ -435,6 +437,16 @@ impl<'a> Parser<'a> {
         Ok(statements)
     }
 
+    fn skip_function_description(&mut self) -> Result<(), ParseError> {
+        if !self.check_symbol(Symbol::LBracket)? {
+            return Ok(());
+        }
+
+        let opening = self.consume()?;
+        self.lexer
+            .skip_function_description(opening.line, opening.column)
+    }
+
     fn parse_stmt_or_block_vec(&mut self) -> Result<Vec<Stmt>, ParseError> {
         // Parse a single statement. If it was a braced block, unwrap it to Vec<Stmt>,
         // otherwise wrap the single statement into a one-element Vec.
@@ -473,25 +485,6 @@ impl<'a> Parser<'a> {
             let body = self.parse_block_statements()?;
             self.expect_symbol(Symbol::RBrace, "expected '}' to close block")?;
             return Ok(Stmt::Block(body));
-        }
-
-        // Check for context annotation vs array literal
-        // Context annotations: [$LocaleKey$|...] or [Key=Value|...] or [Key|...]
-        // Arrays: [expr, expr, ...]
-        if self.check_symbol(Symbol::LBracket)? {
-            // Consume the '['
-            self.consume()?;
-            // Use lookahead to distinguish context annotation from array
-            if self.is_context_annotation()? {
-                // This is a context annotation, parse it
-                return self.parse_context_annotation_body();
-            } else {
-                // This is an array literal in statement position
-                // '[' was already consumed at line 371, so parse_array_literal() will handle the rest
-                // Note: Bracket annotations in C4Script don't require semicolons
-                let array_expr = self.parse_array_literal()?;
-                return Ok(Stmt::Expr(array_expr));
-            }
         }
 
         // Handle empty statement (;)
@@ -1788,46 +1781,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // Check if we're looking at a context annotation after '['
-    // Context annotations have the pattern:
-    // - [$LocaleKey$ | ...] OR
-    // - [Identifier=Value | ...] OR
-    // - [Identifier | ...]
-    // Distinguished from arrays by lack of commas and presence of = or | or $
-    fn is_context_annotation(&mut self) -> Result<bool, ParseError> {
-        // Save current position
-        let saved_peeked = self.peeked.clone();
-
-        // Check first token after '['
-        let first_token = self.peek()?;
-        let is_annotation = match &first_token.kind {
-            // LocaleKey definitely means context annotation
-            TokenKind::LocaleKey(_) => true,
-            // Identifier might be context annotation if followed by = or | or ] or another identifier
-            TokenKind::Identifier(_) => {
-                // Consume the identifier to look at next token
-                self.consume()?;
-                let second_token = self.peek()?;
-                // Check the second token kind and determine result
-                let result = matches!(
-                    &second_token.kind,
-                    TokenKind::Symbol(Symbol::Equal)     // Key=Value
-                    | TokenKind::Symbol(Symbol::Pipe)    // Key|...
-                    | TokenKind::Symbol(Symbol::RBracket) // [Key] alone
-                    | TokenKind::Identifier(_) // [Key text...] freeform annotation
-                );
-                // Note: Comma means array: [Key, ...]
-                result
-            }
-            // Anything else is not a context annotation
-            _ => false,
-        };
-
-        // Restore state
-        self.peeked = saved_peeked;
-        Ok(is_annotation)
-    }
-
     fn parse_var_decl_list(&mut self, kind: VarDeclKind) -> Result<Vec<VarDecl>, ParseError> {
         // Parse: name [= expr] (, name [= expr])* ;
         let mut decls = Vec::new();
@@ -1873,38 +1826,6 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::Semicolon, "expected ';' after variable declaration")?;
 
         Ok(decls)
-    }
-
-    fn parse_context_annotation_body(&mut self) -> Result<Stmt, ParseError> {
-        // Context annotations are metadata for the UI system
-        // Syntax: [$LocaleKey$|Property=Value|...]
-        // We parse and discard these as they're not executable code
-        // Note: The opening '[' has already been consumed
-
-        // Consume all tokens until we hit the closing bracket
-        loop {
-            let token = self.peek()?.clone();
-            match &token.kind {
-                TokenKind::Symbol(Symbol::RBracket) => {
-                    self.consume()?;
-                    break;
-                }
-                TokenKind::Eof => {
-                    return Err(ParseError::new(
-                        "unterminated context annotation (missing ']')",
-                        token.line,
-                        token.column,
-                    ));
-                }
-                _ => {
-                    // Consume any token (LocaleKey, Identifier, Symbol, etc.)
-                    self.consume()?;
-                }
-            }
-        }
-
-        // Return an empty block as context annotations have no runtime effect
-        Ok(Stmt::Block(Vec::new()))
     }
 }
 
@@ -1972,6 +1893,57 @@ fn static_const_multi_declarators_parse() {
     fn parse_return_with_simple_expression() {
         let result = parse_script("func Test() { return 42; }");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn function_description_accepts_raw_localized_text() {
+        // C4AulParse.cpp:1825-1853 raw-scans the bracket block immediately
+        // after `{`; localized descriptions are not C4Script token streams.
+        let script = parse_script(
+            "func Test() { [Put/Get object | Image=CLNK | Options=[fast/slow] @ menu] return 42; }",
+        )
+        .expect("raw function description parses");
+
+        assert!(matches!(
+            script.functions[0].body.as_slice(),
+            [Stmt::Return(Some(Expr::Literal(Literal::Int(42))))]
+        ));
+    }
+
+    #[test]
+    fn function_description_must_close_its_outer_bracket() {
+        // C4AulParse.cpp:1832-1844 counts nested brackets and rejects EOF
+        // before the outer description bracket closes.
+        let error = parse_script("func Test() { [Put/Get [fast/slow] return 42; }")
+            .expect_err("unterminated function description must fail");
+
+        assert_eq!(error.message(), "function desc not closed");
+    }
+
+    #[test]
+    fn old_style_function_description_is_raw_text_too() {
+        // C4AulParse.cpp:1757-1759 invokes the same Parse_Desc path directly
+        // after an old-style function's colon.
+        let script = parse_script("Test: [Put/Get | Options=[fast/slow] @ menu] return 42;")
+            .expect("old-style raw function description parses");
+
+        assert!(matches!(
+            script.functions[0].body.as_slice(),
+            [Stmt::Return(Some(Expr::Literal(Literal::Int(42))))]
+        ));
+    }
+
+    #[test]
+    fn array_statement_after_first_body_position_is_not_a_description() {
+        // C4AulParse.cpp:1709-1711 calls Parse_Desc exactly once, before
+        // Parse_Function; a later bracket expression remains executable.
+        let script = parse_script("func Test() { var marker; [marker]; return 42; }")
+            .expect("array statement parses");
+
+        assert!(script.functions[0]
+            .body
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::Expr(Expr::Array(values)) if values.len() == 1)));
     }
 
     #[test]
