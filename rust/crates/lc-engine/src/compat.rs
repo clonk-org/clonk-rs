@@ -4754,6 +4754,98 @@ fn set_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn get_plr_magic(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlrMagic", "player")?;
+    let definition = parse_definition_argument(args.get(1), "GetPlrMagic")?;
+    let index = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "GetPlrMagic",
+        "index",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+
+        if let Some(definition) = definition {
+            return Ok(Value::Bool(
+                player.magic.iter().any(|entry| entry == &definition),
+            ));
+        }
+        if index < 0 {
+            return Ok(Value::Nil);
+        }
+
+        Ok(player
+            .magic
+            .iter()
+            .filter(|entry| {
+                context
+                    .definition_metadata(entry)
+                    .is_some_and(|metadata| metadata.category & crate::CATEGORY_MAGIC != 0)
+            })
+            .nth(index as usize)
+            .cloned()
+            .map(Value::C4Id)
+            .unwrap_or(Value::Nil))
+    })
+}
+
+fn set_plr_magic(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetPlrMagic", "player")?;
+    let definition = match parse_definition_argument(args.get(1), "SetPlrMagic")? {
+        Some(id) => id,
+        None => return Ok(Value::Int(0)),
+    };
+    let remove = value_to_bool(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetPlrMagic",
+        "remove flag",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Int(0));
+        };
+
+        if remove {
+            let Some(player) = context.player_state_mut(player_id) else {
+                return Ok(Value::Int(0));
+            };
+            let Some(index) = player.magic.iter().position(|entry| entry == &definition) else {
+                return Ok(Value::Int(0));
+            };
+            let removed = player.magic.remove(index);
+            context.record_player_command(PlayerCommand::RevokeMagic {
+                player_id,
+                definition_id: removed,
+            });
+            Ok(Value::Int(1))
+        } else {
+            if context.definition_metadata(&definition).is_none() {
+                return Ok(Value::Int(0));
+            }
+            let Some(player) = context.player_state_mut(player_id) else {
+                return Ok(Value::Int(0));
+            };
+            if !player.magic.iter().any(|entry| entry == &definition) {
+                player.magic.push(definition.clone());
+                context.record_player_command(PlayerCommand::GrantMagic {
+                    player_id,
+                    definition_id: definition,
+                });
+            }
+            Ok(Value::Int(1))
+        }
+    })
+}
+
 fn do_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() < 3 {
         return Err(RuntimeError::new(
@@ -6010,6 +6102,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlrValue", get_plr_value);
     script.register_host_function("GetPlrValueGain", get_plr_value_gain);
     script.register_host_function("GetPlrKnowledge", get_plr_knowledge);
+    script.register_host_function("GetPlrMagic", get_plr_magic);
     script.register_host_function("GetCrew", get_crew);
     script.register_host_function("GetHiRank", get_hi_rank);
     script.register_host_function("SetComponent", set_component);
@@ -6051,6 +6144,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetViewCursor", get_view_cursor);
     script.register_host_function("GetSelectCount", get_select_count);
     script.register_host_function("SetPlrKnowledge", set_plr_knowledge);
+    script.register_host_function("SetPlrMagic", set_plr_magic);
     script.register_host_function("SetPlrShowControl", set_plr_show_control);
     script.register_host_function("SetPlrShowControlPos", set_plr_show_control_pos);
     script.register_host_function("SetAction", set_action);
@@ -25168,6 +25262,7 @@ mod tests {
         "GetPlrExtraData",
         "GetPlrJumpAndRunControl",
         "GetPlrKnowledge",
+        "GetPlrMagic",
         "GetPlrValue",
         "GetPlrValueGain",
         "GetPortrait",
@@ -25288,6 +25383,7 @@ mod tests {
         "SetPhysical",
         "SetPlrExtraData",
         "SetPlrKnowledge",
+        "SetPlrMagic",
         "SetPlrShowControl",
         "SetPlrShowControlPos",
         "SetPlrView",

@@ -390,6 +390,7 @@ pub const CATEGORY_STRUCTURE: i32 = 1 << 1;
 pub const CATEGORY_VEHICLE: i32 = 1 << 2;
 pub const CATEGORY_LIVING: i32 = 1 << 3;
 pub const CATEGORY_OBJECT: i32 = 1 << 4;
+pub const CATEGORY_MAGIC: i32 = 1 << 17;
 pub const CATEGORY_SORT_LIMIT: i32 = CATEGORY_STATIC_BACK
     | CATEGORY_STRUCTURE
     | CATEGORY_VEHICLE
@@ -11752,10 +11753,8 @@ impl Engine {
             }
         }
 
-        // Wealth, home base material/production, knowledge
+        // Wealth, home base material/production, knowledge and magic
         // (C4Player.cpp:702-711); ConsolidateValids keeps known defs only.
-        // The Magic list (C4Player.cpp:709-711) has no engine state yet —
-        // it gates spell knowledge, not objects or RNG draws.
         let wealth = start.wealth.evaluate(&mut self.rng);
         let valid_counts = |entries: &[(String, i32)]| -> HashMap<DefinitionId, u32> {
             entries
@@ -11778,6 +11777,30 @@ impl Engine {
             })
             .map(|(id, _)| DefinitionId::from(id.as_str()))
             .collect();
+        let mut magic: Vec<DefinitionId> = start
+            .magic
+            .iter()
+            .map(|(id, _)| DefinitionId::from(id.as_str()))
+            .filter(|id| self.definitions.contains_key(id))
+            .collect();
+        if magic.is_empty() {
+            magic = self
+                .runtime_definition_order
+                .iter()
+                .filter(|id| {
+                    self.definitions
+                        .get(*id)
+                        .is_some_and(|definition| definition.category() & CATEGORY_MAGIC != 0)
+                })
+                .cloned()
+                .collect();
+        }
+        magic.sort_by_key(|id| {
+            self.definitions
+                .get(id)
+                .map(Definition::value)
+                .unwrap_or_default()
+        });
         {
             let player = self.player_mut(number)?;
             player.set_color_index(color_index);
@@ -11787,6 +11810,7 @@ impl Engine {
             for id in knowledge {
                 player.grant_knowledge(id);
             }
+            player.set_magic(magic);
         }
         self.sync_team_home_base_for(number);
 
@@ -34805,6 +34829,187 @@ global func MenuCommand(state, kind, selection)
         assert!(
             player.knowledge().any(|id| id == "BRIK"),
             "player gains requested knowledge"
+        );
+    }
+
+    #[test]
+    fn player_magic_host_calls_preserve_order_and_same_call_writes() {
+        // FnGetPlrMagic/FnSetPlrMagic (C4Script.cpp:2723-2748) query and
+        // mutate C4Player::Magic in list order. Indexed reads filter by
+        // C4D_Magic, while an ID read is a boolean membership check; a
+        // successful SetPlrMagic is visible to the very next host call.
+        let mut engine = Engine::with_seed(7);
+        for (id, category) in [
+            ("HIGH", CATEGORY_MAGIC),
+            ("OBJE", CATEGORY_OBJECT),
+            ("LOWM", CATEGORY_MAGIC),
+            ("NEWM", CATEGORY_MAGIC),
+        ] {
+            let mut definition =
+                Definition::from_script(id, id, "").expect("definition compiles");
+            definition.set_category(category);
+            engine
+                .register_definition(definition)
+                .expect("definition registers");
+        }
+        engine
+            .register_player(PlayerConfig::new(7, "Mage").with_magic(vec![
+                "HIGH".into(),
+                "OBJE".into(),
+                "LOWM".into(),
+            ]))
+            .expect("player registers");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "CALL",
+                    "Caller",
+                    r#"
+                    func Probe(player, high, new_magic) {
+                        return [
+                            GetPlrMagic(player, high),
+                            GetPlrMagic(player, nil, 0),
+                            GetPlrMagic(player, nil, 1),
+                            GetPlrMagic(player, nil, -1),
+                            GetPlrMagic(99, high),
+                            SetPlrMagic(player, new_magic),
+                            GetPlrMagic(player, new_magic),
+                            GetPlrMagic(player, nil, 2),
+                            SetPlrMagic(player, high, true),
+                            GetPlrMagic(player, high),
+                            SetPlrMagic(player, high, true)
+                        ];
+                    }
+                    "#,
+                )
+                .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        let result = engine
+            .call_object_function(
+                caller_index,
+                "Probe",
+                vec![
+                    Value::Int(7),
+                    Value::C4Id("HIGH".into()),
+                    Value::C4Id("NEWM".into()),
+                ],
+            )
+            .expect("Probe runs");
+
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::C4Id("HIGH".into()),
+                Value::C4Id("LOWM".into()),
+                Value::Nil,
+                Value::Nil,
+                Value::Int(1),
+                Value::Bool(true),
+                Value::C4Id("NEWM".into()),
+                Value::Int(1),
+                Value::Bool(false),
+                Value::Int(0),
+            ])
+        );
+        assert_eq!(
+            engine
+                .player(7)
+                .expect("player persists")
+                .magic()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["OBJE".to_string(), "LOWM".to_string(), "NEWM".to_string()]
+        );
+    }
+
+    #[test]
+    fn scenario_init_builds_and_persists_cpp_ordered_magic_lists() {
+        // C4Player::ScenarioInit copies the scenario list, removes unknown
+        // definitions, loads every C4D_Magic definition when that result is
+        // empty, then stable-sorts by DefCore Value (C4Player.cpp:705-708;
+        // C4IDList.cpp:177-205). C4Player::CompileFunc persists Magic
+        // verbatim (C4Player.cpp:1610-1612).
+        let mut engine = Engine::with_seed(7);
+        for (id, category, value) in [
+            ("HIGM", CATEGORY_MAGIC, 100),
+            ("LOWM", CATEGORY_MAGIC, 10),
+            ("MIDM", CATEGORY_MAGIC, 10),
+            ("NEWM", CATEGORY_MAGIC, 50),
+            ("OBJE", CATEGORY_OBJECT, 5),
+        ] {
+            let mut definition =
+                Definition::from_script(id, id, "").expect("definition compiles");
+            definition.set_category(category);
+            definition.set_value(value);
+            engine
+                .register_definition(definition)
+                .expect("definition registers");
+        }
+        let mut explicit = PlayerStart::default();
+        explicit.magic = vec![
+            ("HIGM".into(), 0),
+            ("MISS".into(), 0),
+            ("MIDM".into(), 0),
+            ("LOWM".into(), 0),
+            ("OBJE".into(), 0),
+        ];
+        engine.set_player_starts(vec![explicit, PlayerStart::default()]);
+
+        for name in ["Explicit", "Default"] {
+            engine
+                .join_player(JoinPlayerConfig {
+                    name: name.to_string(),
+                    team: None,
+                    color_dw: 0xff0000,
+                    pref_color: 0,
+                    pref_position: 0,
+                    crew: Vec::new(),
+                    control_style: false,
+                    startup_player_count: 1,
+                })
+                .expect("player joins");
+        }
+
+        assert_eq!(
+            engine
+                .player(0)
+                .expect("explicit player exists")
+                .magic()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["OBJE", "MIDM", "LOWM", "HIGM"]
+        );
+        assert_eq!(
+            engine
+                .player(1)
+                .expect("default player exists")
+                .magic()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["MIDM", "LOWM", "NEWM", "HIGM"]
+        );
+
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("state serializes");
+        let decoded = EngineState::from_json_str(&encoded).expect("state deserializes");
+        engine.restore_state(&decoded).expect("state restores");
+        assert_eq!(
+            engine
+                .player(0)
+                .expect("restored player exists")
+                .magic()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["OBJE", "MIDM", "LOWM", "HIGM"]
         );
     }
 
