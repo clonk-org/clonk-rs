@@ -2,15 +2,15 @@ use crate::pathfinder::Path;
 use crate::rng::LcgRng;
 use crate::{
     control::{
-        interpret_player_control_command, parse_control_ini, ControlEvent, ControlPacket,
-        ControlPlayerInfoEntry, JoinPlayerControlData, PlayerControlData,
+        parse_control_ini, ControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
+        PlayerControlData,
     },
-    ActionState, CommandDirection, CommandStackSnapshot, CrewCommandTarget, CrewRole,
-    CrewSelectionState, Direction, DrawTransform, EffectState, Engine, EngineError, EngineState,
-    EnvironmentFrame, FloatVector2, HudPlayerSnapshot, HudSnapshot, Landscape,
-    NetworkPacketDirection, NetworkPacketSnapshot, ObjectBaseGraphics, ObjectId, ObjectSnapshot,
-    ObjectStatus, ObjectUpdate, ObjectVertex, ParticleLayer, ParticleSnapshot, Playback,
-    PlayerInputState, Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot, Vector2,
+    ActionState, CommandDirection, CommandStackSnapshot, CrewRole, CrewSelectionState, Direction,
+    DrawTransform, EffectState, Engine, EngineState, EnvironmentFrame, FloatVector2,
+    HudPlayerSnapshot, HudSnapshot, Landscape, NetworkPacketDirection, NetworkPacketSnapshot,
+    ObjectBaseGraphics, ObjectId, ObjectSnapshot, ObjectStatus, ObjectVertex, ParticleLayer,
+    ParticleSnapshot, Playback, Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot,
+    Vector2,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -371,7 +371,6 @@ pub struct RuntimeHandle {
     last_frame: u64,
     control_log_strings: BTreeMap<u64, Vec<String>>,
     control_packets: BTreeMap<u64, Vec<ControlPacket>>,
-    player_controls: HashMap<i32, PlayerInputState>,
     /// C4PlayerInfo registry (Game.PlayerInfos): CID_PlrInfo fills it,
     /// CID_JoinPlr resolves `InfoID` against it (C4Control.cpp:716-722).
     player_infos: HashMap<i32, ControlPlayerInfoEntry>,
@@ -402,7 +401,6 @@ impl RuntimeHandle {
             last_frame: 0,
             control_log_strings: BTreeMap::new(),
             control_packets: BTreeMap::new(),
-            player_controls: HashMap::new(),
             player_infos: HashMap::new(),
             rng_mismatch_reported: false,
         }
@@ -541,27 +539,12 @@ impl RuntimeHandle {
     }
 
     fn apply_player_control(&mut self, data: &PlayerControlData) -> Result<(), String> {
-        let player = data.player;
-        if player < 0 {
-            // Ignore observers or invalid players.
-            return Ok(());
-        }
-        let event = match interpret_player_control_command(data.command) {
-            Some(event) => event,
-            None => return Ok(()),
-        };
-        let state = self.player_controls.entry(player).or_default();
-        let maybe_direction = state.handle_event(event);
-        if let ControlEvent::Command { command, kind } = event {
-            self.engine
-                .handle_control_command(player, command, kind)
-                .map_err(|error| error.to_string())?;
-        }
-        if let Some(direction) = maybe_direction {
-            self.set_player_command_direction(player, direction)
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(())
+        // C4ControlPlayerControl::Execute forwards the packet fields straight
+        // to C4Player::InCom (C4Control.cpp:386-395), including menu-only coms
+        // and iData. The int-to-byte cast matches C++'s parameter conversion.
+        self.engine
+            .player_in_com(data.player, data.command as u8, data.data)
+            .map_err(|error| error.to_string())
     }
 
     fn find_path(
@@ -573,26 +556,6 @@ impl RuntimeHandle {
     ) -> Option<Path> {
         self.engine
             .find_path(from, to, level, transfer_zones_enabled)
-    }
-
-    fn set_player_command_direction(
-        &mut self,
-        owner: i32,
-        direction: CommandDirection,
-    ) -> Result<(), EngineError> {
-        self.engine.ensure_cursor(owner)?;
-        let update = ObjectUpdate::new().with_command_direction(direction);
-        match self
-            .engine
-            .apply_command(owner, CrewCommandTarget::cursor(), update.clone())
-        {
-            Ok(()) => Ok(()),
-            Err(EngineError::CrewSelection { .. }) => {
-                self.engine
-                    .apply_command(owner, CrewCommandTarget::selection(), update)
-            }
-            Err(error) => Err(error),
-        }
     }
 
     fn advance_to_frame(&mut self, frame: u64) -> Result<(), String> {
@@ -1898,7 +1861,6 @@ fn load_scenario_into_runtime(
     runtime.scenario_path = Some(path.clone());
     runtime.control_log_strings.clear();
     runtime.control_packets.clear();
-    runtime.player_controls.clear();
     runtime.player_infos.clear();
     runtime.player_infos.clear();
     runtime.player_infos.clear();
@@ -2052,7 +2014,6 @@ pub extern "C" fn lc_engine_runtime_reset(
         runtime.last_frame = runtime.engine.frame();
         runtime.control_log_strings.clear();
         runtime.control_packets.clear();
-        runtime.player_controls.clear();
         runtime.player_infos.clear();
         runtime.player_infos.clear();
         runtime.player_infos.clear();
@@ -2639,7 +2600,6 @@ pub extern "C" fn lc_engine_runtime_import_state_json(
     runtime.last_frame = runtime.engine.frame();
     runtime.control_log_strings.clear();
     runtime.control_packets.clear();
-    runtime.player_controls.clear();
 
     true
 }
@@ -2907,8 +2867,9 @@ pub extern "C" fn lc_engine_string_free(value: *mut c_char) {
 mod tests {
     use super::*;
     use crate::{
-        control::{COM_RELEASE_OFFSET, COM_RIGHT},
-        Definition, EnvironmentSettings, RgbColor, SpawnConfig, Vector2,
+        control::{COM_MENU_RIGHT, COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT},
+        ActionSpec, Definition, EnvironmentSettings, ObjectMenuItem, ObjectMenuState, ObjectUpdate,
+        PlayerConfig, RgbColor, SpawnConfig, Vector2,
     };
     use serde_json::Value;
     use std::{ffi::CString, ptr};
@@ -4511,8 +4472,7 @@ global func Step(state, frame, random)
         assert_eq!(player.name(), "Tyler");
     }
 
-    #[test]
-    fn runtime_control_application_updates_direction() {
+    fn runtime_with_cursor_menu() -> (RuntimeHandle, ObjectId) {
         let mut runtime = RuntimeHandle::new();
         let mut definition = Definition::from_script("Test", "Test", "").expect("script compiles");
         definition.set_crew_member(true);
@@ -4520,6 +4480,10 @@ global func Step(state, frame, random)
             .engine
             .register_definition(definition)
             .expect("definition registers");
+        runtime
+            .engine
+            .register_player(PlayerConfig::new(0, "Test"))
+            .expect("player registers");
 
         let crew = runtime
             .engine
@@ -4529,6 +4493,160 @@ global func Step(state, frame, random)
                     .with_crew_member(true),
             )
             .expect("spawn succeeds");
+        runtime
+            .engine
+            .select_crew(0, vec![crew])
+            .expect("select crew");
+        runtime
+            .engine
+            .set_crew_cursor(0, Some(crew))
+            .expect("set cursor");
+        let items = ["One", "Two", "Three"]
+            .into_iter()
+            .map(|caption| ObjectMenuItem {
+                caption: caption.to_string(),
+                info_caption: String::new(),
+                command: "return 1".to_string(),
+                command2: String::new(),
+                count: 12_345_678,
+                item_id: "NONE".to_string(),
+                selectable: true,
+                value: None,
+            })
+            .collect();
+        runtime
+            .engine
+            .apply_object_update(
+                crew,
+                ObjectUpdate {
+                    menu: Some(Some(ObjectMenuState {
+                        caption: "Choose".to_string(),
+                        symbol_id: "NONE".to_string(),
+                        identification: crate::Value::Int(0),
+                        style: 0,
+                        permanent: false,
+                        selection: 0,
+                        user_menu: false,
+                        command_object: Some(crew),
+                        items,
+                        columns: 5,
+                        lines: 0,
+                        text_progress: None,
+                        decoration: None,
+                    })),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install menu");
+        (runtime, crew)
+    }
+
+    #[test]
+    fn recorded_menu_right_reaches_the_cursor_menu() {
+        // C4ControlPlayerControl::Execute forwards the recorded raw command
+        // and data to C4Player::InCom (C4Control.cpp:386-395).
+        let (mut runtime, crew) = runtime_with_cursor_menu();
+        runtime.control_packets.insert(
+            1,
+            vec![ControlPacket::PlayerControl(PlayerControlData {
+                player: 0,
+                command: i32::from(COM_MENU_RIGHT),
+                data: 0,
+                by_client: 0,
+            })],
+        );
+
+        runtime
+            .apply_control_packets_for_frame(1)
+            .expect("control applies");
+
+        assert_eq!(
+            runtime
+                .engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("menu stays open")
+                .selection,
+            1
+        );
+    }
+
+    #[test]
+    fn recorded_menu_select_forwards_its_data_to_the_cursor_menu() {
+        // C4ControlPlayerControl::Execute preserves iData
+        // (C4Control.cpp:386-395); C4Menu::Control masks the adjustment bit
+        // before selecting that item (C4Menu.cpp:474-476).
+        let (mut runtime, crew) = runtime_with_cursor_menu();
+        runtime.control_packets.insert(
+            1,
+            vec![ControlPacket::PlayerControl(PlayerControlData {
+                player: 0,
+                command: i32::from(COM_MENU_SELECT),
+                data: i32::MIN | 2,
+                by_client: 0,
+            })],
+        );
+
+        runtime
+            .apply_control_packets_for_frame(1)
+            .expect("control applies");
+
+        assert_eq!(
+            runtime
+                .engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("menu stays open")
+                .selection,
+            2
+        );
+    }
+
+    #[test]
+    fn runtime_control_application_updates_direction() {
+        let mut runtime = RuntimeHandle::new();
+        let mut definition = Definition::from_script("Test", "Test", "").expect("script compiles");
+        definition.set_crew_member(true);
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            [(
+                "Walk".to_string(),
+                ActionSpec::default().with_procedure("walk"),
+            )]
+            .into(),
+        );
+        runtime
+            .engine
+            .register_definition(definition)
+            .expect("definition registers");
+        runtime
+            .engine
+            .register_player(PlayerConfig::new(0, "Test"))
+            .expect("player registers");
+        runtime
+            .engine
+            .player_mut(0)
+            .expect("player exists")
+            .control
+            .control_style = true;
+
+        let crew = runtime
+            .engine
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_owner(0)
+                    .with_crew_member(true)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("spawn succeeds");
+        runtime
+            .engine
+            .select_crew(0, vec![crew])
+            .expect("select crew");
+        runtime
+            .engine
+            .set_crew_cursor(0, Some(crew))
+            .expect("set cursor");
 
         runtime.control_packets.insert(
             1,
