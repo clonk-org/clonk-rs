@@ -35,7 +35,7 @@ const DETAIL_FONT_SIZE: f32 = 14.0;
 const MODE_HINT: &str = "Press ←/→ to switch menus";
 const CLASSIC_ITEM_SIZE: i32 = 35;
 const CLASSIC_FRAME_WIDTH: i32 = 2;
-const CLASSIC_COMMAND_HEIGHT: i32 = CLASSIC_ITEM_SIZE;
+const CLASSIC_COMMAND_HEIGHT: i32 = 16;
 const CLASSIC_TITLE_HEIGHT: i32 = 23;
 const CLASSIC_BG_ALPHA: u8 = 255 - 0x5f;
 const CLASSIC_SELECTION_COLOR: Color = Color::opaque(0xc8, 0, 0);
@@ -1943,6 +1943,14 @@ mod tests {
     }
 
     #[test]
+    fn engine_script_menu_command_strip_uses_cpp_menu_symbol_height() {
+        // DrawMenuControls reserves C4MN_SymbolSize (16px), not the
+        // unrelated 35px C4SymbolSize used by normal-menu items
+        // (src/C4Menu.h:32-35,262; src/C4Menu.cpp:843-880).
+        assert_eq!(CLASSIC_COMMAND_HEIGHT, 16);
+    }
+
+    #[test]
     fn engine_script_normal_menu_uses_cpp_grid_geometry_and_selection_color() {
         // CreateMenu/AddMenuItem populate the runtime menu drawn by
         // C4Viewport::DrawMenu (C4Viewport.cpp:983-995). An item without a
@@ -2009,9 +2017,9 @@ mod tests {
             ..IngameMenuGraphics::default()
         };
         let icons = vec![None, None];
-        // DrawMenuControls reserves one full C4MN_SymbolSize (35px) below
-        // the item grid (src/C4Menu.h:35,262), and C4Menu::DrawElement uses
-        // that complete strip for its square command cells
+        // DrawMenuControls reserves one C4MN_SymbolSize (16px) below the
+        // 35px item grid (src/C4Menu.h:32-35,262), and C4Menu::DrawElement
+        // uses that complete strip for its square command cells
         // (src/C4Menu.cpp:843-880). InitSize includes the strip in the menu
         // bounds before bottom alignment (src/C4Menu.cpp:755-777).
         let layout = engine_script_menu_layout(
@@ -2020,9 +2028,9 @@ mod tests {
             &menu,
             true,
         );
-        assert_eq!(CLASSIC_COMMAND_HEIGHT, CLASSIC_ITEM_SIZE);
-        assert_eq!(layout.bounds, Rect::new(391, 350, 179, 95));
-        assert_eq!(layout.item_rect(0), Some(Rect::new(393, 373, 35, 35)));
+        assert_eq!(CLASSIC_COMMAND_HEIGHT, 16);
+        assert_eq!(layout.bounds, Rect::new(391, 369, 179, 76));
+        assert_eq!(layout.item_rect(0), Some(Rect::new(393, 392, 35, 35)));
         assert_eq!(
             engine_script_menu_pointer_target(
                 Rect::new(0, 0, 640, 480),
@@ -2030,21 +2038,12 @@ mod tests {
                 &menu,
                 true,
                 true,
-                GuiPoint::new(411.0, 374.0),
+                GuiPoint::new(411.0, 393.0),
             ),
             Some(EngineScriptMenuPointerTarget::Item(0)),
             "pointer hit cells must move with the C++-sized command strip"
         );
         let mut surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
-        let overflow_probe = (
-            u32::try_from(layout.bounds.x + layout.bounds.width as i32 + 10)
-                .expect("overflow probe x is positive"),
-            u32::try_from(layout.bounds.y + layout.bounds.height as i32 - 18)
-                .expect("overflow probe y is positive"),
-        );
-        let overflow_before = surface
-            .get_pixel(overflow_probe.0, overflow_probe.1)
-            .expect("overflow probe starts on the surface");
         render_engine_script_menu(
             &mut surface,
             Rect::new(0, 0, 640, 480),
@@ -2059,14 +2058,44 @@ mod tests {
             0,
         );
 
-        // Six square controls are requested when Command2 exists, but this
-        // five-column menu only has room for five. C4Facet::TruncateSection
-        // returns an empty facet for the sixth, so the cancel phase must not
-        // leak past the right menu edge (C4Menu.cpp:857-880;
-        // C4Facet.cpp:182-217). This is the red X that visibly hung off the
-        // Dragon Rock difficulty/character menus in Rust.
+        let mut narrow_menu = menu.clone();
+        narrow_menu.columns = 1;
+        let narrow_layout = engine_script_menu_layout(
+            Rect::new(0, 0, 640, 480),
+            hud_font.line_height(),
+            &narrow_menu,
+            true,
+        );
+        let mut overflow_surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
+        let overflow_probe = (
+            u32::try_from(narrow_layout.bounds.x + narrow_layout.bounds.width as i32 + 50)
+                .expect("overflow probe x is positive"),
+            u32::try_from(narrow_layout.bounds.y + narrow_layout.bounds.height as i32 - 10)
+                .expect("overflow probe y is positive"),
+        );
+        let overflow_before = overflow_surface
+            .get_pixel(overflow_probe.0, overflow_probe.1)
+            .expect("overflow probe starts on the surface");
+        render_engine_script_menu(
+            &mut overflow_surface,
+            Rect::new(0, 0, 640, 480),
+            &hud_font,
+            &font,
+            None,
+            &narrow_menu,
+            &gfx,
+            None,
+            &icons,
+            true,
+            0,
+        );
+
+        // A one-column menu cannot fit all six requested controls.
+        // C4Facet::TruncateSection returns an empty facet once another 16px
+        // square no longer fits, so later phases must not leak past the menu
+        // edge (C4Menu.cpp:857-880; C4Facet.cpp:182-217).
         assert_eq!(
-            surface
+            overflow_surface
                 .get_pixel(overflow_probe.0, overflow_probe.1)
                 .expect("overflow probe remains on the surface"),
             overflow_before,
@@ -2074,19 +2103,19 @@ mod tests {
         );
 
         // Normal style is always a five-column 35px icon grid. With the
-        // 23px wooden title, 35px command bar and 2px frame, this two-item
-        // menu is 179x95 and aligns Right|Bottom at (391,350) in 640x480
-        // (C4Menu.h:262; C4Menu.cpp:642-777). Item 1 starts at client
-        // (428,373), and the
+        // 23px wooden title, 16px command bar and 2px frame, this two-item
+        // menu is 179x76 and aligns Right|Bottom at (391,369) in 640x480
+        // (C4Menu.h:32-35,262; C4Menu.cpp:642-777). Item 1 starts at client
+        // (428,392), and the
         // selected cell is filled with palette CRed (#c80000) before its
         // icon is drawn (C4Menu.cpp:147-154).
         assert_eq!(
-            surface.get_pixel(429, 374).expect("selected cell pixel"),
+            surface.get_pixel(429, 393).expect("selected cell pixel"),
             Color::opaque(0xc8, 0, 0),
             "script menus must use the C++ five-column icon-grid geometry"
         );
         assert_eq!(
-            surface.get_pixel(558, 362).expect("close icon pixel"),
+            surface.get_pixel(558, 381).expect("close icon pixel"),
             Color::opaque(17, 238, 51),
             "mouse-controlled C4Menu title bars show Ico_Close at their top-right corner"
         );
@@ -2097,7 +2126,7 @@ mod tests {
                 &menu,
                 true,
                 true,
-                GuiPoint::new(558.0, 362.0),
+                GuiPoint::new(558.0, 381.0),
             ),
             Some(EngineScriptMenuPointerTarget::Close)
         );
