@@ -1623,6 +1623,7 @@ mod tests {
             controller: 1,
             category: 0,
             crew_member: false,
+            selected: false,
             alive: true,
             base_graphics: None,
             graphics_overlays: Vec::new(),

@@ -676,6 +676,7 @@ mod tests {
             controller: 0,
             category: lc_engine::DEFAULT_CATEGORY,
             crew_member: true,
+            selected: false,
             alive: true,
             base_graphics: None,
             graphics_overlays: Vec::new(),
