@@ -9344,6 +9344,7 @@ impl ScenarioScript {
         &mut self,
         snapshot: &SimulationSnapshot,
         scoreboard: Rc<RefCell<ScoreboardState>>,
+        materials: Rc<MaterialSet>,
         rng: LcgRng,
         random: i32,
         global_effects: &[EffectState],
@@ -9373,6 +9374,7 @@ impl ScenarioScript {
             args,
             snapshot,
             scoreboard,
+            materials,
             rng,
             snapshot.frame,
             global_effects,
@@ -9394,6 +9396,7 @@ impl ScenarioScript {
         &mut self,
         snapshot: &SimulationSnapshot,
         scoreboard: Rc<RefCell<ScoreboardState>>,
+        materials: Rc<MaterialSet>,
         rng: LcgRng,
         random: i32,
         frame: u64,
@@ -9426,6 +9429,7 @@ impl ScenarioScript {
             args,
             snapshot,
             scoreboard,
+            materials,
             rng,
             frame,
             global_effects,
@@ -9459,6 +9463,7 @@ impl ScenarioScript {
         args: Vec<Value>,
         snapshot: &SimulationSnapshot,
         scoreboard: Rc<RefCell<ScoreboardState>>,
+        materials: Rc<MaterialSet>,
         rng: LcgRng,
         env_frame: u64,
         global_effects: &[EffectState],
@@ -9489,6 +9494,7 @@ impl ScenarioScript {
         // intro _TLK collided with a burned same-frame FXU1 id here).
         let world = host_world_context_from_snapshot(snapshot)
             .with_scoreboard(scoreboard)
+            .with_materials(Some(materials))
             .with_definition_metadata(definition_metadata)
             .with_definition_order(definition_order)
             .with_particle_defs(particle_defs)
@@ -13549,12 +13555,14 @@ impl Engine {
         let next_object_id = self.next_object_id;
         let scenario_script_counter = self.scenario_script_counter;
         let scoreboard = Rc::clone(&self.scoreboard);
+        let materials = self.materials_shared();
         let Some(script) = self.scenario_script.as_mut() else {
             return Ok(Vec::new());
         };
         let (batch, audio_state, new_rng, script_error) = script.initialize(
             &snapshot,
             scoreboard,
+            materials,
             rng_state,
             random,
             &global_effects,
@@ -13675,6 +13683,7 @@ impl Engine {
         let engine_next_object_id = self.next_object_id;
         let scenario_script_counter = self.scenario_script_counter;
         let scoreboard = Rc::clone(&self.scoreboard);
+        let materials = self.materials_shared();
         let script = match self.scenario_script.as_mut() {
             Some(script) if script.has_function(function) => script,
             Some(_) => return Ok(()),
@@ -13685,6 +13694,7 @@ impl Engine {
             args,
             &snapshot,
             scoreboard,
+            materials,
             rng_state,
             env_frame,
             &global_effects,
@@ -15930,6 +15940,7 @@ impl Engine {
             let engine_next_object_id = self.next_object_id;
             let scenario_script_counter = self.scenario_script_counter;
             let scoreboard = Rc::clone(&self.scoreboard);
+            let materials = self.materials_shared();
             let (batch, audio_state, new_rng) = {
                 let definition_scripts = self.definition_script_table();
                 let script = self
@@ -15939,6 +15950,7 @@ impl Engine {
                 script.step(
                     &snapshot,
                     scoreboard,
+                    materials,
                     rng_state,
                     random,
                     frame,
@@ -40688,6 +40700,44 @@ func Trigger() {
             .find_object_index(created[0])
             .expect("scenario-created object exists");
         assert_eq!(engine.objects[index].definition_id.as_str(), "ZZZA");
+    }
+
+    #[test]
+    fn scenario_initialize_reads_the_live_material_table_like_cpp() {
+        // Game.Script.Call(PSF_Initialize) reaches FnMaterial, which resolves
+        // through the live Game.Material table (C4Game.cpp:2731-2734;
+        // C4Script.cpp:2482-2485; C4Material.cpp:302-308).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            "#,
+        )
+        .expect("material library parses");
+        let mut engine = Engine::with_seed(7);
+        engine.configure_materials_from_library(&library);
+        engine
+            .register_definition(simple_definition("MARK"))
+            .expect("marker registers");
+
+        let created = engine
+            .install_scenario_script_with_convention(
+                "Scenario",
+                r#"
+                func Initialize() {
+                    if (Material("Earth") >= 0) CreateObject(MARK, 0, 0, -1);
+                }
+                "#,
+                true,
+            )
+            .expect("scenario initializes");
+
+        assert_eq!(created.len(), 1, "Earth lookup creates the marker");
+        let marker = engine
+            .object_snapshot(created[0])
+            .expect("scenario-created marker exists");
+        assert_eq!(marker.definition_id.as_str(), "MARK");
     }
 
     #[test]
