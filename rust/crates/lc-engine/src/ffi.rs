@@ -1309,6 +1309,7 @@ unsafe fn make_snapshot(
         sky: None,
         weather_events: Vec::new(),
         global_effects: global_effects_vec,
+        script_globals: Default::default(),
         particles: particle_snapshots,
         players: Vec::new(),
         crew_selection: crew_selection_map,

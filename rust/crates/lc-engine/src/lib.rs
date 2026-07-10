@@ -137,7 +137,7 @@ use message::{MessageCommand, MessageManager, MessageSpec, PersistedMessage};
 use ocf::NORMAL as OCF_NORMAL;
 use sector::{SectorMap, SectorObject};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fs::File;
@@ -5348,6 +5348,23 @@ pub struct ObjectSnapshot {
     pub fixed_rotation: Option<C4Fixed>,
 }
 
+/// Persisted runtime values owned by `C4AulScriptEngine`: numbered
+/// `Global(index)` slots and declared `GlobalNamed` statics
+/// (C4Aul.cpp:506-520). Ordered maps keep JSON byte-stable.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScriptGlobalState {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub numbered: BTreeMap<i32, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub named: BTreeMap<String, Value>,
+}
+
+impl ScriptGlobalState {
+    pub fn is_empty(&self) -> bool {
+        self.numbered.is_empty() && self.named.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub frame: u64,
@@ -5364,6 +5381,8 @@ pub struct SimulationSnapshot {
     pub weather_events: Vec<WeatherEvent>,
     #[serde(default)]
     pub global_effects: Vec<EffectState>,
+    #[serde(default, skip_serializing_if = "ScriptGlobalState::is_empty")]
+    pub script_globals: ScriptGlobalState,
     #[serde(default)]
     pub particles: Vec<ParticleSnapshot>,
     #[serde(default)]
@@ -5447,6 +5466,8 @@ pub struct EngineState {
     pub crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     #[serde(default)]
     pub global_effects: Vec<EffectState>,
+    #[serde(default, skip_serializing_if = "ScriptGlobalState::is_empty")]
+    pub script_globals: ScriptGlobalState,
     #[serde(default)]
     pub known_crew_owners: Vec<i32>,
     #[serde(default)]
@@ -5552,6 +5573,7 @@ impl EngineState {
             crew_selection: snapshot.crew_selection.clone(),
             crew_roles: snapshot.crew_roles.clone(),
             global_effects: snapshot.global_effects.clone(),
+            script_globals: ScriptGlobalState::default(),
             known_crew_owners,
             eliminated_crew_owners,
             transfer_zones: snapshot.transfer_zones.clone(),
@@ -18275,6 +18297,7 @@ impl Engine {
             sky: sky_snapshot,
             weather_events,
             global_effects: self.global_effects.clone(),
+            script_globals: ScriptGlobalState::default(),
             particles,
             players: player_states,
             crew_selection,
@@ -18457,6 +18480,7 @@ impl Engine {
             crew_selection,
             crew_roles,
             global_effects: self.global_effects.clone(),
+            script_globals: ScriptGlobalState::default(),
             known_crew_owners,
             eliminated_crew_owners,
             transfer_zones: self.transfer_zones.states(),

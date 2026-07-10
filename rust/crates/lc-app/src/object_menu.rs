@@ -1674,6 +1674,7 @@ mod tests {
             sky: None,
             weather_events: Vec::new(),
             global_effects: Vec::new(),
+            script_globals: Default::default(),
             particles: Vec::new(),
             players,
             crew_selection: HashMap::new(),
