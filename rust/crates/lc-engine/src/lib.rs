@@ -194,6 +194,8 @@ pub const C4FX_CALL_ENG_ASPHYXIATION: i32 = 37;
 pub const C4FX_CALL_ENG_GET_PUNCHED: i32 = 40;
 const GAME_OVER_CHECK_INTERVAL: u8 = 35;
 const FIRE_DEFINITION_ID: &str = "FLAM";
+/// The bubble object BubbleOut creates (C4Effect.cpp:847-857).
+const BUBBLE_DEFINITION_ID: &str = "FXU1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GraphicsOverlayMode {
@@ -31080,6 +31082,68 @@ mod tests {
             .expect("fire effect survives");
         assert_eq!(fire.vars()[0], EffectVarValue::Int(2), "mode written");
         assert_eq!(fire.vars()[1], EffectVarValue::Int(9), "cause remapped");
+        Ok(())
+    }
+
+    #[test]
+    fn bubble_script_function_creates_fxu1_in_liquid_like_cpp() -> Result<(), EngineError> {
+        // FnBubble (C4Script.cpp:2188-2192 + AddFunc :6718): the
+        // caller-relative point goes to BubbleOut (C4Effect.cpp:847-857) —
+        // a bubble only from semi-solid (submerged) spots, creating one
+        // FXU1 object.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let mut engine = Engine::with_seed(59);
+        engine.set_materials(materials);
+        let mut landscape = Landscape::flat_with_material(40, 30, None);
+        landscape.set_liquid_column(10, vec![LiquidSegment::with_material(5, 12, Some(water))]);
+        engine.set_landscape(landscape);
+        engine.register_definition(simple_definition("FXU1"))?;
+        engine.register_definition(
+            Definition::from_script(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc Blub(iX, iY) { Bubble(iX, iY); }\n",
+            )
+            .expect("actor compiles"),
+        )?;
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_position(Vector2::new(0, 0)))?;
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        // submerged spot → one FXU1
+        let _ = engine.call_object_function(
+            actor_idx,
+            "Blub",
+            vec![Value::Int(10), Value::Int(8)],
+        )?;
+        let bubbles: Vec<&Object> = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "FXU1")
+            .collect();
+        assert_eq!(bubbles.len(), 1, "one bubble from the submerged spot");
+        assert_eq!(bubbles[0].state.position, Vector2::new(10, 8));
+        // open air → no bubbles from nowhere (C4Effect.cpp:850)
+        let _ = engine.call_object_function(
+            actor_idx,
+            "Blub",
+            vec![Value::Int(30), Value::Int(2)],
+        )?;
+        let count = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "FXU1")
+            .count();
+        assert_eq!(count, 1, "no bubble in open air");
         Ok(())
     }
 

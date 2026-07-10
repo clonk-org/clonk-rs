@@ -1891,7 +1891,113 @@ fn object_set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 }
 
-/// FnSmoke (C4Script.cpp:2188-2192) -> Smoke (C4Effect.cpp:859-866): with
+/// FnBubble (C4Script.cpp:2188-2192 + AddFunc :6718) -> BubbleOut
+/// (C4Effect.cpp:847-857): a bubble only from semi-solid (submerged)
+/// spots, capped at the sync-mode smoke level 150 (GetSmokeLevel,
+/// C4Effect.cpp:838-844); creates one FXU1 object.
+fn bubble(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "Bubble expects at most 2 arguments: x, y",
+        ));
+    }
+    let mut x = parse_optional_i32(args.first(), "Bubble", "x")?.unwrap_or(0);
+    let mut y = parse_optional_i32(args.get(1), "Bubble", "y")?.unwrap_or(0);
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        // Local calls offset by the object position (C4Script.cpp:2190).
+        if let Some(object) = context.object_context() {
+            let position = object.effective_position();
+            x = x.saturating_add(position.x);
+            y = y.saturating_add(position.y);
+        }
+        // No bubbles from nowhere (C4Effect.cpp:850).
+        let semi_solid = context
+            .landscape_ref()
+            .map(|landscape| landscape.is_semi_solid_at(x, y))
+            .unwrap_or(false);
+        if !semi_solid {
+            return Ok(Value::Nil);
+        }
+        let Some(metadata) = context
+            .definition_metadata(crate::BUBBLE_DEFINITION_ID)
+            .cloned()
+        else {
+            // Unknown FXU1 def: Game.CreateObject returns nullptr.
+            return Ok(Value::Nil);
+        };
+        // Enough bubbles out there already (C4Effect.cpp:853-854) —
+        // pending same-call spawns count like the live objects.
+        let bubbles = context
+            .world_object_ids()
+            .into_iter()
+            .filter(|id| {
+                context
+                    .get_world_object(*id)
+                    .filter(|object| object.definition_id() == crate::BUBBLE_DEFINITION_ID)
+                    .filter(|object| object.status().is_active())
+                    .is_some()
+            })
+            .count();
+        if bubbles >= 150 {
+            return Ok(Value::Nil);
+        }
+        let id = context.allocate_object_id();
+        let spawn = SpawnConfig::new(crate::BUBBLE_DEFINITION_ID)
+            .with_position(Vector2::new(x, y))
+            .with_owner(OWNER_NONE)
+            .with_category(metadata.category)
+            .with_id(id);
+        let preview_ocf = ocf::compute(
+            metadata.ocf_base,
+            metadata.crew_member,
+            true,
+            ObjectStatus::Normal,
+            false,
+            FULL_CON,
+            metadata.category,
+        );
+        let preview = HostWorldObject::with_category(
+            id,
+            crate::BUBBLE_DEFINITION_ID,
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            metadata.category,
+            0,
+            FULL_CON,
+            0,
+            Vector2::new(x, y),
+            Vector2::ZERO,
+            0,
+            Vec::new(),
+            0,
+            0,
+            0,
+            None,
+            None,
+        )
+        .with_ocf(preview_ocf)
+        .with_full_state(Rc::new(crate::preview_spawn_state(
+            Vector2::new(x, y),
+            OWNER_NONE,
+            OWNER_NONE,
+            metadata.category,
+            FULL_CON,
+            metadata.vertices.clone(),
+        )));
+        context.register_spawn(spawn, preview);
+        Ok(Value::Nil)
+    })
+}
+
+/// FnSmoke (C4Script.cpp:2182-2186) -> Smoke (C4Effect.cpp:859-866): with
 /// the standard particle system one Smoke particle spawns at
 /// (x, y - level/2), size `level`, color `dwClr`.
 fn smoke(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -4736,6 +4842,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetMaterialVal", get_material_val);
     script.register_host_function("ObjectSetAction", object_set_action);
     script.register_host_function("Smoke", smoke);
+    script.register_host_function("Bubble", bubble);
     script.register_host_function("SetPortrait", set_portrait);
     script.register_host_function("GetPortrait", get_portrait);
     script.register_host_function("SetVisibility", set_visibility);
@@ -20946,6 +21053,7 @@ mod tests {
         "BlastFree",
         "BlastObject",
         "BoundBy",
+        "Bubble",
         "C4Id",
         "Call",
         "CastBackParticles",
