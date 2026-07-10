@@ -1633,6 +1633,103 @@ fn get_player_name(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetPlayerVal reflects the named C4Player fields serialized by
+/// C4Player::CompileFunc (C4Script.cpp:4252-4263). The standard
+/// GetPlrViewX/GetPlrViewY wrappers use the ViewX/ViewY entries
+/// (planet/System.c4g/GetXVal.c:99-100; C4Player.cpp:1576-1577).
+fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(entry) = parse_optional_string(args.first(), "GetPlayerVal", "entry")? else {
+        return Ok(Value::Nil);
+    };
+    let section = parse_optional_string(args.get(1), "GetPlayerVal", "section")?;
+    let player_id = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "GetPlayerVal", "player")?;
+    let entry_index = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "GetPlayerVal",
+        "entry_nr",
+    )?;
+    if entry_index != 0 || !matches!(section.as_deref(), None | Some("Player")) {
+        return Ok(Value::Nil);
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        let view_center = player
+            .viewports
+            .first()
+            .map(|viewport| viewport.center)
+            .or_else(|| {
+                player
+                    .cursor
+                    .and_then(|cursor| context.get_world_object(cursor))
+                    .map(|cursor| cursor.position())
+            })
+            .unwrap_or(Vector2::ZERO);
+        let player_status = match player.status {
+            crate::PlayerStatus::Inactive => 0,
+            crate::PlayerStatus::TeamSelection => 2,
+            crate::PlayerStatus::Active
+            | crate::PlayerStatus::Eliminated
+            | crate::PlayerStatus::Surrendered => 1,
+        };
+        let object_number =
+            |object: Option<ObjectId>| object.map(|id| truncate_to_i32(id.as_u64())).unwrap_or(0);
+        Ok(match entry.as_str() {
+            "Status" => Value::Int(player_status),
+            "Index" | "ID" => Value::Int(player.id),
+            "Eliminated" => Value::Int(i32::from(matches!(
+                player.status,
+                crate::PlayerStatus::Eliminated
+            ))),
+            "Surrendered" => Value::Int(i32::from(
+                player.surrendered || matches!(player.status, crate::PlayerStatus::Surrendered),
+            )),
+            "ColorDw" => Value::Int(
+                player
+                    .color
+                    .map(|color| {
+                        ((color.r as i32) << 16) | ((color.g as i32) << 8) | color.b as i32
+                    })
+                    .unwrap_or(0),
+            ),
+            "AutoStopControl" => Value::Int(i32::from(player.control.control_style)),
+            "ViewX" => Value::Int(view_center.x),
+            "ViewY" => Value::Int(view_center.y),
+            "FogOfWar" => Value::Bool(player.fog_of_war),
+            "ForceFogOfWar" => Value::Bool(player.force_fog_of_war),
+            "ShowControl" => Value::Int(player.show_control),
+            "ShowControlPos" => Value::Int(player.show_control_position),
+            "Wealth" => Value::Int(player.wealth),
+            "Points" => Value::Int(player.points),
+            "Value" => Value::Int(player.value),
+            "InitialValue" => Value::Int(player.initial_value),
+            "ValueGain" => Value::Int(player.value_gain),
+            "ObjectsOwned" => Value::Int(player.objects_owned as i32),
+            "ProductionDelay" => Value::Int(player.production_delay as i32),
+            "ProductionUnit" => Value::Int(player.production_unit as i32),
+            "SelectFlash" => Value::Int(player.control.select_flash),
+            "CursorFlash" => Value::Int(player.control.cursor_flash),
+            "Cursor" => Value::Int(object_number(player.cursor)),
+            "ViewCursor" => Value::Int(object_number(
+                player.viewports.first().and_then(|viewport| viewport.focus),
+            )),
+            "LastCom" => Value::Int(i32::from(player.control.last_com)),
+            "LastComDel" => Value::Int(player.control.last_com_delay),
+            "PressedComs" => Value::Int(player.control.pressed_coms),
+            "LastComDownDouble" => Value::Int(player.control.last_com_down_double),
+            "CursorSelection" => Value::Int(player.control.cursor_selection),
+            "CursorToggled" => Value::Int(player.control.cursor_toggled),
+            _ => Value::Nil,
+        })
+    })
+}
+
 fn get_player_id(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -5413,6 +5510,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerCount", get_player_count);
     script.register_host_function("GetPlayerByIndex", get_player_by_index);
     script.register_host_function("GetPlayerName", get_player_name);
+    script.register_host_function("GetPlayerVal", get_player_val);
     script.register_host_function("GetPlayerTeam", get_player_team);
     script.register_host_function("GetPlayerType", get_player_type);
     script.register_host_function("GetPlayerID", get_player_id);
@@ -24242,6 +24340,7 @@ mod tests {
         "GetPlayerName",
         "GetPlayerTeam",
         "GetPlayerType",
+        "GetPlayerVal",
         "GetPlrColorDw",
         "GetPlrDownDouble",
         "GetPlrExtraData",
@@ -25968,6 +26067,265 @@ func Trigger(object pOther)
         assert_eq!(
             result.expect("GetPlayerName succeeds"),
             Value::String("Delta".into())
+        );
+    }
+
+    #[test]
+    fn get_player_val_reads_the_cpp_view_coordinates() {
+        // FnGetPlayerVal reflects C4Player::CompileFunc
+        // (C4Script.cpp:4252-4263), whose ViewX/ViewY entries are the
+        // current player view coordinates (C4Player.cpp:1576-1577).
+        let player = PlayerState {
+            id: 0,
+            viewports: vec![PlayerViewport::new(Vector2::new(306, 271))],
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let mut script = lc_script::Engine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    "global func Probe() { return [GetPlayerVal(\"ViewX\", 0, 0), GetPlayerVal(\"ViewY\", 0, 0)]; }",
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call("Probe", &[])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(
+            result.expect("GetPlayerVal runs"),
+            Value::Array(vec![Value::Int(306), Value::Int(271)])
+        );
+    }
+
+    #[test]
+    fn get_player_val_view_coordinates_follow_the_cursor() {
+        // In C4PVM_Cursor, C4Player::UpdateView copies the current cursor
+        // position into ViewX/ViewY (C4Player.cpp:1692-1704). The engine's
+        // sync state may not carry a presentation viewport, so the cursor
+        // remains the authoritative fallback used by Tutorial01's LENS.
+        let cursor = ObjectId::new(42);
+        let player = PlayerState {
+            id: 0,
+            status: crate::PlayerStatus::Active,
+            cursor: Some(cursor),
+            ..PlayerState::default()
+        };
+        let object = HostWorldObject::new(
+            cursor,
+            "CLNK",
+            ObjectStatus::Normal,
+            "Walk",
+            None,
+            None,
+            None,
+            0,
+            100,
+            crate::FULL_CON,
+            Vector2::new(306, 271),
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        );
+        let world = HostWorldContext::from_objects_with_players(vec![object], vec![player]);
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            get_player_val(&[Value::String("ViewX".into()), Value::Int(0), Value::Int(0)])
+        });
+
+        assert_eq!(
+            result.expect("GetPlayerVal reads cursor view"),
+            Value::Int(306)
+        );
+    }
+
+    #[test]
+    fn get_player_val_reads_the_cpp_runtime_scalars() {
+        // C4Player::CompileFunc exposes FogOfWar, ShowControl, Wealth,
+        // Points, Value, InitialValue, ValueGain and ObjectsOwned under
+        // these exact names (C4Player.cpp:1580-1590); FnGetPlayerVal
+        // returns their native bool/int values (C4Script.cpp:4252-4263).
+        let player = PlayerState {
+            id: 4,
+            wealth: 87,
+            points: 135,
+            value: 320,
+            initial_value: 275,
+            value_gain: 45,
+            objects_owned: 6,
+            fog_of_war: true,
+            show_control: 9,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let read = |entry: &str| {
+                get_player_val(&[Value::String(entry.into()), Value::Int(0), Value::Int(4)])
+            };
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                read("FogOfWar")?,
+                read("ShowControl")?,
+                read("Wealth")?,
+                read("Points")?,
+                read("Value")?,
+                read("InitialValue")?,
+                read("ValueGain")?,
+                read("ObjectsOwned")?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("GetPlayerVal scalar reads run"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(9),
+                Value::Int(87),
+                Value::Int(135),
+                Value::Int(320),
+                Value::Int(275),
+                Value::Int(45),
+                Value::Int(6),
+            ])
+        );
+    }
+
+    #[test]
+    fn get_player_val_reads_the_cpp_control_bookkeeping() {
+        // The remaining modeled C4Player::CompileFunc scalars retain their
+        // exact serialized names and integer types (C4Player.cpp:1560-1605).
+        let cursor = ObjectId::new(42);
+        let view_cursor = ObjectId::new(43);
+        let mut player = PlayerState {
+            id: 7,
+            status: crate::PlayerStatus::Active,
+            surrendered: true,
+            cursor: Some(cursor),
+            color: Some(crate::RgbColor::new(0x12, 0x34, 0x56)),
+            production_delay: 12,
+            production_unit: 3,
+            ..PlayerState::default()
+        };
+        player
+            .viewports
+            .push(PlayerViewport::new(Vector2::ZERO).with_focus(Some(view_cursor)));
+        player.control = crate::PlayerControlState {
+            last_com: 5,
+            last_com_delay: 7,
+            last_com_down_double: 9,
+            pressed_coms: 11,
+            control_style: true,
+            cursor_flash: 13,
+            select_flash: 15,
+            cursor_selection: 17,
+            cursor_toggled: 19,
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let read = |entry: &str| {
+                get_player_val(&[
+                    Value::String(entry.into()),
+                    Value::String("Player".into()),
+                    Value::Int(7),
+                ])
+            };
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                read("Status")?,
+                read("Index")?,
+                read("ID")?,
+                read("Surrendered")?,
+                read("ColorDw")?,
+                read("AutoStopControl")?,
+                read("ProductionDelay")?,
+                read("ProductionUnit")?,
+                read("Cursor")?,
+                read("ViewCursor")?,
+                read("LastCom")?,
+                read("LastComDel")?,
+                read("PressedComs")?,
+                read("LastComDownDouble")?,
+                read("CursorFlash")?,
+                read("SelectFlash")?,
+                read("CursorSelection")?,
+                read("CursorToggled")?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("GetPlayerVal control reads run"),
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(7),
+                Value::Int(7),
+                Value::Int(1),
+                Value::Int(0x12_34_56),
+                Value::Int(1),
+                Value::Int(12),
+                Value::Int(3),
+                Value::Int(42),
+                Value::Int(43),
+                Value::Int(5),
+                Value::Int(7),
+                Value::Int(11),
+                Value::Int(9),
+                Value::Int(13),
+                Value::Int(15),
+                Value::Int(17),
+                Value::Int(19),
+            ])
+        );
+    }
+
+    #[test]
+    fn get_player_val_returns_nil_for_unmatched_cpp_reflection_paths() {
+        // ValidPlr rejects missing players before reflection
+        // (C4Script.cpp:4257), while C4ValueGetCompiler leaves its result
+        // nil when no name/entry occurrence matches (C4Script.cpp:4042-4068).
+        let player = PlayerState {
+            id: 0,
+            viewports: vec![PlayerViewport::new(Vector2::new(1, 2))],
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                get_player_val(&[Value::String("ViewX".into()), Value::Int(0), Value::Int(99)])?,
+                get_player_val(&[
+                    Value::String("Unknown".into()),
+                    Value::Int(0),
+                    Value::Int(0),
+                ])?,
+                get_player_val(&[
+                    Value::String("ViewX".into()),
+                    Value::String("Other".into()),
+                    Value::Int(0),
+                ])?,
+                get_player_val(&[
+                    Value::String("ViewX".into()),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(1),
+                ])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("GetPlayerVal misses remain nil"),
+            Value::Array(vec![Value::Nil; 4])
         );
     }
 
