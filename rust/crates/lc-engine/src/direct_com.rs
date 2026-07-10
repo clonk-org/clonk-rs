@@ -927,7 +927,7 @@ impl Engine {
                         let direction = self.objects[index].state.direction;
                         self.objects[index].state.command_direction = match direction {
                             Direction::Right => CommandDirection::DownRight,
-                            Direction::Left => CommandDirection::DownLeft,
+                            _ => CommandDirection::DownLeft,
                         };
                     }
                 }

@@ -1975,11 +1975,7 @@ impl GraphicsSystem {
             );
             return;
         };
-        let direction_index = match object.direction {
-            Direction::Left => 0,
-            Direction::Right => 1,
-        };
-        let (draw_dir, flipped) = Self::resolve_draw_direction(graphics, direction_index);
+        let (draw_dir, flipped) = Self::resolve_draw_direction(graphics, object.direction);
         // FacetBase face underneath, phase (0, DrawDir)
         // (src/C4Object.cpp:2397-2399).
         if graphics.facet_base {
@@ -1990,7 +1986,7 @@ impl GraphicsSystem {
                 def_shape,
                 inst_shape,
                 0,
-                draw_dir as i32,
+                draw_dir,
                 flipped,
                 owner_color,
                 zoom,
@@ -2012,7 +2008,7 @@ impl GraphicsSystem {
         }
         let source = SourceRect::new(
             facet.x + facet.width.saturating_mul(phase),
-            facet.y + facet.height.saturating_mul(draw_dir as i32),
+            facet.y + facet.height.saturating_mul(draw_dir),
             facet.width,
             facet.height,
         );
@@ -2274,15 +2270,11 @@ impl GraphicsSystem {
             phase.rem_euclid(frame_count_i32)
         };
 
-        let direction_index = match direction {
-            Direction::Left => 0,
-            Direction::Right => 1,
-        };
-        let (draw_dir, flipped) = Self::resolve_draw_direction(graphics, direction_index);
+        let (draw_dir, flipped) = Self::resolve_draw_direction(graphics, direction);
 
         let source_rect = SourceRect::new(
             facet.x + facet.width.saturating_mul(frame_index),
-            facet.y + facet.height.saturating_mul(draw_dir as i32),
+            facet.y + facet.height.saturating_mul(draw_dir),
             facet.width,
             facet.height,
         );
@@ -2580,17 +2572,24 @@ impl GraphicsSystem {
         }
     }
 
-    fn resolve_draw_direction(graphics: &DefinitionActionGraphics, direction: u32) -> (u32, bool) {
-        let directions = graphics.directions.max(1);
+    fn resolve_draw_direction(
+        graphics: &DefinitionActionGraphics,
+        direction: Direction,
+    ) -> (i32, bool) {
+        let direction = direction.to_script_value();
         if let Some(flip_dir) = graphics.flip_dir {
+            let flip_dir = flip_dir.min(i32::MAX as u32) as i32;
             if flip_dir > 0 && direction >= flip_dir {
-                let base = flip_dir - 1;
-                let delta = direction - flip_dir;
-                let draw_dir = base.saturating_sub(delta).min(directions.saturating_sub(1));
-                return (draw_dir, true);
+                return (
+                    flip_dir
+                        .saturating_mul(2)
+                        .saturating_sub(1)
+                        .saturating_sub(direction),
+                    true,
+                );
             }
         }
-        (direction.min(directions.saturating_sub(1)), false)
+        (direction, false)
     }
 
     fn source_within_image(image: &ImageData, rect: &SourceRect) -> bool {
@@ -4039,6 +4038,32 @@ mod tests {
 
     fn gray(v: u8) -> Color {
         Color::new(v, v, v, 255)
+    }
+
+    #[test]
+    fn renderer_resolves_raw_draw_dir_and_flip_dir_rows() {
+        // C4Object::UpdateFlipDir keeps raw Action.Dir and computes
+        // DrawDir=2*FlipDir-1-Dir for the mirrored half
+        // (C4Object.cpp:404-430).
+        let banner = DefinitionActionGraphics {
+            directions: 14,
+            flip_dir: Some(7),
+            ..DefinitionActionGraphics::default()
+        };
+        for (raw, expected) in [(13, (0, true)), (7, (6, true))] {
+            let direction = Direction::from_script_value(raw);
+            assert_eq!(GraphicsSystem::resolve_draw_direction(&banner, direction), expected);
+        }
+
+        let flag = DefinitionActionGraphics {
+            directions: 9,
+            ..DefinitionActionGraphics::default()
+        };
+        let direction = Direction::from_script_value(4);
+        assert_eq!(
+            GraphicsSystem::resolve_draw_direction(&flag, direction),
+            (4, false)
+        );
     }
 
     #[test]

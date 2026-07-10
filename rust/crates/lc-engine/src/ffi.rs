@@ -885,7 +885,7 @@ unsafe fn make_snapshot(
         }
         action.data = entry.action_data;
 
-        let direction = Direction::from_script_value(entry.direction).unwrap_or_default();
+        let direction = Direction::from_raw(entry.direction);
         let command_direction =
             CommandDirection::from_script_value(entry.command_direction).unwrap_or_default();
 
@@ -3053,7 +3053,7 @@ global func Step(state, frame, random)
             action_phase: 3,
             action_ticks: 2,
             action_data: 0,
-            direction: 1,
+            direction: 13,
             command_direction: 3,
             effects: &effect_snapshot,
             effect_count: 1,
@@ -3103,6 +3103,9 @@ global func Step(state, frame, random)
         assert_eq!(recorded.effects.len(), 1);
         assert_eq!(recorded.owner, -1);
         assert!(recorded.crew_member);
+        // C4Action::CompileFunc transports Action.Dir as an unrestricted
+        // int32 (C4Action.cpp:45-54); the bridge must not collapse it to 0/1.
+        assert_eq!(recorded.direction.to_script_value(), 13);
         // The ABI action_ticks slot carries C4Object Action.Time (the
         // bridge exports obj->Action.Time); the phase-delay counter is
         // not transported.

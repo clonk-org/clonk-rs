@@ -2565,7 +2565,7 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
         // tdir = +1, DIR_Left -> -1 (C4ObjectCom.cpp:745).
         let tdir = match scope.direction() {
             Direction::Left => -1,
-            Direction::Right => 1,
+            _ => 1,
         };
         if !context.ensure_object_scope(target) {
             return None;
@@ -12709,6 +12709,7 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
             _ => match object.direction() {
                 Direction::Left => -physical_walk,
                 Direction::Right => physical_walk,
+                _ => C4Fixed::ZERO,
             },
         };
         // The dive branch (SimFlightHitsLiquid → ObjectActionDive,
@@ -14807,10 +14808,7 @@ fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let direction = match Direction::from_script_value(raw_direction) {
-        Some(direction) => direction,
-        None => return Ok(Value::Bool(false)),
-    };
+    let direction = Direction::from_raw(raw_direction);
 
     let mut index = 1;
     let target_id =
@@ -14857,13 +14855,13 @@ fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
                 // TurnAction fires through the staged action update.
                 let action_name = scope.effective_action_name().to_string();
                 if scope.action_library.is_idle_action(&action_name) {
-                    return Ok(Value::Bool(false));
+                    return Ok(Value::Bool(true));
                 }
                 let directions = scope.action_library.directions_for(&action_name) as i32;
                 if direction.to_script_value() < 0
                     || direction.to_script_value() >= directions
                 {
-                    return Ok(Value::Bool(false));
+                    return Ok(Value::Bool(true));
                 }
                 if scope.direction() != direction {
                     if let Some(turn_action) = scope
@@ -14897,11 +14895,11 @@ fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         // action's TurnAction through SetActionByName first.
         let action_name = object.effective_action_name().to_string();
         if object.action_library.is_idle_action(&action_name) {
-            return Ok(Value::Bool(false));
+            return Ok(Value::Bool(true));
         }
         let directions = object.action_library.directions_for(&action_name) as i32;
         if direction.to_script_value() < 0 || direction.to_script_value() >= directions {
-            return Ok(Value::Bool(false));
+            return Ok(Value::Bool(true));
         }
         let turn_action = (object.direction() != direction)
             .then(|| {
@@ -27258,6 +27256,19 @@ func ProbeBadIndex(id) {
     }
 
     #[test]
+    fn set_dir_out_of_range_returns_true_without_changing_direction() {
+        // FnSetDir returns true whenever it resolves an object even when
+        // C4Object::SetDir rejects iDir outside the current action's
+        // Directions range (C4Script.cpp:799-804; C4Object.cpp:4235-4241).
+        let (result, outcome) = with_walking_host_context(|| set_dir(&[Value::Int(13)]));
+        assert_eq!(result.expect("SetDir runs"), Value::Bool(true));
+        assert!(outcome
+            .object_update
+            .map(|update| update.direction.is_none())
+            .unwrap_or(true));
+    }
+
+    #[test]
     fn set_phase_clamps_to_action_length_inclusive_like_cpp() {
         // C4Object::SetPhase (C4Object.cpp:2205-2211): idle → false;
         // BoundBy(iPhase, 0, Length) — INCLUSIVE of Length.
@@ -27303,9 +27314,10 @@ func ProbeBadIndex(id) {
     #[test]
     fn set_dir_is_a_no_op_on_idle_objects() {
         // C4Object::SetDir bails on `Action.Act <= ActIdle`
-        // (C4Object.cpp:4228).
+        // (C4Object.cpp:4238), but FnSetDir still returns true for the object
+        // (C4Script.cpp:799-804).
         let (result, outcome) = with_object_host_context(|| set_dir(&[Value::Int(1)]));
-        assert_eq!(result.expect("SetDir runs"), Value::Bool(false));
+        assert_eq!(result.expect("SetDir runs"), Value::Bool(true));
         assert!(outcome
             .object_update
             .map(|update| update.direction.is_none())

@@ -3278,6 +3278,52 @@ mod tests {
     }
 
     #[test]
+    fn jump_with_multidirection_facing_has_zero_horizontal_launch() {
+        // ObjectComJump initializes TXDir to zero and only changes it for a
+        // left/right ComDir or exact DIR_Left/DIR_Right facing
+        // (C4ObjectCom.cpp:284-296).
+        let actor_id = ObjectId::new(403);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.construction = FULL_CON;
+        actor.direction = Direction::from_raw(8);
+        actor.command_direction = CommandDirection::Stop;
+        actor.physical = PhysicalInfo {
+            walk: 35_000,
+            jump: 40_000,
+            ..PhysicalInfo::default()
+        };
+
+        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 6,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut state = JumpState::from_request(&CommandRequest::new(CommandId::Jump));
+        let velocity = state
+            .step(&ctx)
+            .update
+            .expect("jump update")
+            .fixed_velocity
+            .expect("launch velocity");
+        assert_eq!(velocity.x, crate::C4Fixed::ZERO);
+        assert!(velocity.y < crate::C4Fixed::ZERO);
+    }
+
+    #[test]
     fn jump_skips_action_when_not_walking() {
         let actor_id = ObjectId::new(401);
 
@@ -8119,6 +8165,7 @@ impl MoveToState {
                 && inside(cy - target.y, -LET_GO_RANGE2, LET_GO_RANGE2)
                 || contact_let_go)
                 .then_some(-1),
+            _ => None,
         }
     }
 
@@ -10011,6 +10058,7 @@ impl JumpState {
                     _ => match facing {
                         Direction::Left => -physical_walk,
                         Direction::Right => physical_walk,
+                        _ => crate::C4Fixed::ZERO,
                     },
                 };
                 object_update.fixed_velocity = Some(FixedVec2::new(txdir, -physical_jump));

@@ -501,27 +501,31 @@ impl ObjectStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Direction {
-    #[default]
-    Left,
-    Right,
-}
+/// C4Action::Dir: the raw direction index for the current action.
+///
+/// `DIR_Left` and `DIR_Right` are the first two conventional values, but
+/// multi-directional ActMaps use the full signed int32 domain in saved object
+/// state (C4Action.cpp:45-54).
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct Direction(i32);
 
 impl Direction {
-    pub const fn to_script_value(self) -> i32 {
-        match self {
-            Direction::Left => 0,
-            Direction::Right => 1,
-        }
+    #[allow(non_upper_case_globals)]
+    pub const Left: Self = Self(0);
+    #[allow(non_upper_case_globals)]
+    pub const Right: Self = Self(1);
+
+    pub const fn from_raw(value: i32) -> Self {
+        Self(value)
     }
 
-    pub const fn from_script_value(value: i32) -> Option<Self> {
-        match value {
-            0 => Some(Direction::Left),
-            1 => Some(Direction::Right),
-            _ => None,
-        }
+    pub const fn to_script_value(self) -> i32 {
+        self.0
+    }
+
+    pub const fn from_script_value(value: i32) -> Self {
+        Self(value)
     }
 }
 
@@ -540,7 +544,7 @@ impl<'de> Deserialize<'de> for Direction {
         D: Deserializer<'de>,
     {
         let raw = i32::deserialize(deserializer)?;
-        Ok(Direction::from_script_value(raw).unwrap_or_default())
+        Ok(Direction::from_raw(raw))
     }
 }
 
@@ -10459,11 +10463,14 @@ fn procedure_t_attach(
         | ActionProcedure::Chop
         | ActionProcedure::Fight => base | CNAT_BOTTOM,
         ActionProcedure::Scale => {
-            base | if direction == Direction::Left {
-                CNAT_LEFT
-            } else {
-                CNAT_RIGHT
+            let mut attach = base;
+            if direction == Direction::Left {
+                attach |= CNAT_LEFT;
             }
+            if direction == Direction::Right {
+                attach |= CNAT_RIGHT;
+            }
+            attach
         }
         ActionProcedure::Hang => base | CNAT_TOP,
         ActionProcedure::Dig | ActionProcedure::Swim => CNAT_NONE,
@@ -14309,6 +14316,7 @@ impl Engine {
         let offset = match crew_state.direction {
             Direction::Left => -8,
             Direction::Right => 8,
+            _ => 0,
         };
         let drop_position = Vector2::new(crew_state.position.x + offset, crew_state.position.y);
         let update = ObjectUpdate::new()
@@ -29763,11 +29771,7 @@ fn value_to_direction(
     value: Value,
 ) -> Result<Direction, EngineError> {
     let raw = value_to_int(definition, function, value)?;
-    Direction::from_script_value(raw).ok_or_else(|| EngineError::InvalidScriptOutput {
-        definition: definition.to_string(),
-        function: function.to_string(),
-        detail: format!("unsupported direction value {raw}"),
-    })
+    Ok(Direction::from_raw(raw))
 }
 
 fn value_to_command_direction(
@@ -30532,6 +30536,24 @@ fn value_to_liquid_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direction_json_round_trip_preserves_raw_int32() {
+        // C4Action::CompileFunc persists Action.Dir verbatim
+        // (C4Action.cpp:45-54); save/snapshot JSON must do the same.
+        let direction: Direction = serde_json::from_str("13").expect("direction decodes");
+        assert_eq!(direction.to_script_value(), 13);
+        assert_eq!(serde_json::to_string(&direction).expect("direction encodes"), "13");
+    }
+
+    #[test]
+    fn scale_attach_with_multidirection_dir_has_no_horizontal_side() {
+        // DFA_SCALE independently tests Dir==DIR_Left and Dir==DIR_Right
+        // before adding an attachment side (C4Object.cpp:4852-4853).
+        let direction = Direction::from_script_value(8);
+        let attach = procedure_t_attach(ActionProcedure::Scale, false, direction, 0, 0);
+        assert_eq!(attach & (CNAT_LEFT | CNAT_RIGHT), 0);
+    }
     use crate::math::C4Fixed;
     use crate::rng::LcgRng;
     use crate::scenario::{ClearObjectObjective, CreateObjectObjective, ScenarioObjectives};

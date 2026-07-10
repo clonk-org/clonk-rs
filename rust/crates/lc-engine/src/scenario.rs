@@ -4191,17 +4191,9 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?;
-                // C4Object Dir is a plain int — multi-directional defs use
-                // 0..Directions-1 (Dir=8 in Knights Camp.c4s). The two-way
-                // engine model keeps its default for now (PORT_STATUS).
-                match Direction::from_script_value(raw) {
-                    Some(direction) => self.direction = Some(direction),
-                    None => tracing::warn!(
-                        line = self.line,
-                        value = raw,
-                        "Objects.txt Dir exceeds the two-way direction model; keeping default"
-                    ),
-                }
+                // C4Action::CompileFunc persists Dir verbatim without action-
+                // range validation (C4Action.cpp:45-54).
+                self.direction = Some(Direction::from_raw(raw));
             }
             "comdir" => {
                 let raw = parse_i32(trimmed_value).map_err(|err| {
@@ -9172,22 +9164,33 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
-    fn objects_dir_values_beyond_the_two_way_enum_do_not_abort_load() {
-        // C4Object::CompileFunc reads Dir as a plain int — multi-directional
-        // defs legitimately store Dir=8 (Knights.c4f/Camp.c4s/Objects.txt:
-        // 1098). The two-direction engine model keeps its default until the
-        // Dir model widens (PORT_STATUS); loading must not abort.
+    fn objects_dir_values_round_trip_as_raw_ints_like_cpp() {
+        // C4Action::CompileFunc reads and writes Dir as a plain int with no
+        // validation (C4Action.cpp:45-54). Multi-directional definitions use
+        // values beyond DIR_Right; Dragon Rock contains Dir=13 banners.
         let dir = tempdir().expect("tempdir");
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
         std::fs::write(
             scenario_dir.join("Objects.txt"),
-            "[Object]\nid=GOOD\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\nAction=Float\nDir=8\nComDir=5\n",
+            "[Object]\nid=GOOD\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\nAction=Float\nDir=8\nComDir=5\n\n[Object]\nid=GOOD\nNumber=11\nStatus=1\nCategory=0\nX=20\nY=20\nAction=Float\nDir=13\nComDir=5\n",
         )
         .expect("write objects");
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
-        assert!(
-            engine.object_snapshot(ObjectId::new(10)).is_some(),
-            "the Dir=8 object loaded"
+        assert_eq!(
+            engine
+                .object_snapshot(ObjectId::new(10))
+                .expect("Dir=8 object loaded")
+                .direction
+                .to_script_value(),
+            8
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(ObjectId::new(11))
+                .expect("Dir=13 object loaded")
+                .direction
+                .to_script_value(),
+            13
         );
     }
 
