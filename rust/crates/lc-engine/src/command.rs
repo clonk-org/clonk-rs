@@ -1747,12 +1747,20 @@ mod tests {
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
         assert!(result.operations.is_empty());
-        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events.len(), 2);
         match &result.events[0] {
             CommandEvent::ApplyObjectUpdate { object_id, update } => {
                 assert_eq!(*object_id, item_id);
                 assert_eq!(update.container, Some(None));
                 assert_eq!(update.position, Some(actor.position));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        // ObjectComDrop arms the DROPPER's NoCollectDelay after the exit
+        // (C4ObjectCom.cpp:668-671).
+        match &result.events[1] {
+            CommandEvent::ArmNoCollectDelay { object_id } => {
+                assert_eq!(*object_id, actor_id);
             }
             other => panic!("unexpected event: {:?}", other),
         }
@@ -7132,6 +7140,11 @@ pub enum CommandOperation {
         index: i32,
         success: bool,
     },
+    /// C4Object::SetCommand's entry decrement (C4Object.cpp:3941-3942):
+    /// every SetCommand counts an armed NoCollectDelay down by one. It
+    /// travels with the command ops so its order against Clear/Push is
+    /// preserved through the staged script outcomes.
+    DecrementNoCollectDelay,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7144,6 +7157,17 @@ pub enum MenuRequestKind {
     Activate,
     Get {
         container: ObjectId,
+    },
+    /// ActivateMenu(C4MN_Buy) with the base container as target
+    /// (ContainedControl COM_Up, C4Object.cpp:3269-3274; ActivateMenu,
+    /// C4Object.cpp:1919-1930).
+    Buy {
+        base: ObjectId,
+    },
+    /// ActivateMenu(C4MN_Sell) (ContainedControl COM_Dig,
+    /// C4Object.cpp:3275-3280; ActivateMenu, C4Object.cpp:1932-1943).
+    Sell {
+        base: ObjectId,
     },
 }
 
@@ -7194,6 +7218,11 @@ pub enum CommandEvent {
     AdjustPlayerWealth {
         player_id: i32,
         delta: i32,
+    },
+    /// ObjectComDrop's post-exit `cObj->NoCollectDelay = 2` plus the
+    /// immediate `SetOCF()` on the DROPPER (C4ObjectCom.cpp:668-671).
+    ArmNoCollectDelay {
+        object_id: ObjectId,
     },
     OpenMenu(MenuRequest),
 }
@@ -7614,6 +7643,10 @@ impl CommandStack {
                 CommandOperation::Finish { index, success } => {
                     self.finish_entry(index, success);
                 }
+                // Command internals use AddCommand, never SetCommand — the
+                // decrement only arrives via the engine/script staging
+                // paths, which apply against the object state.
+                CommandOperation::DecrementNoCollectDelay => {}
             }
         }
         Some(result)
@@ -10444,10 +10477,18 @@ impl DropState {
         item_update.position = Some(drop_position);
         item_update.velocity = Some(Vector2::ZERO);
 
-        CommandStepResult::completed(update).with_events(vec![CommandEvent::ApplyObjectUpdate {
-            object_id: item_id,
-            update: item_update,
-        }])
+        // ObjectComDrop (C4ObjectCom.cpp:640-676): after the item's Exit
+        // the dropper arms NoCollectDelay = 2 and refreshes its OCF so the
+        // Collection bit is off before the next cross check.
+        CommandStepResult::completed(update).with_events(vec![
+            CommandEvent::ApplyObjectUpdate {
+                object_id: item_id,
+                update: item_update,
+            },
+            CommandEvent::ArmNoCollectDelay {
+                object_id: ctx.object.id,
+            },
+        ])
     }
 }
 

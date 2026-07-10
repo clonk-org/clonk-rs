@@ -8489,6 +8489,12 @@ impl GameApp {
                         self.object_menu = Some(menu);
                     }
                 }
+                MenuRequestKind::Buy { .. } | MenuRequestKind::Sell { .. } => {
+                    // The engine's ContainedControl base check now emits
+                    // these (C4Object.cpp:3269-3280); the C4MN_Buy/C4MN_Sell
+                    // refill-driven menu UI (C4Object.cpp:1919-1943) is not
+                    // built yet — see PORT_STATUS Controls.
+                }
             }
         }
     }
@@ -10729,10 +10735,16 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
             .unwrap_or_default()
     }
 
-    fn base_owner(&self, _container: &ObjectSnapshot) -> Option<i32> {
-        // C4Object::Base is not modeled by the engine yet — the contained
-        // Buy/Sell commands (src/C4Object.cpp:3020-3034) stay off.
-        None
+    fn base_owner(&self, container: &ObjectSnapshot) -> Option<i32> {
+        // ValidPlr(Contained->Base) gates the contained Buy/Sell commands
+        // (src/C4Object.cpp:3034-3048); the engine's ExecBase now models
+        // C4Object::Base.
+        let base = container.base;
+        self.snapshot
+            .players
+            .iter()
+            .any(|player| player.id == base)
+            .then_some(base)
     }
 
     fn base_sell_enabled(&self) -> bool {
@@ -12247,6 +12259,7 @@ mod tests {
             physical_changes: Vec::new(),
             breath: 0,
             last_energy_loss_cause: -1,
+            base: -1,
             fixed_position: None,
             fixed_velocity: None,
             rotation_velocity: None,
@@ -12613,6 +12626,7 @@ mod tests {
                 physical_changes: Vec::new(),
                 breath: 0,
                 last_energy_loss_cause: -1,
+                base: -1,
                 fixed_position: None,
                 fixed_velocity: None,
                 rotation_velocity: None,
@@ -12667,6 +12681,7 @@ mod tests {
                 physical_changes: Vec::new(),
                 breath: 0,
                 last_energy_loss_cause: -1,
+                base: -1,
                 fixed_position: None,
                 fixed_velocity: None,
                 rotation_velocity: None,

@@ -13893,6 +13893,9 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         let request = parse_command_request(command_id, args, CommandArgLayout::Set, "SetCommand")?;
+        // C4Object::SetCommand entry decrement (C4Object.cpp:3941-3942),
+        // then ClearCommands (:3943) and the push.
+        object.decrement_no_collect_delay();
         object.clear_command_stack();
         let success = object.push_command_front(request);
         Ok(Value::Bool(success))
@@ -20200,6 +20203,13 @@ impl ObjectScopeContext {
         self.command_count = 0;
     }
 
+    /// C4Object::SetCommand's NoCollectDelay entry decrement
+    /// (C4Object.cpp:3941-3942), staged in command-op order.
+    fn decrement_no_collect_delay(&mut self) {
+        self.command_operations
+            .push(CommandOperation::DecrementNoCollectDelay);
+    }
+
     fn push_command_front(&mut self, request: CommandRequest) -> bool {
         if self.command_count >= MAX_COMMAND_STACK {
             return false;
@@ -25382,12 +25392,18 @@ func ProbeBadIndex(id) {
         let (result, outcome) = with_object_host_context(|| set_command(&args));
         let value = result.expect("SetCommand succeeds");
         assert_eq!(value, Value::Bool(true));
-        assert_eq!(outcome.command_operations.len(), 2);
+        // C4Object::SetCommand: NoCollectDelay decrement (C4Object.cpp:
+        // 3941-3942), ClearCommands (:3943), then the push.
+        assert_eq!(outcome.command_operations.len(), 3);
         match &outcome.command_operations[0] {
+            CommandOperation::DecrementNoCollectDelay => {}
+            other => panic!("expected decrement operation, got {:?}", other),
+        }
+        match &outcome.command_operations[1] {
             CommandOperation::Clear => {}
             other => panic!("expected Clear operation, got {:?}", other),
         }
-        match &outcome.command_operations[1] {
+        match &outcome.command_operations[2] {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::MoveTo);
                 assert_eq!(request.tx, Some(10));
@@ -25839,7 +25855,7 @@ func ProbeBadIndex(id) {
         ];
         let (result, outcome) = with_object_host_context(|| set_command(&args));
         assert_eq!(result.expect("SetCommand succeeds"), Value::Bool(true));
-        let request = match &outcome.command_operations[1] {
+        let request = match &outcome.command_operations[2] {
             CommandOperation::PushFront(request) => request.clone(),
             other => panic!("expected PushFront operation, got {:?}", other),
         };
