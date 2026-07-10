@@ -56560,12 +56560,14 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
     }
 
-    #[test]
-    fn missing_contact_callback_preserves_liquid_entry_splash_like_cpp() {
+    fn assert_contact_callback_preserves_liquid_entry_splash_like_cpp(
+        script: &str,
+        callback_present: bool,
+    ) {
         // C4Object::Execute computes OCF once before command/action/movement
-        // (src/C4Object.cpp:1058-1066). ContactCheck may Call a missing
-        // Contact* function during movement (src/C4Movement.cpp:112-119,
-        // :166-182), but that empty call does not invoke SetOCF. The later
+        // (src/C4Object.cpp:1058-1066). ContactCheck may Call a Contact*
+        // function during movement (src/C4Movement.cpp:112-119, :166-182),
+        // but a missing or no-op callback does not invoke SetOCF. The later
         // liquid-entry Splash therefore still reads the pre-collision
         // OCF_HitSpeed2 bit (src/C4Movement.cpp:449-456). Goldrush's WIPF
         // #564 freezes this sequence at frame 403.
@@ -56585,7 +56587,7 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         let materials = MaterialSet::from_resource_library(&library);
 
         let mut mover_definition =
-            Definition::from_script("Mover", "Mover", "").expect("script compiles");
+            Definition::from_script("Mover", "Mover", script).expect("script compiles");
         mover_definition.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
         mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 5).with_cnat(CNAT_BOTTOM)]);
         mover_definition.set_contact_density(50);
@@ -56629,13 +56631,14 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         engine
             .register_definition(mover_definition)
             .expect("mover definition registers");
-        assert!(
-            !engine
+        assert_eq!(
+            engine
                 .definitions
                 .get("Mover")
                 .expect("mover definition exists")
                 .has_function("ContactBottom"),
-            "the regression requires a genuinely missing callback"
+            callback_present,
+            "the fixture must exercise the requested callback path"
         );
 
         let mover_id = engine
@@ -56691,6 +56694,11 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
                 .any(|object| object.definition_id == "FXU1"),
             "the cached HitSpeed2 gate must create submerged FXU1 bubbles"
         );
+    }
+
+    #[test]
+    fn missing_contact_callback_preserves_liquid_entry_splash_like_cpp() {
+        assert_contact_callback_preserves_liquid_entry_splash_like_cpp("", false);
     }
 
     #[test]
