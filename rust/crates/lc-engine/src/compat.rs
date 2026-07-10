@@ -13550,8 +13550,45 @@ impl FindCondition {
     fn is_ensured(&self, world: &impl WorldAccessor) -> bool {
         match self {
             FindCondition::Not(child) => child.is_impossible(world),
+            // C4FindObjectAnd::IsEnsured is `!iCnt` AFTER the constructor
+            // filtered ensured children (C4FindObject.h:135) — recursively:
+            // ensured iff every child is.
+            FindCondition::And(children) => {
+                children.iter().all(|child| child.is_ensured(world))
+            }
+            // C4FindObjectOr::IsEnsured (C4FindObject.cpp:514-520)
+            FindCondition::Or(children) => {
+                children.iter().any(|child| child.is_ensured(world))
+            }
             FindCondition::Category(category) => *category == 0,
             _ => false,
+        }
+    }
+
+    /// The construction-time pruning of C4FindObjectAnd/Or
+    /// (C4FindObject.cpp:400-410, 466-476), bottom-up like CreateByValue:
+    /// And drops ensured children (whose Check may still be false —
+    /// Category(0), C4FindObject.cpp:582-590), Or drops impossible ones
+    /// (which would otherwise kill the sibling bounds). The drivers prune
+    /// once before Check/bounds/IsImpossible run, matching the C++ tree.
+    fn pruned(self, world: &impl WorldAccessor) -> FindCondition {
+        match self {
+            FindCondition::Not(child) => FindCondition::Not(Box::new(child.pruned(world))),
+            FindCondition::And(children) => FindCondition::And(
+                children
+                    .into_iter()
+                    .map(|child| child.pruned(world))
+                    .filter(|child| !child.is_ensured(world))
+                    .collect(),
+            ),
+            FindCondition::Or(children) => FindCondition::Or(
+                children
+                    .into_iter()
+                    .map(|child| child.pruned(world))
+                    .filter(|child| !child.is_impossible(world))
+                    .collect(),
+            ),
+            other => other,
         }
     }
 
@@ -14121,6 +14158,7 @@ fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(view) = snapshot_func_find_view() else {
             return Ok(Value::Nil);
         };
+        let condition = condition.pruned(&view);
         if let Some(sort) = sort {
             return Ok(find_first_with_sort(&view, &condition, &sort)?
                 .map(object_reference_value)
@@ -14138,6 +14176,7 @@ fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
+        let condition = condition.pruned(context);
         if let Some(sort) = sort {
             return Ok(find_first_with_sort(context, &condition, &sort)?
                 .map(object_reference_value)
@@ -14162,6 +14201,7 @@ fn find_objects2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(view) = snapshot_func_find_view() else {
             return Ok(Value::Array(Vec::new()));
         };
+        let condition = condition.pruned(&view);
         let mut matches = find_condition_matches(&view, &condition)?;
         // Pre-sort: erase objects deleted during Check
         // (C4FindObject.cpp:217-218).
@@ -14194,6 +14234,7 @@ fn find_objects2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Array(Vec::new()));
         };
+        let condition = condition.pruned(context);
         let mut matches = find_condition_matches(context, &condition)?;
         if let Some(sort) = sort {
             sort.sort(context, &mut matches)?;
@@ -14215,6 +14256,10 @@ fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(view) = snapshot_func_find_view() else {
             return Ok(Value::Int(0));
         };
+        let condition = condition.pruned(&view);
+        if condition.is_ensured(&view) {
+            return Ok(Value::Int(truncate_to_i32(view.object_ids().len() as u64)));
+        }
         let matches = find_condition_matches(&view, &condition)?;
         return Ok(Value::Int(truncate_to_i32(matches.len() as u64)));
     }
@@ -14223,6 +14268,7 @@ fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Int(0));
         };
+        let condition = condition.pruned(context);
         if condition.is_ensured(context) {
             return Ok(Value::Int(truncate_to_i32(
                 context.world_object_ids().len() as u64,
@@ -29988,6 +30034,105 @@ func ProbeBadIndex(id) {
             object_id_from_value(&result.expect("FindObject2 succeeds")),
             Some(ObjectId::new(expected))
         );
+    }
+
+    #[test]
+    fn find_criteria_prune_ensured_and_children_like_the_cpp_constructor() {
+        // C4FindObjectAnd's constructor REMOVES ensured children
+        // (C4FindObject.cpp:400-410) before Check ever runs: Find_Category(0)
+        // is ensured (C4FindObject.cpp:587-590) yet its Check is always
+        // false (:582-585) — pruning makes it act as always-true inside an
+        // And (and CreateCriterionsFromPars' top-level And,
+        // C4Script.cpp:2023-2026).
+        let world = HostWorldContext::from_objects(vec![
+            find_world_object(1, "ROCK", 10, 10, 1),
+            find_world_object(2, "TREE", 50, 10, 1),
+            find_world_object(3, "ROCK", 90, 10, 1),
+        ]);
+        let args = vec![
+            Value::Array(vec![Value::Int(22), Value::Int(0)]), // ensured
+            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+        ];
+        let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![Some(ObjectId::new(1)), Some(ObjectId::new(3))],
+            "the ensured Category(0) child must not veto the And"
+        );
+    }
+
+    #[test]
+    fn find_criteria_prune_impossible_or_children_for_the_bounds_decision() {
+        // C4FindObjectOr's constructor removes impossible children
+        // (C4FindObject.cpp:466-476) BEFORE summing bounds — an OCF(0)
+        // child (impossible, C4FindObject.cpp:577-580) must not kill the
+        // sibling rect's bounds, so the walk stays sector-ordered.
+        let world = sectored_find_world(
+            vec![
+                find_world_object(1, "ROCK", 80, 10, 1), // sector (1,0)
+                find_world_object(2, "ROCK", 10, 10, 1), // sector (0,0)
+                find_world_object(3, "ROCK", 20, 10, 1), // sector (0,0)
+            ],
+            HashMap::new(),
+        );
+        let args = vec![Value::Array(vec![
+            Value::Int(3), // C4FO_Or
+            Value::Array(vec![
+                Value::Int(10),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(150),
+                Value::Int(40),
+            ]),
+            Value::Array(vec![Value::Int(21), Value::Int(0)]), // impossible
+        ])];
+        let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![
+                Some(ObjectId::new(2)),
+                Some(ObjectId::new(3)),
+                Some(ObjectId::new(1)),
+            ],
+            "the pruned Or keeps the InRect bounds → sector-walk order"
+        );
+    }
+
+    #[test]
+    fn object_count2_or_with_ensured_child_counts_the_full_list() {
+        // C4FindObjectOr::IsEnsured (C4FindObject.cpp:514-520) + the Count
+        // ensured shortcut (C4FindObject.cpp:233-234): an Or with an
+        // ensured child counts every object without checking any.
+        let world = HostWorldContext::from_objects(vec![
+            find_world_object(1, "ROCK", 10, 10, 1),
+            find_world_object(2, "TREE", 50, 10, 1),
+            find_world_object(3, "ROCK", 90, 10, 1),
+        ]);
+        let args = vec![Value::Array(vec![
+            Value::Int(3),
+            Value::Array(vec![Value::Int(22), Value::Int(0)]), // ensured
+            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+        ])];
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || object_count2(&args));
+        assert_eq!(result.expect("ObjectCount2 succeeds"), Value::Int(3));
+
+        // Same through the Func-criterion view path: the unknown-Func child
+        // is impossible (C4FindObject.cpp:664-667), pruned from the Or —
+        // the ensured Category(0) child remains and the shortcut fires.
+        let args = vec![Value::Array(vec![
+            Value::Int(3),
+            Value::Array(vec![Value::Int(22), Value::Int(0)]),
+            Value::Array(vec![Value::Int(60), Value::String("NoSuchFunc".into())]),
+        ])];
+        let (result, _) = with_object_host_context_with_world(world, || object_count2(&args));
+        assert_eq!(result.expect("ObjectCount2 succeeds"), Value::Int(3));
     }
 
     #[test]
