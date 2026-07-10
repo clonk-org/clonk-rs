@@ -56,8 +56,9 @@ require a rebuilt/relinked pinned live run and its new first mismatch.
   AutoContextMenu/CloseCommand, and PlayerMenu ordering.
 - **Presentation:** renderer transforms/GL/shaders/landscape/panning; playlist,
   looped/streamed MIDI, WAV/definition effects; GUI layout/text/portraits and
-  Particle.txt graphics/procedures; launcher Network/Player/Options/About input,
-  player/update/first-start/search/CanOpen/icons/files/mission access/scrolling;
+  Particle.txt graphics/procedures; launcher network discovery/list/chat/create
+  timing, non-Program option sheets, player create/delete/properties/crew/list
+  search/scrolling, update/first-start/CanOpen/icons/files/mission access;
   player-menu pause/abort/
   goal/rule/player/key/team/admin/network/MaxPlayers/scrolling/markup/tooltips;
   HUD inventory/control/mouse rows, board animation/colors, descriptors, FlashCom,
