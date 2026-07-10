@@ -16,6 +16,12 @@ pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Se
 pub type GlobalVariables =
     std::rc::Rc<std::cell::RefCell<HashMap<String, crate::vm::ValueCell>>>;
 
+/// The engine-global numbered-variable table (`C4AulScriptEngine::Global`).
+/// It is separate from [`GlobalVariables`] because numeric slots and declared
+/// named statics have independent namespaces in C++.
+pub type GlobalSlots =
+    std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<i32, crate::vm::ValueCell>>>;
+
 /// Supplies a live cell for a FOREIGN object's named local —
 /// FnLocalN returns `pVarN->GetRef()` (C4Script.cpp:4591-4605), a
 /// reference into the target's locals, so cross-object reads AND lvalue
@@ -24,6 +30,10 @@ pub type LocalCellHook = std::rc::Rc<dyn Fn(&Value, &str) -> Option<crate::vm::V
 
 pub fn new_global_variables() -> GlobalVariables {
     std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()))
+}
+
+pub fn new_global_slots() -> GlobalSlots {
+    std::rc::Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new()))
 }
 
 /// Registers a script's `static` and `static const` declarations in the
@@ -180,6 +190,8 @@ pub struct Engine {
     /// The shared `static` table; `None` keeps the legacy per-host
     /// fallback (fixtures without an engine).
     globals_named: Option<GlobalVariables>,
+    /// The shared numbered `Global(index)` table.
+    globals_numbered: Option<GlobalSlots>,
     /// The shared `static const` registry (C4AulScriptEngine's global
     /// constants, RegisterGlobalConstant C4Aul.cpp:484): script-declared
     /// constants every host sees. Cells are SHARED with `globals_named`
@@ -200,6 +212,7 @@ impl Engine {
             global_functions: None,
             method_dispatch: None,
             globals_named: None,
+            globals_numbered: None,
             globals_consts: None,
             local_cell_hook: None,
         }
@@ -381,6 +394,12 @@ impl Engine {
         self.globals_named = Some(table);
     }
 
+    /// Attaches the engine-global numbered-variable table
+    /// (`C4AulScriptEngine::Global`).
+    pub fn set_global_slots(&mut self, table: GlobalSlots) {
+        self.globals_numbered = Some(table);
+    }
+
     /// Attaches the engine-global `static const` registry (the C4Aul
     /// global-constant table, C4Aul.cpp:484). Scripts adopted afterwards
     /// register their constants here so every host resolves them — both
@@ -424,6 +443,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref());
         vm.call(name, args).map_err(ScriptError::from)
@@ -450,6 +470,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref());
         let cells: Vec<crate::vm::ValueCell> =
@@ -481,6 +502,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref());
         vm.call_with_locals(name, args, local_vars)
@@ -510,6 +532,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_this(this);
@@ -533,6 +556,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_this(this);
@@ -561,6 +585,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_this(this);
@@ -590,6 +615,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_this(this);

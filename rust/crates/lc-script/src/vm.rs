@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use crate::ast::{
@@ -473,6 +473,8 @@ pub struct Vm<'a> {
     /// The engine-global `static` table (GlobalNamed); resolved after
     /// locals, before global constants (C4AulParse.cpp:2836-2839).
     globals_named: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
+    /// The engine-global numbered-variable table (`C4AulScriptEngine::Global`).
+    globals_numbered: Option<&'a std::cell::RefCell<BTreeMap<i32, ValueCell>>>,
     /// The engine-global `static const` registry (GetGlobalConstant,
     /// C4Aul.cpp:494): script-declared constants shared across hosts,
     /// resolvable via the pre-#strict-2 `NAME()` call idiom.
@@ -498,6 +500,7 @@ impl<'a> Vm<'a> {
             this_value: Value::Nil,
             method_dispatch: None,
             globals_named: None,
+            globals_numbered: None,
             globals_consts: None,
             local_cell_hook: None,
         }
@@ -535,6 +538,14 @@ impl<'a> Vm<'a> {
         table: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
     ) -> Self {
         self.globals_named = table;
+        self
+    }
+
+    pub fn with_global_slots(
+        mut self,
+        table: Option<&'a std::cell::RefCell<BTreeMap<i32, ValueCell>>>,
+    ) -> Self {
+        self.globals_numbered = table;
         self
     }
 

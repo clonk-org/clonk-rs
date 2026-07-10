@@ -13,7 +13,8 @@ pub use crate::debugger::DebuggerHooks;
 pub use crate::ast::{AppendTo, Function};
 pub use crate::ast::{VarDecl, VarDeclKind};
 pub use crate::engine::{
-    new_global_variables, register_global_declarations, Engine, GlobalVariables, Script,
+    new_global_slots, new_global_variables, register_global_declarations, Engine, GlobalSlots,
+    GlobalVariables, Script,
 };
 pub use crate::vm::{caller_var_slots, value_cell, CallerVarSlots, LocalCells, ValueCell};
 pub use crate::error::{ParseError, RuntimeError, ScriptError};
