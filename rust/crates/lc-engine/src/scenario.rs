@@ -3903,7 +3903,7 @@ struct LegacyObjectRecord {
     timer: Option<i32>,
     /// Per-object script locals (`LocalNamed=`, C4Object.cpp:2788;
     /// C4ValueMapData::CompileFunc, C4ValueMap.cpp:236-295).
-    local_named: Option<Vec<(String, lc_script::Value)>>,
+    local_named: Option<Vec<(String, SerializedC4Value)>>,
     /// The CURRENT shape's vertices, serialized by C4Shape::CompileFunc
     /// into the [Object] section (C4Shape.cpp:495-515): the effective
     /// post-Con/rotation shape, loaded verbatim.
@@ -4479,7 +4479,12 @@ impl LegacyObjectRecord {
             // Loaded objects keep their script locals verbatim (the tree
             // MotionThreshold, bandit AI state); C++ denumerates object
             // refs after load — Value::Object carries the number directly.
-            config = config.with_local_vars(local_named.into_iter().collect());
+            config = config.with_local_vars(
+                local_named
+                    .into_iter()
+                    .map(|(name, value)| (name, value.into_unresolved_value()))
+                    .collect(),
+            );
         }
         // The saved shape's vertices (C4Shape::CompileFunc into [Object],
         // C4Shape.cpp:495-515): the CURRENT effective shape, loaded
@@ -4796,10 +4801,54 @@ fn parse_i32(value: &str) -> Result<i32, String> {
 /// C4ValueMap.cpp:236-295): `<count>;name=<value>,name=<value>,...` where
 /// each value uses the C4Value type-char encoding (GetC4VID,
 /// C4Value.cpp:368-394). A zero count writes no separator and no entries.
+#[derive(Debug)]
+enum SerializedC4Value {
+    Value(lc_script::Value),
+    ObjectNumber(i32),
+    StringTableIndex(i32),
+    Array(Vec<SerializedC4Value>),
+    Unsupported(String),
+}
+
+impl SerializedC4Value {
+    /// Preserve the pre-resolution loader behavior while serialized identity
+    /// values remain distinct from live VM values. Resolution is a separate
+    /// post-parse step because object numbers are only meaningful once every
+    /// Objects.txt record has been accepted.
+    fn into_unresolved_value(self) -> lc_script::Value {
+        use lc_script::Value;
+        match self {
+            Self::Value(value) => value,
+            Self::ObjectNumber(number) if number > 0 => Value::Object(number as u64),
+            Self::ObjectNumber(_) => Value::Nil,
+            Self::Array(values) => Value::Array(
+                values
+                    .into_iter()
+                    .map(Self::into_unresolved_value)
+                    .collect(),
+            ),
+            Self::StringTableIndex(index) => {
+                tracing::warn!(
+                    value = format!("S{index}"),
+                    "LocalNamed C4Value type not modeled yet; reading as nil"
+                );
+                Value::Nil
+            }
+            Self::Unsupported(encoded) => {
+                tracing::warn!(
+                    value = encoded,
+                    "LocalNamed C4Value type not modeled yet; reading as nil"
+                );
+                Value::Nil
+            }
+        }
+    }
+}
+
 fn parse_local_named(
     value: &str,
     line: usize,
-) -> Result<Vec<(String, lc_script::Value)>, ScenarioError> {
+) -> Result<Vec<(String, SerializedC4Value)>, ScenarioError> {
     let trimmed = value.trim();
     let Some((_count, rest)) = trimmed.split_once(';') else {
         return Ok(Vec::new());
@@ -4850,14 +4899,17 @@ fn split_outside_brackets(text: &str) -> Vec<&str> {
 /// `I`=C4ID stored as its signed 32-bit payload, `a[size;elems]`=array with
 /// trailing nils omitted on write. `S` (string-table id) and `m` (map) are
 /// not modeled yet — they read as nil with a warning.
-fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Value, ScenarioError> {
+fn parse_serialized_c4value(
+    encoded: &str,
+    line: usize,
+) -> Result<SerializedC4Value, ScenarioError> {
     use lc_script::Value;
     let parse_error = |detail: String| {
         ScenarioError::LegacyObjectsParse(format!("Objects.txt line {}: {}", line, detail))
     };
     let mut chars = encoded.chars();
     let Some(type_char) = chars.next() else {
-        return Ok(Value::Nil);
+        return Ok(SerializedC4Value::Value(Value::Nil));
     };
     let payload = &encoded[type_char.len_utf8()..];
     let int_payload = || {
@@ -4865,17 +4917,16 @@ fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Val
             .map_err(|err| parse_error(format!("invalid C4Value payload `{}` ({})", encoded, err)))
     };
     match type_char {
-        'A' => Ok(match int_payload()? {
+        'A' => Ok(SerializedC4Value::Value(match int_payload()? {
             0 => Value::Nil,
             other => Value::Int(other),
-        }),
-        'i' => Ok(Value::Int(int_payload()?)),
-        'b' => Ok(Value::Bool(int_payload()? != 0)),
-        'O' => Ok(match int_payload()? {
-            number if number > 0 => Value::Object(number as u64),
-            _ => Value::Nil,
-        }),
-        'I' => Ok(match int_payload()? {
+        })),
+        'i' => Ok(SerializedC4Value::Value(Value::Int(int_payload()?))),
+        'b' => Ok(SerializedC4Value::Value(Value::Bool(
+            int_payload()? != 0,
+        ))),
+        'O' => Ok(SerializedC4Value::ObjectNumber(int_payload()?)),
+        'I' => Ok(SerializedC4Value::Value(match int_payload()? {
             0 => Value::Nil,
             raw @ 1..=9999 => Value::C4Id(format!("{raw:04}")),
             raw => Value::C4Id(
@@ -4886,7 +4937,7 @@ fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Val
                     .map(char::from)
                     .collect(),
             ),
-        }),
+        })),
         'a' => {
             let inner = payload
                 .strip_prefix('[')
@@ -4903,7 +4954,7 @@ fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Val
                     parse_error(format!("invalid array size in `{}` ({})", encoded, err))
                 })?
                 .clamp(0, 100_000) as usize;
-            let mut elements: Vec<Value> = split_outside_brackets(elements_text)
+            let mut elements: Vec<SerializedC4Value> = split_outside_brackets(elements_text)
                 .into_iter()
                 .map(str::trim)
                 .filter(|element| !element.is_empty())
@@ -4911,17 +4962,12 @@ fn parse_serialized_c4value(encoded: &str, line: usize) -> Result<lc_script::Val
                 .collect::<Result<_, _>>()?;
             // Trailing nils are omitted on write; restore the full size.
             if elements.len() < size {
-                elements.resize(size, Value::Nil);
+                elements.resize_with(size, || SerializedC4Value::Value(Value::Nil));
             }
-            Ok(Value::Array(elements))
+            Ok(SerializedC4Value::Array(elements))
         }
-        'S' | 'm' => {
-            tracing::warn!(
-                value = encoded,
-                "LocalNamed C4Value type not modeled yet; reading as nil"
-            );
-            Ok(Value::Nil)
-        }
+        'S' => Ok(SerializedC4Value::StringTableIndex(int_payload()?)),
+        'm' => Ok(SerializedC4Value::Unsupported(encoded.to_string())),
         other => Err(parse_error(format!(
             "unknown C4Value type char `{}` in `{}`",
             other, encoded
