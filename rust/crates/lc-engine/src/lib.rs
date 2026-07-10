@@ -24421,8 +24421,7 @@ impl Engine {
 
     /// `C4Object::ExecLife` breathing block (C4Object.cpp:878-919), run
     /// after the fire effect like C++ (C4Object.cpp:1074-1080). Still open:
-    /// the MVehic forcefield arm (needs the solid-mask material layer), the
-    /// FXB1 bubble object (the synced `Random(5)` x-argument draw IS
+    /// the FXB1 bubble object (the synced `Random(5)` x-argument draw IS
     /// consumed), the DeepBreath callback's sound, and the corrosion/
     /// C4Object::DoCon on a live object (C4Object.cpp:1414-1483),
     /// growth-path subset: clamp Con into [0, FullCon] (Oversize
@@ -24508,7 +24507,13 @@ impl Engine {
             .unwrap_or(0);
         let mouth_y = position.y + shape_top / 2;
         // Supply check (C4Object.cpp:882-897).
-        let breathe = if self.objects[idx].state.container.is_some() {
+        let vehicle_at_mouth = self.materials.id_of("Vehicle").is_some_and(|vehicle| {
+            self.landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(position.x, mouth_y))
+                == Some(vehicle)
+        });
+        let breathe = if vehicle_at_mouth || self.objects[idx].state.container.is_some() {
             true
         } else if physical.breathe_water != 0 {
             let water = self.materials.id_of("Water");
@@ -43916,6 +43921,100 @@ protected func Activity() { SetActionTargets(); return(1); }
         }
         assert_eq!(engine.objects[idx].state.energy, 49_000);
         assert_eq!(engine.objects[idx].last_energy_loss_cause, 7);
+    }
+
+    #[test]
+    fn exec_life_vehicle_material_is_breathable_like_cpp() {
+        // C4Object::ExecLife treats MVehic at the mouth as breathable
+        // before the ordinary semi-solid check (src/C4Object.cpp:884-899).
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let vehicle = materials.id_of("Vehicle").expect("vehicle material exists");
+        let mut definition = Definition::from_script("Crew", "Crew", script).unwrap();
+        definition.set_physical(PhysicalInfo {
+            breath: 50_000,
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+        definition.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 16)));
+
+        let mut engine = Engine::with_seed(77);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_materials(materials);
+        let mut densities = vec![0; 128];
+        densities[20] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[20] = Some("Vehicle".to_string());
+        let bytes = vec![20; 8 * 40];
+        let grid = landscape::PixelGrid::new(
+            8,
+            40,
+            bytes,
+            densities,
+            material_names,
+            vec![None; 128],
+        );
+        let mut landscape = Landscape::new(8, vec![40; 8]).expect("landscape builds");
+        landscape.set_world_height(40);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+
+        let vertices = vec![
+            ObjectVertex::new(-4, -8),
+            ObjectVertex::new(4, -8),
+            ObjectVertex::new(4, 8),
+            ObjectVertex::new(-4, 8),
+        ];
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Crew")
+                    .with_alive(true)
+                    .with_position(Vector2::new(2, 26))
+                    .with_vertices(vertices)
+                    .with_energy(50_000),
+            )
+            .expect("crew spawns");
+        let idx = engine.find_object_index(id).expect("crew exists");
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(2, 22)),
+            Some(vehicle)
+        );
+        assert!(engine
+            .landscape
+            .as_ref()
+            .is_some_and(|landscape| landscape.is_solid_at(2, 22)));
+        assert_eq!(
+            engine.objects[idx].current_shape_rect(),
+            Some(DefinitionRect::new(-4, -8, 8, 16))
+        );
+        engine.objects[idx].state.breath = 10_000;
+
+        for _ in 0..5 {
+            engine.tick().expect("tick succeeds");
+        }
+        assert_eq!(engine.objects[idx].state.breath, 50_000);
+        assert_eq!(engine.objects[idx].state.energy, 50_000);
     }
 
     #[test]
