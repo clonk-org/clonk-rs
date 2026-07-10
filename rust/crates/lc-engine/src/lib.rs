@@ -38689,6 +38689,166 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn global_numbered_slots_are_live_references_like_cpp() {
+        // FnGlobal returns C4ValueList::operator[](index).GetRef()
+        // (C4Script.cpp:3404-3407); the mutable list clamps negative indices
+        // to zero and grows on demand (C4ValueList.cpp:50-64).
+        let script = r#"
+        global func & Numbered(index) { return Global(index); }
+        func Probe() {
+            Global(-4) = 7;
+            ++Global(2);
+            Global(2) += 4;
+            Numbered(3) = 9;
+            return [Global(0), Global(2), Global(), Global(3)];
+        }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("TSTD", "Test", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("TSTD"))
+            .expect("object spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Probe", Vec::new())
+                .expect("Probe runs"),
+            Value::Array(vec![
+                Value::Int(7),
+                Value::Int(5),
+                Value::Int(7),
+                Value::Int(9),
+            ])
+        );
+    }
+
+    #[test]
+    fn globaln_returns_the_declared_named_global_by_reference() {
+        // FnGlobalN looks up an existing GlobalNamed entry and returns its
+        // C4Value reference (C4Script.cpp:4607-4617). Reference-returning
+        // script functions preserve that exact cell (C4AulExec.cpp:416-430).
+        let script = r#"
+        static spell;
+        global func & Dynamic(name) { return GlobalN(name); }
+        func Probe() {
+            spell = 11;
+            GlobalN("spell") += 2;
+            Dynamic("spell")++;
+            return [spell, GlobalN("spell")];
+        }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("TSTD", "Test", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("TSTD"))
+            .expect("object spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Probe", Vec::new())
+                .expect("Probe runs"),
+            Value::Array(vec![Value::Int(14), Value::Int(14)])
+        );
+    }
+
+    #[test]
+    fn global_access_matches_cpp_missing_bounds_and_parameter_types() {
+        // Engine-call parameter conversion precedes FnGlobal/FnGlobalN
+        // (C4AulExec.cpp:1362-1396); C4ValueList rejects index MaxSize and
+        // GlobalN returns nil (not a new cell) on a missing name
+        // (C4ValueList.cpp:50-64; C4Script.cpp:4607-4617).
+        let script = r#"#strict 3
+        func Coerce() {
+            Global(true) = 3;
+            Global(nil) = 4;
+            return [Global(1), Global(0), GlobalN("missing")];
+        }
+        func TooLarge() { return Global(1000000); }
+        func BadIndexType() { return Global("0"); }
+        func BadNameType() { return GlobalN(0); }
+        func MissingWrite() { GlobalN("missing") = 1; }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("TSTD", "Test", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("TSTD"))
+            .expect("object spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Coerce", Vec::new())
+                .expect("bool and nil convert like C4Value"),
+            Value::Array(vec![Value::Int(3), Value::Int(4), Value::Nil])
+        );
+        for function in ["TooLarge", "BadIndexType", "BadNameType", "MissingWrite"] {
+            assert!(
+                engine
+                    .call_object_function(idx, function, Vec::new())
+                    .is_err(),
+                "{function} must reject the same invalid access as C++"
+            );
+        }
+    }
+
+    #[test]
+    fn numbered_globals_are_shared_across_script_hosts() {
+        // Game.ScriptEngine.Global is one table for every definition host
+        // (C4Aul.h:549; FnGlobal in C4Script.cpp:3404-3407).
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "WRTR",
+                    "Writer",
+                    "func Put() { Global(8) = 41; return Global(8); }",
+                )
+                .expect("writer compiles"),
+            )
+            .expect("writer registers");
+        engine
+            .register_definition(
+                Definition::from_script("READ", "Reader", "func Read() { return Global(8); }")
+                    .expect("reader compiles"),
+            )
+            .expect("reader registers");
+        let writer = engine
+            .spawn_object(SpawnConfig::new("WRTR"))
+            .expect("writer spawns");
+        let reader = engine
+            .spawn_object(SpawnConfig::new("READ"))
+            .expect("reader spawns");
+        let writer_idx = engine.find_object_index(writer).expect("writer exists");
+        assert_eq!(
+            engine
+                .call_object_function(writer_idx, "Put", Vec::new())
+                .expect("write succeeds"),
+            Value::Int(41)
+        );
+        let reader_idx = engine.find_object_index(reader).expect("reader exists");
+        assert_eq!(
+            engine
+                .call_object_function(reader_idx, "Read", Vec::new())
+                .expect("read succeeds"),
+            Value::Int(41)
+        );
+    }
+
+    #[test]
     fn declaring_host_global_link_inherits_engine_overload() {
         let mut engine = Engine::with_seed(7);
         assert_eq!(

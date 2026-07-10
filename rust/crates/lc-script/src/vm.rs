@@ -18,6 +18,9 @@ const MAX_CALL_DEPTH: usize = 512;
 /// (C4Aul.h); `Par(n)` beyond them reads nil and `F(...)` forwards at most
 /// this many.
 const MAX_CALL_PARAMETERS: usize = 10;
+/// `C4ValueList::MaxSize` (C4ValueList.h:32): `Global(index)` may grow up to,
+/// but not including, this index.
+const GLOBAL_SLOT_MAX_SIZE: i32 = 1_000_000;
 
 /// Run `f` with native-stack headroom, growing the stack when it runs low. Each
 /// script-call level of this tree-walking interpreter uses several KiB of native
@@ -619,6 +622,78 @@ impl<'a> Vm<'a> {
             }
         }
         env.object_state.local_slot_cell(index)
+    }
+
+    /// FnGlobal's mutable `C4ValueList::operator[]` target
+    /// (C4Script.cpp:3404-3407; C4ValueList.cpp:50-64).
+    fn numbered_global_cell(&self, index: i32) -> Result<ValueCell, RuntimeError> {
+        if index >= GLOBAL_SLOT_MAX_SIZE {
+            return Err(RuntimeError::new("out of memory"));
+        }
+        let table = self
+            .globals_numbered
+            .ok_or_else(|| RuntimeError::new("unknown function 'Global'"))?;
+        Ok(table
+            .borrow_mut()
+            .entry(index.max(0))
+            .or_insert_with(|| value_cell(Value::Nil))
+            .clone())
+    }
+
+    fn evaluate_global_slot(
+        &self,
+        args: &[Expr],
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<ValueCell, RuntimeError> {
+        // All supplied arguments evaluate before an engine call, even though
+        // FnGlobal consumes only the first C4Aul parameter slot.
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            values.push(self.evaluate(arg, env, depth)?);
+        }
+        let index = match values.first().cloned().unwrap_or(Value::Nil) {
+            Value::Int(index) => index,
+            Value::Bool(flag) => i32::from(flag),
+            Value::Nil => 0,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "call to \"Global\" parameter 1: got \"{}\", but expected \"int\"!",
+                    other.type_name()
+                )))
+            }
+        };
+        self.numbered_global_cell(index)
+    }
+
+    /// FnGlobalN's GlobalNamed lookup (C4Script.cpp:4607-4617). The name
+    /// must already have been registered by a `static` declaration; a miss
+    /// returns nil rather than creating a new global.
+    fn evaluate_named_global(
+        &self,
+        args: &[Expr],
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Option<ValueCell>, RuntimeError> {
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            values.push(self.evaluate(arg, env, depth)?);
+        }
+        let value = values.first().cloned().unwrap_or(Value::Nil);
+        let name = match value {
+            Value::String(name) => name,
+            Value::Nil => String::new(),
+            Value::Int(0) | Value::Bool(false) if env.strict_level.unwrap_or(0) < 3 => {
+                String::new()
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "call to \"GlobalN\" parameter 1: got \"{}\", but expected \"string\"!",
+                    other.type_name()
+                )))
+            }
+        };
+        Ok(self.global_variable_cell(&name))
     }
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
@@ -1285,6 +1360,36 @@ impl<'a> Vm<'a> {
                                 .transpose()?;
                             let cell = self.localn_cell(env, &local_name, target);
                             let value = cell.borrow().clone();
+                            return Ok(value);
+                        }
+                        // FnGlobal returns a live reference into the one
+                        // engine-global numbered table (C4Script.cpp:
+                        // 3404-3407). Ordinary calls read that cell; the
+                        // assignment/ref-return paths below keep the cell.
+                        if name == "Global"
+                            && !self.functions.contains_key(name)
+                            && !self
+                                .global_functions
+                                .is_some_and(|functions| functions.contains_key(name))
+                            && !self.host_functions.contains_key(name)
+                        {
+                            let cell = self.evaluate_global_slot(args, env, depth + 1)?;
+                            let value = cell.borrow().clone();
+                            return Ok(value);
+                        }
+                        // FnGlobalN returns a reference only when the static
+                        // name is already registered (C4Script.cpp:4607-4617).
+                        if name == "GlobalN"
+                            && !self.functions.contains_key(name)
+                            && !self
+                                .global_functions
+                                .is_some_and(|functions| functions.contains_key(name))
+                            && !self.host_functions.contains_key(name)
+                        {
+                            let value = self
+                                .evaluate_named_global(args, env, depth + 1)?
+                                .map(|cell| cell.borrow().clone())
+                                .unwrap_or(Value::Nil);
                             return Ok(value);
                         }
                         // FnEval (C4Script.cpp:4507-4520) ->
@@ -2309,6 +2414,34 @@ impl<'a> Vm<'a> {
             AssignmentTarget::VarSlot(index_expr) => {
                 let index = self.evaluate_slot_index("Var()", index_expr, env, depth)?;
                 Ok(env.var_slot_lvalue(index))
+            }
+            AssignmentTarget::FunctionCall { name, args }
+                if name == "Global"
+                    && !self.functions.contains_key(name)
+                    && !self
+                        .global_functions
+                        .is_some_and(|functions| functions.contains_key(name))
+                    && !self.host_functions.contains_key(name) =>
+            {
+                Ok(LValueRef::Cell(self.evaluate_global_slot(
+                    args,
+                    env,
+                    depth + 1,
+                )?))
+            }
+            AssignmentTarget::FunctionCall { name, args }
+                if name == "GlobalN"
+                    && !self.functions.contains_key(name)
+                    && !self
+                        .global_functions
+                        .is_some_and(|functions| functions.contains_key(name))
+                    && !self.host_functions.contains_key(name) =>
+            {
+                self.evaluate_named_global(args, env, depth + 1)?
+                    .map(LValueRef::Cell)
+                    .ok_or_else(|| {
+                        RuntimeError::new("function 'GlobalN' does not return a reference")
+                    })
             }
             AssignmentTarget::FunctionCall { name, args }
                 if name == "LocalN"

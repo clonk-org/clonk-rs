@@ -212,7 +212,7 @@ impl Engine {
             global_functions: None,
             method_dispatch: None,
             globals_named: None,
-            globals_numbered: None,
+            globals_numbered: Some(new_global_slots()),
             globals_consts: None,
             local_cell_hook: None,
         }
