@@ -12564,6 +12564,26 @@ impl Engine {
         Ok(())
     }
 
+    pub fn grant_player_magic(
+        &mut self,
+        id: i32,
+        definition_id: impl Into<DefinitionId>,
+    ) -> Result<(), EngineError> {
+        let player = self.player_mut(id)?;
+        player.grant_magic(definition_id.into());
+        Ok(())
+    }
+
+    pub fn revoke_player_magic(
+        &mut self,
+        id: i32,
+        definition_id: &DefinitionId,
+    ) -> Result<(), EngineError> {
+        let player = self.player_mut(id)?;
+        player.revoke_magic(definition_id);
+        Ok(())
+    }
+
     pub fn player_inventory(&self, id: i32) -> Result<&HashMap<DefinitionId, u32>, EngineError> {
         self.player(id)
             .map(|player| player.inventory())
@@ -19598,6 +19618,18 @@ impl Engine {
                     definition_id,
                 } => {
                     self.revoke_player_knowledge(player_id, &definition_id)?;
+                }
+                PlayerCommand::GrantMagic {
+                    player_id,
+                    definition_id,
+                } => {
+                    self.grant_player_magic(player_id, definition_id)?;
+                }
+                PlayerCommand::RevokeMagic {
+                    player_id,
+                    definition_id,
+                } => {
+                    self.revoke_player_magic(player_id, &definition_id)?;
                 }
                 PlayerCommand::SetCursor {
                     player_id,

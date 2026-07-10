@@ -80,6 +80,10 @@ pub struct PlayerState {
     pub initial_value_set: bool,
     #[serde(default)]
     pub knowledge: Vec<DefinitionId>,
+    /// Ordered `C4Player::Magic` ID list (C4Player.h:114). Unlike build
+    /// knowledge, script indexed lookups observe this list's order.
+    #[serde(default)]
+    pub magic: Vec<DefinitionId>,
     #[serde(default)]
     pub inventory: HashMap<DefinitionId, u32>,
     #[serde(default)]
@@ -193,6 +197,7 @@ pub struct Player {
     objects_owned: u32,
     initial_value_set: bool,
     knowledge: HashSet<DefinitionId>,
+    magic: Vec<DefinitionId>,
     inventory: HashMap<DefinitionId, u32>,
     cursor: Option<ObjectId>,
     viewports: Vec<PlayerViewport>,
@@ -236,6 +241,7 @@ impl Player {
             objects_owned: 0,
             initial_value_set: false,
             knowledge: HashSet::new(),
+            magic: Vec::new(),
             inventory: HashMap::new(),
             cursor: None,
             viewports: Vec::new(),
@@ -272,6 +278,7 @@ impl Player {
             objects_owned,
             initial_value_set,
             knowledge,
+            magic,
             inventory,
             cursor,
             viewports,
@@ -295,6 +302,7 @@ impl Player {
             objects_owned,
             initial_value_set,
             knowledge: knowledge.into_iter().collect(),
+            magic,
             inventory,
             cursor,
             viewports,
@@ -333,6 +341,7 @@ impl Player {
             objects_owned,
             initial_value_set,
             knowledge,
+            magic,
             inventory,
             cursor,
             viewports,
@@ -364,6 +373,7 @@ impl Player {
             objects_owned,
             initial_value_set,
             knowledge: knowledge.into_iter().collect(),
+            magic,
             inventory,
             cursor,
             viewports,
@@ -404,6 +414,7 @@ impl Player {
             objects_owned: self.objects_owned,
             initial_value_set: self.initial_value_set,
             knowledge,
+            magic: self.magic.clone(),
             inventory: self.inventory.clone(),
             cursor: self.cursor,
             viewports: self.viewports.clone(),
@@ -574,6 +585,26 @@ impl Player {
 
     pub fn revoke_knowledge(&mut self, definition_id: &DefinitionId) {
         self.knowledge.remove(definition_id);
+    }
+
+    pub fn magic(&self) -> impl Iterator<Item = &DefinitionId> {
+        self.magic.iter()
+    }
+
+    pub fn set_magic(&mut self, magic: Vec<DefinitionId>) {
+        self.magic = magic;
+    }
+
+    pub fn grant_magic(&mut self, definition_id: DefinitionId) {
+        if !self.magic.iter().any(|entry| entry == &definition_id) {
+            self.magic.push(definition_id);
+        }
+    }
+
+    pub fn revoke_magic(&mut self, definition_id: &DefinitionId) {
+        if let Some(index) = self.magic.iter().position(|entry| entry == definition_id) {
+            self.magic.remove(index);
+        }
     }
 
     pub fn inventory(&self) -> &HashMap<DefinitionId, u32> {
@@ -808,6 +839,7 @@ pub struct PlayerConfig {
     objects_owned: u32,
     initial_value_set: bool,
     knowledge: Vec<DefinitionId>,
+    magic: Vec<DefinitionId>,
     inventory: HashMap<DefinitionId, u32>,
     cursor: Option<ObjectId>,
     viewports: Vec<PlayerViewport>,
@@ -834,6 +866,7 @@ impl PlayerConfig {
             objects_owned: 0,
             initial_value_set: false,
             knowledge: Vec::new(),
+            magic: Vec::new(),
             inventory: HashMap::new(),
             cursor: None,
             viewports: Vec::new(),
@@ -888,6 +921,14 @@ impl PlayerConfig {
         I: IntoIterator<Item = DefinitionId>,
     {
         self.knowledge = knowledge.into_iter().collect();
+        self
+    }
+
+    pub fn with_magic<I>(mut self, magic: I) -> Self
+    where
+        I: IntoIterator<Item = DefinitionId>,
+    {
+        self.magic = magic.into_iter().collect();
         self
     }
 

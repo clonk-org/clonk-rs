@@ -231,6 +231,14 @@ pub(crate) enum PlayerCommand {
         player_id: i32,
         definition_id: DefinitionId,
     },
+    GrantMagic {
+        player_id: i32,
+        definition_id: DefinitionId,
+    },
+    RevokeMagic {
+        player_id: i32,
+        definition_id: DefinitionId,
+    },
     /// `FnSetWealth` (C4Script.cpp:2761-2766), already clamped.
     SetWealth { player_id: i32, value: i32 },
     /// `FnSetFoW` (C4Script.cpp:3671-3678): persist the explicit fog of
