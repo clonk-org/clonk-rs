@@ -735,6 +735,7 @@ enum OptionsFocus {
 enum OptionsHit {
     Back,
     Tab(OptionsSheet),
+    ShowLogTimestamps,
 }
 
 /// Live interaction and presentation state for the pixel-parity options
@@ -782,7 +783,11 @@ impl OptionsDlgState {
         self.layout = Some(options_dlg_layout(width.max(1), height.max(1), gui, book));
         self.hovered = self
             .pointer_position
-            .and_then(|point| self.layout.as_ref().and_then(|layout| options_hit_test(layout, point)));
+            .and_then(|point| {
+                self.layout
+                    .as_ref()
+                    .and_then(|layout| options_hit_test(layout, self.active_sheet, point))
+            });
     }
 
     pub const fn active_sheet(&self) -> OptionsSheet {
@@ -803,8 +808,11 @@ impl OptionsDlgState {
 
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
         self.pointer_position = position;
-        self.hovered = position
-            .and_then(|point| self.layout.as_ref().and_then(|layout| options_hit_test(layout, point)));
+        self.hovered = position.and_then(|point| {
+            self.layout
+                .as_ref()
+                .and_then(|layout| options_hit_test(layout, self.active_sheet, point))
+        });
         if position.is_none() {
             self.pressed_back = false;
         }
@@ -832,6 +840,10 @@ impl OptionsDlgState {
                 self.pressed_back = false;
                 self.select_sheet(sheet)
             }
+            Some(OptionsHit::ShowLogTimestamps) => {
+                self.pressed_back = false;
+                Vec::new()
+            }
             None => {
                 self.pressed_back = false;
                 Vec::new()
@@ -843,10 +855,16 @@ impl OptionsDlgState {
         self.set_pointer_position(Some(position));
         let activate_back = self.pressed_back && self.hovered == Some(OptionsHit::Back);
         self.pressed_back = false;
-        activate_back
-            .then_some(OptionsDlgAction::Back)
-            .into_iter()
-            .collect()
+        if activate_back {
+            return vec![OptionsDlgAction::Back];
+        }
+        if self.hovered == Some(OptionsHit::ShowLogTimestamps) {
+            self.program.show_log_timestamps = !self.program.show_log_timestamps;
+            return vec![OptionsDlgAction::ShowLogTimestampsChanged(
+                self.program.show_log_timestamps,
+            )];
+        }
+        Vec::new()
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<OptionsDlgAction> {
@@ -894,6 +912,7 @@ impl OptionsDlgState {
             return Vec::new();
         }
         self.active_sheet = sheet;
+        self.set_pointer_position(self.pointer_position);
         vec![OptionsDlgAction::SheetChanged(sheet)]
     }
 
@@ -903,6 +922,10 @@ impl OptionsDlgState {
 
     const fn back_highlighted(&self) -> bool {
         matches!(self.focus, OptionsFocus::Back) || matches!(self.hovered, Some(OptionsHit::Back))
+    }
+
+    const fn timestamps_highlighted(&self) -> bool {
+        matches!(self.hovered, Some(OptionsHit::ShowLogTimestamps))
     }
 }
 
@@ -914,9 +937,20 @@ fn rect_contains(rect: &IntRect, point: GuiPoint) -> bool {
 /// `Tabular::MouseInput` for a graphical left tab strip
 /// (C4GuiTabular.cpp:464-534). `Inside` is inclusive for the internal
 /// caption bands even though the surrounding `C4Rect` is half-open.
-fn options_hit_test(layout: &OptionsDlgLayout, point: GuiPoint) -> Option<OptionsHit> {
+fn options_hit_test(
+    layout: &OptionsDlgLayout,
+    active_sheet: OptionsSheet,
+    point: GuiPoint,
+) -> Option<OptionsHit> {
     if rect_contains(&layout.back_button, point) {
         return Some(OptionsHit::Back);
+    }
+    let timestamp_square = IntRect {
+        w: layout.timestamps_check.h,
+        ..layout.timestamps_check
+    };
+    if active_sheet == OptionsSheet::Program && rect_contains(&timestamp_square, point) {
+        return Some(OptionsHit::ShowLogTimestamps);
     }
     if !rect_contains(&layout.tabular, point) {
         return None;
@@ -1354,13 +1388,45 @@ impl OptionsDlgScreen {
         Self::draw_combo(surface, assets, book, &layout.font_face_combo, &program.font_face, gamma);
         Self::draw_combo(surface, assets, book, &layout.font_size_combo, &program.font_size, gamma);
         draw_book_left(surface, layout.white_chat_label, "White Chat:");
-        Self::draw_checkbox(surface, assets, book, &layout.ingame_check, "Ingame", program.white_chat_ingame, gamma);
-        Self::draw_checkbox(surface, assets, book, &layout.lobby_check, "Lobby", program.white_chat_lobby, gamma);
         Self::draw_checkbox(
-            surface, assets, book, &layout.timestamps_check, "Timestamps", program.show_log_timestamps, gamma,
+            surface,
+            assets,
+            book,
+            &layout.ingame_check,
+            "Ingame",
+            program.white_chat_ingame,
+            false,
+            gamma,
         );
         Self::draw_checkbox(
-            surface, assets, book, &layout.preloading_check, "Preload game data", program.preloading, gamma,
+            surface,
+            assets,
+            book,
+            &layout.lobby_check,
+            "Lobby",
+            program.white_chat_lobby,
+            false,
+            gamma,
+        );
+        Self::draw_checkbox(
+            surface,
+            assets,
+            book,
+            &layout.timestamps_check,
+            "Timestamps",
+            program.show_log_timestamps,
+            state.timestamps_highlighted(),
+            gamma,
+        );
+        Self::draw_checkbox(
+            surface,
+            assets,
+            book,
+            &layout.preloading_check,
+            "Preload game data",
+            program.preloading,
+            false,
+            gamma,
         );
         Self::draw_fair_crew_group(surface, assets, book, &layout, program, gamma);
         Self::draw_small_button(surface, book, &layout.reset_button, "Reset configuration", gamma);
@@ -1442,6 +1508,7 @@ impl OptionsDlgScreen {
         rect: &IntRect,
         label: &str,
         checked: bool,
+        highlighted: bool,
         gamma: Option<&GammaRamp>,
     ) {
         let phase =
@@ -1452,6 +1519,20 @@ impl OptionsDlgScreen {
             &phase,
             gamma,
         );
+        if highlighted {
+            let size = rect.h / 2;
+            draw_image_bilinear_additive(
+                surface,
+                &GuiRect::new(
+                    (rect.x + rect.h / 4) as f32,
+                    (rect.y + rect.h / 4) as f32,
+                    size as f32,
+                    size as f32,
+                ),
+                &blacken_transparent(&assets.button_highlight),
+                gamma,
+            );
+        }
         let y_off = (rect.h - book.book.line_height).max(0) / 2;
         book.book.draw_with_gamma(
             surface,
@@ -1750,6 +1831,44 @@ mod tests {
         assert!(state.handle_pointer_up(outside).is_empty());
         assert!(state.handle_pointer_down(inside).is_empty());
         assert_eq!(state.handle_pointer_up(inside), vec![OptionsDlgAction::Back]);
+    }
+
+    // The Program sheet binds this checkbox directly to
+    // Config.General.ShowLogTimestamps (C4StartupOptionsDlg.cpp:749-753).
+    // C4GUI::CheckBox toggles only on left-button-up over its square, not its
+    // caption (C4GuiCheckBox.cpp:82-96), then BoolConfig updates the bound value
+    // (C4StartupOptionsDlg.cpp:558-568).
+    #[test]
+    fn live_state_toggles_log_timestamps_only_over_checkbox_square() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::default();
+        state.resize(1280, 720, &gui, &book);
+        let checkbox = options_dlg_layout(1280, 720, &gui, &book).timestamps_check;
+        let square = crate::GuiPoint::new(
+            (checkbox.x + checkbox.h / 2) as f32,
+            (checkbox.y + checkbox.h / 2) as f32,
+        );
+        let caption = crate::GuiPoint::new(
+            (checkbox.x + checkbox.h + 5) as f32,
+            (checkbox.y + checkbox.h / 2) as f32,
+        );
+
+        assert!(!state.program().show_log_timestamps);
+        assert!(state.handle_pointer_down(square).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(square),
+            vec![OptionsDlgAction::ShowLogTimestampsChanged(true)]
+        );
+        assert!(state.program().show_log_timestamps);
+
+        assert!(state.handle_pointer_up(caption).is_empty());
+        assert!(state.program().show_log_timestamps);
+        assert_eq!(
+            state.handle_pointer_up(square),
+            vec![OptionsDlgAction::ShowLogTimestampsChanged(false)]
+        );
+        assert!(!state.program().show_log_timestamps);
     }
 
     // DrawLineDw is GL_LINES between pixel centers (StdGL.cpp:893-934): by

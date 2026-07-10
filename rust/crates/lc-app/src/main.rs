@@ -5422,6 +5422,23 @@ fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
         .unwrap_or(false)
 }
 
+fn load_options_program_state(
+    paths: Option<&AppPaths>,
+) -> lc_frontend::startup_options_dlg::ProgramSheetState {
+    let show_log_timestamps = paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .and_then(|config| {
+            config
+                .get_in(Some("General"), "ShowLogTimestamps")
+                .map(parse_config_bool)
+        })
+        .unwrap_or(false);
+    lc_frontend::startup_options_dlg::ProgramSheetState {
+        show_log_timestamps,
+        ..Default::default()
+    }
+}
+
 fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
     let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
     let masterserver_signup = config
@@ -9146,7 +9163,7 @@ impl GameApp {
             match action {
                 OptionsDlgAction::Back => self.close_options_menu(),
                 OptionsDlgAction::SheetChanged(_) => self.play_ui_sound("Command"),
-                OptionsDlgAction::ShowLogTimestampsChanged(_) => {}
+                OptionsDlgAction::ShowLogTimestampsChanged(_) => self.play_ui_sound("ArrowHit"),
             }
         }
         Ok(())
@@ -9390,7 +9407,9 @@ impl GameApp {
     }
 
     fn open_options_menu(&mut self) {
-        let mut dialog = lc_frontend::startup_options_dlg::OptionsDlgState::default();
+        let mut dialog = lc_frontend::startup_options_dlg::OptionsDlgState::new(
+            load_options_program_state(self.app_paths.as_ref()),
+        );
         if let (Some(fonts), Some(book)) = (
             self.assets.clonk_fonts.as_deref(),
             self.assets.options_book_fonts.as_deref(),
@@ -9433,6 +9452,21 @@ impl GameApp {
     }
 
     fn close_options_menu(&mut self) {
+        let save_result = self
+            .app_paths
+            .as_ref()
+            .zip(self.startup_options_dialog.as_ref())
+            .map(|(paths, dialog)| {
+                persist_config_value(
+                    paths,
+                    "General",
+                    "ShowLogTimestamps",
+                    i32::from(dialog.program().show_log_timestamps).to_string(),
+                )
+            });
+        if let Some(Err(error)) = save_result {
+            tracing::warn!(error = %error, "failed to save options dialog settings");
+        }
         self.show_main_menu();
     }
 
@@ -15071,6 +15105,132 @@ mod tests {
         .expect("initialise app");
         wait_for_menu(&mut app);
         app
+    }
+
+    // BoolConfig initializes the Timestamps checkbox from
+    // Config.General.ShowLogTimestamps (C4StartupOptionsDlg.cpp:558-560,
+    // 749-753; C4Config.cpp:398).
+    #[test]
+    fn options_dialog_loads_log_timestamps_from_general_config() {
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        persist_config_value(&paths, "General", "ShowLogTimestamps", "1")
+            .expect("seed timestamp config");
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+
+        app.open_options_menu();
+
+        assert!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("options dialog")
+                .program()
+                .show_log_timestamps,
+            "the live checkbox must reflect General.ShowLogTimestamps"
+        );
+    }
+
+    // BoolConfig mutates Config.General.ShowLogTimestamps immediately, while
+    // DoBack saves the configuration before returning to the main dialog
+    // (C4StartupOptionsDlg.cpp:564-568, 1150-1184, 1189-1194).
+    #[test]
+    fn options_dialog_saves_log_timestamps_when_closed() {
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        persist_config_value(&paths, "General", "ShowLogTimestamps", "1")
+            .expect("seed timestamp config");
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_options_menu();
+        let gui = app.assets.clonk_fonts.as_deref().expect("GUI fonts");
+        let book = app
+            .assets
+            .options_book_fonts
+            .as_deref()
+            .expect("options book fonts");
+        let checkbox = lc_frontend::startup_options_dlg::options_dlg_layout(
+            1280, 720, gui, book,
+        )
+        .timestamps_check;
+        let point = PhysicalPosition::new(
+            f64::from(checkbox.x + checkbox.h / 2),
+            f64::from(checkbox.y + checkbox.h / 2),
+        );
+
+        app.handle_cursor_moved(point).expect("hover Timestamps");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Timestamps");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release Timestamps");
+        assert!(
+            !app.startup_options_dialog
+                .as_ref()
+                .expect("options dialog")
+                .program()
+                .show_log_timestamps,
+            "checkbox toggles before the dialog closes"
+        );
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("config before close")
+                .get_in(Some("General"), "ShowLogTimestamps"),
+            Some("1"),
+            "C++ defers Config.Save until DoBack"
+        );
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close options");
+
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("config after close")
+                .get_in(Some("General"), "ShowLogTimestamps"),
+            Some("0")
+        );
     }
 
     #[test]
