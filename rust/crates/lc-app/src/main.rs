@@ -10527,9 +10527,22 @@ impl GameApp {
             {
                 let show_commands = self.display_flags.show_commands;
                 let show_command_keys = self.display_flags.show_command_keys;
+                let owner_colors = self
+                    .snapshot
+                    .players
+                    .iter()
+                    .map(|player| {
+                        let color = player
+                            .color
+                            .map(|RgbColor { r, g, b }| Color::opaque(r, g, b))
+                            .unwrap_or_else(|| default_owner_color(player.id));
+                        (player.id, color)
+                    })
+                    .collect();
                 let gfx = self.ensure_ingame_menu_gfx();
                 gfx.show_commands = show_commands;
                 gfx.show_command_keys = show_command_keys;
+                gfx.owner_colors = owner_colors;
             }
             if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
                 let font = lc_frontend::hud::HudFont::from_set(

@@ -2,9 +2,13 @@ use std::collections::HashMap;
 
 use lc_engine::{
     CommandKind, ContextMenuEntry, ControlCommand, DefinitionPictureImage, Engine, ObjectId,
-    SimulationSnapshot, OWNER_NONE,
+    ObjectMenuSymbol, SimulationSnapshot, OWNER_NONE,
 };
-use lc_frontend::{hud::HudFont, GuiPoint};
+use lc_frontend::{
+    default_owner_color,
+    hud::{draw_command_image_cell, HudFont},
+    CommandImage, GuiPoint,
+};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, Rect, Surface, TextFont};
 use lc_gui::ImageData;
@@ -504,15 +508,27 @@ fn render_engine_normal_menu(
         } else {
             cell
         };
-        if let Some(icon) = item_icons.get(index).and_then(Option::as_ref) {
-            draw_image_region_aspect(
-                surface,
-                icon,
-                Rect::new(0, 0, icon.width(), icon.height()),
-                symbol_cell,
-                false,
-            );
-        }
+        let picture = item_icons.get(index).cloned().flatten();
+        let image = match item.symbol {
+            ObjectMenuSymbol::Definition => CommandImage::Picture(picture),
+            ObjectMenuSymbol::Buy { owner } => CommandImage::BuyMenu {
+                owner_color: gfx
+                    .owner_colors
+                    .get(&owner)
+                    .copied()
+                    .unwrap_or_else(|| default_owner_color(owner)),
+            },
+            ObjectMenuSymbol::Sell { owner } => CommandImage::SellMenu {
+                owner_color: gfx
+                    .owner_colors
+                    .get(&owner)
+                    .copied()
+                    .unwrap_or_else(|| default_owner_color(owner)),
+            },
+            ObjectMenuSymbol::Info => CommandImage::InfoMenu { picture },
+            ObjectMenuSymbol::Exit => CommandImage::Exit,
+        };
+        draw_command_image_cell(surface, &gfx.hud, symbol_cell, &image);
         if menu.style == 1 {
             font.draw(
                 surface,
@@ -607,7 +623,15 @@ fn render_engine_normal_menu(
             );
         }
         if let Some(cell) = truncate_control() {
-            draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 1, 0);
+            if menu
+                .items
+                .iter()
+                .any(|item| item.symbol == ObjectMenuSymbol::Exit)
+            {
+                draw_command_image_cell(surface, &gfx.hud, cell, &CommandImage::Exit);
+            } else {
+                draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 1, 0);
+            }
         }
     }
 
@@ -2071,6 +2095,165 @@ mod tests {
                 .expect("selected context cell pixel"),
             CLASSIC_SELECTION_COLOR
         );
+    }
+
+    #[test]
+    fn engine_context_menu_draws_cpp_composite_symbols_and_exit_close_icon() {
+        // C4ObjectMenu::RefillInternal uses a definition picture for
+        // Contents, DrawMenuSymbol for Buy/Sell, target+OKCancel(0,1) for
+        // Info and fctExit for Exit (src/C4ObjectMenu.cpp:361-427;
+        // src/C4Menu.cpp:43-70). AutoContextMenu's close command contains
+        // "Exit", so the command strip also draws fctExit (:874-880).
+        fn solid(width: u32, height: u32, rgba: [u8; 4]) -> ImageData {
+            ImageData::new(width, height, rgba.repeat((width * height) as usize))
+        }
+
+        fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
+            (rect.y..rect.y + rect.height as i32).any(|y| {
+                (rect.x..rect.x + rect.width as i32).any(|x| {
+                    surface.get_pixel(x as u32, y as u32) == Some(color)
+                })
+            })
+        }
+
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Hut", 0, 1);
+            AddMenuItem("Contents", "Choose()", MENU, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let mut menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        let template = menu.items[0].clone();
+        let make_item = |caption: &str,
+                         item_id: &str,
+                         symbol: lc_engine::ObjectMenuSymbol| {
+            let mut item = template.clone();
+            item.caption = caption.to_string();
+            item.item_id = item_id.to_string();
+            item.symbol = symbol;
+            item
+        };
+        menu.identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
+            .expect("context identification deserializes");
+        menu.selection = -1;
+        menu.items = vec![
+            make_item(
+                "Contents",
+                "HUT3",
+                lc_engine::ObjectMenuSymbol::Definition,
+            ),
+            make_item(
+                "Buy",
+                "NONE",
+                lc_engine::ObjectMenuSymbol::Buy { owner: 7 },
+            ),
+            make_item(
+                "Sell",
+                "NONE",
+                lc_engine::ObjectMenuSymbol::Sell { owner: 7 },
+            ),
+            make_item("Info", "HUT3", lc_engine::ObjectMenuSymbol::Info),
+            make_item("Exit", "NONE", lc_engine::ObjectMenuSymbol::Exit),
+        ];
+
+        let gray = Color::opaque(80, 80, 80);
+        let red = Color::opaque(240, 20, 20);
+        let green = Color::opaque(20, 220, 20);
+        let yellow = Color::opaque(240, 220, 20);
+        let magenta = Color::opaque(220, 20, 220);
+        let orange = Color::opaque(240, 120, 20);
+        let cyan = Color::opaque(20, 220, 220);
+        let mut arrow = vec![0_u8; 16 * 8 * 4];
+        for y in 0..8 {
+            for x in 0..16 {
+                let offset = (y * 16 + x) * 4;
+                let color = if x < 8 { yellow } else { magenta };
+                arrow[offset..offset + 4]
+                    .copy_from_slice(&[color.r, color.g, color.b, color.a]);
+            }
+        }
+        let mut control = vec![0_u8; 224 * 164 * 4];
+        for y in 132..164 {
+            for x in 128..160 {
+                let offset = (y * 224 + x) * 4;
+                control[offset..offset + 4]
+                    .copy_from_slice(&[orange.r, orange.g, orange.b, orange.a]);
+            }
+        }
+        let control = ImageData::new(224, 164, control);
+        let gfx = IngameMenuGraphics {
+            hud: lc_frontend::HudGraphics {
+                flag: Some(solid(8, 8, [0, 0, 255, 255])),
+                wealth: Some(solid(8, 8, [green.r, green.g, green.b, green.a])),
+                arrow: Some(ImageData::new(16, 8, arrow)),
+                exit: Some(solid(8, 8, [cyan.r, cyan.g, cyan.b, cyan.a])),
+                control: Some(control.clone()),
+                ..lc_frontend::HudGraphics::default()
+            },
+            owner_colors: HashMap::from([(7, red)]),
+            control: Some(control),
+            show_commands: true,
+            ..IngameMenuGraphics::default()
+        };
+        let picture = solid(8, 8, [gray.r, gray.g, gray.b, gray.a]);
+        let item_icons = vec![
+            Some(picture.clone()),
+            None,
+            None,
+            Some(picture),
+            None,
+        ];
+        let font = lc_graphics::BitmapFont::new();
+        let hud_font = HudFont::Fallback(&font);
+        let area = Rect::new(0, 0, 640, 480);
+        let layout = engine_script_menu_layout(area, &hud_font, &menu, true);
+        let mut surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
+        render_engine_script_menu(
+            &mut surface,
+            area,
+            &hud_font,
+            &font,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &item_icons,
+            false,
+            0,
+        );
+
+        let row = |index| layout.item_rect(index).expect("context row is visible");
+        assert!(contains_color(&surface, row(0), gray));
+        for color in [red, green, yellow] {
+            assert!(contains_color(&surface, row(1), color), "missing Buy {color:?}");
+        }
+        for color in [red, green, magenta] {
+            assert!(contains_color(&surface, row(2), color), "missing Sell {color:?}");
+        }
+        for color in [gray, orange] {
+            assert!(contains_color(&surface, row(3), color), "missing Info {color:?}");
+        }
+        assert!(contains_color(&surface, row(4), cyan));
+        let command_strip = Rect::new(
+            layout.bounds.x,
+            layout.bounds.y + layout.bounds.height as i32 - CLASSIC_COMMAND_HEIGHT,
+            layout.bounds.width,
+            CLASSIC_COMMAND_HEIGHT as u32,
+        );
+        assert!(contains_color(&surface, command_strip, cyan));
     }
 
     #[test]

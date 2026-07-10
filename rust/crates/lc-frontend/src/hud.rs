@@ -528,6 +528,9 @@ pub enum CommandImage {
     BuyMenu { owner_color: Color },
     /// `DrawMenuSymbol(C4MN_Sell, ...)` (src/C4Menu.cpp:66-70).
     SellMenu { owner_color: Color },
+    /// Target picture at left-bottom plus OKCancel phase (0,1) at
+    /// right-top (src/C4ObjectMenu.cpp:405-414).
+    InfoMenu { picture: Option<ImageData> },
 }
 
 /// The overlay icon of a composite image cell.
@@ -749,6 +752,23 @@ pub fn draw_command_image_cell(
                     arrow,
                     sheet_cell(arrow, phase),
                     get_fraction(cell, 70, 70, true, false, true),
+                );
+            }
+        }
+        CommandImage::InfoMenu { picture } => {
+            if let Some(picture) = picture {
+                draw_image_aspect_fit(
+                    surface,
+                    picture,
+                    get_fraction(cell, 85, 85, false, true, false),
+                );
+            }
+            if let Some(control) = hud.control.as_ref() {
+                draw_scaled_region_aspect(
+                    surface,
+                    control,
+                    SurfaceRect::new(128, 132, 32, 32),
+                    get_fraction(cell, 85, 85, true, false, false),
                 );
             }
         }
