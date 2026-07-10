@@ -65,15 +65,34 @@ shadow, recording the new first mismatch.
   shipped content), Landscape.txt script algorithms,
   `PostInitMap`/`KeepMapCreator`; fixture column worlds still remove material
   by segment rather than pixel.
-- **Effects:** builtin fire/splash/smoke/explosion/bubble helpers. Protocol
-  residuals: AddEffect's return value cannot reflect deferred check outcomes
+- **Effects:** builtin fire CLOSED 2026-07-09 — fire is a real "Fire"
+  C4Effect entry (priority 100/interval 1, vars [FireMode, CausedBy, Blasted,
+  IncineratingObj]) on BOTH incinerate paths; the burn executes through the
+  effect timer at its list position; Extinguish/RemoveEffect("Fire") kill via
+  the effect (engine FnFxFireStop clears OnFire); Incinerate/Extinguish/
+  Bubble and FxFireStart/Timer/Stop/Info host fns registered (script
+  overloads chain via inherited); AddEffect("Fire") runs the engine start
+  synchronously (checked adds defer to the Fx*Effect chain and ignite at
+  first execution — timing divergence; interval-0 checked fire never
+  ignites); Splash/BubbleOut ported engine-side (synced Random order + FXU1
+  cap 150). Fire residuals: other effects' check chain does not intercept
+  ENGINE-initiated incineration; attached-object detach (DFA_ATTACH scan),
+  Tick5 base extinguish, ValidPlr mapping of the burn's cause, SmokeRate
+  smoke/fire particles/sounds (presentation-only); host-seam FxFireTimer
+  (inherited chain) omits those same pieces; Smoke() always takes the
+  particle path (the no-particle FXS1 fallback unmodeled); Explosion()'s
+  engine helper stays unported (System.c4g's global Explode shadows
+  FnExplode for all shipped content). Protocol residuals: AddEffect's
+  return value cannot reflect deferred check outcomes
   (deny 0 / acceptor number / -2); inactive negative-priority effects are not
   persisted between dispatch sequences (mid-bracket queries, Kill's
   TempAddForRemoval arm); Stop_Deny recovery reinserts at sorted position and
   skips death-clear reasons; stop reasons are strings, not C4FxCall_* ints;
   GLOBAL adds skip the priority check chain, and their no-command-target
   dispatch goes through the first-registered definition's script host where a
-  definition-local Fx* name could shadow a same-name global.
+  definition-local Fx* name could shadow a same-name global; AddEffect
+  arg 6 keeps an explicit-nil fixture timer slot (any value there is rVal1
+  like C++).
 - **Commands:** the Tick35 `PathChecked` recheck is blocked on a real
   C4PathFinder port (waypoint pushes, fWaypoint easings; `pathfinder.rs` is a
   GetPath-only heightmap approximation); DFA_FLOAT steering arm; contained
