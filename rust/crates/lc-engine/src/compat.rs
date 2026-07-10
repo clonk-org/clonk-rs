@@ -5551,6 +5551,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
     script.register_host_function("CastObjects", cast_objects);
+    script.register_host_function("PlaceVegetation", place_vegetation);
     script.register_host_function("CreateConstruction", create_construction);
     // FnFindConstructionSite (C4Script.cpp:1958-1981) — the caller-Var
     // staging seam behind the System.c4g FindConstructionSiteX wrapper.
@@ -17170,6 +17171,495 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Nil)
 }
 
+fn placement_find_liquid_height(
+    landscape: &Landscape,
+    x: i32,
+    y: &mut i32,
+    height: i32,
+) -> bool {
+    let world_height = landscape.estimated_height();
+    let (mut cy1, mut cy2) = (*y, *y);
+    let (mut rl1, mut rl2) = (0, 0);
+    while cy1 >= 0 || cy2 < world_height {
+        if cy1 >= 0 {
+            if landscape.is_liquid_at(x, cy1) {
+                rl1 += 1;
+                if rl1 >= height {
+                    *y = cy1 + height / 2;
+                    return true;
+                }
+            } else {
+                rl1 = 0;
+            }
+        }
+        if cy2 + 1 < world_height {
+            if landscape.is_liquid_at(x, cy2) {
+                rl2 += 1;
+                if rl2 >= height {
+                    *y = cy2 - height / 2;
+                    return true;
+                }
+            } else {
+                rl2 = 0;
+            }
+        }
+        cy1 -= 1;
+        cy2 += 1;
+    }
+    false
+}
+
+fn placement_find_surface_liquid(
+    landscape: &Landscape,
+    x: &mut i32,
+    y: &mut i32,
+    width: i32,
+    height: i32,
+) -> bool {
+    let world_width = landscape.width() as i32;
+    let (mut cx1, mut cx2) = (*x, *x);
+    let (mut cy1, mut cy2) = (*y, *y);
+    let (mut rl1, mut rl2) = (0, 0);
+    let mut found = false;
+    while cx1 > 0 || cx2 < world_width {
+        if cx1 > 0 {
+            match landscape.above_semi_solid(cx1, cy1) {
+                Some(adjusted) => {
+                    cy1 = adjusted;
+                    if (0..height).all(|offset| landscape.is_liquid_at(cx1, cy1 + 1 + offset)) {
+                        rl1 += 1;
+                    } else {
+                        rl1 = 0;
+                    }
+                }
+                None => cx1 = -1,
+            }
+        }
+        if cx2 < world_width {
+            match landscape.above_semi_solid(cx2, cy2) {
+                Some(adjusted) => {
+                    cy2 = adjusted;
+                    if (0..height).all(|offset| landscape.is_liquid_at(cx2, cy2 + 1 + offset)) {
+                        rl2 += 1;
+                    } else {
+                        rl2 = 0;
+                    }
+                }
+                None => cx2 = world_width,
+            }
+        }
+        if rl1 >= width {
+            *x = cx1 + rl1 / 2;
+            *y = cy1;
+            found = true;
+            break;
+        }
+        if rl2 >= width {
+            *x = cx2 - rl2 / 2;
+            *y = cy2;
+            found = true;
+            break;
+        }
+        cx1 -= 1;
+        cx2 += 1;
+    }
+    if found {
+        if let Some(adjusted) = landscape.above_semi_solid(*x, *y) {
+            *y = adjusted;
+        }
+    }
+    found
+}
+
+fn placement_find_liquid(
+    landscape: &Landscape,
+    x: &mut i32,
+    y: &mut i32,
+    width: i32,
+    height: i32,
+) -> bool {
+    let world_width = landscape.width() as i32;
+    let (mut cx1, mut cx2) = (*x, *x);
+    let (mut cy1, mut cy2) = (*y, *y);
+    let (mut rl1, mut rl2) = (0, 0);
+    while cx1 > 0 || cx2 < world_width {
+        if cx1 > 0 {
+            if placement_find_liquid_height(landscape, cx1, &mut cy1, height) {
+                rl1 += 1;
+            } else {
+                rl1 = 0;
+            }
+        }
+        if cx2 < world_width {
+            if placement_find_liquid_height(landscape, cx2, &mut cy2, height) {
+                rl2 += 1;
+            } else {
+                rl2 = 0;
+            }
+        }
+        if rl1 >= width {
+            *x = cx1 + rl1 / 2;
+            *y = cy1;
+            return true;
+        }
+        if rl2 >= width {
+            *x = cx2 - rl2 / 2;
+            *y = cy2;
+            return true;
+        }
+        cx1 -= 1;
+        cx2 += 1;
+    }
+    false
+}
+
+fn place_vegetation(args: &[Value]) -> Result<Value, RuntimeError> {
+    let definition = match args.first().unwrap_or(&Value::Nil) {
+        Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
+        Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => return Ok(Value::Nil),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "PlaceVegetation: expected id for definition, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let x = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "PlaceVegetation",
+        "x",
+    )?;
+    let y = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "PlaceVegetation",
+        "y",
+    )?;
+    let width = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "PlaceVegetation",
+        "width",
+    )?;
+    let height = value_to_i32(
+        args.get(4).unwrap_or(&Value::Nil),
+        "PlaceVegetation",
+        "height",
+    )?;
+    let requested_growth = value_to_i32(
+        args.get(5).unwrap_or(&Value::Nil),
+        "PlaceVegetation",
+        "growth",
+    )?;
+
+    let registration = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("PlaceVegetation requires an active engine context")
+        })?;
+        let Some(metadata) = context.definition_metadata(&definition).cloned() else {
+            // C4Id2Def failure happens before the first Random draw
+            // (C4Game.cpp:2985-2986).
+            return Ok(None);
+        };
+        let base = context
+            .object_context()
+            .map(ObjectScopeContext::effective_position)
+            .unwrap_or(Vector2::ZERO);
+        let area_x = base.x.wrapping_add(x);
+        let area_y = base.y.wrapping_add(y);
+
+        let mut growth = requested_growth;
+        if growth <= 0 {
+            growth = FULL_CON;
+            if metadata.growth != 0 && draw_context_random(3)? == 0 {
+                growth = draw_context_random(FULL_CON)?.wrapping_add(1);
+            }
+        }
+
+        let (shape_width, shape_height) = metadata
+            .shape
+            .map(|shape| (shape.width, shape.height))
+            .unwrap_or((0, 0));
+        let Some(landscape) = context.landscape_ref() else {
+            return Ok(None);
+        };
+        let bottom = match metadata.placement {
+            // C4D_Place_Surface (C4Game.cpp:2998-3024).
+            0 => {
+                let mut found = None;
+                for _ in 0..20 {
+                    let tx = area_x.wrapping_add(draw_context_random(width)?);
+                    let mut ty = area_y.wrapping_add(draw_context_random(height)?);
+                    while ty > 0 && landscape.is_ift_at(tx, ty) {
+                        ty -= 1;
+                    }
+                    let Some(ty) = landscape.above_semi_solid(tx, ty) else {
+                        continue;
+                    };
+                    if !(50..=landscape.estimated_height() - 50).contains(&ty) {
+                        continue;
+                    }
+                    if landscape.is_semi_solid_at(tx, ty - shape_height)
+                        || landscape.is_semi_solid_at(tx, ty - shape_height / 2)
+                        || landscape.is_semi_solid_at(
+                            tx - shape_width / 2,
+                            ty - shape_height * 2 / 3,
+                        )
+                        || landscape.is_semi_solid_at(
+                            tx + shape_width / 2,
+                            ty - shape_height * 2 / 3,
+                        )
+                    {
+                        continue;
+                    }
+                    let soil_y = ty.wrapping_add(3);
+                    let is_soil = landscape
+                        .border_material_at(tx, soil_y)
+                        .and_then(|material| {
+                            context
+                                .world
+                                .materials()
+                                .and_then(|materials| materials.get_by_id(material))
+                        })
+                        .and_then(|material| material.definition().int("Soil"))
+                        .is_some_and(|soil| soil != 0);
+                    if !is_soil {
+                        continue;
+                    }
+                    if metadata.growth == 0 {
+                        growth = FULL_CON;
+                    }
+                    found = Some(Vector2::new(tx, soil_y.wrapping_add(5)));
+                    break;
+                }
+                let Some(found) = found else {
+                    return Ok(None);
+                };
+                found
+            }
+            // C4D_Place_Liquid (C4Game.cpp:3027-3039).
+            1 => {
+                let mut tx = area_x.wrapping_add(draw_context_random(width)?);
+                let mut ty = area_y.wrapping_add(draw_context_random(height)?);
+                if !placement_find_surface_liquid(
+                    landscape,
+                    &mut tx,
+                    &mut ty,
+                    shape_width,
+                    shape_height,
+                ) && !placement_find_liquid(
+                    landscape,
+                    &mut tx,
+                    &mut ty,
+                    shape_width,
+                    shape_height,
+                ) {
+                    return Ok(None);
+                }
+                let Some(ty) = landscape.semi_above_solid(tx, ty) else {
+                    return Ok(None);
+                };
+                Vector2::new(tx, ty.wrapping_add(3))
+            }
+            _ => return Ok(None),
+        };
+
+        let id = context.allocate_object_id();
+        let mut spawn = SpawnConfig::new(definition.clone())
+            .with_position(bottom)
+            .with_owner(OWNER_NONE)
+            .with_controller(OWNER_NONE)
+            .with_category(metadata.category)
+            .with_construction(0)
+            .with_id(id);
+        // NewObject's callbacks and initial DoCon run below while this host
+        // call is live. Materialization must not repeat either operation.
+        spawn.initialized = true;
+        spawn.position_adjusted = true;
+        let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
+        let preview_ocf = ocf::compute(
+            metadata.ocf_base,
+            metadata.crew_member,
+            initial_alive,
+            ObjectStatus::Normal,
+            false,
+            0,
+            metadata.category,
+        );
+        let preview = HostWorldObject::with_category(
+            id,
+            definition,
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            metadata.category,
+            if initial_alive {
+                metadata.physical.energy
+            } else {
+                0
+            },
+            0,
+            0,
+            bottom,
+            Vector2::ZERO,
+            0,
+            metadata.vertices.clone(),
+            0,
+            0,
+            0,
+            None,
+            None,
+        )
+        .with_alive(initial_alive)
+        .with_ocf(preview_ocf)
+        .with_full_state(Rc::new({
+            let mut state = crate::preview_spawn_state(
+                bottom,
+                OWNER_NONE,
+                OWNER_NONE,
+                metadata.category,
+                0,
+                metadata.vertices,
+            );
+            state.alive = initial_alive;
+            state.energy = if initial_alive {
+                metadata.physical.energy
+            } else {
+                0
+            };
+            state.crew_member = metadata.crew_member;
+            state.blit_mode = metadata.blit_mode;
+            state
+        }));
+        context.register_spawn(spawn, preview);
+        context.ensure_object_scope(id);
+        Ok(Some((
+            id,
+            growth.clamp(0, FULL_CON),
+            metadata.shape,
+            metadata.stretch_growth,
+            metadata.line,
+        )))
+    })?;
+    let Some((target, growth, shape, stretch_growth, line)) = registration else {
+        return Ok(Value::Nil);
+    };
+
+    // C4Game::NewObject calls Construction before the initial DoCon, with a
+    // null creator for PlaceVegetation (C4Game.cpp:1135-1144, 3020-3022).
+    if let Some(Err(error)) =
+        call_world_object_own_function(target, "Construction", &[Value::Nil])
+    {
+        tracing::warn!(
+            id = target.as_u64(),
+            callback = "Construction",
+            %error,
+            "creation callback failed; continuing like C++ fail-safe Call"
+        );
+    }
+    let removed = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| context.nested_object_destroyed(target))
+            .unwrap_or(false)
+    });
+    if removed {
+        return Ok(Value::Nil);
+    }
+
+    let crossed_full_con = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        let (was_full, final_construction, pre_growth_position, adjusted_position) = {
+            let Some(scope) = context.object_scope_mut(target) else {
+                return false;
+            };
+            let entry_construction = scope.construction();
+            let was_full = entry_construction >= FULL_CON;
+            let final_construction = entry_construction
+                .saturating_add(growth)
+                .clamp(0, FULL_CON);
+            let pre_growth_position = scope.effective_position();
+            let adjusted_position = Vector2::new(
+                pre_growth_position.x,
+                crate::docon_initial_center_y(
+                    shape,
+                    stretch_growth,
+                    line,
+                    final_construction,
+                    pre_growth_position.y,
+                ),
+            );
+            scope.current_construction = final_construction;
+            scope.pending_update.construction = None;
+            scope.current_position = adjusted_position;
+            scope.pending_update.position = None;
+            (
+                was_full,
+                final_construction,
+                pre_growth_position,
+                adjusted_position,
+            )
+        };
+        if let Some(spawn) = context
+            .pending_spawns
+            .iter_mut()
+            .find(|spawn| spawn.id == Some(target))
+        {
+            spawn.position = adjusted_position;
+            spawn.construction = final_construction;
+            spawn.fixed_position = (adjusted_position != pre_growth_position)
+                .then_some(FixedVec2::from_ints(
+                    pre_growth_position.x,
+                    pre_growth_position.y,
+                ));
+        }
+        !was_full && final_construction >= FULL_CON
+    });
+    if crossed_full_con {
+        if let Some(Err(error)) = call_world_object_own_function(target, "Completion", &[]) {
+            tracing::warn!(
+                id = target.as_u64(),
+                callback = "Completion",
+                %error,
+                "creation callback failed; continuing like C++ fail-safe Call"
+            );
+        }
+        let removed = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| context.nested_object_destroyed(target))
+                .unwrap_or(false)
+        });
+        if !removed {
+            if let Some(Err(error)) = call_world_object_own_function(target, "Initialize", &[]) {
+                tracing::warn!(
+                    id = target.as_u64(),
+                    callback = "Initialize",
+                    %error,
+                    "creation callback failed; continuing like C++ fail-safe Call"
+                );
+            }
+        }
+    }
+
+    let removed = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| context.nested_object_destroyed(target))
+            .unwrap_or(false)
+    });
+    Ok(if removed {
+        Value::Nil
+    } else {
+        object_reference_value(target)
+    })
+}
+
 fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
     // FnCreateConstruction takes a C4ID (C4Script.cpp:1911-1912); our
     // resources address definitions by their id string, so id values and
@@ -23815,6 +24305,7 @@ mod tests {
         "OnFire",
         "Or",
         "PathFree",
+        "PlaceVegetation",
         "PlayerMessage",
         "PlrMessage",
         "Pow",
@@ -31016,6 +31507,347 @@ func ProbeBadIndex(id) {
         assert_eq!(spawn.owner, 0);
         assert_eq!(spawn.id, Some(ObjectId::new(1)));
         assert_eq!(outcome.next_object_id, 2);
+    }
+
+    #[test]
+    fn place_vegetation_uses_relative_surface_area_and_raw_growth_like_cpp() {
+        // FnPlaceVegetation makes x/y caller-relative (C4Script.cpp:2487-2492),
+        // then the surface arm draws x/y, applies AboveSemiSolid, checks Soil,
+        // and passes the raw growth value to CreateObjectConstruction with
+        // NO_OWNER (C4Game.cpp:2980-3022).
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
+        )
+        .expect("earth material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth material exists");
+        let mut landscape = Landscape::flat_with_material(400, 160, Some(earth));
+        landscape.set_world_height(300);
+        let definitions = HashMap::from([(
+            DefinitionId::from("TREE"),
+            DefinitionMetadata {
+                category: crate::CATEGORY_STATIC_BACK,
+                shape: Some(DefinitionRect::new(-20, -28, 40, 56)),
+                placement: 0,
+                growth: 2,
+                stretch_growth: true,
+                ..DefinitionMetadata::default()
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            2,
+            false,
+        )
+        .with_materials(Some(Rc::new(materials)));
+        let caller = HostObjectContext::new(
+            ObjectId::new(1),
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::new(200, 150),
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            FULL_CON,
+        );
+        let mut expected_rng = LcgRng::new(17);
+        assert_eq!(expected_rng.random(200), 94);
+        assert_eq!(expected_rng.random(200), 2);
+        let guard = enter_random_context(LcgRng::new(17));
+        let (result, outcome) = with_effect_context(Some(caller), &[], world, 2, || {
+            place_vegetation(&[
+                Value::C4Id("TREE".into()),
+                Value::Int(-100),
+                Value::Int(-100),
+                Value::Int(200),
+                Value::Int(200),
+                Value::Int(10),
+            ])
+        });
+        let rng_after = guard.finish();
+
+        assert_eq!(rng_after, expected_rng, "exactly the x/y draws are consumed");
+        assert_eq!(
+            result.expect("PlaceVegetation succeeds"),
+            object_reference_value(ObjectId::new(2))
+        );
+        assert_eq!(outcome.spawns.len(), 1);
+        let spawn = &outcome.spawns[0];
+        assert_eq!(spawn.definition_id, "TREE");
+        assert_eq!(spawn.position, Vector2::new(194, 168));
+        assert_eq!(spawn.construction, 10, "growth is FullCon scale, not percent");
+        assert_eq!(spawn.owner, OWNER_NONE);
+        assert_eq!(spawn.controller, Some(OWNER_NONE));
+    }
+
+    #[test]
+    fn place_vegetation_runs_construction_before_partial_growth_like_cpp() {
+        // NewObject inserts the object, calls Construction at Con=0, then
+        // DoCon(iGrowth, true); Completion+Initialize only run when that
+        // transition reaches FullCon (C4Game.cpp:1135-1144;
+        // C4Object.cpp:1428-1515). FnPlaceVegetation returns that live object.
+        let script = r#"#strict
+local iConstructionCon, iCompletion, iInitialized, iObservedCon;
+
+protected func Construction()
+{
+    iConstructionCon = GetCon();
+    DoCon(1);
+    return(1);
+}
+
+protected func Completion()
+{
+    iCompletion = 1;
+    return(1);
+}
+
+protected func Initialize()
+{
+    iInitialized = 1;
+    return(1);
+}
+
+public func ConstructionCon()
+{
+    return(iConstructionCon);
+}
+
+public func Seed()
+{
+    var child = PlaceVegetation(TREE, -100, -100, 200, 200, 10);
+    iObservedCon = child->ConstructionCon();
+    return(child);
+}
+
+public func SeedFull()
+{
+    return(PlaceVegetation(TREE, -100, -100, 200, 200, 100000));
+}
+"#;
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
+        )
+        .expect("earth material parses");
+        let mut engine = crate::Engine::with_seed(17);
+        engine.configure_materials_from_library(&library);
+        let earth = engine
+            .materials()
+            .id_of("Earth")
+            .expect("earth material exists");
+        let mut landscape = Landscape::flat_with_material(400, 160, Some(earth));
+        landscape.set_world_height(300);
+        engine.set_landscape(landscape);
+
+        let mut tree = crate::Definition::from_script("TREE", "Tree", script)
+            .expect("tree script compiles");
+        tree.set_category(crate::CATEGORY_STATIC_BACK);
+        tree.set_shape_rect(Some(DefinitionRect::new(-20, -28, 40, 56)));
+        tree.set_placement(0);
+        tree.set_growth(2);
+        tree.set_stretch_growth(true);
+        engine.register_definition(tree).expect("tree registers");
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("TREE")
+                    .with_position(Vector2::new(200, 160))
+                    .with_category(crate::CATEGORY_STATIC_BACK),
+            )
+            .expect("caller tree spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let value = engine
+            .call_object_function(caller_index, "Seed", Vec::new())
+            .expect("Seed runs");
+        let child_id = object_id_from_value(&value).expect("Seed returns child");
+        let child_index = engine.find_object_index(child_id).expect("child exists");
+        let child = &engine.objects[child_index].state;
+
+        assert_eq!(
+            child.construction, 1_010,
+            "the initial DoCon adds raw growth after Construction's change"
+        );
+        assert_eq!(
+            child.local_vars.get("iConstructionCon"),
+            Some(&Value::Int(0)),
+            "Construction observes the pre-growth Con=0 state"
+        );
+        assert_eq!(child.local_vars.get("iCompletion"), Some(&Value::Nil));
+        assert_eq!(child.local_vars.get("iInitialized"), Some(&Value::Nil));
+        let caller_index = engine.find_object_index(caller).expect("caller remains");
+        assert_eq!(
+            engine.objects[caller_index]
+                .state
+                .local_vars
+                .get("iObservedCon"),
+            Some(&Value::Int(0)),
+            "the Construction write is visible before PlaceVegetation returns"
+        );
+
+        let value = engine
+            .call_object_function(caller_index, "SeedFull", Vec::new())
+            .expect("SeedFull runs");
+        let full_child = object_id_from_value(&value).expect("SeedFull returns child");
+        let full_index = engine
+            .find_object_index(full_child)
+            .expect("full child exists");
+        let full = &engine.objects[full_index].state;
+        assert_eq!(full.construction, FULL_CON);
+        assert_eq!(
+            full.local_vars.get("iConstructionCon"),
+            Some(&Value::Int(0))
+        );
+        assert_eq!(full.local_vars.get("iCompletion"), Some(&Value::Int(1)));
+        assert_eq!(full.local_vars.get("iInitialized"), Some(&Value::Int(1)));
+    }
+
+    #[test]
+    fn place_vegetation_finds_liquid_bottom_like_cpp() {
+        // C4D_Place_Liquid takes one random point, tries FindSurfaceLiquid
+        // then FindLiquid, settles via SemiAboveSolid, and creates three
+        // pixels into the bottom (C4Game.cpp:3027-3039;
+        // C4Landscape.cpp:1860-1915,1772-1796).
+        let library = lc_resources::MaterialLibrary::parse(
+            r#"
+            [Material Rock]
+            Name=Rock
+            Density=100
+
+            [Material Water]
+            Name=Water
+            Density=25
+            "#,
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let rock = materials.id_of("Rock").expect("rock exists");
+        let water = materials.id_of("Water").expect("water exists");
+        let mut landscape = Landscape::flat_with_material(100, 200, Some(rock));
+        landscape.set_world_height(300);
+        for x in 20..80 {
+            for y in 100..200 {
+                assert!(landscape.insert_liquid_at(x, y, Some(water)));
+            }
+        }
+        let definitions = HashMap::from([(
+            DefinitionId::from("PLNT"),
+            DefinitionMetadata {
+                shape: Some(DefinitionRect::new(-2, -3, 4, 6)),
+                placement: 1,
+                ..DefinitionMetadata::default()
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+        .with_materials(Some(Rc::new(materials)));
+        let mut expected_rng = LcgRng::new(23);
+        assert_eq!(expected_rng.random(1), 0);
+        assert_eq!(expected_rng.random(1), 0);
+        let guard = enter_random_context(LcgRng::new(23));
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            place_vegetation(&[
+                Value::C4Id("PLNT".into()),
+                Value::Int(50),
+                Value::Int(120),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(500),
+            ])
+        });
+        let rng_after = guard.finish();
+
+        assert_eq!(rng_after, expected_rng, "the point costs exactly two draws");
+        assert_eq!(
+            result.expect("PlaceVegetation succeeds"),
+            object_reference_value(ObjectId::new(1))
+        );
+        assert_eq!(outcome.spawns.len(), 1);
+        assert_eq!(outcome.spawns[0].position, Vector2::new(49, 202));
+        assert_eq!(outcome.spawns[0].construction, 500);
+    }
+
+    #[test]
+    fn place_vegetation_default_growth_uses_cpp_random_gate() {
+        // iGrowth<=0 first becomes FullCon; a definition with Growth then
+        // has a 1-in-3 gate followed by Random(FullCon)+1
+        // (C4Game.cpp:2988-2992), before the placement-point draws.
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
+        )
+        .expect("earth material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut landscape = Landscape::flat_with_material(400, 160, Some(earth));
+        landscape.set_world_height(300);
+        let definitions = HashMap::from([(
+            DefinitionId::from("TREE"),
+            DefinitionMetadata {
+                shape: Some(DefinitionRect::new(-20, -28, 40, 56)),
+                placement: 0,
+                growth: 2,
+                stretch_growth: true,
+                ..DefinitionMetadata::default()
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+        .with_materials(Some(Rc::new(materials)));
+        let mut expected_rng = LcgRng::new(2);
+        assert_eq!(expected_rng.random(3), 0);
+        let expected_growth = expected_rng.random(FULL_CON) + 1;
+        assert_eq!(expected_growth, 29_217);
+        assert_eq!(expected_rng.random(1), 0);
+        assert_eq!(expected_rng.random(1), 0);
+        let guard = enter_random_context(LcgRng::new(2));
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            place_vegetation(&[
+                Value::C4Id("TREE".into()),
+                Value::Int(200),
+                Value::Int(50),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(0),
+            ])
+        });
+        let rng_after = guard.finish();
+
+        assert_eq!(rng_after, expected_rng);
+        assert_eq!(
+            result.expect("PlaceVegetation succeeds"),
+            object_reference_value(ObjectId::new(1))
+        );
+        assert_eq!(outcome.spawns[0].construction, expected_growth);
     }
 
     #[test]
