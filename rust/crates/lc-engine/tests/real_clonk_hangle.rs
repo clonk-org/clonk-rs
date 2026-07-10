@@ -5,7 +5,7 @@ use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ocf, CommandDirection, Definition, DefinitionTargetRect, Direction, Engine, JoinPlayerConfig,
     Landscape, ObjectUpdate, PhysicalsUpdate, Scenario, ScenarioError, SpawnConfig, Vector2,
-    CATEGORY_STATIC_BACK, CNAT_TOP, COM_DIG, COM_THROW, COM_UP,
+    CATEGORY_STATIC_BACK, CNAT_TOP, COM_DIG, COM_LEFT, COM_THROW, COM_UP,
 };
 use lc_resources::Group;
 
@@ -236,6 +236,11 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
         .expect("Tutorial01 and the real Objects.c4d load");
     let mut engine = Engine::with_seed(0);
+    let material_group =
+        Group::open(content.join("Material.c4g")).expect("the real global Material.c4g opens");
+    let materials = lc_resources::MaterialLibrary::from_group(&material_group)
+        .expect("the real global material definitions load");
+    engine.configure_materials_from_library(&materials);
     scenario.apply(&mut engine).expect("Tutorial01 applies");
     let joined = engine
         .join_player(JoinPlayerConfig {
@@ -377,30 +382,88 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         script160_clonk.container,
         engine.snapshot().players[0].show_control,
     );
-    engine.set_landscape(Landscape::flat(80, 30));
+    let gold = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .find(|object| object.definition_id.as_str() == "GOLD")
+        .expect("Script150 creates the tutorial gold")
+        .id;
+    let (width, height, before_dig) = engine
+        .debug_landscape_plane()
+        .expect("Tutorial01 keeps its authoritative Surface8 plane");
+    assert!(
+        engine.debug_landscape_is_solid(220, 299),
+        "the lesson floor starts solid before DigFree"
+    );
     engine
         .apply_object_update(
             clonk,
             ObjectUpdate::new()
-                .with_position(Vector2::new(30, 20))
+                .with_position(Vector2::new(220, 289))
                 .with_velocity(Vector2::ZERO)
                 .with_action("Walk")
+                .with_direction(Direction::Left)
                 .with_command_direction(CommandDirection::Stop),
         )
-        .expect("place the unlocked CLNK on a stable digging floor");
+        .expect("place the unlocked CLNK on the real lesson floor");
     engine
         .player_in_com(joined.number, COM_DIG, 0)
         .expect("normal player Dig control");
-    for _ in 0..=10 {
-        engine.tick().expect("dig single-click timeout frame");
+    for _ in 0..100 {
+        engine.tick().expect("diagonal tutorial digging frame");
     }
+    let diagonal_digger = engine.object_snapshot(clonk).expect("CLNK after Dig");
+    assert_eq!(diagonal_digger.action.name, "Dig");
+    assert_eq!(
+        diagonal_digger.command_direction,
+        CommandDirection::DownLeft
+    );
+    // DoMovement applies an active action's DigFree circle to the predicted
+    // position on Surface8 (C4Movement.cpp:227-245). This is the real pixel
+    // underneath the lesson start, not a replacement heightfield fixture.
+    assert!(
+        !engine.debug_landscape_is_solid(220, 299),
+        "the real tutorial floor pixel must be excavated"
+    );
+    let (dug_width, dug_height, after_diagonal_dig) = engine
+        .debug_landscape_plane()
+        .expect("Tutorial01 Surface8 remains authoritative after digging");
+    assert_eq!((dug_width, dug_height), (width, height));
+    assert_ne!(
+        after_diagonal_dig, before_dig,
+        "DigFree must mutate the authoritative landscape byte plane"
+    );
+
+    engine
+        .player_in_com(joined.number, COM_LEFT, 0)
+        .expect("steer the active dig left toward the gold");
     assert_eq!(
         engine
             .object_snapshot(clonk)
-            .expect("CLNK after Dig")
-            .action
-            .name,
-        "Dig"
+            .expect("CLNK after steering")
+            .command_direction,
+        CommandDirection::Left
+    );
+    // Tick3 cross-check collection enters carryable objects into the crew
+    // (C4GameObjects.cpp:143-194; C4Object.cpp:5693-5713). Follow the real
+    // tutorial tunnel until its Script150 GOLD enters the real CLNK.
+    for _ in 0..140 {
+        engine.tick().expect("horizontal tutorial digging frame");
+        if engine
+            .object_snapshot(gold)
+            .is_some_and(|object| object.container == Some(clonk))
+        {
+            break;
+        }
+    }
+    let collected_gold = engine.object_snapshot(gold).expect("tutorial GOLD remains");
+    assert_eq!(
+        collected_gold.container,
+        Some(clonk),
+        "the excavated tunnel must let the real CLNK collect Script150's GOLD; clonk={:?}, gold={:?}",
+        engine.object_snapshot(clonk),
+        collected_gold,
     );
 }
 

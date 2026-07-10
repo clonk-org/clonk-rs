@@ -20518,6 +20518,7 @@ impl Engine {
         let old_movement_velocity = self.objects[idx].fixed_velocity;
         let old_movement_hit_flags = movement_hit_speed_flags(old_movement_velocity);
         let action_name = self.objects[idx].state.action.name.clone();
+        self.apply_dig_procedure(idx, definition_id);
         let (
             contact_density,
             contact_function_calls,
@@ -20950,10 +20951,6 @@ impl Engine {
         // Mirror into the script-visible state: FnAdjustWalkRotation
         // reads Action.t_attach (C4Script.cpp:5444).
         self.objects[idx].state.t_attach = self.objects[idx].frame_t_attach;
-
-        if matches!(procedure, ActionProcedure::Dig) {
-            self.apply_dig_procedure(idx, &definition_id);
-        }
 
         if matches!(procedure, ActionProcedure::Bridge)
             && !self.apply_bridge_procedure(idx, command_direction, &definition_id)
@@ -21489,97 +21486,65 @@ impl Engine {
     }
 
     fn apply_dig_procedure(&mut self, idx: usize, definition_id: &DefinitionId) {
-        let materials = &self.materials;
-        let landscape = match self.landscape.as_mut() {
-            Some(landscape) if landscape.width() > 0 => landscape,
-            _ => return,
-        };
-
-        let (action_name, requested) = {
+        let (action_name, predicted, requested, object_id, construction, shape_rect) = {
             let object = &self.objects[idx];
             (
                 object.state.action.name.clone(),
+                Vector2::new(
+                    math::fixtoi(object.fixed_position.x + object.fixed_velocity.x),
+                    math::fixtoi(object.fixed_position.y + object.fixed_velocity.y),
+                ),
                 object.state.action.data != 0,
+                object.id,
+                object.state.construction,
+                object.current_shape_rect(),
             )
         };
 
-        let dig_free_value = match self.definitions.get(definition_id).and_then(|definition| {
-            definition
-                .action_library()
-                .dig_free_for_action(&action_name)
-        }) {
-            Some(value) => value,
-            None => return,
+        let Some(action_library) = self
+            .definitions
+            .get(definition_id)
+            .map(Definition::action_library)
+        else {
+            return;
+        };
+        if action_library.is_idle_action(&action_name) {
+            return;
+        }
+        let Some(dig_free_value) = action_library.dig_free_for_action(&action_name) else {
+            return;
         };
 
         if dig_free_value <= 0 {
             return;
         }
 
-        let mut removal_counts: HashMap<MaterialId, i32> = HashMap::new();
-
-        let (position, (half_width, half_height)) = {
-            let object = &self.objects[idx];
-            (object.state.position, Self::object_half_extents(object))
-        };
-
         if dig_free_value == 1 {
-            let effective_half_width = half_width.max(1);
-            let effective_half_height = half_height.max(1);
-            let left = position.x - effective_half_width;
-            let right = position.x + effective_half_width;
-            let bottom = position.y + effective_half_height;
-            for column in left..=right {
-                if let Some((material_id, removed)) =
-                    Self::dig_column(materials, landscape, column, bottom)
-                {
-                    removal_counts
-                        .entry(material_id)
-                        .and_modify(|value| *value = value.saturating_add(removed))
-                        .or_insert(removed);
-                }
-            }
+            let Some(shape_rect) = shape_rect else {
+                return;
+            };
+            self.execute_dig_rect_operation(
+                Vector2::new(
+                    predicted.x.saturating_add(shape_rect.x),
+                    predicted.y.saturating_add(shape_rect.y),
+                ),
+                shape_rect.width,
+                shape_rect.height,
+                requested,
+                Some(object_id),
+            );
         } else {
-            let radius = dig_free_value.max(1);
-            let center_x = position.x;
-            let center_y = position.y.saturating_sub(1);
-            let radius_sq = i64::from(radius) * i64::from(radius);
-            for offset in -radius..=radius {
-                let column = center_x + offset;
-                let dx_sq = i64::from(offset) * i64::from(offset);
-                if dx_sq > radius_sq {
-                    continue;
-                }
-                let remaining = radius_sq - dx_sq;
-                if remaining < 0 {
-                    continue;
-                }
-                let vertical = (remaining as f64).sqrt().floor() as i32;
-                let target = center_y.saturating_add(vertical);
-                if let Some((material_id, removed)) =
-                    Self::dig_column(materials, landscape, column, target)
-                {
-                    removal_counts
-                        .entry(material_id)
-                        .and_modify(|value| *value = value.saturating_add(removed))
-                        .or_insert(removed);
-                }
+            let mut radius = dig_free_value;
+            if construction < FULL_CON {
+                radius = radius * 6 * construction / 5 / FULL_CON;
             }
+            self.execute_dig_circle_operation(
+                Vector2::new(predicted.x, predicted.y.saturating_sub(1)),
+                radius,
+                requested,
+                Some(object_id),
+            );
         }
-
-        if removal_counts.is_empty() {
-            return;
-        }
-
-        {
-            let object = &mut self.objects[idx];
-            object.ensure_material_capacity(self.materials.len());
-            for (material_id, removed) in &removal_counts {
-                object.add_material_content(*material_id, *removed);
-            }
-        }
-
-        self.process_dig_material_conversions(idx, requested);
     }
 
     fn dig_column(
@@ -37568,6 +37533,11 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             ActionSpec::default().with_procedure("dig").with_dig_free(6),
         );
         definition.configure_actions(Some("Dig".to_string()), actions);
+        // C4D_StaticBack objects skip ExecMovement (C4Movement.cpp:553-567),
+        // and DFA_DIG requires a bottom attachment (C4Object.cpp:4906-4911).
+        definition.set_category(CATEGORY_OBJECT);
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        definition.set_contact_density(50);
 
         let material_source = r#"
             [Material Earth]
@@ -37591,7 +37561,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let id = engine
             .spawn_object(
                 SpawnConfig::new("Digger")
-                    .with_position(Vector2::new(12, 8))
+                    .with_position(Vector2::new(12, 4))
                     .with_action(ActionState::new("Dig")),
             )
             .expect("spawn succeeds");
@@ -37612,6 +37582,110 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn dig_free_uses_post_steering_predicted_center_on_pixel_grid_like_cpp() {
+        // DFA_DIG assigns xdir during ExecAction (C4Object.cpp:4906-4935),
+        // then DoMovement digs at fixtoi(fix_x+xdir), fixtoi(fix_y+ydir)
+        // on the authoritative landscape plane (C4Movement.cpp:227-245).
+        let mut definition =
+            Definition::from_script("DGRR", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        definition.set_physical(PhysicalInfo {
+            dig: C4_MAX_PHYSICAL,
+            ..PhysicalInfo::default()
+        });
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        definition.set_contact_density(50);
+        definition.configure_actions(
+            Some("Dig".to_string()),
+            HashMap::from([(
+                "Dig".to_string(),
+                ActionSpec::default()
+                    .with_procedure("DIG")
+                    .with_length(16)
+                    .with_delay(15)
+                    .with_next("Dig")
+                    .with_dig_free(2),
+            )]),
+        );
+
+        let library = lc_resources::MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+
+            [Material Granite]
+            Name=Granite
+            Density=100
+            DigFree=0
+            "#,
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+
+        let mut bytes = vec![0_u8; 32 * 32];
+        // With xdir=1.25, C++ predicts center x=11. Radius two's conditional
+        // right edge reaches x=13; the obsolete pre-steering center reaches
+        // x=7 on its left edge instead. Keep both pixels as sentinels.
+        bytes[9 * 32 + 7] = 1;
+        bytes[9 * 32 + 13] = 1;
+        // A non-diggable support pixel keeps this a valid bottom attachment
+        // for the C++ DFA_DIG precondition.
+        bytes[12 * 32 + 10] = 2;
+        let grid = landscape::PixelGrid::new(
+            32,
+            32,
+            bytes,
+            vec![0, 80, 100],
+            vec![None, Some("Earth".into()), Some("Granite".into())],
+            vec![None; 3],
+        );
+        let mut landscape = Landscape::new(32, vec![30; 32]).expect("landscape builds");
+        landscape.set_world_height(32);
+        landscape.set_pixel_grid(grid);
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .spawn_object(
+                SpawnConfig::new("DGRR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_action(ActionState::new("Dig"))
+                    .with_command_direction(CommandDirection::Right)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("digger spawns");
+
+        engine.tick().expect("dig frame succeeds");
+        let landscape = engine.landscape().expect("landscape remains");
+        assert_eq!(
+            landscape.grid_byte_at(13, 9),
+            Some(0),
+            "the post-steering predicted circle clears its leading edge"
+        );
+        assert_eq!(
+            landscape.grid_byte_at(7, 9),
+            Some(1),
+            "the obsolete pre-steering circle must not clear its trailing sentinel"
+        );
+        assert_eq!(
+            landscape.grid_byte_at(10, 12),
+            Some(2),
+            "non-DigFree support remains solid"
+        );
+    }
+
+    #[test]
     fn dig_procedure_removes_surface_pixel_when_circle_touches_ground() -> Result<(), EngineError> {
         let mut definition = Definition::from_script("DGRR", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
             .expect("script compiles");
@@ -37621,6 +37695,9 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             ActionSpec::default().with_procedure("dig").with_dig_free(6),
         );
         definition.configure_actions(Some("Dig".to_string()), actions);
+        definition.set_category(CATEGORY_OBJECT);
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        definition.set_contact_density(50);
 
         let material_source = r#"
             [Material Earth]
@@ -37641,8 +37718,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.set_materials(materials);
         engine.set_landscape(Landscape::flat_with_material(32, 20, Some(earth)));
 
-        let dig_radius = 6;
-        let position_y = 21 - dig_radius;
+        let position_y = 18;
         let column_x = 12;
 
         engine
@@ -37681,6 +37757,9 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             ActionSpec::default().with_procedure("dig").with_dig_free(6),
         );
         digger.configure_actions(Some("Dig".to_string()), actions);
+        digger.set_category(CATEGORY_OBJECT);
+        digger.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        digger.set_contact_density(50);
 
         let gem = Definition::from_script(
             "GEM_",
@@ -37714,7 +37793,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine
             .spawn_object(
                 SpawnConfig::new("DGRR")
-                    .with_position(Vector2::new(12, 8))
+                    .with_position(Vector2::new(12, 4))
                     .with_action(ActionState::new("Dig")),
             )
             .expect("spawn succeeds");
@@ -37747,6 +37826,9 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             ActionSpec::default().with_procedure("dig").with_dig_free(6),
         );
         digger.configure_actions(Some("Dig".to_string()), actions);
+        digger.set_category(CATEGORY_OBJECT);
+        digger.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        digger.set_contact_density(50);
 
         let gem = Definition::from_script(
             "GEM_",
@@ -37780,7 +37862,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine
             .spawn_object(
                 SpawnConfig::new("DGRR")
-                    .with_position(Vector2::new(12, 8))
+                    .with_position(Vector2::new(12, 4))
                     .with_action(ActionState::new("Dig")),
             )
             .expect("spawn succeeds");
@@ -37823,6 +37905,9 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
                 ActionSpec::default().with_procedure("dig").with_dig_free(6),
             );
             digger.configure_actions(Some("Dig".to_string()), actions);
+            digger.set_category(CATEGORY_OBJECT);
+            digger.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+            digger.set_contact_density(50);
             digger
         }
 
@@ -37865,7 +37950,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             engine
                 .spawn_object(
                     SpawnConfig::new("DGRR")
-                        .with_position(Vector2::new(12, 8))
+                        .with_position(Vector2::new(12, 4))
                         .with_action(ActionState::new("Dig")),
                 )
                 .expect("spawn succeeds");
@@ -37899,7 +37984,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             engine
                 .spawn_object(
                     SpawnConfig::new("DGRR")
-                        .with_position(Vector2::new(12, 8))
+                        .with_position(Vector2::new(12, 4))
                         .with_action(requested_action),
                 )
                 .expect("spawn succeeds");
