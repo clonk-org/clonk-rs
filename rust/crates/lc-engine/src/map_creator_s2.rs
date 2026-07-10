@@ -16,6 +16,7 @@
 use crate::map_creator::evaluate_map_size;
 use crate::rng::LcgRng;
 use crate::scenario::{LegacyC4SVal, MapPixelClassifier};
+use serde::{Deserialize, Serialize};
 
 /// `C4MC_SizeRes` — positions in percent (C4MapCreatorS2.h:29).
 const SIZE_RES: i32 = 100;
@@ -24,7 +25,7 @@ const ZOOM_RES: i32 = 100;
 
 type NodeId = usize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Op {
     None,
     And,
@@ -32,7 +33,7 @@ enum Op {
     Xor,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Algo {
     Solid,
     Random,
@@ -72,7 +73,7 @@ impl Algo {
 }
 
 /// C4MCNode::int_bool (C4MapCreatorS2.h:181-197).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct IntBool {
     value: i32,
     percent: bool,
@@ -94,7 +95,7 @@ impl IntBool {
 
 /// C4MCOverlay fields (C4MapCreatorS2.h:248-298). Maps are overlays with
 /// `is_map` (C4MCMap, C4MapCreatorS2.h:327-347).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Overlay {
     is_map: bool,
     seed: i32,
@@ -177,7 +178,7 @@ impl Overlay {
 }
 
 /// C4MCPoint (C4MapCreatorS2.h:301-324).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Point {
     x: i32,
     y: i32,
@@ -185,7 +186,7 @@ struct Point {
     ry: IntBool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum NodeKind {
     /// The global scope (C4MapCreatorS2 itself, Type MCN_Node).
     Root,
@@ -193,7 +194,7 @@ enum NodeKind {
     Point(Point),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Node {
     owner: Option<NodeId>,
     children: Vec<NodeId>,
@@ -201,8 +202,30 @@ struct Node {
     kind: NodeKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Tree {
     nodes: Vec<Node>,
+}
+
+/// The parsed and evaluated `C4MapCreatorS2` node tree retained by
+/// `KeepMapCreator`. Runtime `DrawMap` can clone this tree to resolve the
+/// scenario's named overlay templates without reparsing ranges or drawing
+/// new synced random values (C4Landscape.cpp:2650-2658).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MapCreatorS2State {
+    tree: Tree,
+}
+
+impl MapCreatorS2State {
+    #[cfg(test)]
+    fn node_count(&self) -> usize {
+        self.tree.nodes.len()
+    }
+}
+
+pub(crate) struct S2MapCreation {
+    pub(crate) bitmap: Option<lc_resources::bitmap::IndexedBitmap>,
+    pub(crate) creator: MapCreatorS2State,
 }
 
 impl Tree {
@@ -1333,6 +1356,31 @@ pub(crate) fn create_s2_map(
     player_count: i32,
     rng: &mut LcgRng,
 ) -> Option<lc_resources::bitmap::IndexedBitmap> {
+    create_s2_map_with_state(
+        source,
+        classifier,
+        map_width,
+        map_height,
+        map_player_extend,
+        player_count,
+        rng,
+    )
+    .bitmap
+}
+
+/// The state-bearing form of [`create_s2_map`]. Unlike the compatibility
+/// wrapper, this returns the evaluated creator tree even when the source has
+/// no renderable map node; C++ still retains that creator when
+/// `KeepMapCreator=1` (C4Landscape.cpp:537-556, 606-614).
+pub(crate) fn create_s2_map_with_state(
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    map_width: LegacyC4SVal,
+    map_height: LegacyC4SVal,
+    map_player_extend: bool,
+    player_count: i32,
+    rng: &mut LcgRng,
+) -> S2MapCreation {
     // C4MCMap::Default (src/C4MapCreatorS2.cpp:633-644) runs at creator
     // construction: MapWdt/MapHgt evaluate through the synced rng.
     let (wdt, hgt) = evaluate_map_size(map_width, map_height, map_player_extend, player_count, rng);
@@ -1361,27 +1409,33 @@ pub(crate) fn create_s2_map(
         .iter()
         .rev()
         .find(|&&child| tree.overlay(child).is_some_and(|overlay| overlay.is_map))
-        .copied()?;
-    let map_overlay = tree.overlay(map).expect("map overlay");
-    let (wdt, hgt) = (map_overlay.wdt, map_overlay.hgt);
-    if wdt <= 0 || hgt <= 0 {
-        return None;
-    }
-
-    // C4MCMap::RenderTo (src/C4MapCreatorS2.cpp:646-674).
-    let mut bytes = vec![0u8; (wdt * hgt) as usize];
-    for iy in 0..hgt {
-        for ix in 0..wdt {
-            let pix = &mut bytes[(iy * wdt + ix) as usize];
-            *pix = 0;
-            tree.render_pix(map, ix, iy, pix, Op::None, false, true);
+        .copied();
+    let bitmap = map.and_then(|map| {
+        let map_overlay = tree.overlay(map).expect("map overlay");
+        let (wdt, hgt) = (map_overlay.wdt, map_overlay.hgt);
+        if wdt <= 0 || hgt <= 0 {
+            return None;
         }
+
+        // C4MCMap::RenderTo (src/C4MapCreatorS2.cpp:646-674).
+        let mut bytes = vec![0u8; (wdt * hgt) as usize];
+        for iy in 0..hgt {
+            for ix in 0..wdt {
+                let pix = &mut bytes[(iy * wdt + ix) as usize];
+                *pix = 0;
+                tree.render_pix(map, ix, iy, pix, Op::None, false, true);
+            }
+        }
+        Some(lc_resources::bitmap::IndexedBitmap {
+            width: wdt as u32,
+            height: hgt as u32,
+            indices: bytes,
+        })
+    });
+    S2MapCreation {
+        bitmap,
+        creator: MapCreatorS2State { tree },
     }
-    Some(lc_resources::bitmap::IndexedBitmap {
-        width: wdt as u32,
-        height: hgt as u32,
-        indices: bytes,
-    })
 }
 
 #[cfg(test)]
@@ -1432,6 +1486,33 @@ mod tests {
             LegacyC4SVal::new(20, 0, 10, 250),
             LegacyC4SVal::new(10, 0, 10, 250),
         )
+    }
+
+    #[test]
+    fn evaluated_creator_tree_round_trips_without_a_renderable_map() {
+        // CreateMapS2 leaves pMapCreator alive even when Render(nullptr)
+        // finds no map and the caller falls back to C4MapCreator. With
+        // KeepMapCreator, named templates must therefore survive that path
+        // too (C4Landscape.cpp:537-556, 606-614).
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let (w, h) = params();
+        let creation = create_s2_map_with_state(
+            "overlay Named { wdt = 50; seed = 7; };",
+            &mut classifier,
+            w,
+            h,
+            false,
+            1,
+            &mut rng,
+        );
+        assert!(creation.bitmap.is_none());
+        assert!(creation.creator.node_count() > 1);
+
+        let encoded = serde_json::to_string(&creation.creator).expect("creator serializes");
+        let restored: MapCreatorS2State =
+            serde_json::from_str(&encoded).expect("creator restores");
+        assert_eq!(restored, creation.creator);
     }
 
     #[test]

@@ -251,6 +251,113 @@ impl PixelGrid {
     }
 }
 
+/// The material properties needed when a runtime landscape operation adds a
+/// texture-map entry. This is deliberately narrower than the complete
+/// resource definition: `C4TextureMap::GetIndex` only needs the material's
+/// density and `MapChunkType` after validating its name (C4Texture.cpp:319-345).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RuntimeTexMapMaterial {
+    pub(crate) name: String,
+    pub(crate) density: i32,
+    pub(crate) shape: crate::chunky::ChunkShape,
+}
+
+/// The live C4 texture-map state needed by post-initialization raster writes.
+/// Unlike [`PixelGrid`], this retains the raw texture names used for pair
+/// matching, the available texture/material inventories, and the exact
+/// `DefaultMatTex` result for every material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RuntimeTexMapState {
+    pub(crate) densities: Vec<i32>,
+    pub(crate) material_names: Vec<Option<String>>,
+    pub(crate) texture_names: Vec<Option<String>>,
+    pub(crate) match_texture_names: Vec<Option<String>>,
+    pub(crate) shapes: Vec<Option<crate::chunky::ChunkShape>>,
+    pub(crate) materials: Vec<RuntimeTexMapMaterial>,
+    pub(crate) texture_inventory: Vec<String>,
+    /// `(material name, texmap slot)` in C++ material-map order.
+    #[serde(default)]
+    pub(crate) default_material_entries: Vec<(String, u8)>,
+}
+
+impl RuntimeTexMapState {
+    pub(crate) fn material(&self, name: &str) -> Option<&RuntimeTexMapMaterial> {
+        self.materials
+            .iter()
+            .find(|material| material.name.eq_ignore_ascii_case(name))
+    }
+
+    pub(crate) fn set_default_material_entry(&mut self, name: &str, slot: u8) {
+        if let Some((_, entry)) = self
+            .default_material_entries
+            .iter_mut()
+            .find(|(material, _)| material.eq_ignore_ascii_case(name))
+        {
+            *entry = slot;
+        } else {
+            self.default_material_entries
+                .push((name.to_string(), slot));
+        }
+    }
+
+    pub(crate) fn default_material_entry(&self, name: &str) -> Option<u8> {
+        self.default_material_entries
+            .iter()
+            .find(|(material, _)| material.eq_ignore_ascii_case(name))
+            .map(|(_, slot)| *slot)
+    }
+}
+
+/// State C++ keeps alongside `Surface8` for deterministic map-to-landscape
+/// rasterization after scenario activation (`C4Landscape.h:57-71`). It is
+/// absent for fixture/column-only landscapes that have no texture map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LandscapeRasterState {
+    map_zoom: i32,
+    map_seed: i32,
+    texmap: RuntimeTexMapState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    map_creator: Option<crate::map_creator_s2::MapCreatorS2State>,
+}
+
+impl LandscapeRasterState {
+    pub(crate) fn new(map_zoom: i32, map_seed: i32, texmap: RuntimeTexMapState) -> Self {
+        Self {
+            map_zoom,
+            map_seed,
+            texmap,
+            map_creator: None,
+        }
+    }
+
+    pub(crate) fn map_zoom(&self) -> i32 {
+        self.map_zoom
+    }
+
+    pub(crate) fn map_seed(&self) -> i32 {
+        self.map_seed
+    }
+
+    pub(crate) fn texmap(&self) -> &RuntimeTexMapState {
+        &self.texmap
+    }
+
+    pub(crate) fn texmap_mut(&mut self) -> &mut RuntimeTexMapState {
+        &mut self.texmap
+    }
+
+    pub(crate) fn map_creator(&self) -> Option<&crate::map_creator_s2::MapCreatorS2State> {
+        self.map_creator.as_ref()
+    }
+
+    pub(crate) fn set_map_creator(
+        &mut self,
+        creator: Option<crate::map_creator_s2::MapCreatorS2State>,
+    ) {
+        self.map_creator = creator;
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum LandscapeError {
     #[error("height map length {found} does not match width {width}")]
@@ -318,6 +425,10 @@ pub struct Landscape {
     /// exist (Engine::set_landscape).
     #[serde(default)]
     vehicle_material: Option<MaterialId>,
+    /// Runtime texmap/map-creator inputs required by DrawMap and direct
+    /// material raster writes. Old saves and synthetic landscapes omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    raster_state: Option<LandscapeRasterState>,
 }
 
 fn default_top_open() -> bool {
@@ -502,6 +613,7 @@ impl Landscape {
             top_open: true,
             bottom_open: false,
             vehicle_material: None,
+            raster_state: None,
         })
     }
 
@@ -527,6 +639,18 @@ impl Landscape {
 
     pub fn pixel_grid(&self) -> Option<&PixelGrid> {
         self.pixels.as_ref()
+    }
+
+    pub(crate) fn set_raster_state(&mut self, state: LandscapeRasterState) {
+        self.raster_state = Some(state);
+    }
+
+    pub(crate) fn raster_state(&self) -> Option<&LandscapeRasterState> {
+        self.raster_state.as_ref()
+    }
+
+    pub(crate) fn raster_state_mut(&mut self) -> Option<&mut LandscapeRasterState> {
+        self.raster_state.as_mut()
     }
 
     /// Resolve the grid's Pix2Mat table once the engine materials exist
@@ -2618,6 +2742,8 @@ impl<'de> Deserialize<'de> for Landscape {
             bottom_open: bool,
             #[serde(default)]
             vehicle_material: Option<MaterialId>,
+            #[serde(default)]
+            raster_state: Option<LandscapeRasterState>,
         }
 
         let mut data = LandscapeData::deserialize(deserializer)?;
@@ -2660,6 +2786,7 @@ impl<'de> Deserialize<'de> for Landscape {
         landscape.top_open = data.top_open;
         landscape.bottom_open = data.bottom_open;
         landscape.vehicle_material = data.vehicle_material;
+        landscape.raster_state = data.raster_state;
         Ok(landscape)
     }
 }
@@ -2683,6 +2810,60 @@ mod tests {
         let mut landscape = Landscape::flat(100, 50);
         landscape.set_world_height(400);
         landscape
+    }
+
+    #[test]
+    fn landscape_without_raster_state_remains_backward_compatible() {
+        let landscape: Landscape = serde_json::from_str(
+            r#"{"width":2,"surface":[3,4],"top_open":true}"#,
+        )
+        .expect("pre-raster-state landscape deserializes");
+        assert!(landscape.raster_state().is_none());
+
+        let serialized = serde_json::to_value(&landscape).expect("landscape serializes");
+        assert!(
+            serialized.get("raster_state").is_none(),
+            "absent state stays omitted from old/save fixture shapes"
+        );
+    }
+
+    #[test]
+    fn runtime_texmap_and_raster_inputs_round_trip_with_landscape() {
+        let mut texture_names = vec![None; 128];
+        texture_names[7] = Some("Smooth".to_string());
+        let mut material_names = vec![None; 128];
+        material_names[7] = Some("Earth".to_string());
+        let mut densities = vec![0; 128];
+        densities[7] = 100;
+        let mut shapes = vec![None; 128];
+        shapes[7] = Some(crate::chunky::ChunkShape::Smooth);
+        let mut texmap = RuntimeTexMapState {
+            densities,
+            material_names,
+            texture_names: texture_names.clone(),
+            match_texture_names: texture_names,
+            shapes,
+            materials: vec![RuntimeTexMapMaterial {
+                name: "Earth".to_string(),
+                density: 100,
+                shape: crate::chunky::ChunkShape::Smooth,
+            }],
+            texture_inventory: vec!["smooth".to_string()],
+            default_material_entries: Vec::new(),
+        };
+        texmap.set_default_material_entry("Earth", 7);
+
+        let mut landscape = Landscape::flat(2, 4);
+        landscape.set_raster_state(LandscapeRasterState::new(10, 31337, texmap));
+        let serialized = serde_json::to_string(&landscape).expect("landscape serializes");
+        let restored: Landscape = serde_json::from_str(&serialized).expect("state restores");
+
+        assert_eq!(restored, landscape);
+        let state = restored.raster_state().expect("raster state survives");
+        assert_eq!(state.map_zoom(), 10);
+        assert_eq!(state.map_seed(), 31337);
+        assert_eq!(state.texmap().default_material_entry("earth"), Some(7));
+        assert!(state.map_creator().is_none());
     }
 
     #[test]

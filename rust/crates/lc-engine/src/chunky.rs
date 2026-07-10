@@ -215,7 +215,7 @@ pub(crate) fn polygon(surface: &mut Surface8, vertices: &[(i32, i32)], col: u8) 
 }
 
 /// Material MapChunkType (C4Material.h:193-196, compiled from `Shape`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ChunkShape {
     Flat,
     TopFlat,

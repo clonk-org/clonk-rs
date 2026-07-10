@@ -19,6 +19,7 @@ use serde::de::Error as _;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::Deserialize;
 
+use crate::landscape::{LandscapeRasterState, RuntimeTexMapMaterial, RuntimeTexMapState};
 use crate::{
     action::ActionSpec, ActionState, CommandDirection, Definition, DefinitionActionFacet,
     DefinitionActionGraphics, DefinitionComponent, DefinitionPicture, DefinitionPictureImage,
@@ -2962,31 +2963,18 @@ fn basic_map_params(landscape: &LegacyLandscape) -> crate::map_creator::BasicMap
 /// bits are the texmap index (bit 0x80 = IFT); index 0, unmapped entries
 /// and unknown materials are sky (MNone, density 0).
 pub(crate) struct MapPixelClassifier {
-    densities: [i32; 128],
-    /// Material NAME per texmap index — the pixel grid resolves these
-    /// into engine MaterialIds once the MaterialSet exists.
-    names: Vec<Option<String>>,
-    /// TEXTURE name per texmap index (presentation: the landscape
-    /// renders each pixel from its texture's Material.c4g png).
-    textures: Vec<Option<String>>,
-    /// Material MapChunkType per texmap index (`Shape`,
-    /// C4Material.cpp:181); None = no material mapped, so ChunkOZoom
-    /// draws nothing for the texture (C4Landscape.cpp:342-343).
-    shapes: Vec<Option<crate::chunky::ChunkShape>>,
-    /// Raw TEXTURE name per texmap index used for `GetIndex` pair
-    /// matching (C4Texture.cpp:319-345) — unlike [`Self::textures`] this
-    /// keeps liquids' `Smooth` instead of the presentation `Liquid`.
-    match_textures: Vec<Option<String>>,
-    /// The material groups behind the slots — `GetIndex` adds
-    /// (fAddIfNotExist) resolve Density/Shape through them.
-    local_library: Option<lc_resources::MaterialLibrary>,
-    global_library: Option<lc_resources::MaterialLibrary>,
-    /// Image basenames in the material groups: `AddEntry` validates the
-    /// texture exists (C4Texture.cpp:116-131).
-    texture_inventory: Vec<String>,
+    state: RuntimeTexMapState,
 }
 
 impl MapPixelClassifier {
+    pub(crate) fn from_runtime_state(state: RuntimeTexMapState) -> Self {
+        Self { state }
+    }
+
+    pub(crate) fn into_runtime_state(self) -> RuntimeTexMapState {
+        self.state
+    }
+
     /// Bare-slot constructor for unit tests (no material groups behind
     /// the slots — `get_index` adds fail like a full C++ texture map).
     #[cfg(test)]
@@ -2997,14 +2985,16 @@ impl MapPixelClassifier {
         shapes: Vec<Option<crate::chunky::ChunkShape>>,
     ) -> Self {
         Self {
-            densities,
-            names,
-            match_textures: textures.clone(),
-            textures,
-            shapes,
-            local_library: None,
-            global_library: None,
-            texture_inventory: Vec::new(),
+            state: RuntimeTexMapState {
+                densities: densities.to_vec(),
+                material_names: names,
+                match_texture_names: textures.clone(),
+                texture_names: textures,
+                shapes,
+                materials: Vec::new(),
+                texture_inventory: Vec::new(),
+                default_material_entries: Vec::new(),
+            },
         }
     }
 
@@ -3020,15 +3010,29 @@ impl MapPixelClassifier {
         library: lc_resources::MaterialLibrary,
         texture_inventory: Vec<String>,
     ) -> Self {
+        let materials = library
+            .iter()
+            .map(Self::runtime_material)
+            .collect::<Vec<_>>();
         Self {
-            densities,
-            names,
-            match_textures: textures.clone(),
-            textures,
-            shapes,
-            local_library: None,
-            global_library: Some(library),
-            texture_inventory,
+            state: RuntimeTexMapState {
+                densities: densities.to_vec(),
+                material_names: names,
+                match_texture_names: textures.clone(),
+                texture_names: textures,
+                shapes,
+                materials,
+                texture_inventory,
+                default_material_entries: Vec::new(),
+            },
+        }
+    }
+
+    fn runtime_material(material: &lc_resources::MaterialDefinition) -> RuntimeTexMapMaterial {
+        RuntimeTexMapMaterial {
+            name: material.name().to_string(),
+            density: material.int("Density").unwrap_or(0),
+            shape: crate::chunky::ChunkShape::from_shape(material.int("Shape").unwrap_or(0)),
         }
     }
 
@@ -3043,28 +3047,22 @@ impl MapPixelClassifier {
     }
 
     fn density(&self, pixel: u8) -> i32 {
-        self.densities[(pixel & 0x7F) as usize]
+        self.state.densities[(pixel & 0x7F) as usize]
     }
 
     /// C4TextureMap::CheckTexture (the map creators validate `tex=`
     /// fields against the loaded texture inventory).
     pub(crate) fn texture_exists(&self, name: &str) -> bool {
-        self.texture_inventory
+        self.state
+            .texture_inventory
             .iter()
             .any(|t| t.eq_ignore_ascii_case(name))
     }
 
     /// The material definition behind a name, scenario-local first
     /// (C4MaterialMap::Get order after the prepending loads).
-    pub(crate) fn material(&self, name: &str) -> Option<&lc_resources::MaterialDefinition> {
-        self.local_library
-            .as_ref()
-            .and_then(|library| library.get(name))
-            .or_else(|| {
-                self.global_library
-                    .as_ref()
-                    .and_then(|library| library.get(name))
-            })
+    pub(crate) fn material(&self, name: &str) -> Option<&RuntimeTexMapMaterial> {
+        self.state.material(name)
     }
 
     /// C4TextureMap::GetIndex (C4Texture.cpp:319-345): the existing
@@ -3077,11 +3075,11 @@ impl MapPixelClassifier {
         add_if_not_exist: bool,
     ) -> u8 {
         for slot in 1..128usize {
-            if let Some(existing) = &self.names[slot] {
+            if let Some(existing) = &self.state.material_names[slot] {
                 if existing.eq_ignore_ascii_case(mat_name)
                     && tex_name
                         .map(|tex| {
-                            self.match_textures[slot]
+                            self.state.match_texture_names[slot]
                                 .as_deref()
                                 .is_some_and(|t| t.eq_ignore_ascii_case(tex))
                         })
@@ -3097,21 +3095,22 @@ impl MapPixelClassifier {
         let Some(material) = self.material(mat_name) else {
             return 0;
         };
-        let shape = crate::chunky::ChunkShape::from_shape(material.int("Shape").unwrap_or(0));
-        let density = material.int("Density").unwrap_or(0);
+        let shape = material.shape;
+        let density = material.density;
         if let Some(tex) = tex_name {
             if !self.texture_exists(tex) {
                 return 0;
             }
         }
-        let Some(slot) = (1..128usize).find(|&slot| self.names[slot].is_none()) else {
+        let Some(slot) = (1..128usize).find(|&slot| self.state.material_names[slot].is_none())
+        else {
             return 0;
         };
-        self.names[slot] = Some(mat_name.to_string());
-        self.match_textures[slot] = tex_name.map(str::to_string);
-        self.textures[slot] = tex_name.map(str::to_string);
-        self.shapes[slot] = Some(shape);
-        self.densities[slot] = density;
+        self.state.material_names[slot] = Some(mat_name.to_string());
+        self.state.match_texture_names[slot] = tex_name.map(str::to_string);
+        self.state.texture_names[slot] = tex_name.map(str::to_string);
+        self.state.shapes[slot] = Some(shape);
+        self.state.densities[slot] = density;
         slot as u8
     }
 
@@ -3181,6 +3180,25 @@ pub(crate) fn build_map_pixel_classifier(
                 .and_then(|group| lc_resources::MaterialLibrary::from_group(group).ok())
         })
         .flatten();
+
+    // Collapse the loaded resource libraries into the only material fields
+    // runtime texmap allocation consumes. Scenario-local definitions win
+    // name collisions, matching C4MaterialMap::Get after overloaded loads.
+    let runtime_materials = local_library
+        .iter()
+        .flat_map(|library| library.iter())
+        .chain(
+            global_library
+                .iter()
+                .flat_map(|library| library.iter())
+                .filter(|definition| {
+                    local_library
+                        .as_ref()
+                        .is_none_or(|local| local.get(definition.name()).is_none())
+                }),
+        )
+        .map(MapPixelClassifier::runtime_material)
+        .collect();
 
     let mut densities = [0i32; 128];
     let mut names: Vec<Option<String>> = vec![None; 128];
@@ -3270,14 +3288,16 @@ pub(crate) fn build_map_pixel_classifier(
         .collect();
 
     let mut classifier = MapPixelClassifier {
-        densities,
-        names,
-        textures: grid_textures,
-        shapes,
-        match_textures,
-        local_library,
-        global_library,
-        texture_inventory,
+        state: RuntimeTexMapState {
+            densities: densities.to_vec(),
+            material_names: names,
+            texture_names: grid_textures,
+            shapes,
+            match_texture_names: match_textures,
+            materials: runtime_materials,
+            texture_inventory,
+            default_material_entries: Vec::new(),
+        },
     };
 
     // Dynamic texmap entries (C4MaterialMap::CrossMapMaterials,
@@ -3300,7 +3320,10 @@ pub(crate) fn build_map_pixel_classifier(
             .filter(|overlay| classifier.texture_exists(overlay))
             .unwrap_or("Smooth")
             .to_string();
-        classifier.get_index(name, Some(&overlay), true);
+        let default_entry = classifier.get_index(name, Some(&overlay), true);
+        classifier
+            .state
+            .set_default_material_entry(name, default_entry);
     }
     // Second loop: the cross-ref specs (C4Material.cpp:474-484).
     for (_, _, specs) in &ordered {
@@ -3319,7 +3342,7 @@ pub(crate) fn build_map_pixel_classifier(
         for slot in 1..9usize {
             eprintln!(
                 "RUSTTEX {slot} = {:?} density={}",
-                classifier.names[slot], classifier.densities[slot]
+                classifier.state.material_names[slot], classifier.state.densities[slot]
             );
         }
     }
@@ -3349,10 +3372,10 @@ fn classified_landscape(
         map_height,
         zoom,
         map_seed,
-        &classifier.shapes,
+        &classifier.state.shapes,
     )
     .into_bytes();
-    let density_of = |byte: u8| classifier.densities[(byte & 127) as usize];
+    let density_of = |byte: u8| classifier.state.densities[(byte & 127) as usize];
 
     let mut surfaces = Vec::with_capacity(plane_width);
     for x in 0..plane_width {
@@ -3411,9 +3434,14 @@ fn classified_landscape(
         final_width,
         world_height.max(0) as u32,
         bytes,
-        classifier.densities.to_vec(),
-        classifier.names.clone(),
-        classifier.textures.clone(),
+        classifier.state.densities.clone(),
+        classifier.state.material_names.clone(),
+        classifier.state.texture_names.clone(),
+    ));
+    landscape.set_raster_state(LandscapeRasterState::new(
+        zoom,
+        map_seed,
+        classifier.state.clone(),
     ));
 
     // Loaded water is at rest: C4MassMoverSet starts empty and movers are
@@ -3574,26 +3602,37 @@ fn load_legacy_landscape_body(
         let mut map_rng = legacy_map_creation_rng();
         let players = legacy_startup_player_count();
         let landscape_core = &manifest.core.landscape;
-        let bitmap = read_optional("Landscape.txt")?
-            .and_then(|bytes| {
-                crate::map_creator_s2::create_s2_map(
-                    &String::from_utf8_lossy(&bytes),
-                    classifier,
-                    landscape_core.map_width,
-                    landscape_core.map_height,
-                    landscape_core.map_player_extend,
-                    players,
-                    &mut map_rng,
-                )
-            })
-            .unwrap_or_else(|| {
+        let mut retained_creator = None;
+        let bitmap = if let Some(bytes) = read_optional("Landscape.txt")? {
+            let creation = crate::map_creator_s2::create_s2_map_with_state(
+                &String::from_utf8_lossy(&bytes),
+                classifier,
+                landscape_core.map_width,
+                landscape_core.map_height,
+                landscape_core.map_player_extend,
+                players,
+                &mut map_rng,
+            );
+            if landscape_core.keep_map_creator {
+                retained_creator = Some(creation.creator);
+            }
+            creation.bitmap.unwrap_or_else(|| {
                 // Dynamic map by scenario (C4Landscape.cpp:612-614) —
                 // also the fallback when the exmap yields no map node.
                 let params = basic_map_params(landscape_core);
                 crate::map_creator::create_basic_map(&params, classifier, players, &mut map_rng)
-            });
-        return classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, legacy_map_seed())
-            .map(Some);
+            })
+        } else {
+            let params = basic_map_params(landscape_core);
+            crate::map_creator::create_basic_map(&params, classifier, players, &mut map_rng)
+        };
+        let mut landscape =
+            classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, legacy_map_seed())?;
+        landscape
+            .raster_state_mut()
+            .expect("classified landscapes carry raster state")
+            .set_map_creator(retained_creator);
+        return Ok(Some(landscape));
     }
 
     let fallback_map_width = map_width_hint.unwrap_or(96);
@@ -11936,6 +11975,40 @@ public func ActualizePhase(pClonk)
             40,
             "all-sky border column opens the full height"
         );
+    }
+
+    #[test]
+    fn keep_map_creator_persists_the_evaluated_tree_with_raster_state() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = dir.path().join("KeepCreator.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Landscape.txt"),
+            "overlay Named { seed = 7; }; map Test { seed = 11; };",
+        )
+        .expect("write Landscape.txt");
+        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let manifest = parse_legacy_scenario_text(
+            "[Landscape]\nMapWidth=64\nMapHeight=40\nMapZoom=5\nKeepMapCreator=1\n",
+        )
+        .expect("scenario core parses");
+        let mut classifier = MapPixelClassifier::from_slots(
+            [0; 128],
+            vec![None; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+
+        let landscape = load_legacy_landscape_body(&group, &manifest, Some(&mut classifier))
+            .expect("landscape loads")
+            .expect("landscape exists");
+        let raster = landscape.raster_state().expect("raster state retained");
+        assert_eq!(raster.map_zoom(), 5);
+        assert!(raster.map_creator().is_some(), "KeepMapCreator retains tree");
+
+        let encoded = serde_json::to_string(&landscape).expect("landscape serializes");
+        let restored: Landscape = serde_json::from_str(&encoded).expect("landscape restores");
+        assert_eq!(restored, landscape, "creator and texmap survive saves");
     }
 
     #[test]
