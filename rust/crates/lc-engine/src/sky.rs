@@ -35,6 +35,11 @@ pub struct SkySettings {
     pub modulation: Option<u32>,
     #[serde(default)]
     pub back_color: Option<u32>,
+    /// Raw `C4Sky::BackClr`, retained even while `back_color` is disabled.
+    /// C++ persists this independently from `BackClrEnabled`
+    /// (C4Sky.cpp:246-258).
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub back_color_raw: u32,
 }
 
 impl SkySettings {
@@ -61,8 +66,13 @@ impl Default for SkySettings {
             fade_bottom: default_fade_bottom(),
             modulation: None,
             back_color: None,
+            back_color_raw: 0,
         }
     }
+}
+
+fn u32_is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 fn default_parallax() -> i32 {
@@ -95,6 +105,41 @@ pub struct SkyFrame {
 /// SetSkyParallax to preserve a parameter slot.
 pub const SKY_PAR_KEEP: i32 = -163764;
 
+/// The two raw values exposed by `GetSkyAdjust`. `BackClrEnabled` remains
+/// represented by `SkySettings::back_color`; it does not affect this pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SkyAdjustment {
+    pub modulation: u32,
+    pub back_color: u32,
+}
+
+impl SkyAdjustment {
+    pub(crate) fn from_settings(settings: &SkySettings) -> Self {
+        Self {
+            // C4Sky::Default initializes Modulation to RGB(255,255,255)
+            // and BackClr to zero (C4Sky.cpp:154-164).
+            modulation: settings.modulation.unwrap_or(0x00ff_ffff),
+            // `back_color` is the compatibility representation used by old
+            // snapshots. Prefer the new raw slot, falling back only when it
+            // is absent/defaulted.
+            back_color: if settings.back_color_raw == 0 {
+                settings.back_color.unwrap_or(0)
+            } else {
+                settings.back_color_raw
+            },
+        }
+    }
+}
+
+impl Default for SkyAdjustment {
+    fn default() -> Self {
+        Self {
+            modulation: 0x00ff_ffff,
+            back_color: 0,
+        }
+    }
+}
+
 /// The C4Sky scroll state (C4Sky.h): position and per-frame speed as
 /// C4Fixed, advanced by `C4Sky::Execute` (C4Sky.cpp:193-204).
 #[derive(Debug, Clone)]
@@ -107,11 +152,12 @@ pub struct SkyState {
 }
 
 impl SkyState {
-    pub fn new(settings: SkySettings) -> Self {
+    pub fn new(mut settings: SkySettings) -> Self {
         // C4Sky::Init resets x = y = xdir = ydir = 0 (C4Sky.cpp:79); the
         // fixture-world `base_xdir`/`base_ydir` extension seeds the
         // initial speed (C++ only sets xdir/ydir via script
         // SetSkyParallax, itofix ints — ftofix keeps integral seeds exact).
+        settings.back_color_raw = SkyAdjustment::from_settings(&settings).back_color;
         let xdir = math::ftofix(settings.base_xdir);
         let ydir = math::ftofix(settings.base_ydir);
         Self {
@@ -133,8 +179,10 @@ impl SkyState {
             math::ftofix(frame.settings.base_xdir).val(),
             math::ftofix(frame.settings.base_ydir).val(),
         ]);
+        let mut settings = frame.settings.clone();
+        settings.back_color_raw = SkyAdjustment::from_settings(&settings).back_color;
         Self {
-            settings: frame.settings.clone(),
+            settings,
             x: C4Fixed::from_raw(x),
             y: C4Fixed::from_raw(y),
             xdir: C4Fixed::from_raw(xdir),
@@ -144,6 +192,10 @@ impl SkyState {
 
     pub fn settings(&self) -> &SkySettings {
         &self.settings
+    }
+
+    pub(crate) fn adjustment(&self) -> SkyAdjustment {
+        SkyAdjustment::from_settings(&self.settings)
     }
 
     /// `C4Sky::Execute` (C4Sky.cpp:193-204): no advance without a surface;

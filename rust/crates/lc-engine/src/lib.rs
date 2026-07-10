@@ -162,7 +162,7 @@ use lc_script::{DebuggerHooks, Engine as ScriptEngine, Value};
 use mass_mover::MassMoverSet;
 use rand::Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sky::SkyState;
+use sky::{SkyAdjustment, SkyState};
 use thiserror::Error;
 use transfer::{TransferZoneCommand, TransferZoneRect, TransferZoneState, TransferZoneTable};
 
@@ -13085,6 +13085,11 @@ impl Engine {
             .iter()
             .map(|(&owner, selection)| (owner, CrewSelectionState::from(selection)))
             .collect();
+        let sky_adjustment = self
+            .sky
+            .as_ref()
+            .map(SkyState::adjustment)
+            .unwrap_or_default();
         HostWorldContext::with_landscape_shared(
             self.objects.iter().map(|object| {
                 let definition = self.definitions.get(&object.definition_id);
@@ -13169,6 +13174,7 @@ impl Engine {
                 .unwrap_or(0),
             self.idle_crew_counts(),
         )
+        .with_sky_adjustment(sky_adjustment)
     }
 
     /// The shared definition-script table host contexts carry (nested
@@ -29878,6 +29884,11 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         .map(|state| (state.id, state.clone()))
         .collect();
     let crew_selection = snapshot.crew_selection.clone();
+    let sky_adjustment = snapshot
+        .sky
+        .as_ref()
+        .map(|frame| SkyAdjustment::from_settings(&frame.settings))
+        .unwrap_or_default();
     HostWorldContext::with_landscape(
         snapshot.objects.iter().map(|object| {
             HostWorldObject::with_category(
@@ -29923,6 +29934,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         next_object_id,
         false,
     )
+    .with_sky_adjustment(sky_adjustment)
 }
 
 fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {

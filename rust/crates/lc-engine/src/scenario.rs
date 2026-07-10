@@ -6131,7 +6131,9 @@ impl SkyManifest {
             settings.modulation = Some(rgb_to_bgr_u32(color.into_color()));
         }
         if let Some(color) = self.back_color {
-            settings.back_color = Some(rgb_to_bgr_u32(color.into_color()));
+            let back_color = rgb_to_bgr_u32(color.into_color());
+            settings.back_color = Some(back_color);
+            settings.back_color_raw = back_color;
         }
 
         Ok(SkyConfig {

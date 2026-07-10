@@ -20,6 +20,7 @@ use crate::message::{
 use crate::ocf;
 use crate::rng::LcgRng;
 use crate::sector::{SectorMap, SectorObject};
+use crate::sky::SkyAdjustment;
 use crate::transfer::TransferZoneTable;
 #[cfg(test)]
 use crate::LiquidSegment;
@@ -610,6 +611,8 @@ pub(crate) struct HostWorldContext {
     frame: u64,
     base_buy_enabled: bool,
     base_sell_enabled: bool,
+    /// Raw `C4Sky::Modulation`/`BackClr` at callback entry.
+    sky_adjustment: SkyAdjustment,
 }
 
 impl Default for HostWorldContext {
@@ -640,6 +643,7 @@ impl Default for HostWorldContext {
             frame: 0,
             base_buy_enabled: true,
             base_sell_enabled: true,
+            sky_adjustment: SkyAdjustment::default(),
         }
     }
 }
@@ -796,7 +800,17 @@ impl HostWorldContext {
             frame: 0,
             base_buy_enabled: true,
             base_sell_enabled: true,
+            sky_adjustment: SkyAdjustment::default(),
         }
+    }
+
+    pub(crate) fn with_sky_adjustment(mut self, adjustment: SkyAdjustment) -> Self {
+        self.sky_adjustment = adjustment;
+        self
+    }
+
+    fn sky_adjustment(&self) -> SkyAdjustment {
+        self.sky_adjustment
     }
 
     /// Attach the scenario script for GameCall/GameCallEx resolution.
@@ -22112,6 +22126,9 @@ struct EffectHostContext {
     pending_messages: Vec<MessageCommand>,
     pending_menu_requests: Vec<crate::MenuRequest>,
     pending_landscape_ops: Vec<LandscapeOperation>,
+    /// Live script-visible sky values. Host writes update this before their
+    /// deferred landscape operation is folded into the engine.
+    sky_adjustment: SkyAdjustment,
     audio: AudioRegistry,
     next_object_id: u64,
     trigger_game_over: bool,
@@ -22149,6 +22166,7 @@ impl EffectHostContext {
     ) -> Self {
         let team_home_base_rule = world.team_home_base_rule();
         let scenario_script_counter = world.scenario_script_counter();
+        let sky_adjustment = world.sky_adjustment();
         let mut object = object.map(|ctx| {
             let HostObjectContext {
                 id,
@@ -22274,6 +22292,7 @@ impl EffectHostContext {
             pending_messages: Vec::new(),
             pending_menu_requests: Vec::new(),
             pending_landscape_ops: Vec::new(),
+            sky_adjustment,
             audio,
             next_object_id,
             trigger_game_over: false,
