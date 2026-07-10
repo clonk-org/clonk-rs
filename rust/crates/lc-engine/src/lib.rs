@@ -1925,7 +1925,7 @@ impl EnvironmentSettings {
             }
         }
 
-        if self.base_wind == 0 || self.wind_variation == 0 {
+        if self.wind_variation == 0 {
             self.base_wind = self.wind;
         }
     }
@@ -35031,6 +35031,26 @@ global func MenuCommand(state, kind, selection)
         let stepped = (before.wind + (expected_target - before.wind).signum())
             .clamp(settings.wind_min, settings.wind_max);
         assert_eq!(settings.wind, stepped, "Tick10 step toward the target");
+    }
+
+    #[test]
+    fn zero_base_wind_survives_the_initial_random_evaluation() {
+        // C4Weather::Init evaluates C4S.Weather.Wind into the current Wind but
+        // leaves the scenario C4SVal::Std untouched; Tick1000 evaluates around
+        // that same Std even when it is zero (C4Weather.cpp:40-48,94-100;
+        // C4Scenario.cpp:43-46).
+        let mut settings = EnvironmentSettings::new(0).with_wind_variation(75, 2_000);
+        settings.wind = -61;
+        settings.wind_target = -61;
+        let mut rng = LcgRng::seed_from_u64(424_242);
+        let mut probe = rng.clone();
+        let expected_target = (probe.random(151) - 75).clamp(-100, 100);
+
+        settings.advance_frame(&mut rng, 1_000);
+
+        assert_eq!(settings.base_wind, 0, "scenario Std remains authoritative");
+        assert_eq!(settings.wind_target, expected_target);
+        assert_eq!(rng, probe, "Tick1000 consumes exactly one synced draw");
     }
 
     const SET_BRIDGE_ACTION_DATA_SCRIPT: &str = r#"
