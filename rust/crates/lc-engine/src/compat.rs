@@ -89,6 +89,8 @@ pub(crate) struct HostWorldObject {
     pub owner: i32,
     /// C4Object::Select at call entry, overlaid from active scopes.
     pub selected: bool,
+    /// C4Object::CrewDisabled at call entry, overlaid from active scopes.
+    pub crew_disabled: bool,
     pub category: i32,
     pub collectible: bool,
     pub energy: i32,
@@ -369,6 +371,7 @@ impl HostWorldObject {
             action_procedure,
             owner,
             selected: false,
+            crew_disabled: false,
             category,
             collectible: false,
             energy,
@@ -410,6 +413,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    pub(crate) fn with_crew_disabled(mut self, crew_disabled: bool) -> Self {
+        self.crew_disabled = crew_disabled;
         self
     }
 
@@ -23064,6 +23072,10 @@ impl EffectHostContext {
             object.damage = scope.current_damage;
             object.need_energy = scope.need_energy();
             object.selected = scope.selected();
+            object.crew_disabled = scope
+                .pending_update
+                .crew_disabled
+                .unwrap_or(object.crew_disabled);
             object.direction = scope.current_direction.to_script_value();
             object.owner = scope.owner();
             // Staged dir writes surface at whole-pixel grain (the foreign

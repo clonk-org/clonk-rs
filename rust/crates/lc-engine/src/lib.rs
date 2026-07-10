@@ -13275,6 +13275,7 @@ impl Engine {
                     object.state.draw_transform,
                 ).with_direction(object.state.direction.to_script_value())
                 .with_selected(object.state.selected)
+                .with_crew_disabled(object.state.crew_disabled)
                 .with_contents(object.state.contents.clone())
                 .with_alive(object.state.alive)
                 .with_need_energy(object.state.need_energy)
