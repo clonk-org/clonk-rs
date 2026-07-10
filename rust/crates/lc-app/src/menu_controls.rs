@@ -8,6 +8,7 @@ pub fn map_menu_control_event(event: ControlEvent) -> Option<ControlEvent> {
         ControlEvent::Press(button) => map_button_press(button, CommandKind::Press),
         ControlEvent::Release(button) => map_button_press(button, CommandKind::Release),
         ControlEvent::Command { command, kind } => map_command(command, kind),
+        raw @ ControlEvent::RawPlayerControl { .. } => Some(raw),
         ControlEvent::ClearPressed => None,
     }
 }

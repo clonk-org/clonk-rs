@@ -172,6 +172,13 @@ pub enum ControlEvent {
         command: ControlCommand,
         kind: CommandKind,
     },
+    /// An exact `C4ControlPlayerControl` payload for commands whose `Data`
+    /// slot is semantically significant (for example pointer-driven object
+    /// menu selection).
+    RawPlayerControl {
+        command: u8,
+        data: i32,
+    },
     ClearPressed,
 }
 

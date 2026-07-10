@@ -52,7 +52,7 @@ impl PlayerInputState {
             ControlEvent::Press(button) => self.press(button),
             ControlEvent::Release(button) => self.release(button),
             ControlEvent::ClearPressed => self.clear(),
-            ControlEvent::Command { .. } => None,
+            ControlEvent::Command { .. } | ControlEvent::RawPlayerControl { .. } => None,
         }
     }
 

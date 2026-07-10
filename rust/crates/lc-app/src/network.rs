@@ -617,6 +617,7 @@ fn control_command_for_event(event: ControlEvent) -> Option<i32> {
             Some(i32::from(command_for_button(button) + COM_RELEASE_OFFSET))
         }
         ControlEvent::Command { command, kind } => command_code_for(command, kind).map(i32::from),
+        ControlEvent::RawPlayerControl { .. } => None,
         ControlEvent::ClearPressed => Some(i32::from(COM_CLEAR_PRESSED_COMS)),
     }
 }

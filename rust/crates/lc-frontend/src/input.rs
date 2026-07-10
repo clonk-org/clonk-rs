@@ -47,6 +47,9 @@ impl InputDispatcher {
                     }
                 }
             }
+            // Structural carrier only; producers are wired in the behavioral
+            // slice that preserves C4ControlPlayerControl::Data end-to-end.
+            ControlEvent::RawPlayerControl { .. } => {}
         }
         Ok(None)
     }
