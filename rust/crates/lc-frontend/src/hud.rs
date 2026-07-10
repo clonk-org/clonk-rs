@@ -904,6 +904,107 @@ pub fn draw_player_startup(
     );
 }
 
+/// `C4Viewport::DrawPlayerControls` (src/C4Viewport.cpp:1394-1441): the
+/// tutorial-selected command-key grid, including optional and blinking labels.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_player_controls(
+    surface: &mut Surface,
+    regular_font: &HudFont<'_>,
+    tiny_font: &HudFont<'_>,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    show_control: i32,
+    show_control_position: i32,
+    last_com: u8,
+    key_labels: &[String],
+    frame: u64,
+) {
+    if show_control == 0 {
+        return;
+    }
+    let size = ((viewport.width as i32) / 3).min(7 * viewport.height as i32 / 24);
+    if size <= 0 {
+        return;
+    }
+    let (tx, ty) = match show_control_position {
+        1 => (
+            viewport.x + viewport.width as i32 * 3 / 4 - size / 2,
+            viewport.y + viewport.height as i32 / 2 - size / 2,
+        ),
+        2 => (
+            viewport.x + viewport.width as i32 / 4 - size / 2,
+            viewport.y + viewport.height as i32 / 2 - size / 2,
+        ),
+        3 => (
+            viewport.x + viewport.width as i32 / 4 - size / 2,
+            viewport.y + 15,
+        ),
+        4 => (
+            viewport.x + viewport.width as i32 * 3 / 4 - size / 2,
+            viewport.y + 15,
+        ),
+        _ => (
+            viewport.x + viewport.width as i32 / 2 - size / 2,
+            viewport.y + 15,
+        ),
+    };
+    let cell_width = size / 3;
+    let cell_height = size / 4;
+    if cell_width <= 0 || cell_height <= 0 {
+        return;
+    }
+    let last_control = com_control_index(last_com).0;
+    let tick35 = (frame % 35) as i32;
+
+    for control in 0..10 {
+        if show_control & (1 << control) == 0 {
+            continue;
+        }
+        let mut show_text = show_control & (1 << (control + 10)) != 0;
+        if show_control & (1 << (control + 20)) != 0 && tick35 > 18 {
+            show_text = false;
+        }
+        let cell = SurfaceRect::new(
+            tx + cell_width * (control % 3),
+            ty + cell_height * (control / 3),
+            cell_width as u32,
+            cell_height as u32,
+        );
+        if let Some(control_sheet) = hud.control.as_ref() {
+            let pressed = i32::from(last_control == control);
+            draw_scaled_region(
+                surface,
+                control_sheet,
+                SurfaceRect::new(64 * pressed, 100, 64, 64),
+                cell,
+            );
+            draw_scaled_region_aspect(
+                surface,
+                control_sheet,
+                SurfaceRect::new(32 * control, 36, 32, 32),
+                cell,
+            );
+        }
+        if show_text {
+            if let Some(label) = key_labels.get(control as usize).filter(|label| !label.is_empty()) {
+                let font = if cell_height <= SYMBOL_SIZE {
+                    regular_font
+                } else {
+                    tiny_font
+                };
+                font.draw(
+                    surface,
+                    cell.x + cell.width as i32 / 2,
+                    cell.y + cell.height as i32 - font.line_height() - 2,
+                    label,
+                    MESSAGE_COLOR,
+                    TextAlign::Center,
+                );
+            }
+        }
+    }
+}
+
 /// `C4MessageBoard::Draw` in one-line mode (src/C4MessageBoard.cpp:243-306):
 /// tiled `fctBackground` strip at the screen bottom with the current log
 /// line at its top-left.
@@ -979,6 +1080,93 @@ mod tests {
             }
         }
         ImageData::new(width, height, pixels)
+    }
+
+    /// Transparent command symbols over blue unpressed and red pressed key
+    /// caps, using the exact Control.png source rectangles.
+    fn tutorial_control_sheet() -> ImageData {
+        let width = 320u32;
+        let height = 164u32;
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        for y in 100..164 {
+            for x in 0..128 {
+                let idx = ((y * width + x) * 4) as usize;
+                let color: [u8; 4] = if x < 64 {
+                    [10, 10, 200, 255]
+                } else {
+                    [200, 10, 10, 255]
+                };
+                pixels[idx..idx + 4].copy_from_slice(&color);
+            }
+        }
+        ImageData::new(width, height, pixels)
+    }
+
+    #[test]
+    fn player_controls_follow_cpp_mask_grid_and_pressed_phase() {
+        // DrawPlayerControls chooses size=min(Wdt/3,7*Hgt/24), position 2's
+        // left/middle origin, and a 3x4 grid (src/C4Viewport.cpp:1397-1439).
+        // DrawControlKey selects fctKey phase 1 for LastCom's control
+        // (src/C4ObjectCom.cpp:946-958).
+        let mut target = surface(300, 240);
+        let hud = HudGraphics {
+            control: Some(tutorial_control_sheet()),
+            ..HudGraphics::default()
+        };
+        let font = bitmap_font();
+        let font = HudFont::Fallback(&font);
+        draw_player_controls(
+            &mut target,
+            &font,
+            &font,
+            &hud,
+            SurfaceRect::new(0, 0, 300, 240),
+            (1 << 0) | (1 << 3),
+            2,
+            12, // COM_CursorLeft -> CON_CursorLeft
+            &[],
+            0,
+        );
+
+        // size=70, origin=(40,85), cell=23x17. Control 0 is pressed/red;
+        // control 3 is present but unpressed/blue; control 1 is absent.
+        assert_eq!(target.get_pixel(45, 90), Some(Color::opaque(200, 10, 10)));
+        assert_eq!(target.get_pixel(45, 107), Some(Color::opaque(10, 10, 200)));
+        assert_eq!(target.get_pixel(70, 90), Some(Color::opaque(0, 0, 0)));
+    }
+
+    #[test]
+    fn player_control_label_layers_follow_tick35_blinking() {
+        // Layer two enables key text; layer three suppresses that text while
+        // Tick35 > 18 (src/C4Viewport.cpp:1431-1439).
+        let render = |mask: i32, frame: u64| {
+            let mut target = surface(300, 240);
+            let hud = HudGraphics {
+                control: Some(tutorial_control_sheet()),
+                ..HudGraphics::default()
+            };
+            let font = bitmap_font();
+            let font = HudFont::Fallback(&font);
+            draw_player_controls(
+                &mut target,
+                &font,
+                &font,
+                &hud,
+                SurfaceRect::new(0, 0, 300, 240),
+                mask,
+                0,
+                0,
+                &["K".to_string()],
+                frame,
+            );
+            target
+        };
+        let key_only = render(1, 18);
+        let visible_label = render(1 | (1 << 10) | (1 << 20), 18);
+        let hidden_label = render(1 | (1 << 10) | (1 << 20), 19);
+
+        assert_ne!(visible_label.pixels(), key_only.pixels());
+        assert_eq!(hidden_label.pixels(), key_only.pixels());
     }
 
     #[test]

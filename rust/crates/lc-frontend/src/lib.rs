@@ -864,7 +864,7 @@ impl GraphicsSystem {
         let used_keys: HashSet<_> = used_camera_keys.into_iter().collect();
         self.camera_states.retain(|key, _| used_keys.contains(key));
 
-        self.draw_hud();
+        self.draw_hud(snapshot.frame);
 
         self.collect_sprite_atlas(snapshot)
     }
@@ -2955,7 +2955,7 @@ impl GraphicsSystem {
     /// The fullscreen overlay in the C4GraphicsSystem::Execute order:
     /// per-viewport player HUD, then message board, then upper board
     /// (src/C4GraphicsSystem.cpp:352-365).
-    fn draw_hud(&mut self) {
+    fn draw_hud(&mut self, frame: u64) {
         // Per-viewport player info (C4Viewport::DrawOverlay,
         // src/C4Viewport.cpp:835-848).
         let viewports = self.active_viewports.clone();
@@ -3027,6 +3027,24 @@ impl GraphicsSystem {
                 player.select_count,
                 player.crew.len() as i32,
                 player.owner_color,
+            );
+
+            let tiny = self
+                .clonk_fonts
+                .as_deref()
+                .map(|set| hud::HudFont::Clonk(&set.mini))
+                .unwrap_or(hud::HudFont::Fallback(self.font.as_ref()));
+            hud::draw_player_controls(
+                &mut self.surface,
+                &font,
+                &tiny,
+                &self.hud_graphics,
+                rect,
+                player.show_control,
+                player.show_control_position,
+                player.last_com,
+                &player.control_key_labels,
+                frame,
             );
 
             if player.show_startup {
@@ -4583,6 +4601,71 @@ mod tests {
         // Rendering with overlay state must not panic; without an
         // UpperBoard texture the chrome stays off (C4UpperBoard::Init,
         // src/C4UpperBoard.cpp:114-118) and the viewport spans the surface.
+    }
+
+    #[test]
+    fn graphics_system_draws_player_control_hints_from_overlay() {
+        // DrawOverlay reaches DrawPlayerInfo -> DrawPlayerControls after the
+        // world pass (src/C4Viewport.cpp:835-848,1324-1327), so the selected
+        // Control.png key cap must overwrite the viewport pixel.
+        let snapshot = make_snapshot();
+        let focus = &snapshot.objects[0];
+        let width = 320u32;
+        let height = 164u32;
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        for y in 100..164 {
+            for x in 0..64 {
+                let index = ((y * width + x) * 4) as usize;
+                pixels[index..index + 4].copy_from_slice(&[10, 10, 200, 255]);
+            }
+        }
+        let hud_graphics = Arc::new(HudGraphics {
+            control: Some(ImageData::new(width, height, pixels)),
+            ..HudGraphics::default()
+        });
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Control Hint",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            hud_graphics,
+        );
+        graphics.update_overlay(&GraphicsOverlay {
+            frame_text: "",
+            status_text: "",
+            debug_hud: false,
+            players: vec![PlayerOverlay {
+                owner: 0,
+                name: "Player".to_string(),
+                wealth: 0,
+                score: 0,
+                cursor: None,
+                eliminated: false,
+                owner_color: Color::opaque(0, 100, 200),
+                select_count: 0,
+                show_startup: false,
+                show_control: 1,
+                show_control_position: 0,
+                last_com: 5,
+                control_key_labels: Vec::new(),
+                crew: Vec::new(),
+                commands: Vec::new(),
+            }],
+            game_time_seconds: 0,
+            message_board_line: None,
+            show_commands: true,
+            show_command_keys: true,
+        });
+
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+        // size=min(320/3,7*180/24)=52, default origin=(134,15).
+        assert_eq!(
+            graphics.surface().get_pixel(135, 16),
+            Some(Color::opaque(10, 10, 200))
+        );
     }
 
     #[test]
