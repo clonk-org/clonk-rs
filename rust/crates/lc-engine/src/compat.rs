@@ -8919,32 +8919,17 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         "index",
     )?;
 
-    let query = match args.get(3) {
-        Some(Value::Int(value)) => *value,
-        Some(Value::Nil) | None => 0,
-        Some(other) => {
-            return Err(RuntimeError::new(format!(
-                "GetEffect: expected int for query, got {}",
-                other.type_name()
-            )))
-        }
-    };
+    let query = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "GetEffect",
+        "query",
+    )?;
 
-    let max_priority = match args.get(4) {
-        Some(Value::Int(value)) if *value >= 0 => Some(*value),
-        Some(Value::Int(_)) => {
-            return Err(RuntimeError::new(
-                "GetEffect: max priority must be >= 0 when provided",
-            ))
-        }
-        Some(Value::Nil) | None => None,
-        Some(other) => {
-            return Err(RuntimeError::new(format!(
-                "GetEffect: expected int for max priority, got {}",
-                other.type_name()
-            )))
-        }
-    };
+    let max_priority = value_to_i32(
+        args.get(4).unwrap_or(&Value::Nil),
+        "GetEffect",
+        "max priority",
+    )?;
 
     let found = match name_filter {
         // Name/wildcard given: find by name and index
@@ -8954,11 +8939,7 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
             effects
                 .iter()
                 .filter(|effect| s_wildcard_match_ex(&effect.name, filter))
-                .filter(|effect| {
-                    max_priority
-                        .map(|limit| effect.priority.abs() <= limit)
-                        .unwrap_or(true)
-                })
+                .filter(|effect| max_priority == 0 || effect.priority <= max_priority)
                 .nth(index)
         }),
         // No name: iIndex is the effect NUMBER (C4Script.cpp:5474-5475 ->
@@ -8966,11 +8947,7 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         None => effects
             .iter()
             .find(|effect| effect.number == desired_index)
-            .filter(|effect| {
-                max_priority
-                    .map(|limit| effect.priority.abs() <= limit)
-                    .unwrap_or(true)
-            }),
+            .filter(|effect| max_priority == 0 || effect.priority <= max_priority),
     };
 
     Ok(found
@@ -8978,7 +8955,7 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
             // 0: number (C4Script.cpp:5481 `C4VInt(pEffect->iNumber)`)
             0 => Value::Int(effect.number),
             1 => Value::String(effect.name.clone()),
-            2 => Value::Int(effect.priority),
+            2 => Value::Int(effect.priority.abs()),
             3 => Value::Int(effect.interval),
             4 => effect.command_target.map(Value::Int).unwrap_or(Value::Nil),
             5 => effect
@@ -32329,6 +32306,123 @@ func ProbeBadIndex(id) {
 
         let value = result.expect("GetEffect succeeds");
         assert_eq!(value, Value::String("Glow".into()));
+    }
+
+    #[test]
+    fn get_effect_converts_bool_query_to_c4valueint() {
+        // FnGetEffect declares iQueryValue as C4ValueInt
+        // (C4Script.cpp:5458), and Bool->Int is a direct conversion
+        // (C4Value.cpp:514-518); true therefore selects query 1/name
+        // (C4Script.cpp:5473-5477).
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(100),
+            ])?;
+            get_effect(&[
+                Value::String("Glow".into()),
+                state,
+                Value::Int(0),
+                Value::Bool(true),
+            ])
+        });
+
+        assert_eq!(
+            result.expect("bool query converts to one"),
+            Value::String("Glow".into())
+        );
+    }
+
+    #[test]
+    fn get_effect_converts_bool_max_priority_to_c4valueint() {
+        // FnGetEffect also declares iMaxPriority as C4ValueInt
+        // (C4Script.cpp:5458), so bool true converts to signed limit 1
+        // (C4Value.cpp:514-518) and admits priority 1
+        // (C4Effect.cpp:223-226).
+        let mut effect = EffectState::new("Glow").with_priority(1);
+        effect.number = 7;
+        let (result, _) = with_effect_context(
+            None,
+            &[effect],
+            HostWorldContext::default(),
+            1,
+            || {
+                get_effect(&[
+                    Value::String("Glow".into()),
+                    Value::Nil,
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Bool(true),
+                ])
+            },
+        );
+
+        assert_eq!(
+            result.expect("bool max priority converts to one"),
+            Value::Int(7)
+        );
+    }
+
+    #[test]
+    fn get_effect_zero_max_priority_is_unbounded() {
+        // C4Effect::Get only applies its signed priority ceiling when
+        // iMaxPriority is nonzero (C4Effect.cpp:223-226, 240-250).
+        // FnGetEffect's omitted/nil C4ValueInt slot therefore becomes the
+        // same unbounded zero (C4AulExec.cpp:1364-1394).
+        let mut effect = EffectState::new("Glow").with_priority(100);
+        effect.number = 8;
+        let (result, _) = with_effect_context(
+            None,
+            &[effect],
+            HostWorldContext::default(),
+            1,
+            || {
+                get_effect(&[
+                    Value::String("Glow".into()),
+                    Value::Nil,
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(0),
+                ])
+            },
+        );
+
+        assert_eq!(
+            result.expect("zero max priority is unbounded"),
+            Value::Int(8)
+        );
+    }
+
+    #[test]
+    fn get_effect_uses_signed_max_priority_and_reports_absolute_priority() {
+        // C4Effect::Get accepts negative iMaxPriority and compares the signed
+        // stored priority directly (`priority > max`, C4Effect.cpp:223-226),
+        // so -100 passes a -50 ceiling. FnGetEffect query 2 then returns
+        // Abs(iPriority), not the deactivation sign (C4Script.cpp:5473-5478).
+        let mut effect = EffectState::new("Dormant").with_priority(-100);
+        effect.number = 9;
+        let (result, _) = with_effect_context(
+            None,
+            &[effect],
+            HostWorldContext::default(),
+            1,
+            || {
+                get_effect(&[
+                    Value::String("Dormant".into()),
+                    Value::Nil,
+                    Value::Int(0),
+                    Value::Int(2),
+                    Value::Int(-50),
+                ])
+            },
+        );
+
+        assert_eq!(
+            result.expect("negative max priority is valid"),
+            Value::Int(100)
+        );
     }
 
     #[test]
