@@ -6631,6 +6631,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CreateObject", create_object);
     script.register_host_function("CastObjects", cast_objects);
     script.register_host_function("CastPXS", cast_pxs);
+    script.register_host_function("PlaceAnimal", place_animal);
     script.register_host_function("PlaceVegetation", place_vegetation);
     script.register_host_function("CreateConstruction", create_construction);
     // FnFindConstructionSite (C4Script.cpp:1958-1981) — the caller-Var
@@ -19504,6 +19505,115 @@ fn finish_placement_object_creation(
     })
 }
 
+/// FnPlaceAnimal -> C4Game::PlaceAnimal (C4Script.cpp:2495-2499;
+/// C4Game.cpp:3028-3061): placement is GLOBAL and creatorless. Definition
+/// validation and the Placement switch happen before any synced draw; the
+/// three supported arms then use the exact C++ search order.
+fn place_animal(args: &[Value]) -> Result<Value, RuntimeError> {
+    let definition = match args.first().unwrap_or(&Value::Nil) {
+        Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
+        Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => {
+            return Ok(Value::Nil)
+        }
+        other => {
+            return Err(RuntimeError::new(format!(
+                "PlaceAnimal: expected id for definition, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let registration = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("PlaceAnimal requires an active engine context"))?;
+        let Some(metadata) = context.definition_metadata(&definition).cloned() else {
+            // C4Id2Def failure precedes the Placement switch and Random
+            // (C4Game.cpp:3028-3035).
+            return Ok(None);
+        };
+        if !matches!(metadata.placement, 0..=2) {
+            return Ok(None);
+        }
+        let (shape_width, shape_height) = metadata
+            .shape
+            .map(|shape| (shape.width, shape.height))
+            .unwrap_or((0, 0));
+        let landscape = context.landscape_ref();
+        let world_width = landscape.map(|landscape| landscape.width() as i32).unwrap_or(0);
+        let world_height = landscape
+            .map(Landscape::estimated_height)
+            .unwrap_or(0);
+        let position = match metadata.placement {
+            // Running free: exactly two draws, even when the ground search
+            // later fails (C4Game.cpp:3037-3041).
+            0 => {
+                let x = draw_context_random(world_width)?;
+                let y = draw_context_random(world_height)?;
+                let Some((x, y)) = landscape
+                    .and_then(|landscape| landscape.find_solid_ground(x, y, shape_width))
+                else {
+                    return Ok(None);
+                };
+                Vector2::new(x, y)
+            }
+            // In liquid: surface search first, then the deep fallback. Both
+            // consume only the initial x/y draws (C4Game.cpp:3043-3051).
+            1 => {
+                let mut x = draw_context_random(world_width)?;
+                let mut y = draw_context_random(world_height)?;
+                let Some(landscape) = landscape else {
+                    return Ok(None);
+                };
+                if !placement_find_surface_liquid(
+                    landscape,
+                    &mut x,
+                    &mut y,
+                    shape_width,
+                    shape_height,
+                ) && !placement_find_liquid(
+                    landscape,
+                    &mut x,
+                    &mut y,
+                    shape_width,
+                    shape_height,
+                ) {
+                    return Ok(None);
+                }
+                Vector2::new(x, y.wrapping_add(shape_height / 2))
+            }
+            // Air: x draw, top-down first-semisolid scan, then y draw only
+            // when the scan result is positive (C4Game.cpp:3053-3060).
+            2 => {
+                let x = draw_context_random(world_width)?;
+                let mut y = 0;
+                while y < world_height
+                    && landscape.is_some_and(|landscape| !landscape.is_semi_solid_at(x, y))
+                {
+                    y += 1;
+                }
+                if y <= 0 {
+                    return Ok(None);
+                }
+                Vector2::new(x, draw_context_random(y)?)
+            }
+            _ => unreachable!("placement validated above"),
+        };
+        Ok(Some(register_placement_object(
+            context,
+            definition,
+            metadata,
+            position,
+            FULL_CON,
+        )))
+    })?;
+    let Some(registration) = registration else {
+        return Ok(Value::Nil);
+    };
+    finish_placement_object_creation(registration)
+}
+
 fn place_vegetation(args: &[Value]) -> Result<Value, RuntimeError> {
     let definition = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
@@ -26746,6 +26856,7 @@ mod tests {
         "OnFire",
         "Or",
         "PathFree",
+        "PlaceAnimal",
         "PlaceVegetation",
         "PlayerMessage",
         "PlrMessage",
@@ -35743,6 +35854,366 @@ func ProbeBadIndex(id) {
         assert_eq!(spawn.owner, 0);
         assert_eq!(spawn.id, Some(ObjectId::new(1)));
         assert_eq!(outcome.next_object_id, 2);
+    }
+
+    fn place_animal_world(
+        id: &str,
+        placement: i32,
+        landscape: Landscape,
+    ) -> HostWorldContext {
+        HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::from([(
+                DefinitionId::from(id),
+                DefinitionMetadata {
+                    category: crate::CATEGORY_LIVING,
+                    shape: Some(DefinitionRect::new(-2, -3, 4, 6)),
+                    placement,
+                    physical: PhysicalInfo {
+                        energy: 50_000,
+                        ..PhysicalInfo::default()
+                    },
+                    ..DefinitionMetadata::default()
+                },
+            )]),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+    }
+
+    #[test]
+    fn place_animal_surface_uses_two_draws_and_find_solid_ground() {
+        // C4D_Place_Surface draws global x then y, runs FindSolidGround with
+        // Shape.Wdt, and calls creatorless CreateObject at the returned point
+        // (C4Game.cpp:3028-3043; C4Landscape.cpp:1830-1857).
+        let mut landscape = Landscape::flat(100, 60);
+        landscape.set_world_height(100);
+        let mut expected_rng = LcgRng::new(17);
+        let start_x = expected_rng.random(100);
+        let start_y = expected_rng.random(100);
+        let raw = landscape
+            .find_solid_ground(start_x, start_y, 4)
+            .map(|(x, y)| Vector2::new(x, y))
+            .expect("flat world has solid ground");
+        let final_position = Vector2::new(
+            raw.x,
+            crate::docon_initial_center_y(
+                Some(DefinitionRect::new(-2, -3, 4, 6)),
+                false,
+                0,
+                FULL_CON,
+                raw.y,
+            ),
+        );
+        let guard = enter_random_context(LcgRng::new(17));
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            place_animal_world("SURF", 0, landscape),
+            1,
+            || place_animal(&[Value::C4Id("SURF".into())]),
+        );
+        let final_rng = guard.finish();
+
+        assert_eq!(final_rng, expected_rng);
+        assert_eq!(
+            result.expect("PlaceAnimal surface succeeds"),
+            object_reference_value(ObjectId::new(1))
+        );
+        let spawn = &outcome.spawns[0];
+        assert_eq!(spawn.position, final_position);
+        assert_eq!(spawn.fixed_position, Some(FixedVec2::from_ints(raw.x, raw.y)));
+        assert_eq!(spawn.owner, OWNER_NONE);
+        assert_eq!(spawn.controller, Some(OWNER_NONE));
+        assert_eq!(spawn.construction, FULL_CON);
+    }
+
+    #[test]
+    fn place_animal_liquid_uses_surface_then_deep_fallback_search() {
+        // C4D_Place_Liquid draws global x/y, tries FindSurfaceLiquid before
+        // FindLiquid, then adds Shape.Hgt/2 before creatorless CreateObject
+        // (C4Game.cpp:3044-3052; C4Landscape.cpp:1860-1915).
+        let mut landscape = Landscape::flat(100, 80);
+        landscape.set_world_height(100);
+        let water = crate::MaterialId::new(1).expect("water id");
+        for x in 20..80 {
+            for y in 40..80 {
+                assert!(landscape.insert_liquid_at(x, y, Some(water)));
+            }
+        }
+        let mut expected_rng = LcgRng::new(23);
+        let mut expected_x = expected_rng.random(100);
+        let mut expected_y = expected_rng.random(100);
+        assert!(
+            placement_find_surface_liquid(&landscape, &mut expected_x, &mut expected_y, 4, 6)
+                || placement_find_liquid(&landscape, &mut expected_x, &mut expected_y, 4, 6)
+        );
+        let raw = Vector2::new(expected_x, expected_y + 3);
+        let final_position = Vector2::new(
+            raw.x,
+            crate::docon_initial_center_y(
+                Some(DefinitionRect::new(-2, -3, 4, 6)),
+                false,
+                0,
+                FULL_CON,
+                raw.y,
+            ),
+        );
+        let guard = enter_random_context(LcgRng::new(23));
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            place_animal_world("FISH", 1, landscape),
+            1,
+            || place_animal(&[Value::C4Id("FISH".into())]),
+        );
+        let final_rng = guard.finish();
+
+        assert_eq!(final_rng, expected_rng);
+        assert_eq!(
+            result.expect("PlaceAnimal liquid succeeds"),
+            object_reference_value(ObjectId::new(1))
+        );
+        assert_eq!(outcome.spawns[0].position, final_position);
+        assert_eq!(
+            outcome.spawns[0].fixed_position,
+            Some(FixedVec2::from_ints(raw.x, raw.y))
+        );
+    }
+
+    #[test]
+    fn place_animal_air_scans_first_semisolid_then_draws_height() {
+        // C4D_Place_Air draws global x, scans down to the first semi-solid
+        // row, then draws Random(y) (C4Game.cpp:3053-3060).
+        let mut landscape = Landscape::flat(100, 60);
+        landscape.set_world_height(100);
+        let mut expected_rng = LcgRng::new(31);
+        let expected_x = expected_rng.random(100);
+        let ceiling = (0..100)
+            .find(|&y| landscape.is_semi_solid_at(expected_x, y))
+            .expect("flat ground is semi-solid");
+        let raw = Vector2::new(expected_x, expected_rng.random(ceiling));
+        let final_position = Vector2::new(
+            raw.x,
+            crate::docon_initial_center_y(
+                Some(DefinitionRect::new(-2, -3, 4, 6)),
+                false,
+                0,
+                FULL_CON,
+                raw.y,
+            ),
+        );
+        let guard = enter_random_context(LcgRng::new(31));
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            place_animal_world("BIRD", 2, landscape),
+            1,
+            || place_animal(&[Value::C4Id("BIRD".into())]),
+        );
+        let final_rng = guard.finish();
+
+        assert_eq!(final_rng, expected_rng);
+        assert_eq!(
+            result.expect("PlaceAnimal air succeeds"),
+            object_reference_value(ObjectId::new(1))
+        );
+        assert_eq!(outcome.spawns[0].position, final_position);
+        assert_eq!(
+            outcome.spawns[0].fixed_position,
+            Some(FixedVec2::from_ints(raw.x, raw.y))
+        );
+    }
+
+    #[test]
+    fn place_animal_air_without_semisolid_uses_world_height() {
+        // If the column contains no semi-solid pixel, the C++ scan reaches
+        // GBackHgt and still calls Random(GBackHgt) before creating the
+        // animal (C4Game.cpp:3053-3060).
+        let mut landscape = Landscape::flat(100, 100);
+        landscape.set_world_height(100);
+        let mut expected_rng = LcgRng::new(37);
+        let raw = Vector2::new(expected_rng.random(100), expected_rng.random(100));
+        let guard = enter_random_context(LcgRng::new(37));
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            place_animal_world("BIRD", 2, landscape),
+            1,
+            || place_animal(&[Value::C4Id("BIRD".into())]),
+        );
+        let final_rng = guard.finish();
+
+        assert_eq!(final_rng, expected_rng);
+        assert_eq!(
+            result.expect("PlaceAnimal sky-only air succeeds"),
+            object_reference_value(ObjectId::new(1))
+        );
+        assert_eq!(
+            outcome.spawns[0].fixed_position,
+            Some(FixedVec2::from_ints(raw.x, raw.y))
+        );
+    }
+
+    #[test]
+    fn place_animal_invalid_modes_draw_nothing_and_air_row_zero_draws_once() {
+        // C4Id2Def and unsupported Placement return before Random; the Air
+        // arm draws x, then fails without Random(y) when row zero is already
+        // semi-solid (C4Game.cpp:3028-3061).
+        let mut landscape = Landscape::flat(20, 0);
+        landscape.set_world_height(20);
+        let definitions = HashMap::from([
+            (
+                DefinitionId::from("UNSP"),
+                DefinitionMetadata {
+                    placement: 9,
+                    ..DefinitionMetadata::default()
+                },
+            ),
+            (
+                DefinitionId::from("AIR0"),
+                DefinitionMetadata {
+                    placement: 2,
+                    shape: Some(DefinitionRect::new(-2, -3, 4, 6)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+            (
+                DefinitionId::from("SURF0"),
+                DefinitionMetadata {
+                    placement: 0,
+                    shape: Some(DefinitionRect::new(-2, -3, 4, 6)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+        ]);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let mut expected_rng = LcgRng::new(41);
+        let _ = expected_rng.random(20);
+        let _ = expected_rng.random(20);
+        let _ = expected_rng.random(20);
+        let expected_after = expected_rng.random(1_000);
+        let guard = enter_random_context(LcgRng::new(41));
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                place_animal(&[Value::C4Id("NONE".into())])?,
+                place_animal(&[Value::C4Id("UNSP".into())])?,
+                place_animal(&[Value::C4Id("AIR0".into())])?,
+                place_animal(&[Value::C4Id("SURF0".into())])?,
+                random(&[Value::Int(1_000)])?,
+            ]))
+        });
+        let final_rng = guard.finish();
+
+        assert_eq!(final_rng, expected_rng);
+        assert_eq!(
+            result.expect("PlaceAnimal failure paths succeed"),
+            Value::Array(vec![
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Int(expected_after),
+            ])
+        );
+        assert!(outcome.spawns.is_empty());
+    }
+
+    #[test]
+    fn place_animal_callbacks_are_synchronous_and_removal_returns_nil() {
+        // CreateObject inserts the animal before Construction(nil) at Con=0,
+        // then DoCon(FullCon,true) calls Completion and Initialize; removal
+        // in Construction makes PlaceAnimal return null while consuming the
+        // object number (C4Game.cpp:1102-1146,3028-3061;
+        // C4Object.cpp:1428-1515).
+        let animal_script = r#"#strict
+local iConstructionCon, iConstructionY, iOrder;
+protected func Construction() { iConstructionCon=GetCon(); iConstructionY=GetY(); iOrder=1; }
+protected func Completion() { iOrder=iOrder*10+2; }
+protected func Initialize() { iOrder=iOrder*10+3; }
+public func ConstructionCon() { return(iConstructionCon); }
+"#;
+        let caller_script = r#"#strict
+local iObservedCon;
+public func Seed() { var child=PlaceAnimal(ANML); iObservedCon=child->ConstructionCon(); return(child); }
+public func SeedRemoved() { return(PlaceAnimal(DIEA)); }
+"#;
+        let mut engine = crate::Engine::with_seed(53);
+        let mut landscape = Landscape::flat(100, 60);
+        landscape.set_world_height(100);
+        engine.set_landscape(landscape);
+        let mut animal = crate::Definition::from_script("ANML", "Animal", animal_script)
+            .expect("animal script compiles");
+        animal.set_category(crate::CATEGORY_LIVING);
+        animal.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
+        animal.set_placement(2);
+        engine.register_definition(animal).expect("animal registers");
+        let mut removed = crate::Definition::from_script(
+            "DIEA",
+            "Removed animal",
+            "#strict\nprotected func Construction() { RemoveObject(); }",
+        )
+        .expect("removed animal script compiles");
+        removed.set_category(crate::CATEGORY_LIVING);
+        removed.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
+        removed.set_placement(2);
+        engine.register_definition(removed).expect("removed animal registers");
+        let caller = crate::Definition::from_script("CALL", "Caller", caller_script)
+            .expect("caller script compiles");
+        engine.register_definition(caller).expect("caller registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(1_000, 1_000)))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+
+        let value = engine
+            .call_object_function(caller_index, "Seed", Vec::new())
+            .expect("Seed runs");
+        let animal_id = object_id_from_value(&value).expect("Seed returns live animal");
+        let animal_index = engine.find_object_index(animal_id).expect("animal exists");
+        let animal = &engine.objects[animal_index].state;
+        assert_eq!(animal.owner, OWNER_NONE);
+        assert_eq!(animal.controller, OWNER_NONE);
+        assert_eq!(animal.construction, FULL_CON);
+        assert!((0..100).contains(&animal.position.x), "placement is global");
+        assert_eq!(animal.local_vars.get("iConstructionCon"), Some(&Value::Int(0)));
+        assert_eq!(animal.local_vars.get("iOrder"), Some(&Value::Int(123)));
+        assert_eq!(
+            animal.local_vars.get("iConstructionY"),
+            Some(&Value::Int(animal.position.y + 3)),
+            "Construction sees the raw pre-DoCon y"
+        );
+        let caller_index = engine.find_object_index(caller_id).expect("caller remains");
+        assert_eq!(
+            engine.objects[caller_index].state.local_vars.get("iObservedCon"),
+            Some(&Value::Int(0)),
+            "Construction writes are visible before PlaceAnimal returns"
+        );
+
+        let before_next_id = engine.capture_state().next_object_id;
+        let value = engine
+            .call_object_function(caller_index, "SeedRemoved", Vec::new())
+            .expect("SeedRemoved runs");
+        assert_eq!(value, Value::Nil);
+        assert!(engine
+            .snapshot()
+            .objects
+            .iter()
+            .all(|object| object.definition_id != "DIEA"));
+        assert_eq!(engine.capture_state().next_object_id, before_next_id + 1);
     }
 
     #[test]
