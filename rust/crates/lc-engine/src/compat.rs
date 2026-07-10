@@ -13565,25 +13565,36 @@ fn get_path(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_transfer_zone(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 4 || args.len() > 5 {
+    if args.len() > 5 {
         return Err(RuntimeError::new(
-            "SetTransferZone expects 4 or 5 arguments: x, y, width, height, [object]",
+            "SetTransferZone expects at most 5 arguments: x, y, width, height, [object]",
         ));
     }
 
-    let x = value_to_i32(&args[0], "SetTransferZone", "x")?;
-    let y = value_to_i32(&args[1], "SetTransferZone", "y")?;
-    let width = value_to_i32(&args[2], "SetTransferZone", "width")?;
-    let height = value_to_i32(&args[3], "SetTransferZone", "height")?;
-    let explicit_object = if args.len() == 5 {
-        Some(parse_object_reference_argument(
-            &args[4],
-            "SetTransferZone",
-            "object",
-        )?)
-    } else {
-        None
-    };
+    let x = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetTransferZone",
+        "x",
+    )?;
+    let y = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetTransferZone",
+        "y",
+    )?;
+    let width = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetTransferZone",
+        "width",
+    )?;
+    let height = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "SetTransferZone",
+        "height",
+    )?;
+    let explicit_object = args
+        .get(4)
+        .map(|value| parse_object_reference_argument(value, "SetTransferZone", "object"))
+        .transpose()?;
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -27769,6 +27780,25 @@ func ProbeBadIndex(id) {
                 assert_eq!(rect.height, 7);
             }
             other => panic!("expected set command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn set_transfer_zone_omitted_dimensions_clear_the_active_object_zone() {
+        // Parse_Params pads FnSetTransferZone's five slots with nil
+        // (C4AulParse.cpp:2342-2344), and the engine call converts its four
+        // integer slots to zero (C4AulExec.cpp:1364-1396). FnSetTransferZone
+        // then uses the active object (C4Script.cpp:3145-3149), so `()` clears
+        // that object's existing zone (C4TransferZone.cpp:78-83).
+        let (result, outcome) = with_object_host_context(|| set_transfer_zone(&[]));
+
+        assert_eq!(result.expect("SetTransferZone succeeds"), Value::Bool(true));
+        assert_eq!(outcome.transfer_zones.len(), 1);
+        match outcome.transfer_zones.first() {
+            Some(TransferZoneCommand::Clear { owner }) => {
+                assert_eq!(*owner, ObjectId::new(1));
+            }
+            other => panic!("expected clear command, got {:?}", other),
         }
     }
 
