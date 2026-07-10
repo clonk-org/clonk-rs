@@ -28,7 +28,8 @@ rebuilt pinned live comparison.
   movement damping/clamping/collision behavior.
 - **Commands/objects:** pathfinding/Tick35, FLOAT, Exit/Throw, arrival/intervals,
   vehicle/linekit/dig/trade behavior, OCF/sectors/find order, containers,
-  permanent crew/base state, elimination, and rank/version gates.
+  initial-placement lifecycle, permanent crew/base state, elimination, and
+  rank/version gates.
 - **Script/network/state:** strict C4Value conversion/serialization, remaining
   DefCore/ActMap/effect/menu/callback order, object-info/evaluation payloads,
   control synchronization, and protocol/auth/league behavior.
