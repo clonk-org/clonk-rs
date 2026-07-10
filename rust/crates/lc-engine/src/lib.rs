@@ -19105,6 +19105,14 @@ impl Engine {
                         player.set_fog_of_war(enabled);
                     }
                 }
+                PlayerCommand::SetShowControlPosition {
+                    player_id,
+                    position,
+                } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.show_control_position = position;
+                    }
+                }
                 // FnSetPlrExtraData (C4Script.cpp:4712-4730): update in
                 // place, or append preserving the names-list order.
                 PlayerCommand::SetExtraData {

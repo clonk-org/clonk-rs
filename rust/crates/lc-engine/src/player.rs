@@ -105,6 +105,10 @@ pub struct PlayerState {
     /// control (C4Player::bForceFogOfWar, C4Player.cpp:1581).
     #[serde(default)]
     pub force_fog_of_war: bool,
+    /// C4Player::ShowControlPos: tutorial-selected placement for the command
+    /// hint strip (FnSetPlrShowControlPos, C4Script.cpp:2561-2566).
+    #[serde(default)]
+    pub show_control_position: i32,
     /// Players this player declared hostility against (C4Player::Hostility,
     /// queried by C4PlayerList::Hostile, C4PlayerList.cpp:82-92). Sorted for
     /// deterministic serialization.
@@ -196,6 +200,7 @@ pub struct Player {
     color: Option<RgbColor>,
     fog_of_war: bool,
     force_fog_of_war: bool,
+    pub(crate) show_control_position: i32,
     hostility: HashSet<i32>,
     /// The indexed player color chosen at ScenarioInit
     /// (C4Player.cpp:678-685; C4PlayerList::ColorTaken scans it). -1 until
@@ -237,6 +242,7 @@ impl Player {
             color: None,
             fog_of_war: false,
             force_fog_of_war: false,
+            show_control_position: 0,
             hostility: HashSet::new(),
             color_index: -1,
             position_index: -1,
@@ -294,6 +300,7 @@ impl Player {
             color,
             fog_of_war: false,
             force_fog_of_war: false,
+            show_control_position: 0,
             hostility: HashSet::new(),
             color_index: -1,
             position_index: -1,
@@ -330,6 +337,7 @@ impl Player {
             color,
             fog_of_war,
             force_fog_of_war,
+            show_control_position,
             hostility,
             control,
             extra_data,
@@ -359,6 +367,7 @@ impl Player {
             color,
             fog_of_war,
             force_fog_of_war,
+            show_control_position,
             hostility: hostility.into_iter().collect(),
             color_index: -1,
             position_index: -1,
@@ -397,6 +406,7 @@ impl Player {
             color: self.color,
             fog_of_war: self.fog_of_war,
             force_fog_of_war: self.force_fog_of_war,
+            show_control_position: self.show_control_position,
             hostility: {
                 let mut hostility: Vec<i32> = self.hostility.iter().copied().collect();
                 hostility.sort_unstable();
