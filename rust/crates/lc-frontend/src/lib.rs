@@ -7,6 +7,7 @@
 )]
 
 pub mod clonk_fonts;
+pub mod classic_gui;
 pub mod hud;
 pub mod startup_about_dlg;
 pub mod startup_netdlg;

@@ -9,10 +9,14 @@
 //! ComponentAligner of C4Gui.cpp:975-1057.
 
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
-use crate::startup_main_menu::{draw_bar, IntRect};
+use crate::classic_gui::{
+    blacken_transparent_pixels, draw_clipped_text, draw_engine_box, draw_3d_frame,
+    ClassicButtonState, ClassicGuiSkin,
+};
+use crate::startup_main_menu::IntRect;
 use crate::{GuiPoint, ImageData, KeyCode};
-use lc_graphics::clonk_font::{ClonkFont, TextAlign};
-use lc_graphics::{Color, GammaRamp, PixelFormat, Surface};
+use lc_graphics::clonk_font::TextAlign;
+use lc_graphics::{GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
 
 // Engine colors (C4Gui.h:52-103,163-165). Font colors are NORMAL-alpha RGBA
@@ -348,186 +352,6 @@ pub fn net_dlg_layout(w: i32, h: i32, metrics: &NetDlgFontMetrics) -> NetDlgLayo
         ip_label,
         join_edit,
         buttons,
-    }
-}
-
-/// Draws a horizontal three-slice bar at native scale with an explicit
-/// `border` slice width (DynBarFacet::SetHorizontal with iBorderWidth,
-/// C4Gui.cpp:92-99), as used by the wooden caption bar (GUICaption.png,
-/// border 32, height 23; C4Gui.cpp:1087-1088). Mirrors DrawBar's "exact bar"
-/// branch including the narrow-bar overflow quirks: a truncated begin slice,
-/// a middle loop that still starts at the full begin width, and an end slice
-/// cropped from its left that overdraws right-aligned (C4Gui.cpp:283-311).
-fn draw_bar_with_border(
-    surface: &mut Surface,
-    rect: IntRect,
-    image: &ImageData,
-    border: u32,
-    gamma: Option<&GammaRamp>,
-) {
-    let h = image.height();
-    let mid_w = image.width().saturating_sub(2 * border);
-    let bar_w = rect.w;
-    let end_show = (border / 3) as i32; // iRightShowLength (C4Gui.cpp:289)
-
-    // begin slice, truncated when the bar is narrower (C4Gui.cpp:290-292)
-    let begin_w = (border as i32).clamp(0, bar_w.max(0)) as u32;
-    crate::draw_image_strip(surface, rect.x, rect.y, image, 0, 0, begin_w, h, gamma);
-
-    // middle tiles; iX starts at the untruncated begin width (C4Gui.cpp:288,293-298)
-    if mid_w > 0 {
-        let mut ix = border as i32;
-        while ix < bar_w - end_show {
-            let tile_w = (mid_w as i32).min(bar_w - end_show - ix).max(0) as u32;
-            crate::draw_image_strip(surface, rect.x + ix, rect.y, image, border, 0, tile_w, h, gamma);
-            ix += mid_w as i32;
-        }
-    }
-
-    // end slice, right-aligned and cropped from its left when overflowing
-    // (fctEnd.X += wRight - Wdt; C4Gui.cpp:300-310), drawn last
-    let end_w = (border as i32).clamp(0, bar_w.max(0)) as u32;
-    let end_src_x = image.width() - border + (border - end_w);
-    crate::draw_image_strip(
-        surface,
-        rect.x + bar_w - end_w as i32,
-        rect.y,
-        image,
-        end_src_x,
-        0,
-        end_w,
-        h,
-        gamma,
-    );
-}
-
-/// `CStdDDraw::DrawBoxDw` (StdDDraw2.cpp:1401-1404 -> CStdGL::DrawQuadDw,
-/// StdGL.cpp:846-891): fills the INCLUSIVE rect (x1,y1)-(x2,y2) with an
-/// engine AARRGGBB color whose alpha is inverted (0x00 = opaque). GL blends
-/// `src*(1 - A/255) + dst*(A/255)` (glBlendFunc GL_ONE_MINUS_SRC_ALPHA /
-/// GL_SRC_ALPHA on the raw engine color) with the source RGB gamma-encoded
-/// by the blit shader's per-fragment lookup (StdGL.cpp:1082-1086).
-fn draw_box_engine(
-    surface: &mut Surface,
-    x1: i32,
-    y1: i32,
-    x2: i32,
-    y2: i32,
-    clr: u32,
-    gamma: Option<&GammaRamp>,
-) {
-    let a = (255 - ((clr >> 24) & 0xff)) as f32 / 255.0;
-    if a <= 0.0 {
-        return;
-    }
-    let enc = |c: u32| -> f32 {
-        let v = (c & 0xff) as f32;
-        gamma.map_or(v, |g| f32::from(g.encode_float(v)))
-    };
-    let (sr, sg, sb) = (enc(clr >> 16), enc(clr >> 8), enc(clr));
-    let blend =
-        |s: f32, d: u8| (s * a + f32::from(d) * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
-    for y in y1.max(0)..=y2.min(surface.height() as i32 - 1) {
-        for x in x1.max(0)..=x2.min(surface.width() as i32 - 1) {
-            let dst = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
-            let _ = surface.set_pixel(
-                x as u32,
-                y as u32,
-                Color::new(blend(sr, dst.r), blend(sg, dst.g), blend(sb, dst.b), 255),
-            );
-        }
-    }
-}
-
-/// `CStdGL::DrawLineDw` (StdGL.cpp:893-934) for the axis-aligned GUI frame
-/// lines: a GL_LINES segment between the two pixel centers `+0.5`. By the GL
-/// diamond-exit rule the segment never leaves the final pixel's diamond, so
-/// the END pixel is not rasterized (verified against the F9 capture: frame
-/// corners blend exactly once where the C++ lines meet, not twice). Blending
-/// and gamma match DrawBoxDw — the engine inverts the alpha for the
-/// SRC_ALPHA/ONE_MINUS_SRC_ALPHA path (StdGL.cpp:924), which is equivalent.
-fn draw_line_engine(
-    surface: &mut Surface,
-    x1: i32,
-    y1: i32,
-    x2: i32,
-    y2: i32,
-    clr: u32,
-    gamma: Option<&GammaRamp>,
-) {
-    // Axis-aligned only (all GUI 3D-frame lines are); drop the end pixel.
-    if y1 == y2 && x2 > x1 {
-        draw_box_engine(surface, x1, y1, x2 - 1, y2, clr, gamma);
-    } else if x1 == x2 && y2 > y1 {
-        draw_box_engine(surface, x1, y1, x2, y2 - 1, clr, gamma);
-    } else {
-        draw_box_engine(surface, x1, y1, x2, y2, clr, gamma);
-    }
-}
-
-/// `C4GUI::Element::Draw3DFrame` (C4Gui.cpp:264-279) around `rect` with the
-/// default border alpha 0xaf and the C4GUI_BorderColor1/2/3 palette
-/// (C4Gui.h:97-100), drawn in the exact C++ order so pixels covered by two
-/// lines blend twice.
-fn draw_3d_frame(surface: &mut Surface, rect: IntRect, gamma: Option<&GammaRamp>) {
-    const ALPHA: u32 = 0xaf << 24;
-    const COLOR1: u32 = 0x0077_2200;
-    const COLOR2: u32 = 0x0033_1100;
-    const COLOR3: u32 = 0x00aa_4400;
-    let (x0, y0) = (rect.x, rect.y);
-    let (x1, y1) = (rect.x + rect.w - 1, rect.y + rect.h - 1);
-    [
-        (x0, y0, x1, y0, COLOR1),         // top outer
-        (x0, y0, x0, y1, COLOR1),         // left outer
-        (x0 + 1, y0 + 1, x1 - 1, y0 + 1, COLOR2), // top inner
-        (x0 + 1, y0 + 1, x0 + 1, y1 - 1, COLOR2), // left inner
-        (x0, y1, x1, y1, COLOR3),         // bottom outer
-        (x1, y0, x1, y1, COLOR3),         // right outer
-        (x0 + 1, y1 - 1, x1 - 1, y1 - 1, COLOR1), // bottom inner
-        (x1 - 1, y0 + 1, x1 - 1, y1 - 1, COLOR1), // right inner
-    ]
-    .into_iter()
-    .for_each(|(ax, ay, bx, by, c)| draw_line_engine(surface, ax, ay, bx, by, c | ALPHA, gamma));
-}
-
-/// Draws text clipped to a rect, mirroring the C++ primary clipper
-/// (SetPrimaryClipper is INCLUSIVE of its x2/y2 corner; StdDDraw2.cpp:583-600).
-/// `clip` is already in exclusive width/height form. Implemented by drawing
-/// into a copy of the clipped region, which is blend-exact.
-#[allow(clippy::too_many_arguments)]
-fn draw_text_clipped(
-    surface: &mut Surface,
-    font: &ClonkFont,
-    x: i32,
-    y: i32,
-    text: &str,
-    color: [u8; 4],
-    align: TextAlign,
-    gamma: Option<&GammaRamp>,
-    clip: IntRect,
-) {
-    let cx0 = clip.x.max(0);
-    let cy0 = clip.y.max(0);
-    let cx1 = (clip.x + clip.w).min(surface.width() as i32);
-    let cy1 = (clip.y + clip.h).min(surface.height() as i32);
-    if cx0 >= cx1 || cy0 >= cy1 {
-        return;
-    }
-    let (cw, ch) = ((cx1 - cx0) as u32, (cy1 - cy0) as u32);
-    let mut tmp = Surface::new(cw, ch, PixelFormat::Rgba8888);
-    for ty in 0..ch {
-        for tx in 0..cw {
-            let src = surface.get_pixel(cx0 as u32 + tx, cy0 as u32 + ty).unwrap_or_default();
-            let _ = tmp.set_pixel(tx, ty, src);
-        }
-    }
-    font.draw_with_gamma(&mut tmp, x - cx0, y - cy0, text, color, align, true, gamma);
-    for ty in 0..ch {
-        for tx in 0..cw {
-            if let Some(px) = tmp.get_pixel(tx, ty) {
-                let _ = surface.set_pixel(cx0 as u32 + tx, cy0 as u32 + ty, px);
-            }
-        }
     }
 }
 
@@ -945,21 +769,6 @@ fn contains(rect: IntRect, point: GuiPoint) -> bool {
         && point.y < (rect.y + rect.h) as f32
 }
 
-fn blacken_transparent(image: &ImageData) -> ImageData {
-    let pixels = image
-        .pixels()
-        .chunks_exact(4)
-        .flat_map(|pixel| {
-            if pixel[3] == 0 {
-                [0, 0, 0, 0]
-            } else {
-                [pixel[0], pixel[1], pixel[2], pixel[3]]
-            }
-        })
-        .collect();
-    ImageData::new(image.width(), image.height(), pixels)
-}
-
 /// Renders `C4StartupNetDlg`'s deterministic first-shown state.
 pub struct NetDlgScreen;
 
@@ -1024,7 +833,13 @@ impl NetDlgScreen {
         let layout = net_dlg_layout(w, h, &metrics);
         let mode = controller.map_or(NetDlgMode::GameList, |state| state.mode);
         let button_highlight = controller
-            .map(|_| blacken_transparent(&assets.gui_button_highlight));
+            .map(|_| blacken_transparent_pixels(&assets.gui_button_highlight));
+        let classic_skin = ClassicGuiSkin::new(
+            &assets.gui_caption,
+            &assets.gui_button,
+            &assets.gui_button_down,
+            button_highlight.as_ref(),
+        );
 
         // ① Background: StartupNetworkBG plain-stretched one pixel past every
         // screen edge (FullscreenDialog::DrawBackground, C4GuiDialogs.cpp:878-887).
@@ -1081,25 +896,22 @@ impl NetDlgScreen {
         // "Running Games" wooden caption (WoodenLabel::DrawElement,
         // C4GuiLabels.cpp:168-209): bar, then ALeft text at x+5, vertically
         // centered minus one, clipped to the label's inclusive bounds.
-        draw_bar_with_border(surface, layout.game_list_caption, &assets.gui_caption, 32, gamma);
         let capt = layout.game_list_caption;
-        draw_text_clipped(
+        classic_skin.draw_caption(
             surface,
-            &fonts.text,
-            capt.x + 5,
-            capt.y + (capt.h - fonts.text.line_height) / 2 - 1,
+            capt,
             "Running Games",
+            &fonts.text,
             CLR_YELLOW,
             TextAlign::Left,
             gamma,
-            inclusive_clip(capt),
         );
 
         // Game list box (ListBox::DrawElement, C4GuiListBox.cpp:100-139):
         // dark background box over the inclusive bounds, then the 3D frame.
         // No selection bar, delimiters or scroll bar at t=0.
         let list = layout.game_list;
-        draw_box_engine(
+        draw_engine_box(
             surface,
             list.x,
             list.y,
@@ -1135,18 +947,15 @@ impl NetDlgScreen {
 
         // "IP:" wooden label (C4StartupNetDlg.cpp:679-688): the 28px bar
         // exercises DrawBar's overflow quirk; ACenter text, top row clipped.
-        draw_bar_with_border(surface, layout.ip_label, &assets.gui_caption, 32, gamma);
         let ip = layout.ip_label;
-        draw_text_clipped(
+        classic_skin.draw_caption(
             surface,
-            &fonts.text,
-            ip.x + ip.w / 2,
-            ip.y + (ip.h - fonts.text.line_height) / 2 - 1,
+            ip,
             "IP:",
+            &fonts.text,
             CLR_YELLOW,
             TextAlign::Center,
             gamma,
-            inclusive_clip(ip),
         );
 
         // Join-address edit, empty and unfocused (Edit::DrawElement,
@@ -1154,7 +963,7 @@ impl NetDlgScreen {
         // bottom (margins L4 R4 T2 B2, C4GuiEdit.h:102-105), default 3D
         // frame, no text, no caret.
         let edit = layout.join_edit;
-        draw_box_engine(
+        draw_engine_box(
             surface,
             edit.x,
             edit.y,
@@ -1165,7 +974,7 @@ impl NetDlgScreen {
         );
         draw_3d_frame(surface, edit, gamma);
         if let Some(address) = controller.map(|state| state.join_address()) {
-            draw_text_clipped(
+            draw_clipped_text(
                 surface,
                 &fonts.text,
                 edit.x + 4,
@@ -1178,7 +987,7 @@ impl NetDlgScreen {
             );
             if controller.is_some_and(|state| state.focus == NetDlgControl::JoinAddress) {
                 let caret_x = edit.x + 4 + fonts.text.measure(address, false).0;
-                draw_text_clipped(
+                draw_clipped_text(
                     surface,
                     &fonts.text,
                     caret_x,
@@ -1192,7 +1001,7 @@ impl NetDlgScreen {
             }
         }
         } else {
-            Self::draw_chat_sheet(surface, assets, fonts, gamma, layout);
+            Self::draw_chat_sheet(surface, fonts, &classic_skin, gamma, layout);
         }
 
         // ⑥⑦ Right icon buttons, config-driven (C4StartupNetDlg.cpp:710-717)
@@ -1242,16 +1051,17 @@ impl NetDlgScreen {
             {
                 continue;
             }
-            Self::bottom_button(
+            classic_skin.draw_button(
                 surface,
-                assets,
-                fonts,
-                gamma,
                 layout.buttons[index],
                 label,
-                button_highlight.as_ref(),
-                controller.is_some_and(|state| state.is_highlighted(control)),
-                controller.is_some_and(|state| state.is_pressed(control)),
+                fonts,
+                ClassicButtonState {
+                    pressed: controller.is_some_and(|state| state.is_pressed(control)),
+                    highlighted: controller
+                        .is_some_and(|state| state.is_highlighted(control)),
+                },
+                gamma,
             );
         }
     }
@@ -1304,79 +1114,21 @@ impl NetDlgScreen {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn bottom_button(
-        surface: &mut Surface,
-        assets: &NetDlgAssets,
-        fonts: &ClonkFontSet,
-        gamma: Option<&GammaRamp>,
-        rect: IntRect,
-        label: &str,
-        highlight_image: Option<&ImageData>,
-        highlighted: bool,
-        pressed: bool,
-    ) {
-        let plank = if pressed {
-            &assets.gui_button_down
-        } else {
-            &assets.gui_button
-        };
-        draw_bar(surface, &gui_rect(rect), plank, gamma);
-        if highlighted {
-            if let Some(highlight) = highlight_image {
-                crate::draw_image_bilinear_additive(
-                    surface,
-                    &GuiRect::new(
-                        (rect.x + 5) as f32,
-                        (rect.y + 3) as f32,
-                        (rect.w - 10) as f32,
-                        (rect.h - 6) as f32,
-                    ),
-                    highlight,
-                    gamma,
-                );
-            }
-        }
-        let font = fonts.button_font(rect.h);
-        let (text, _) = expand_hotkey_markup(label);
-        let offset = i32::from(pressed);
-        font.draw_with_gamma(
-            surface,
-            (rect.x + rect.x + rect.w - 1) / 2 + offset,
-            (rect.y + rect.y + rect.h - 1 - font.line_height) / 2 + offset,
-            &text,
-            CLR_YELLOW,
-            TextAlign::Center,
-            true,
-            gamma,
-        );
-    }
-
     fn draw_chat_sheet(
         surface: &mut Surface,
-        assets: &NetDlgAssets,
         fonts: &ClonkFontSet,
+        classic_skin: &ClassicGuiSkin<'_>,
         gamma: Option<&GammaRamp>,
         layout: NetDlgLayout,
     ) {
-        draw_bar_with_border(
+        classic_skin.draw_caption(
             surface,
             layout.game_list_caption,
-            &assets.gui_caption,
-            32,
-            gamma,
-        );
-        let caption = layout.game_list_caption;
-        draw_text_clipped(
-            surface,
-            &fonts.text,
-            caption.x + 5,
-            caption.y + (caption.h - fonts.text.line_height) / 2 - 1,
             "Chat",
+            &fonts.text,
             CLR_YELLOW,
             TextAlign::Left,
             gamma,
-            inclusive_clip(caption),
         );
         let chat = IntRect {
             x: layout.game_list.x,
@@ -1384,7 +1136,7 @@ impl NetDlgScreen {
             w: layout.game_list.w,
             h: layout.join_edit.y + layout.join_edit.h - layout.game_list.y,
         };
-        draw_box_engine(
+        draw_engine_box(
             surface,
             chat.x,
             chat.y,
@@ -1401,6 +1153,7 @@ impl NetDlgScreen {
 mod tests {
     use super::*;
     use crate::test_support::endeavour_font_set;
+    use lc_graphics::PixelFormat;
 
     /// The two text extents the C++ constructor measures from the live fonts
     /// (C4StartupNetDlg.cpp:636,685-686), pinned to the spec's values.
@@ -1619,65 +1372,6 @@ mod tests {
         assert!(actions.contains(&NetDlgAction::ModeChanged(NetDlgMode::Chat)));
         let chat = render(&controller);
         assert_ne!(with_address.pixels(), chat.pixels());
-    }
-
-    /// Builds a `w`x`h` image whose pixel at column x is gray value `10*(x+1)`.
-    fn column_coded_image(w: u32, h: u32) -> ImageData {
-        let pixels = (0..h)
-            .flat_map(|_| (0..w).flat_map(|x| [(10 * (x + 1)) as u8; 3].into_iter().chain([255u8])))
-            .collect();
-        ImageData::new(w, h, pixels)
-    }
-
-    fn column_values(surface: &Surface, y: u32, w: u32) -> Vec<u8> {
-        (0..w)
-            .map(|x| surface.get_pixel(x, y).map(|c| c.r).unwrap_or(0))
-            .collect()
-    }
-
-    // DrawBar "exact bar" with a border narrower than implied by the texture
-    // height (DynBarFacet::SetHorizontal with iBorderWidth, C4Gui.cpp:92-99,
-    // 283-311): begin = left `border` columns, middle tiled until
-    // `w - border/3`, end right-aligned and drawn last.
-    #[test]
-    fn caption_bar_tiles_middle_and_right_aligns_end() {
-        // 8x1 texture, border 2: begin cols 0-1 (10,20), middle cols 2-5
-        // (30,40,50,60), end cols 6-7 (70,80).
-        let image = column_coded_image(8, 1);
-        let mut surface = Surface::new(9, 1, PixelFormat::Rgba8888);
-        let rect = IntRect { x: 0, y: 0, w: 9, h: 1 };
-        draw_bar_with_border(&mut surface, rect, &image, 2, None);
-        // iRightShowLength = 2/3 = 0; middle tiles at x=2 (full) and x=6
-        // (cropped to 3); end drawn last right-aligned at x=7.
-        assert_eq!(column_values(&surface, 0, 9), vec![10, 20, 30, 40, 50, 60, 30, 70, 80]);
-    }
-
-    // The IP-label overflow quirk (bar narrower than one border slice,
-    // C4Gui.cpp:290-292,300-310): begin truncated, middle skipped, end
-    // cropped from its left and overdrawing the begin at the same span.
-    #[test]
-    fn caption_bar_narrower_than_border_lets_end_overdraw_begin() {
-        let image = column_coded_image(8, 1);
-        let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
-        let rect = IntRect { x: 0, y: 0, w: 1, h: 1 };
-        draw_bar_with_border(&mut surface, rect, &image, 2, None);
-        // begin drew col 0 (10); end src X += 2-1 -> texture col 7 (80) wins.
-        assert_eq!(column_values(&surface, 0, 1), vec![80]);
-    }
-
-    // DrawBoxDw via DrawQuadDw (StdGL.cpp:846-891): inclusive corners, engine
-    // inverted alpha, `src*(1-A/255) + dst*(A/255)` blending.
-    #[test]
-    fn engine_box_blends_with_inverted_alpha_over_inclusive_rect() {
-        let mut surface = Surface::new(3, 1, PixelFormat::Rgba8888);
-        for x in 0..3 {
-            let _ = surface.set_pixel(x, 0, Color::new(200, 100, 0, 255));
-        }
-        // 0x7f000000: black at opacity (255-127)/255 over cols 0..=1.
-        draw_box_engine(&mut surface, 0, 0, 1, 0, 0x7f00_0000, None);
-        // 200*(127/255) = 99.6 -> 100; 100*(127/255) = 49.8 -> 50.
-        assert_eq!(column_values(&surface, 0, 3), vec![100, 100, 200]);
-        assert_eq!(surface.get_pixel(0, 0).map(|c| c.g), Some(50));
     }
 
     /// Renders the dialog at 1280x720 with the final whole-surface gamma pass
