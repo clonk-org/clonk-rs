@@ -14152,6 +14152,141 @@ mod tests {
     }
 
     #[test]
+    fn fresh_player_default_up_key_jumps_and_releases_like_cpp() {
+        // A new C++ player selects keyboard set 1 with AutoStopControl
+        // (C4StartupPlrSelDlg.cpp:1103-1113), whose Up key is S, not an arrow
+        // alias (C4Config.cpp:624-635). WALK Up queues Jump
+        // (C4ObjectCom.cpp:335-350), and key-up clears the registered Up bit
+        // (C4Game.cpp:3579-3592; C4Player.cpp:1490-1551).
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Fresh player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+
+        let mut definition =
+            Definition::from_script("JMPR", "Jumper", walker_script()).expect("crew definition");
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("walk"),
+                ),
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default().with_procedure("flight"),
+                ),
+            ]),
+        );
+        definition.set_movement_profile(MovementProfile::default());
+        definition.set_physical(lc_engine::PhysicalInfo {
+            walk: 70_000,
+            jump: 40_000,
+            ..Default::default()
+        });
+        definition.set_crew_member(true);
+        app.engine
+            .register_definition(definition)
+            .expect("register crew definition");
+        app.engine
+            .set_player_starts(vec![lc_engine::scenario::PlayerStart {
+                ready_crew: vec![("JMPR".to_string(), 1)],
+                ..Default::default()
+            }]);
+        app.join_local_player().expect("join fresh player");
+        app.mode = AppMode::Running;
+
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("fresh player's cursor");
+        assert!(
+            app.engine
+                .player(app.local_owner)
+                .expect("fresh player")
+                .control_style(),
+            "new players default to AutoStopControl like C++"
+        );
+        assert_eq!(
+            app.bindings.key_for(ControlBindingId::Up),
+            Some(VirtualKeyCode::S)
+        );
+
+        app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+            .expect("unbound arrow press");
+        assert!(
+            app.engine
+                .object_snapshot(cursor)
+                .expect("cursor after arrow press")
+                .command_stack
+                .command_names()
+                .is_empty(),
+            "the default Up arrow must not alias keyboard-set-1 Up"
+        );
+
+        app.handle_key(VirtualKeyCode::S, ElementState::Pressed)
+            .expect("press keyboard-set-1 Up");
+        assert_eq!(
+            app.engine
+                .object_snapshot(cursor)
+                .expect("cursor after S press")
+                .command_stack
+                .command_names(),
+            vec!["Jump".to_string()],
+            "S must traverse GameApp input and queue C4CMD_Jump"
+        );
+        assert_ne!(
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == app.local_owner)
+                .expect("player after S press")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_UP),
+            0,
+            "the Up press must be registered before release"
+        );
+
+        app.engine.tick().expect("execute queued jump");
+        let jumping = app
+            .engine
+            .object_snapshot(cursor)
+            .expect("cursor after jump tick");
+        assert_eq!(jumping.action.name, "Jump");
+        assert!(
+            jumping.velocity.y < 0,
+            "ObjectComJump launches upward (C4ObjectCom.cpp:280-307)"
+        );
+
+        app.handle_key(VirtualKeyCode::S, ElementState::Released)
+            .expect("release keyboard-set-1 Up");
+        assert_eq!(
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == app.local_owner)
+                .expect("player after S release")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_UP),
+            0,
+            "AutoStop key-up clears the registered Up press"
+        );
+    }
+
+    #[test]
     fn activating_a_scenario_joins_the_local_player_with_crew() {
         // The scenario activation path must join like C4Game::InitPlayers ->
         // C4PlayerList::Join (C4PlayerList.cpp:271-318) so the [Player1]
