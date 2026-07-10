@@ -2756,6 +2756,31 @@ fn material(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnMaterialName (C4Script.cpp:4475-4482): direct index into the loaded
+/// Game.Material map, returning null for every invalid index and the exact
+/// material core Name otherwise.
+fn material_name(args: &[Value]) -> Result<Value, RuntimeError> {
+    let index = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "MaterialName",
+        "material",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let name = usize::try_from(index)
+            .ok()
+            .and_then(crate::material::MaterialId::new)
+            .and_then(|material| {
+                borrow
+                    .as_ref()
+                    .and_then(|context| context.world.materials())
+                    .and_then(|materials| materials.get_by_id(material))
+            })
+            .map(|material| material.name().to_string());
+        Ok(name.map(Value::String).unwrap_or(Value::Nil))
+    })
+}
+
 /// FnGetMaterialCount (C4Script.cpp:2207-2213): invalid material indices
 /// return -1. Otherwise select the raw MatCount for fReal/materials without
 /// MinHeightCount, or the vertically filtered EffectiveMatCount.
@@ -6478,6 +6503,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GrabContents", grab_contents);
     script.register_host_function("InLiquid", in_liquid);
     script.register_host_function("Material", material);
+    script.register_host_function("MaterialName", material_name);
     script.register_host_function("GetMaterialCount", get_material_count);
     script.register_host_function("GetMaterialVal", get_material_val);
     script.register_host_function("ObjectSetAction", object_set_action);
@@ -6569,6 +6595,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GBackLiquid", g_back_liquid);
     script.register_host_function("GBackSky", g_back_sky);
     script.register_host_function("GetMaterial", get_material);
+    script.register_host_function("GetTexture", get_texture);
     script.register_host_function("SetDir", set_dir);
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
@@ -15145,6 +15172,47 @@ fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(|material_id| material_id.index() as i32)
             .unwrap_or(MATERIAL_NONE);
         Ok(Value::Int(result))
+    })
+}
+
+/// FnGetTexture (C4Script.cpp:2222-2232): unlike GetMaterial/GBack*, x/y
+/// are GLOBAL even with an object context. PixCol2Tex strips IFT, then the
+/// live callback TextureMap supplies the exact texture name. Parser-time
+/// allocations are immediately visible; deferred DrawMap pixel writes remain
+/// the explicitly logged same-callback preview gap.
+fn get_texture(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetTexture", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "GetTexture", "y")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let texture_index = context
+            .landscape_ref()
+            .and_then(|landscape| landscape.grid_byte_at(x, y))
+            .map(|pixel| usize::from(pixel & 0x7f))
+            .unwrap_or(0);
+        if texture_index == 0 {
+            return Ok(Value::Nil);
+        }
+        let Some(texmap) = context.runtime_texmap.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        if texmap
+            .material_names
+            .get(texture_index)
+            .and_then(Option::as_ref)
+            .is_none()
+        {
+            return Ok(Value::Nil);
+        }
+        let texture = texmap
+            .texture_names
+            .get(texture_index)
+            .and_then(Option::as_deref)
+            .unwrap_or_default();
+        Ok(Value::String(texture.to_string()))
     })
 }
 
@@ -26585,6 +26653,7 @@ mod tests {
         "GetTeamCount",
         "GetTeamName",
         "GetTemperature",
+        "GetTexture",
         "GetType",
         "GetValues",
         "GetVertex",
@@ -26615,6 +26684,7 @@ mod tests {
         "Log",
         "MakeCrewMember",
         "Material",
+        "MaterialName",
         "Max",
         "Message",
         "Min",
@@ -28275,10 +28345,15 @@ func Trigger(object pOther)
         let mut landscape = Landscape::new(width, vec![height as i32; width as usize])
             .expect("landscape builds");
         landscape.set_world_height(height as i32);
+        let mut bytes = vec![0; width as usize * height as usize];
+        if width > 2 && height > 2 {
+            bytes[2 * width as usize + 1] = 1 | 0x80;
+            bytes[2 * width as usize + 2] = 2;
+        }
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
             width,
             height,
-            vec![0; width as usize * height as usize],
+            bytes,
             densities,
             material_names,
             texture_names,
@@ -28297,6 +28372,56 @@ func Trigger(object pOther)
             1,
             false,
         )
+    }
+
+    #[test]
+    fn get_texture_uses_global_coordinates_masks_ift_and_nil_for_missing_entries() {
+        // FnGetTexture reads GLOBAL GBackPix coordinates even in an object
+        // context, strips the IFT bit through PixCol2Tex, and returns null for
+        // sky or an unmapped TextureMap slot (C4Script.cpp:2222-2232).
+        let object_context = HostObjectContext::new(
+            ObjectId::new(11),
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::new(5, 4),
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+        let (result, _) = with_effect_context(
+            Some(object_context),
+            &[],
+            draw_map_world(8, 7, 3, true),
+            1,
+            || {
+                Ok::<_, RuntimeError>(Value::Array(vec![
+                    get_texture(&[Value::Int(1), Value::Int(2)])?,
+                    get_texture(&[Value::Int(0), Value::Int(0)])?,
+                    get_texture(&[Value::Int(2), Value::Int(2)])?,
+                ]))
+            },
+        );
+
+        assert_eq!(
+            result.expect("GetTexture succeeds"),
+            Value::Array(vec![
+                Value::String("Rough".to_string()),
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
     }
 
     #[test]
@@ -28418,12 +28543,14 @@ func Trigger(object pOther)
     }
 
     #[test]
-    fn draw_map_render_none_still_queues_texture_map_allocation() {
+    fn draw_map_texmap_allocation_is_immediately_visible_to_get_texture() {
         // ReadScript evaluates a complete top-level overlay immediately, so
         // GetIndexMatTex may allocate a TextureMap slot before Render finds
         // no map. The allocation survives even though DrawMap returns false
         // (C4MapCreatorS2.cpp:1201-1203,773-815; C4Landscape.cpp:2659-2663;
-        // C4Texture.cpp:319-369).
+        // C4Texture.cpp:319-369). A subsequent GetTexture in the same
+        // callback resolves through that live mapping, although deferred
+        // DrawMap pixels themselves remain the documented preview gap.
         let args = [
             Value::Int(0),
             Value::Int(0),
@@ -28439,11 +28566,18 @@ func Trigger(object pOther)
             &[],
             draw_map_world(8, 7, 3, false),
             1,
-            || draw_map(&args),
+            || {
+                let drew = draw_map(&args)?;
+                let texture = get_texture(&[Value::Int(2), Value::Int(2)])?;
+                Ok::<_, RuntimeError>((drew, texture))
+            },
         );
         let _ = guard.finish();
 
-        assert_eq!(result.expect("DrawMap false result succeeds"), Value::Int(0));
+        assert_eq!(
+            result.expect("DrawMap and GetTexture succeed"),
+            (Value::Int(0), Value::String("Ridge".to_string()))
+        );
         assert_eq!(outcome.landscape.len(), 1);
         match &outcome.landscape[0] {
             LandscapeOperation::SyncRuntimeTexMap { texmap } => {
@@ -30147,6 +30281,41 @@ func ProbeBadIndex(id) {
         assert_eq!(
             result.expect("Material succeeds"),
             Value::Int(MATERIAL_NONE)
+        );
+    }
+
+    #[test]
+    fn material_name_returns_exact_loaded_name_or_nil_for_invalid_index() {
+        // FnMaterialName indexes Game.Material.Map directly: MatValid false
+        // returns null; a valid index returns the material's exact Name
+        // (C4Script.cpp:4475-4482).
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material Glow]\nName=GlowingRock\nDensity=50\n\n\
+             [Material Water]\nName=Water\nDensity=25\n",
+        )
+        .expect("material library builds");
+        let materials = MaterialSet::from_resource_library(&library);
+        let glowing = materials
+            .get("GlowingRock")
+            .expect("glowing rock exists")
+            .id()
+            .index() as i32;
+        let world = HostWorldContext::default().with_materials(Some(Rc::new(materials)));
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                material_name(&[Value::Int(glowing)])?,
+                material_name(&[Value::Int(-1)])?,
+                material_name(&[Value::Int(99)])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("MaterialName succeeds"),
+            Value::Array(vec![
+                Value::String("GlowingRock".to_string()),
+                Value::Nil,
+                Value::Nil,
+            ])
         );
     }
 
