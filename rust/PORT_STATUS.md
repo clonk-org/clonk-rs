@@ -3,11 +3,16 @@
 C++ (`../src/`) is the simulation oracle. Full parity is not reached; completed
 slices are recorded in `git log -- rust/ parity/`.
 
+Near-term priority: make every `Tutorial.c4f` scenario completable from start
+through the C++-matching victory flow, then resume the Goldrush comparator.
+
 ## Gate
 
 Workspace nextest, strict clippy, snapshots, and parity are green. Scenario
 load/apply and activation are 93/93. The pinned Goldrush comparator first
-diverges at frame 3327 (object #1451 is one pixel too low; RNG remains aligned).
+diverges at frame 3327 (object #1451 Decay/DoCon Y sync; RNG remains aligned).
+Tutorial03's real ready-base path reaches classic Context→Buy/Contents and buys
+the Lorry; scripted production/context rows remain open.
 
 ```sh
 cargo nextest run --workspace
@@ -26,8 +31,10 @@ rebuilt pinned live comparison.
   same-callback reads after deferred landscape writes, plus remaining non-C++
   movement damping/clamping/collision behavior.
 - **Commands/objects:** pathfinding/Tick35, FLOAT, Exit/Throw, arrival/intervals,
-  vehicle/linekit/dig/trade behavior, OCF/sectors/find order, containers,
-  permanent crew/base state, elimination, and rank/version gates.
+  vehicle/linekit/dig, OCF/sectors/find order, containers, permanent crew/base
+  state, elimination, rank/version gates, and remaining menu/trade semantics
+  (script/Put/build rows, target/order/icons, Reject*/NoGet/NoSell, bulk/rebuy,
+  callback and recursive-sale timing).
 - **Script/network/state:** strict C4Value conversion/serialization, remaining
   DefCore/ActMap/effect/menu/callback order, object-info/evaluation payloads,
   control synchronization, and protocol/auth/league behavior.
