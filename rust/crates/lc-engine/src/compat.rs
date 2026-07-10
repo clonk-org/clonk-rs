@@ -33,7 +33,7 @@ use crate::{
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate,
     PhysicsSettings, PlayerState, QueuedCommand, ShapeAttachRecord, SpawnConfig,
-    TransferZoneCommand,
+    ScoreboardState, TransferZoneCommand,
     TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER,
     CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
@@ -624,6 +624,7 @@ pub(crate) struct HostWorldContext {
     base_sell_enabled: bool,
     /// Raw `C4Sky::Modulation`/`BackClr` at callback entry.
     sky_adjustment: SkyAdjustment,
+    scoreboard: Rc<RefCell<ScoreboardState>>,
 }
 
 impl Default for HostWorldContext {
@@ -656,6 +657,7 @@ impl Default for HostWorldContext {
             base_buy_enabled: true,
             base_sell_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
+            scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
         }
     }
 }
@@ -814,6 +816,7 @@ impl HostWorldContext {
             base_buy_enabled: true,
             base_sell_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
+            scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
         }
     }
 
@@ -824,6 +827,14 @@ impl HostWorldContext {
 
     fn sky_adjustment(&self) -> SkyAdjustment {
         self.sky_adjustment
+    }
+
+    pub(crate) fn with_scoreboard(
+        mut self,
+        scoreboard: Rc<RefCell<ScoreboardState>>,
+    ) -> Self {
+        self.scoreboard = scoreboard;
+        self
     }
 
     /// Attach the scenario script for GameCall/GameCallEx resolution.

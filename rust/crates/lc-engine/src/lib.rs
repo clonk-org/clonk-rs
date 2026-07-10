@@ -45,6 +45,7 @@ mod record;
 mod rng;
 pub mod scenario;
 mod script_constants;
+mod scoreboard;
 mod sector;
 mod sky;
 #[cfg(test)]
@@ -84,6 +85,7 @@ pub use scenario::{
     LegacyC4SVal, PlayerStart, Scenario, ScenarioError, ScenarioObjectives, SkyConfig,
     MAX_PLAYER_STARTS,
 };
+pub use scoreboard::{ScoreboardCell, ScoreboardState, SCOREBOARD_CAPTION};
 pub use sky::{SkyFrame, SkyParallaxMode, SkySettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +136,7 @@ use material::{
 use message::{MessageCommand, MessageManager, MessageSpec, PersistedMessage};
 use ocf::NORMAL as OCF_NORMAL;
 use sector::{SectorMap, SectorObject};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
@@ -1044,6 +1047,8 @@ pub struct HudSnapshot {
     pub players: Vec<HudPlayerSnapshot>,
     #[serde(default)]
     pub messages: Vec<MessageSnapshot>,
+    #[serde(default, skip_serializing_if = "ScoreboardState::is_default")]
+    pub scoreboard: ScoreboardState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5450,6 +5455,8 @@ pub struct EngineState {
     pub pending_menu_requests: Vec<MenuRequest>,
     #[serde(default)]
     pub next_mission: NextMissionState,
+    #[serde(default, skip_serializing_if = "ScoreboardState::is_default")]
+    pub scoreboard: ScoreboardState,
     #[serde(default)]
     pub game_over: bool,
     #[serde(default)]
@@ -5547,6 +5554,7 @@ impl EngineState {
             pending_menu_requests: snapshot.menu_requests.clone(),
             messages: Vec::new(),
             next_mission: NextMissionState::default(),
+            scoreboard: snapshot.hud.scoreboard.clone(),
             game_over: snapshot.game_over,
             landscape_insert_thrust: false,
             // SimulationSnapshot carries no mover slots (the C++ snapshot
@@ -9237,6 +9245,7 @@ impl ScenarioScript {
     fn initialize(
         &mut self,
         snapshot: &SimulationSnapshot,
+        scoreboard: Rc<RefCell<ScoreboardState>>,
         rng: LcgRng,
         random: i32,
         global_effects: &[EffectState],
@@ -9265,6 +9274,7 @@ impl ScenarioScript {
             "Initialize",
             args,
             snapshot,
+            scoreboard,
             rng,
             snapshot.frame,
             global_effects,
@@ -9285,6 +9295,7 @@ impl ScenarioScript {
     fn step(
         &mut self,
         snapshot: &SimulationSnapshot,
+        scoreboard: Rc<RefCell<ScoreboardState>>,
         rng: LcgRng,
         random: i32,
         frame: u64,
@@ -9316,6 +9327,7 @@ impl ScenarioScript {
             "Step",
             args,
             snapshot,
+            scoreboard,
             rng,
             frame,
             global_effects,
@@ -9348,6 +9360,7 @@ impl ScenarioScript {
         function: &str,
         args: Vec<Value>,
         snapshot: &SimulationSnapshot,
+        scoreboard: Rc<RefCell<ScoreboardState>>,
         rng: LcgRng,
         env_frame: u64,
         global_effects: &[EffectState],
@@ -9377,6 +9390,7 @@ impl ScenarioScript {
         // the engine's persistent allocator is authoritative (the GoldRush
         // intro _TLK collided with a burned same-frame FXU1 id here).
         let world = host_world_context_from_snapshot(snapshot)
+            .with_scoreboard(scoreboard)
             .with_definition_metadata(definition_metadata)
             .with_definition_order(definition_order)
             .with_particle_defs(particle_defs)
@@ -9874,6 +9888,7 @@ pub struct Engine {
     pending_audio: Vec<AudioCommand>,
     pending_menu_requests: Vec<MenuRequest>,
     messages: MessageManager,
+    scoreboard: Rc<RefCell<ScoreboardState>>,
 }
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -11521,6 +11536,7 @@ impl Engine {
             pending_audio: Vec::new(),
             pending_menu_requests: Vec::new(),
             messages: MessageManager::new(),
+            scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
         };
         engine.environment.refresh_runtime_fields();
         engine
@@ -13199,6 +13215,7 @@ impl Engine {
                 .map(ScenarioScript::script_arc),
         )
         .with_network_game(self.network_game)
+        .with_scoreboard(Rc::clone(&self.scoreboard))
         .with_scenario_script_counter(self.scenario_script_counter)
         .with_command_settings(self.frame, self.base_buy_enabled, self.base_sell_enabled)
         .with_structures_need_energy(self.structures_need_energy)
@@ -13371,11 +13388,13 @@ impl Engine {
         let network_game = self.network_game;
         let next_object_id = self.next_object_id;
         let scenario_script_counter = self.scenario_script_counter;
+        let scoreboard = Rc::clone(&self.scoreboard);
         let Some(script) = self.scenario_script.as_mut() else {
             return Ok(Vec::new());
         };
         let (batch, audio_state, new_rng, script_error) = script.initialize(
             &snapshot,
+            scoreboard,
             rng_state,
             random,
             &global_effects,
@@ -13495,6 +13514,7 @@ impl Engine {
         let network_game = self.network_game;
         let engine_next_object_id = self.next_object_id;
         let scenario_script_counter = self.scenario_script_counter;
+        let scoreboard = Rc::clone(&self.scoreboard);
         let script = match self.scenario_script.as_mut() {
             Some(script) if script.has_function(function) => script,
             Some(_) => return Ok(()),
@@ -13504,6 +13524,7 @@ impl Engine {
             function,
             args,
             &snapshot,
+            scoreboard,
             rng_state,
             env_frame,
             &global_effects,
@@ -15725,6 +15746,7 @@ impl Engine {
             let network_game = self.network_game;
             let engine_next_object_id = self.next_object_id;
             let scenario_script_counter = self.scenario_script_counter;
+            let scoreboard = Rc::clone(&self.scoreboard);
             let (batch, audio_state, new_rng) = {
                 let definition_scripts = self.definition_script_table();
                 let script = self
@@ -15733,6 +15755,7 @@ impl Engine {
                     .expect("scenario script must be present");
                 script.step(
                     &snapshot,
+                    scoreboard,
                     rng_state,
                     random,
                     frame,
@@ -18212,6 +18235,7 @@ impl Engine {
             hud: HudSnapshot {
                 players: hud_players,
                 messages: message_snapshots,
+                scoreboard: self.scoreboard.borrow().clone(),
             },
             controls: Vec::new(),
             network_packets: Vec::new(),
@@ -18386,6 +18410,7 @@ impl Engine {
             messages: self.messages.persisted(),
             pending_menu_requests: self.pending_menu_requests.clone(),
             next_mission: self.next_mission.clone(),
+            scoreboard: self.scoreboard.borrow().clone(),
             game_over: self.game_over_triggered,
             landscape_insert_thrust: self.landscape_insert_thrust,
             mass_movers: self.mass_movers.clone(),
@@ -18700,6 +18725,7 @@ impl Engine {
             .collect();
         self.players_registered = !self.players.is_empty();
         self.next_mission = state.next_mission.clone();
+        *self.scoreboard.borrow_mut() = state.scoreboard.clone();
         self.game_over_triggered = state.game_over;
 
         self.known_crew_owners = state.known_crew_owners.iter().cloned().collect();
@@ -29993,6 +30019,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         false,
     )
     .with_sky_adjustment(sky_adjustment)
+    .with_scoreboard(Rc::new(RefCell::new(snapshot.hud.scoreboard.clone())))
 }
 
 fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {

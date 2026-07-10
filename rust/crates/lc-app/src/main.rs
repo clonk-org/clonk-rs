@@ -13779,6 +13779,7 @@ mod tests {
             hud: HudSnapshot {
                 players: hud_players,
                 messages: Vec::new(),
+                scoreboard: Default::default(),
             },
             controls: Vec::new(),
             network_packets: Vec::new(),
@@ -14235,6 +14236,7 @@ mod tests {
                     score: 0,
                 }],
                 messages: Vec::new(),
+                scoreboard: Default::default(),
             },
             controls: Vec::new(),
             network_packets: Vec::new(),
