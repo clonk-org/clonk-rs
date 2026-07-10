@@ -21491,6 +21491,12 @@ impl Engine {
             return Ok(false);
         }
 
+        if matches!(procedure, ActionProcedure::Chop)
+            && !self.apply_chop_procedure(idx, &definition_id)?
+        {
+            return Ok(true);
+        }
+
         if matches!(procedure, ActionProcedure::Fight)
             && !self.apply_fight_procedure(idx, &definition_id)
         {
@@ -22256,6 +22262,74 @@ impl Engine {
         }
 
         true
+    }
+
+    /// DFA_CHOP (C4Object.cpp:5202-5221): every Tick3 asks the current
+    /// target to Chop; C4Object::Chop applies +10 damage only on Tick10
+    /// (C4Object.cpp:1775-1782). The target must remain chop-capable and
+    /// cover the chopper's current position, then the chopper faces it.
+    fn apply_chop_procedure(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+    ) -> Result<bool, EngineError> {
+        let Some(target_id) = self.objects[idx].state.action.target else {
+            self.reset_action_to_default(idx, definition_id, false);
+            return Ok(false);
+        };
+        let Some(target_idx) = self.find_object_index(target_id) else {
+            self.reset_action_to_default(idx, definition_id, false);
+            return Ok(false);
+        };
+        let target_can_be_chopped = {
+            let target = &self.objects[target_idx];
+            !target.destroyed
+                && target.state.status.is_active()
+                && target.state.container.is_none()
+                && self.definitions.contains_key(&target.definition_id)
+                && target.state.ocf & crate::ocf::CHOP != 0
+        };
+        if !target_can_be_chopped {
+            self.reset_action_to_default(idx, definition_id, false);
+            return Ok(false);
+        }
+
+        if self.frame % 3 == 0 && self.frame % 10 == 0 {
+            let caused_by = self.objects[idx].state.owner;
+            self.change_object_damage(target_idx, 10, C4FX_CALL_DMG_CHOP, caused_by);
+        }
+
+        // Damage callbacks may remove or otherwise invalidate the target;
+        // C++ rechecks Action.Target immediately after Chop returns.
+        let Some(target_id) = self.objects[idx].state.action.target else {
+            self.reset_action_to_default(idx, definition_id, false);
+            return Ok(false);
+        };
+        let Some(target_idx) = self.find_object_index(target_id) else {
+            self.reset_action_to_default(idx, definition_id, false);
+            return Ok(false);
+        };
+        let chopper_position = self.objects[idx].state.position;
+        let target = &self.objects[target_idx];
+        let target_is_at_chopper = !target.destroyed
+            && target.state.status.is_active()
+            && target.state.container.is_none()
+            && target.state.ocf & crate::ocf::CHOP != 0
+            && self
+                .object_shape_rect(target)
+                .contains_point(chopper_position.x, chopper_position.y);
+        if !target_is_at_chopper {
+            self.reset_action_to_default(idx, definition_id, false);
+            return Ok(false);
+        }
+
+        let direction = if chopper_position.x > target.state.position.x {
+            Direction::Left
+        } else {
+            Direction::Right
+        };
+        self.set_exec_action_direction(idx, definition_id, direction)?;
+        Ok(true)
     }
 
     fn ensure_build_components(
@@ -45426,7 +45500,11 @@ protected func Activity() { SetActionTargets(); return(1); }
     }
 
     #[test]
-    fn chop_procedure_zeroes_existing_velocity() {
+    fn chop_procedure_zeroes_velocity_and_damages_on_aligned_tick() {
+        // DFA_CHOP calls Target->Chop on Tick3 frames; Chop emits one +10
+        // damage event only on Tick10 frames. The counters advance together
+        // before object execution, so the first aligned frame is 30
+        // (C4Game.cpp:1899-1911; C4Object.cpp:1775-1782, 5202-5221).
         let script = r#"
         global func Initialize(state, random) {
             return nil;
@@ -45449,21 +45527,73 @@ protected func Activity() { SetActionTargets(); return(1); }
         engine
             .register_definition(definition)
             .expect("definition registers");
+
+        let damage_events = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let damage_events = Arc::clone(&damage_events);
+            hooks.set_on_call(move |name, args| {
+                if name == "Damage" {
+                    damage_events.lock().unwrap().push(args.to_vec());
+                }
+            });
+        }
+        let mut tree = Definition::from_script(
+            "Tree",
+            "Tree",
+            "#strict\nfunc Damage(int change, int caused_by) { return(1); }",
+        )
+        .expect("tree script compiles");
+        tree.set_debugger_hooks(hooks);
+        tree.set_chopable(true);
+        tree.set_shape_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+        engine.register_definition(tree).expect("tree registers");
         engine.set_physics(PhysicsSettings::new(3, 40, -20));
 
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("Tree")
+                    .with_position(Vector2::new(0, 0))
+                    .with_category(CATEGORY_STATIC_BACK)
+                    .with_loaded(true),
+            )
+            .expect("tree spawns");
+        let mut action = ActionState::new("Chop");
+        action.target = Some(target);
         let id = engine
             .spawn_object(
                 SpawnConfig::new("Chopper")
                     .with_position(Vector2::new(0, 0))
-                    .with_velocity(Vector2::new(5, -3)),
+                    .with_velocity(Vector2::new(5, -3))
+                    .with_owner(7)
+                    .with_action(action),
             )
             .expect("spawn succeeds");
+        let target_idx = engine.find_object_index(target).expect("tree exists");
+        assert_ne!(engine.objects[target_idx].state.ocf & ocf::CHOP, 0);
 
-        let snapshot = engine.tick().expect("tick succeeds");
-        let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.action.name, "Chop");
-        assert_eq!(object.velocity, Vector2::ZERO);
-        assert_eq!(object.position, Vector2::new(0, 0));
+        for frame in 1..30 {
+            let snapshot = engine.tick().expect("tick succeeds");
+            let object = snapshot.object(id).expect("object present");
+            assert_eq!(object.action.name, "Chop");
+            assert_eq!(object.action.target, Some(target));
+            assert_eq!(object.velocity, Vector2::ZERO);
+            assert_eq!(object.position, Vector2::new(0, 0));
+            assert_eq!(
+                snapshot.object(target).expect("tree present").damage,
+                0,
+                "frame {frame} is not both Tick3 and Tick10"
+            );
+        }
+        assert!(damage_events.lock().unwrap().is_empty());
+
+        let snapshot = engine.tick().expect("aligned tick succeeds");
+        assert_eq!(snapshot.object(target).expect("tree present").damage, 10);
+        assert_eq!(
+            damage_events.lock().unwrap().as_slice(),
+            [vec![Value::Int(10), Value::Int(7)]],
+            "frame 30 emits exactly one +10 chop damage event by the chopper owner"
+        );
     }
 
     #[test]
