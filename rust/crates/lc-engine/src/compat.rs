@@ -13924,10 +13924,27 @@ fn parse_criterions(args: &[Value]) -> Option<(FindCondition, Option<SortCriteri
     Some((condition, sort))
 }
 
-/// Search over the main object list (C4FindObject::Find/FindMany,
-/// C4FindObject.cpp:180-226). The sector-bounds traversal optimization (and
-/// its sector-order result ordering) is still open — the main list is always
-/// walked, which matches the C++ unbounded path.
+/// The C++ bounded-vs-full walk decision (C4FindObject.cpp:315-328):
+/// criteria bounds pick the sector walk — the ObjectShapes lists (with
+/// first-encounter dedup standing in for the Marker) when the criteria use
+/// shapes, the per-sector point lists otherwise. Boundless criteria — or a
+/// world without a sector map (legacy fixture contexts) — walk the master
+/// list.
+fn find_candidate_ids(world: &impl WorldAccessor, condition: &FindCondition) -> Vec<ObjectId> {
+    condition
+        .bounds()
+        .and_then(|(rect, use_shapes)| {
+            if use_shapes {
+                world.shape_sector_ids_in_rect(rect)
+            } else {
+                world.object_sector_ids_in_rect(rect)
+            }
+        })
+        .unwrap_or_else(|| world.object_ids())
+}
+
+/// Collect matches in C++ walk order (C4FindObject::FindMany,
+/// C4FindObject.cpp:203-226 unbounded, :310-355 sector-bounded).
 fn find_condition_matches(
     world: &impl WorldAccessor,
     condition: &FindCondition,
@@ -13936,7 +13953,7 @@ fn find_condition_matches(
         return Ok(Vec::new());
     }
     let mut matches = Vec::new();
-    for object_id in world.object_ids() {
+    for object_id in find_candidate_ids(world, condition) {
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
@@ -29545,6 +29562,143 @@ func ProbeBadIndex(id) {
             parsed_condition(vec![Value::Int(3), in_rect(0, 0, 20, 20), at_rect]).bounds(),
             None,
             "shapes child → no Or bounds (C4FindObject.cpp:482-488)"
+        );
+    }
+
+    /// A 150x120px world (3x3 sectors of 50px) so sector-walk order can
+    /// diverge from master-list order.
+    fn sectored_find_world(
+        objects: Vec<HostWorldObject>,
+        definitions: HashMap<DefinitionId, DefinitionMetadata>,
+    ) -> HostWorldContext {
+        let landscape = Landscape::new(150, vec![120; 150]).expect("landscape builds");
+        HostWorldContext::with_landscape(
+            objects,
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            10,
+            false,
+        )
+    }
+
+    #[test]
+    fn find_objects2_bounded_criteria_walk_sectors_not_the_master_list() {
+        // C4FindObject::FindMany(Objs, Sct) (C4FindObject.cpp:310-355):
+        // criteria with bounds walk the C4LArea sector lists — result order
+        // is sector-major (row-major sectors, master-relative within each
+        // sector), NOT master order. Boundless criteria keep the master
+        // walk (C4FindObject.cpp:316-317).
+        let world = sectored_find_world(
+            vec![
+                find_world_object(1, "ROCK", 80, 10, 1), // sector (1,0)
+                find_world_object(2, "ROCK", 10, 10, 1), // sector (0,0)
+                find_world_object(3, "ROCK", 20, 10, 1), // sector (0,0)
+            ],
+            HashMap::new(),
+        );
+        // [C4FO_InRect(10), 0, 0, 150, 40] — bounded, no shapes
+        let bounded = vec![Value::Array(vec![
+            Value::Int(10),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(150),
+            Value::Int(40),
+        ])];
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || find_objects2(&bounded));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![
+                Some(ObjectId::new(2)),
+                Some(ObjectId::new(3)),
+                Some(ObjectId::new(1)),
+            ],
+            "sector (0,0) list first, then sector (1,0)"
+        );
+        // FindObject = first in the same walk (C4FindObject.cpp:296-306)
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || find_object2(&bounded));
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(2))
+        );
+
+        // [C4FO_ID(20), ROCK] — no bounds → master-list order
+        let boundless = vec![Value::Array(vec![
+            Value::Int(20),
+            Value::String("ROCK".into()),
+        ])];
+        let (result, _) =
+            with_object_host_context_with_world(world, || find_objects2(&boundless));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![
+                Some(ObjectId::new(1)),
+                Some(ObjectId::new(2)),
+                Some(ObjectId::new(3)),
+            ],
+            "boundless criteria keep the master-list walk"
+        );
+    }
+
+    #[test]
+    fn find_objects2_shape_criteria_walk_shape_lists_with_marker_dedup() {
+        // UseShapes criteria walk the per-sector ObjectShapes lists
+        // (C4FindObject.cpp:321-343): an object whose shape spans several
+        // sectors sits in each of their lists but reports only at its FIRST
+        // encounter (the Marker, C4FindObject.cpp:331-342).
+        let definitions: HashMap<DefinitionId, DefinitionMetadata> = [
+            (
+                "SMLL".to_string(),
+                DefinitionMetadata {
+                    shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+            (
+                "BIGG".to_string(),
+                DefinitionMetadata {
+                    shape: Some(DefinitionRect::new(-30, -5, 60, 10)),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let world = sectored_find_world(
+            vec![
+                // rank 1: shape (88,8)-(92,12) → sector (1,0) only
+                find_world_object(1, "SMLL", 90, 10, 1),
+                // rank 2: shape (20,5)-(80,15) → sectors (0,0) AND (1,0)
+                find_world_object(2, "BIGG", 50, 10, 1),
+            ],
+            definitions,
+        );
+        // [C4FO_AtRect(12), 0, 0, 120, 40] — bounded, shapes
+        let args = vec![Value::Array(vec![
+            Value::Int(12),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(120),
+            Value::Int(40),
+        ])];
+        let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![Some(ObjectId::new(2)), Some(ObjectId::new(1))],
+            "sector (0,0) encounters BIGG first; its sector (1,0) repeat is deduped"
         );
     }
 
