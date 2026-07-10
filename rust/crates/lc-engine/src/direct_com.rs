@@ -343,6 +343,7 @@ impl Engine {
             command2: String::new(),
             count: C4MN_ITEM_NO_COUNT,
             item_id,
+            symbol: crate::ObjectMenuSymbol::default(),
             selectable: true,
             value: None,
         };
@@ -461,6 +462,7 @@ impl Engine {
             command2: String::new(),
             count: C4MN_ITEM_NO_COUNT,
             item_id: definition_id.clone(),
+            symbol: crate::ObjectMenuSymbol::default(),
             selectable: false,
             value: None,
         };
@@ -1747,6 +1749,7 @@ impl Engine {
                     command2,
                     count,
                     item_id: definition_id,
+                    symbol: crate::ObjectMenuSymbol::default(),
                     selectable: true,
                     value: Some(definition.value()),
                 })
@@ -1844,6 +1847,7 @@ impl Engine {
                 command2,
                 count,
                 item_id: definition_id,
+                symbol: crate::ObjectMenuSymbol::default(),
                 selectable: true,
                 value: Some(definition.value()),
             });
@@ -1963,6 +1967,7 @@ impl Engine {
                 command2,
                 count,
                 item_id: definition_id,
+                symbol: crate::ObjectMenuSymbol::default(),
                 selectable: true,
                 value: None,
             });

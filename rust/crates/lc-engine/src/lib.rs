@@ -1991,6 +1991,28 @@ fn default_construction() -> i32 {
 /// 1556-1597), count, item id, selectability (= command non-empty,
 /// C4Script.cpp:1729) and the C4MN_Add_PassValue payload. Symbols and
 /// captions are presentation; the caption is kept for the menu UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ObjectMenuSymbol {
+    /// The item's definition picture (`C4MenuItem::SetSymbol`,
+    /// C4Menu.cpp:119-128).
+    #[default]
+    Definition,
+    /// `DrawMenuSymbol(C4MN_Buy, ...)` (C4Menu.cpp:61-65).
+    Buy { owner: i32 },
+    /// `DrawMenuSymbol(C4MN_Sell, ...)` (C4Menu.cpp:66-70).
+    Sell { owner: i32 },
+    /// Target picture plus OKCancel phase (0,1) (C4ObjectMenu.cpp:405-414).
+    Info,
+    /// `fctExit` (C4ObjectMenu.cpp:422-427).
+    Exit,
+}
+
+impl ObjectMenuSymbol {
+    fn is_definition(&self) -> bool {
+        *self == Self::Definition
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectMenuItem {
     pub caption: String,
@@ -2004,6 +2026,10 @@ pub struct ObjectMenuItem {
     pub count: i32,
     /// C4IdText of idItem ("NONE" for no id).
     pub item_id: String,
+    /// Presentation recipe for symbols that are not a plain definition
+    /// picture. The default preserves existing script-created menu state.
+    #[serde(default, skip_serializing_if = "ObjectMenuSymbol::is_definition")]
+    pub symbol: ObjectMenuSymbol,
     pub selectable: bool,
     /// Some(value) iff C4MN_Add_PassValue was set (C4Script.cpp:1549-1554).
     pub value: Option<i32>,

@@ -4610,6 +4610,7 @@ global func Step(state, frame, random)
                 command2: String::new(),
                 count: 12_345_678,
                 item_id: "NONE".to_string(),
+                symbol: crate::ObjectMenuSymbol::default(),
                 selectable: true,
                 value: None,
             })

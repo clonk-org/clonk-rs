@@ -3745,6 +3745,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         command2,
         count,
         item_id: c4id_text_of(&item_id),
+        symbol: crate::ObjectMenuSymbol::default(),
         selectable,
         value: own_value,
     });
