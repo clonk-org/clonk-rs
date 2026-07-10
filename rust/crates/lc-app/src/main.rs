@@ -907,9 +907,10 @@ fn test_scenario_load(path: &std::path::Path, app_paths: Option<&Arc<AppPaths>>)
     );
 
     let resolver = InstallDefinitionResolver::new(app_paths.cloned());
+    let languages = startup_language_sequence(app_paths.map(|paths| paths.as_ref()));
     let start = Instant::now();
 
-    match Scenario::load_from_path_with(path, &resolver) {
+    match Scenario::load_from_path_with_languages(path, &resolver, &languages) {
         Ok(scenario) => {
             let elapsed = start.elapsed();
             println!(
@@ -9652,6 +9653,7 @@ impl GameApp {
         );
 
         let resolver_paths = cached_app_paths().ok();
+        let languages = startup_language_sequence(resolver_paths.as_deref());
         let scenario_title = scenario.title.clone();
         let (sender, receiver) = mpsc::channel();
         let path_for_thread = path.clone();
@@ -9666,8 +9668,12 @@ impl GameApp {
             };
 
             send_progress(0.05, "Reading scenario data");
-            let scenario_data = Scenario::load_from_path_with(&path_for_thread, &resolver)
-                .map_err(|err| err.to_string());
+            let scenario_data = Scenario::load_from_path_with_languages(
+                &path_for_thread,
+                &resolver,
+                &languages,
+            )
+            .map_err(|err| err.to_string());
 
             match scenario_data {
                 Ok(data) => {

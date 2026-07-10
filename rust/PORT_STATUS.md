@@ -5,29 +5,15 @@
 
 ## Current state
 
-- Pinned Goldrush (`LC_PIN_SEED=424242`) matches through frame **308**.
-- First mismatch: frame **309**, FISH #1343 command direction — Rust `Right`,
-  C++ `Down`.
-- Latest closed wall: frame 219 directly assigned DFA_SWIM facing, bypassing
-  `SetDir`, its `TurnAction`, and fixed-position resync. WALK/HANGLE/DIG/SWIM
-  now share the C++ path; the production `C4ActionDirection.h` differential
-  freezes FISH #1343's exact velocity, action, phase, and fixed coordinates.
-- Foundational fixed-point and RNG gaps are closed: object motion is signed
-  16.16 `C4Fixed`; `Random()` uses the C++ LCG and global draw ledger.
-- Scenario coverage: 93/93 load and apply; content audit 92/93. The remaining
-  CTF_DeepSea animal flag is C++-consistent because water is filled after
-  `InitAnimals`. Goldrush headless reaches 1000 ticks without script warnings.
-- 2026-07-09 content wave merged: the explosion chain (BlastObject/Blast +
-  host-path incinerate, Find_Layer, GetDefCoreVal blast entries — the FLNT
-  `Hit` error class is gone), the C4Effect protocol (check chain, FxAdd
-  merge, TempRemove/Readd brackets, Stop_Deny), Fx*Damage on the host scope
-  path, GLOBAL nil-target effect Fx*Start/Timer dispatch (ShakeEffect runs
-  end-to-end), MoveTo procedure arms + Data flags + Acquire defaults + live
-  GetCommand views, season wrap/sky-scroll bit-exactness, object-menu
-  lifecycle + reflection + user-Enter commands, AddEffect missing-priority,
-  and Tick35 one-way crew elimination.
-- Full parity is not complete. Determinism-critical gaps are listed below;
-  graphical rendering remains partial.
+- Before this merge, pinned Goldrush (`LC_PIN_SEED=424242`) matched through frame
+  402; frame 403 lacked seven C++ `FXU1` bubbles. The merged fire/bubble work may
+  move that wall, so the combined live run must remeasure it.
+- Foundational motion and RNG gaps are closed: object motion uses signed 16.16
+  `C4Fixed`; `Random()` uses the shared C++ LCG/draw ledger.
+- Scenarios load/apply 93/93; audit is 92/93. CTF_DeepSea's animal result is
+  C++-consistent (water fills after `InitAnimals`). Goldrush runs 1000 headless
+  ticks without script warnings.
+- Full simulation parity and graphical parity remain incomplete.
 
 ## Gates
 
@@ -53,147 +39,37 @@ and a recorded new first mismatch.
 
 ## Open simulation gaps
 
-- **Movement / masks:** `SetSolidMask` lifetime; attached-object pushback
-  against rotated mask buffers; rotated non-grid overlays; remove three dormant
-  non-C++ paths (`apply_material_interaction` damping/friction overwrite,
-  engine-wide 12px xdir clamp, post-movement `resolve_collision`).
-- **Landscape / material:** incremental `ExecuteScan`/`DoScan` order and
-  per-pixel instability interleaving; `PRETTY_TEMP_CONV`; pixel-exact
-  DigFree/BlastFree, blast/shake ordering and liquid segments; standalone
-  MapSeed/RandomSeed/startup-player bracketing and random MapZoom (unused by
-  shipped content), Landscape.txt script algorithms,
-  `PostInitMap`/`KeepMapCreator`; fixture column worlds still remove material
-  by segment rather than pixel.
-- **Effects:** builtin fire CLOSED 2026-07-09 — fire is a real "Fire"
-  C4Effect entry (priority 100/interval 1, vars [FireMode, CausedBy, Blasted,
-  IncineratingObj]) on BOTH incinerate paths; the burn executes through the
-  effect timer at its list position; Extinguish/RemoveEffect("Fire") kill via
-  the effect (engine FnFxFireStop clears OnFire); Incinerate/Extinguish/
-  Bubble and FxFireStart/Timer/Stop/Info host fns registered (script
-  overloads chain via inherited); AddEffect("Fire") runs the engine start
-  synchronously (checked adds defer to the Fx*Effect chain and ignite at
-  first execution — timing divergence; interval-0 checked fire never
-  ignites); Splash/BubbleOut ported engine-side (synced Random order + FXU1
-  cap 150). Fire residuals: other effects' check chain does not intercept
-  ENGINE-initiated incineration; attached-object detach (DFA_ATTACH scan),
-  Tick5 base extinguish, ValidPlr mapping of the burn's cause, SmokeRate
-  smoke/fire particles/sounds (presentation-only); host-seam FxFireTimer
-  (inherited chain) omits those same pieces; Smoke() always takes the
-  particle path (the no-particle FXS1 fallback unmodeled); Explosion()'s
-  engine helper stays unported (System.c4g's global Explode shadows
-  FnExplode for all shipped content). Protocol residuals: AddEffect's
-  return value cannot reflect deferred check outcomes
-  (deny 0 / acceptor number / -2); inactive negative-priority effects are not
-  persisted between dispatch sequences (mid-bracket queries, Kill's
-  TempAddForRemoval arm); Stop_Deny recovery reinserts at sorted position and
-  skips death-clear reasons; stop reasons are strings, not C4FxCall_* ints;
-  GLOBAL adds skip the priority check chain, and their no-command-target
-  dispatch goes through the first-registered definition's script host where a
-  definition-local Fx* name could shadow a same-name global; AddEffect
-  arg 6 keeps an explicit-nil fixture timer slot (any value there is rVal1
-  like C++).
-- **Commands:** the Tick35 `PathChecked` recheck is blocked on a real
-  C4PathFinder port (waypoint pushes, fWaypoint easings; `pathfinder.rs` is a
-  GetPath-only heightmap approximation); DFA_FLOAT steering arm; contained
-  targets do not Exit first; the C++ UpdateInterval countdown/arrival model vs
-  the Rust throttle (invented tolerance 5 + dwell); FlightControl's Disabled
-  gate and Def->Pathfinder alternative; Acquire defaults apply at Set rather
-  than first Execute; Put's live Ty reminder rewrite.
-- **Controls:** main gaps CLOSED 2026-07-09 — NoCollectDelay end-to-end
-  (ObjectComDrop arms 2 + SetCommand entry decrement travels as a
-  CommandOperation, C4ObjectCom.cpp:668-671 / C4Object.cpp:3941-3942);
-  wheel-com ShiftContents + COM_Contents target shift with the
-  ControlContents/Selection callbacks (C4Object.cpp:3364-3396, 5751-5797);
-  C4Object::Base modeled via ExecBase flag assignment / lost-flag clear
-  (C4Object.cpp:1000-1031) and the ContainedControl COM_Up/COM_Dig arms
-  emit MenuRequestKind::Buy/Sell after the ValidPlr/hostility/BASEFUNC
-  checks (C4Object.cpp:3269-3280); DefCore VehicleControl parses and both
-  SetCommand ControlCommand overloads run on the control Set path
-  (C4Object.cpp:3944-3969); the exact C4Player cursor selection model
-  (CursorLeft/Right/Toggle, SelectAllCrew, UpdateSelectionToggleStatus,
-  AdjustCursorCommand w/ rank-less hirank, CrewSelection callbacks,
-  C4Player.cpp:1235-1365 + C4Object.cpp:5815-5832) replaced the frontend
-  approximation. Residuals: contained COM_Throw still executes on the next
-  command tick — the immediate ExecuteCommand (C4Object.cpp:3267) needs the
-  tick's command-step block extracted into a one-shot; FnSetCommand skips
-  the vehicle overloads (C++ runs them for EVERY SetCommand, fControl or
-  not); linekit DigDouble line construction (C4ObjectCom.cpp:379-529) is
-  blocked on the DFA_CONNECT line model; ExecBase leaves
-  BASEFUNC_AutoSellContents and the Tick35 structure snow-dig unported;
-  the C4MN_Buy/C4MN_Sell refill menu UI is unbuilt app-side (requests are
-  emitted, arms are no-ops); DefCore version gates (fCallSfEarly,
-  grab-control 4,9,5,0) still treat every def as modern; crew Info->Rank is
-  unmodeled so hirank = first eligible roster entry.
-- **Objects / find / OCF:** the SetOCF computation gap is CLOSED 2026-07-09 —
-  all 30 C4Object::SetOCF bits compute per C4Object.cpp:526-666 (with new
-  DefCore Entrance/RotatedEntrance/Exclusive/Prey/Edible/Chop/
-  AttractLightning/NoFight ingest, ActMap ObjectDisabled, GetOCFForPos area
-  checks in at_object, and cached-OCF reads for script GetOCF/snapshots);
-  residuals: SetOCF's InMat update (InMat/ClosedContainer unmodeled),
-  mid-call creation previews stay preview-grade, C4Object::At lacks addtop
-  (NoCollectDelay arming/decrement landed 2026-07-09 with the Controls
-  work). Sort keys now use the C++ int32 semantics
-  (2026-07-09: Distance wraps in i32, Speed is the 0/1 `operator bool` quirk
-  of the C4Fixed sum with truncating fixed squares, Mass reads the live
-  UpdateMass value; Sort_Value still reads the definition value where C++
-  calls C4Object::GetValue — see the definitions bullet's CalcDefValue gap).
-  Still open: permanent object info training; DFA_CONNECT line walking;
-  sector-bounds FindMany traversal order.
-  The engine explosion fallback trio FnExplode/Explosion/Game::BlastObjects +
-  FnShakeObjects stays unported (System.c4g overrides make it unreachable for
-  shipped content); the host-path incinerate does not add the "Fire" C4Effect
-  entry (same builtin-fire gap as the engine path).
-- **Players / game / network:** team home-base production, asset value,
-  crew-info persistence; elimination is Tick35-gated and one-way now, with
-  RetireDelay/sound presentation and the script-player CSPF_NoEliminationCheck
-  flag unmodeled; control-packet serialization and sync broadcast;
-  auth/voting/league/join-data/protocol completeness.
-- **Definitions / script values:** numeric ActMap dispatch, GetComponents and
-  CalcDefValue overrides, remaining DefCore flags and runtime creation-number
-  skew; C4Value string interning and save/network serialization; strict
-  host-parameter conversion.
-- **Script host model:** every outer call kind (PSF/timer/host calls,
-  Control, Initialize/Construction/Step, menu callbacks, MenuCommand
-  DirectExec) now runs on LIVE session local cells like effect callbacks —
-  nested calls onto the in-flight object share the storage in both
-  directions; outer-call errors keep their pre-error mutations (locals,
-  foreign writes, RNG/audio advance) via the `EngineError::Script`
-  recovery payload, applied by the call_object_function / DirectExec /
-  movement-Hit / control funnels; same-call Enter additions sort into the
-  container's contents (Add stContents cluster rules); FnExit threads its
-  caller-relative position/dir args incl. the tr==-1 Random(360) draw;
-  get_world_object overlays staged owner and whole-pixel dirs and
-  re-derives the STAGED OCF bits (container/con/alive/category).
-  Residuals: effect-callback ERRORS still restore the rng/audio backups
-  and drop the partial outcome (the fail-safe arm predates the recovery
-  seam); the Initialize/Construction/Step and menu-entries/-command/
-  -callback definition seams attach no recovery (their batch folds drop
-  on error); foreign dir reads stay whole-pixel (snapshot task B); energy
-  is deliberately not overlaid (active-scope/DoEnergy paths read live
-  scope state); FnExit's ObjectComCancelAttach/BoundsCheck arms and the
-  Ejection/Departure engine calls stay unmodeled.
-- **Weather / config / resources:** weather/sky closed except presentation
-  residuals (stale-between-triggers gamma vs the live getter, SetSkyFade,
-  disabled-BackClr retention, SkyDef tile fallback; LaunchCloud objects stay
-  ledger-replayed stubs); player control preferences/forced style;
-  name/promotion data and locale defaults; group create/write/gzip/CRC and
-  directory-order fidelity.
-- **Host functions / menus:** exact `CanConcatPictureWith`; complete
-  GrabObjectInfo identity/rank payloads. Object menus are closed at the engine
-  level (close hooks, GetMenuSelection/SetMenuSize/SetMenuTextProgress/
-  SetMenuDecoration, user-Enter MenuCommand via the DirectExec port) — the
-  remaining gaps are lc-app COM_MenuEnter/Close/Select routing to those
-  entries, engine-internal menus staying invisible to `GetMenu`,
-  AutoContextMenu/CloseCommand, and presentation layout.
-
-- **Creation-number skew (the numbering epic):** AH_Predator's Initialize
-  exposes a preview-vs-final id mismatch — the teleporters' deferred
-  SetTransferZone commands record in-flight ids (53/69/84) that the
-  materialized objects never receive, so their zones drop with a WARN
-  (C++-faithful fallback: zones die with their object; the C4TransferZones
-  entry cannot outlive it). The zones SHOULD land — diagnosing why the
-  mid-call preview allocator and spawn materialization disagree in this
-  scenario is the reproducible entry point for the numbering epic.
+- **Movement/masks:** `SetSolidMask` lifetime; rotated-mask attached-object
+  pushback and non-grid overlays; remove dormant non-C++ material damping,
+  engine-wide 12px xdir clamp, and post-movement collision resolution.
+- **Landscape/material:** incremental scan/interleaving, `PRETTY_TEMP_CONV`,
+  pixel-exact DigFree/BlastFree and blast/shake/liquid ordering; standalone seed,
+  startup-player and MapZoom bracketing; Landscape.txt algorithms,
+  `PostInitMap`/`KeepMapCreator`; fixture columns remove segments, not pixels.
+- **Effects/fire:** checked-fire timing/returns; engine-incineration check-chain
+  interception; negative-priority persistence and exact stop semantics; GLOBAL
+  checking/shadowing; attached detach, Tick5 base extinguish, cause mapping,
+  smoke, and engine Explosion helpers.
+- **Commands:** real C4PathFinder/Tick35 recheck; DFA_FLOAT; contained-target
+  Exit; exact UpdateInterval/arrival; FlightControl gates; Acquire default
+  timing; Put's live `Ty` rewrite.
+- **Controls:** immediate contained throw; vehicle overloads on non-control
+  `SetCommand`; linekit DigDouble/DFA_CONNECT; auto-sell/snow-dig; legacy version
+  gates/ranks; app trade-menu UI.
+- **Objects/find/OCF:** `InMat`/`ClosedContainer`, preview OCF and `At` addtop;
+  permanent info; DFA_CONNECT; sector traversal; `Sort_Value` via object value.
+- **Players/game/network:** home-base production, asset value, crew persistence;
+  elimination presentation/script-player flag; control sync and protocol/auth/
+  league completeness.
+- **Definitions/values:** `Oversize`, numeric ActMap, GetComponents/CalcDefValue,
+  remaining DefCore fields; AH_Predator preview/final creation-number skew;
+  C4Value interning/serialization and strict host conversion.
+- **Script host:** partial-error recovery at effect/definition seams; foreign
+  fixed-dir precision; FnExit cancel-attach/bounds and Ejection/Departure.
+- **Weather/config/resources:** remaining sky presentation/LaunchCloud; control
+  preferences; names/promotions/locales; group write/gzip/CRC/directory order.
+- **Hosts/menus:** exact `CanConcatPictureWith` and object-info payloads; app menu
+  routing, engine-menu visibility, AutoContextMenu/CloseCommand, and layout.
 
 ## Accepted/comparator-only divergences
 
@@ -208,8 +84,9 @@ and a recorded new first mismatch.
 
 ## Open presentation gaps
 
-- Renderer/audio: transforms, GL/shaders, landscape, panning, MIDI decoding, and
-  playlist advancement. Scenario music already excludes WAV/definition effects.
+- Renderer/audio: transforms, GL/shaders, landscape, panning, playlist
+  advancement, and exact/looped/streamed MIDI. SMF 0/1 and RMID playback exists;
+  scenario music excludes WAV/definition effects.
 - GUI/particles: generic layout/text/portraits and Particle.txt graphics/procedures.
 - Launcher: player/update/first-start/search/CanOpen, icons/files/mission access,
   FolderMap, and long-list scrolling.
@@ -261,8 +138,7 @@ and a recorded new first mismatch.
 Build/relink and run pinned Goldrush:
 
 ```sh
-cd rust && cargo xtask ffi --release
-cd .. && cmake --build build-arm64-native --target clonk -j 8
+cmake --build build-arm64-native --target clonk -j 8
 cd build-arm64-native
 LC_RUST_ENGINE_RUNTIME=1 LC_PIN_SEED=424242 \
   clonk.app/Contents/MacOS/clonk \
@@ -279,29 +155,9 @@ LC_RUST_ENGINE_RUNTIME=1 LC_PIN_SEED=424242 \
 - Map replay: `LC_DEBUG_MAP=1`, then `LC_RUST_ENGINE_MAP_SEED=<n>`; standalone
   runs may need `LC_RUST_ENGINE_RANDOM_SEED` and `LC_RUST_ENGINE_STARTUP_PLAYERS`.
 
-- Differential golden: `cargo xtask parity record|verify`.
-- The live comparator reports Rust as expected/C++ as actual and disables after
-  the first mismatch. Object/shape probes: `LC_XTASK_OBJ_DUMP=<ids>`,
-  `LC_XTASK_PROBE_SHAPE`, `LC_XTASK_PROBE_SOLID`.
-- Landscape dumps: `LC_DUMP_LANDSCAPE`,
-  `LC_RUST_ENGINE_DUMP_LANDSCAPE`, `LC_XTASK_DUMP_LANDSCAPE`.
-- RNG ledgers: `LC_RNG_TRACE=<file>`, `LC_RUST_RNG_TRACE=<file>`; align
-  FixRandom/reseed generations before comparing counts.
-- Map reproduction: `LC_DEBUG_MAP=1`, then
-  `LC_RUST_ENGINE_MAP_SEED=<n>`; standalone replay may also need
-  `LC_RUST_ENGINE_RANDOM_SEED` and `LC_RUST_ENGINE_STARTUP_PLAYERS`.
-
-## Known harness issues
-
-- MIDI playback needs an SDL SoundFont (`SDL_SOUNDFONTS`); its repeated error is
-  unrelated to simulation parity.
-- `lc-app` still exits on simulation-tick script errors instead of using the
-  engine fail-safe path.
-- FLNT `Hit` headless error: resolved 2026-07-09 (the missing `BlastObject`
-  host fn); the chain is pinned end-to-end through the real planet scripts.
-- Headless xtask worlds skip player join; intro-driven Goldrush state requires
-  the live pinned harness.
-- Goldrush's intro Talker consumes crew controls for roughly its first 1000
-  frames; scripted input tests must run after the dialog stops.
-- `lc-network`'s `control_sync_and_reconnect_smoke` has a TCP timing flake;
-  rerun it before treating a lone failure as a regression.
+Harness limits: MIDI needs FluidSynth 2.x and a trusted SF2/SF3
+(`LC_FLUIDSYNTH_LIBRARY`/`SDL_SOUNDFONTS`; upgrade to 2.5.6+); eager decode caps
+at 8 MiB/15 minutes/1M events. `lc-app` exits instead of fail-safe on tick script
+errors; xtasks skip player join; Goldrush Talker consumes controls for ~1000
+frames; `lc-network`'s `control_sync_and_reconnect_smoke` has a rerunnable TCP
+timing flake.

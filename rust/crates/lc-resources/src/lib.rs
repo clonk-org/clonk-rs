@@ -8,6 +8,7 @@ pub mod group;
 pub mod material;
 pub mod rtf;
 pub mod scenario;
+mod script_strings;
 pub mod texmap;
 
 pub use definition::{
@@ -23,3 +24,4 @@ pub use scenario::{
     discover, discover_many, discover_many_with_languages, discover_with_languages,
     ScenarioDiscoveryError, ScenarioEntry, ScenarioEntryKind,
 };
+pub use script_strings::{decode_legacy_script_text, localize_script_source};

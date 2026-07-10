@@ -10,6 +10,7 @@ pub enum AudioFormat {
     Wav,
     Ogg,
     Mp3,
+    Midi,
 }
 
 #[derive(Debug, Error)]
@@ -22,6 +23,8 @@ pub enum AudioDecodeError {
     DecoderError(&'static str),
     #[error("decoder error: {0}")]
     Mp3DecoderError(&'static str),
+    #[error("MIDI decoder error: {0}")]
+    MidiDecoderError(String),
     #[error("io error")]
     IoError(#[from] std::io::Error),
 }
@@ -33,17 +36,28 @@ pub struct DecodedAudio {
 }
 
 pub fn decode_audio(data: &[u8]) -> Result<DecodedAudio, AudioDecodeError> {
+    decode_audio_for_output(data, 44_100)
+}
+
+pub(crate) fn decode_audio_for_output(
+    data: &[u8],
+    output_sample_rate: u32,
+) -> Result<DecodedAudio, AudioDecodeError> {
     let format = detect_format(data)?;
     match format {
         AudioFormat::Wav => decode_wav(data),
         AudioFormat::Ogg => decode_ogg(data),
         AudioFormat::Mp3 => decode_mp3(data),
+        AudioFormat::Midi => crate::fluidsynth::decode_midi(data, output_sample_rate),
     }
 }
 
 fn detect_format(data: &[u8]) -> Result<AudioFormat, AudioDecodeError> {
     if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" {
         return Ok(AudioFormat::Wav);
+    }
+    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"RMID" {
+        return Ok(AudioFormat::Midi);
     }
     if data.len() >= 4 && &data[0..4] == b"OggS" {
         return Ok(AudioFormat::Ogg);
@@ -53,6 +67,9 @@ fn detect_format(data: &[u8]) -> Result<AudioFormat, AudioDecodeError> {
     }
     if data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0 {
         return Ok(AudioFormat::Mp3);
+    }
+    if data.len() >= 4 && &data[0..4] == b"MThd" {
+        return Ok(AudioFormat::Midi);
     }
     Err(AudioDecodeError::UnsupportedFormat)
 }
@@ -206,4 +223,27 @@ fn convert_interleaved_i16_to_stereo(
         .map(|sample| *sample as f32 / i16::MAX as f32)
         .collect();
     convert_interleaved_to_stereo(&float_samples, channels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_standard_midi_header() {
+        // C4MusicSystem.cpp:31-32,101-113 accepts MID data for SDL_mixer.
+        assert!(matches!(
+            detect_format(b"MThd\0\0\0\x06\0\0\0\x01\0\x60"),
+            Ok(AudioFormat::Midi)
+        ));
+    }
+
+    #[test]
+    fn detects_riff_wrapped_midi_header() {
+        // C4AudioSystemSdl.cpp:280-282 delegates RMID recognition to SDL_mixer.
+        assert!(matches!(
+            detect_format(b"RIFF\x10\0\0\0RMIDdata\x04\0\0\0MThd"),
+            Ok(AudioFormat::Midi)
+        ));
+    }
 }

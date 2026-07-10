@@ -1,0 +1,131 @@
+use std::collections::HashMap;
+
+use crate::{Group, GroupError};
+
+const C4_MAX_NAME: usize = 30;
+
+/// Preserves UTF-8 C4Script/StringTbl text and converts invalid legacy input
+/// from the Windows-1252 system charset used by classic content.
+pub fn decode_legacy_script_text(data: &[u8]) -> String {
+    std::str::from_utf8(data)
+        .map(str::to_owned)
+        .unwrap_or_else(|_| {
+            let (text, _, _) = encoding_rs::WINDOWS_1252.decode(data);
+            text.into_owned()
+        })
+}
+
+/// Applies the group's C4Script string table before parsing the source.
+///
+/// Candidate order and textual replacement mirror
+/// `C4CFN_ScriptStringTbl`/`C4LangStringTable::ReplaceStrings`
+/// (C4Components.h:56; C4LangStringTable.cpp:33-144).
+pub fn localize_script_source<S: AsRef<str>>(
+    group: &Group,
+    source: &str,
+    languages: &[S],
+) -> Result<String, GroupError> {
+    let mut selected_name = None;
+    let mut table = None;
+    for candidate in std::iter::once("StringTbl.txt".to_string()).chain(
+        languages
+            .iter()
+            .map(|language| format!("StringTbl{}.txt", language.as_ref())),
+    ) {
+        if !group.exists(&candidate) {
+            continue;
+        }
+        table = Some(decode_legacy_script_text(&group.read_file(&candidate)?));
+        selected_name = Some(candidate);
+        break;
+    }
+
+    let entries = table.as_deref().map(parse_string_table).unwrap_or_default();
+    let table_path = group
+        .root()
+        .join(selected_name.as_deref().unwrap_or("StringTbl.txt"));
+    Ok(replace_localization_keys(source, &entries, &table_path))
+}
+
+fn parse_string_table(table: &str) -> HashMap<&str, &str> {
+    let mut entries = HashMap::new();
+    for line in table.split(['\r', '\n']) {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        // C++ searches its entry vector from the front, so the first
+        // duplicate wins.
+        entries.entry(key).or_insert(value);
+    }
+    entries
+}
+
+fn replace_localization_keys(
+    source: &str,
+    entries: &HashMap<&str, &str>,
+    table_path: &std::path::Path,
+) -> String {
+    let mut result = String::with_capacity(source.len());
+    let mut copied_through = 0;
+    let mut search_from = 0;
+
+    while let Some(open_offset) = source[search_from..].find('$') {
+        let open = search_from + open_offset;
+        let key_start = open + 1;
+        let Some(close_offset) = source[key_start..].find('$') else {
+            break;
+        };
+        let close = key_start + close_offset;
+        let key = &source[key_start..close];
+        search_from = close + 1;
+
+        let valid = key.len() <= C4_MAX_NAME
+            && key.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'~' | b'+' | b'-')
+            });
+        if !valid {
+            continue;
+        }
+        let Some(value) = entries.get(key) else {
+            tracing::warn!(
+                path = %table_path.display(),
+                key,
+                "string table entry not found"
+            );
+            continue;
+        };
+
+        result.push_str(&source[copied_through..open]);
+        result.push_str(value);
+        copied_through = close + 1;
+    }
+
+    if copied_through == 0 {
+        return source.to_string();
+    }
+    result.push_str(&source[copied_through..]);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_script_decoder_preserves_valid_utf8() {
+        // C4ComponentHost::LoadAppend carries the script bytes unchanged
+        // (C4ComponentHost.cpp:155-213); Rust's source String must not
+        // reinterpret already-valid UTF-8 while normalizing legacy input.
+        assert_eq!(decode_legacy_script_text("Grüße".as_bytes()), "Grüße");
+    }
+
+    #[test]
+    fn legacy_script_decoder_converts_windows_1252() {
+        // Classic scripts use the same Windows system charset as the other
+        // text components C4ComponentHost loads (C4ComponentHost.cpp:47-89).
+        assert_eq!(
+            decode_legacy_script_text(&[b'G', b'r', 0xfc, 0xdf, b'e']),
+            "Grüße"
+        );
+    }
+}

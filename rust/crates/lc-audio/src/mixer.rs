@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::decoder::{decode_audio, AudioDecodeError, DecodedAudio};
+use crate::decoder::{decode_audio, decode_audio_for_output, AudioDecodeError, DecodedAudio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChannelId(pub usize);
@@ -401,7 +401,7 @@ impl AudioMixer {
     }
 
     pub(crate) fn load_music(&self, data: &[u8]) -> Result<MusicId, AudioError> {
-        let decoded = decode_audio(data)?;
+        let decoded = decode_audio_for_output(data, self.sample_rate)?;
         let clip = self.prepare_clip(decoded);
         let mut state = self.state.lock().unwrap();
         let id = MusicId(state.next_music_id);
@@ -860,6 +860,20 @@ mod tests {
         assert!(mixer.channel_is_playing(channel));
         mixer.halt_channel(channel);
         assert!(!mixer.channel_is_playing(channel));
+    }
+
+    #[test]
+    fn non_looping_music_stops_after_one_pass() {
+        // C4AudioSystemSdl.cpp:212-214 passes 1 to Mix_PlayMusic when loop is false;
+        // SDL_mixer 2.8 treats that as one total play for its music backends.
+        let data = generate_sine_wave(10, 440.0, 1_000);
+        let mixer = AudioMixer::new(1_000, 2);
+        let music_id = mixer.load_music(&data).unwrap();
+        mixer.play_music(music_id, false).unwrap();
+
+        let mut first_pass_and_one_frame = vec![0i16; 11 * 2];
+        mixer.mix_i16(&mut first_pass_and_one_frame);
+        assert!(!mixer.music_is_playing());
     }
 
     #[test]
