@@ -4364,6 +4364,7 @@ mod tests {
                 velocity: Vector2::ZERO,
                 rotation: 0,
                 energy: 100,
+                need_energy: false,
                 construction: lc_engine::FULL_CON,
                 damage: 0,
                 magic_energy: 0,

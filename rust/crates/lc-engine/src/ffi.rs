@@ -985,6 +985,8 @@ unsafe fn make_snapshot(
             // valid after DoMovement's circle bound and must survive restore.
             rotation: entry.rotation,
             energy: entry.energy,
+            // The current bridge ABI does not expose C4Object::NeedEnergy.
+            need_energy: false,
             construction: entry.construction,
             damage: entry.damage,
             magic_energy: entry.magic_energy,

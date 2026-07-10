@@ -1934,6 +1934,10 @@ fn default_alive() -> bool {
     true
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn default_construction() -> i32 {
     FULL_CON
 }
@@ -2066,6 +2070,11 @@ pub struct ObjectState {
     #[serde(default)]
     pub rotation: i32,
     pub energy: i32,
+    /// C4Object::NeedEnergy: the persistent insufficient-power marker set
+    /// by EnergyCheck and energy-consuming actions (C4Object.cpp:118,
+    /// 1478, 4739-4752; persisted at :2805).
+    #[serde(default)]
+    pub need_energy: bool,
     #[serde(default)]
     pub damage: i32,
     #[serde(default)]
@@ -2284,6 +2293,7 @@ pub(crate) fn preview_spawn_state(
         no_collect_delay: 0,
         base: OWNER_NONE,
         energy: 0,
+        need_energy: false,
         damage: 0,
         magic_energy: 0,
         magic_capacity: 0,
@@ -2357,6 +2367,9 @@ impl ObjectState {
         if let Some(energy) = delta.energy {
             energy_died = self.alive && self.energy != 0 && energy == 0;
             self.energy = energy;
+        }
+        if let Some(need_energy) = delta.need_energy {
+            self.need_energy = need_energy;
         }
         if let Some(damage) = delta.damage {
             self.damage = damage.max(0);
@@ -2528,6 +2541,8 @@ struct ObjectDelta {
     /// `SetRDir`. Mirrors C++ `pObj->rdir = itofix(n, prec)` (`C4Script.cpp:710`).
     rotation_velocity: Option<C4Fixed>,
     energy: Option<i32>,
+    /// C4Object::NeedEnergy overwrite.
+    need_energy: Option<bool>,
     /// Kill-trace mark riding an energy write (C4Object.cpp:1351-1353).
     energy_loss_cause: Option<i32>,
     /// Staged incinerate outcome `(caused_by, fire_phase)` — see
@@ -2602,6 +2617,9 @@ impl ObjectDelta {
         }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
+        }
+        if let Some(need_energy) = update.need_energy {
+            self.need_energy = Some(need_energy);
         }
         if let Some(cause) = update.energy_loss_cause {
             self.energy_loss_cause = Some(cause);
@@ -2703,6 +2721,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             rotation: update.rotation,
             rotation_velocity: update.rotation_velocity,
             energy: update.energy,
+            need_energy: update.need_energy,
             energy_loss_cause: update.energy_loss_cause,
             fire: update.fire,
             fire_flag: update.fire_flag,
@@ -2788,6 +2807,9 @@ pub struct ObjectUpdate {
     #[serde(default)]
     pub rotation: Option<i32>,
     pub energy: Option<i32>,
+    /// C4Object::NeedEnergy overwrite (FnEnergyCheck).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub need_energy: Option<bool>,
     /// C4Object::DoEnergy's kill-trace mark (C4Object.cpp:1351-1353),
     /// staged with the UpdatLastEnergyLossCause guard (:1369-1378) already
     /// applied at call time — the fold writes it through unconditionally
@@ -2933,6 +2955,11 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_need_energy(mut self, need_energy: bool) -> Self {
+        self.need_energy = Some(need_energy);
+        self
+    }
+
     pub fn with_damage(mut self, damage: i32) -> Self {
         self.damage = Some(damage);
         self
@@ -3063,6 +3090,7 @@ impl ObjectUpdate {
             && self.rotation.is_none()
             && self.rotation_velocity.is_none()
             && self.energy.is_none()
+            && self.need_energy.is_none()
             && self.energy_loss_cause.is_none()
             && self.construction.is_none()
             && self.damage.is_none()
@@ -4334,6 +4362,7 @@ impl Object {
             // (-180, 180], so a left lean remains negative across a save.
             rotation: self.state.rotation,
             energy: self.state.energy,
+            need_energy: self.state.need_energy,
             damage: self.state.damage,
             magic_energy: self.state.magic_energy,
             magic_capacity: self.state.magic_capacity,
@@ -4852,6 +4881,9 @@ pub struct SpawnConfig {
     /// None = the C4Object::Init rule (alive -> GetPhysical()->Energy,
     /// else 0; C4Object.cpp:191-192). Some = explicit raw value (loader).
     pub energy: Option<i32>,
+    /// Saved C4Object::NeedEnergy. New objects default to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub need_energy: Option<bool>,
     /// C4Object::MagicEnergy, compiled verbatim from saves with default 0
     /// (C4Object.cpp:2768). MagicPhysicalFactor raw scale.
     #[serde(default)]
@@ -4951,6 +4983,7 @@ impl SpawnConfig {
             fixed_velocity: None,
             rotation: 0,
             energy: None,
+            need_energy: None,
             magic_energy: None,
             construction: FULL_CON,
             action: None,
@@ -5053,6 +5086,11 @@ impl SpawnConfig {
 
     pub fn with_energy(mut self, energy: i32) -> Self {
         self.energy = Some(energy);
+        self
+    }
+
+    pub fn with_need_energy(mut self, need_energy: bool) -> Self {
+        self.need_energy = Some(need_energy);
         self
     }
 
@@ -5164,6 +5202,10 @@ pub struct ObjectSnapshot {
     #[serde(default)]
     pub rotation: i32,
     pub energy: i32,
+    /// C4Object::NeedEnergy, persisted by C++ as `NeedEnergy=`
+    /// (C4Object.cpp:2805).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub need_energy: bool,
     #[serde(default)]
     pub damage: i32,
     #[serde(default)]
@@ -7260,6 +7302,7 @@ impl Definition {
                 .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
+                .with_need_energy(state.need_energy)
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -7476,6 +7519,7 @@ impl Definition {
                 .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
+                .with_need_energy(state.need_energy)
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -7664,6 +7708,7 @@ impl Definition {
                 .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
+                .with_need_energy(state.need_energy)
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -7865,6 +7910,7 @@ impl Definition {
                 .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
+                .with_need_energy(state.need_energy)
                 .with_ocf(state.ocf),
             ),
             global_effects,
@@ -7981,6 +8027,7 @@ impl Definition {
         .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
+        .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
         let (result, outcome) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -8113,6 +8160,7 @@ impl Definition {
         .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
+        .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -8354,6 +8402,7 @@ impl Definition {
         .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
+        .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
         let cells = lc_script::LocalCells::from_local_vars(&state.local_vars);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
@@ -8534,6 +8583,7 @@ impl Definition {
         .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
+        .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -9050,6 +9100,7 @@ impl Definition {
                 .with_walk_rotation(self.walk_rotation_seed(state))
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
+                .with_need_energy(state.need_energy)
                 .with_ocf(state.ocf)
             }),
             global_effects,
@@ -13041,6 +13092,7 @@ impl Engine {
                 ).with_direction(object.state.direction.to_script_value())
                 .with_contents(object.state.contents.clone())
                 .with_alive(object.state.alive)
+                .with_need_energy(object.state.need_energy)
                 .with_collectible(definition.is_some_and(Definition::is_collectible))
                 .with_in_liquid(object.state.in_liquid)
                 .with_ocf(ocf)
@@ -18406,6 +18458,7 @@ impl Engine {
                     no_collect_delay: 0,
                     base: OWNER_NONE,
                     energy: snapshot.energy,
+                    need_energy: snapshot.need_energy,
                     construction: snapshot.construction,
                     damage: snapshot.damage,
                     magic_energy: snapshot.magic_energy,
@@ -28569,6 +28622,7 @@ impl Engine {
             fixed_velocity,
             rotation,
             energy,
+            need_energy,
             magic_energy,
             construction,
             action,
@@ -28746,6 +28800,7 @@ impl Engine {
                 } else {
                     0
                 }),
+                need_energy: need_energy.unwrap_or(false),
                 damage: 0,
                 // MagicEnergy compiles verbatim, default 0
                 // (C4Object.cpp:2768 / the C4Object ctor, :97).
@@ -29632,6 +29687,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         no_collect_delay: 0,
         base: OWNER_NONE,
         energy: snapshot.energy,
+        need_energy: snapshot.need_energy,
         construction: snapshot.construction,
         damage: snapshot.damage,
         magic_energy: snapshot.magic_energy,
@@ -29752,6 +29808,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.draw_transform,
             ).with_direction(object.direction.to_script_value())
             .with_contents(object.contents.clone())
+            .with_need_energy(object.need_energy)
             .with_commands(object.command_stack.command_views())
             .with_command_stack(object.command_stack.clone())
             .with_ocf(object.ocf)

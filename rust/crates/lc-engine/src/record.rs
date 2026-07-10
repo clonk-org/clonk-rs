@@ -434,6 +434,7 @@ mod tests {
                 velocity: Vector2::new(0, 0),
                 rotation: 0,
                 energy,
+                need_energy: false,
                 construction: crate::FULL_CON,
                 damage: 0,
                 magic_energy: 0,

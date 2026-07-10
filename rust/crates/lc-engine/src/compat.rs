@@ -89,6 +89,8 @@ pub(crate) struct HostWorldObject {
     pub category: i32,
     pub collectible: bool,
     pub energy: i32,
+    /// C4Object::NeedEnergy at call entry, overlaid from active scopes.
+    pub need_energy: bool,
     pub construction: i32,
     #[allow(dead_code)]
     pub damage: i32,
@@ -350,6 +352,7 @@ impl HostWorldObject {
             category,
             collectible: false,
             energy,
+            need_energy: false,
             construction: construction.clamp(0, FULL_CON),
             damage,
             ocf: ocf::NORMAL,
@@ -387,6 +390,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_collectible(mut self, collectible: bool) -> Self {
         self.collectible = collectible;
+        self
+    }
+
+    pub(crate) fn with_need_energy(mut self, need_energy: bool) -> Self {
+        self.need_energy = need_energy;
         self
     }
 
@@ -6883,6 +6891,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub container: Option<ObjectId>,
     pub status: ObjectStatus,
     pub energy: i32,
+    pub need_energy: bool,
     /// C4Object::MagicEnergy (C4Object.h:139), on the
     /// MagicPhysicalFactor-scaled raw scale.
     pub magic_energy: i32,
@@ -7018,6 +7027,7 @@ impl<'a> HostObjectContext<'a> {
             container,
             status,
             energy,
+            need_energy: false,
             magic_energy: 0,
             damage,
             construction: construction.clamp(0, FULL_CON),
@@ -7071,6 +7081,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_magic_energy(mut self, magic_energy: i32) -> Self {
         self.magic_energy = magic_energy;
+        self
+    }
+
+    pub fn with_need_energy(mut self, need_energy: bool) -> Self {
+        self.need_energy = need_energy;
         self
     }
 
@@ -21800,6 +21815,7 @@ impl EffectHostContext {
                 container,
                 status,
                 energy,
+                need_energy,
                 magic_energy,
                 damage,
                 construction,
@@ -21881,6 +21897,7 @@ impl EffectHostContext {
                 scope.cached_ocf = Some(ocf);
                 scope.walk_rotation = walk_rotation;
                 scope.current_magic_energy = magic_energy;
+                scope.current_need_energy = need_energy;
                 // Seed the TRUE fixed dirs when the caller provided them —
                 // GetXDir must see a 0.4 px/f drift as 4 at precision 10
                 // like C++ reading pObj->xdir (C4Script.cpp:1167).
@@ -22020,6 +22037,7 @@ impl EffectHostContext {
             object.action_target2 = scope.current_action_target2;
             object.action_data = scope.current_action_data;
             object.damage = scope.current_damage;
+            object.need_energy = scope.need_energy();
             object.direction = scope.current_direction.to_script_value();
             object.owner = scope.owner();
             // Staged dir writes surface at whole-pixel grain (the foreign
@@ -22585,6 +22603,7 @@ impl EffectHostContext {
             .live_commands
             .restore_from_snapshot(&object.command_stack);
         scope.current_magic_energy = state.magic_energy;
+        scope.current_need_energy = state.need_energy;
         // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358) —
         // nested scopes carry the snapshot mask like outer scopes do, not
         // the preview-grade recompute.
@@ -23262,6 +23281,7 @@ struct ObjectScopeContext {
     current_action_ticks: u32,
     current_action_phase: i32,
     current_energy: i32,
+    current_need_energy: bool,
     /// C4Object::MagicEnergy (C4Object.h:139), MagicPhysicalFactor scale.
     current_magic_energy: i32,
     current_damage: i32,
@@ -23365,6 +23385,7 @@ impl ObjectScopeContext {
             current_action_ticks: action_ticks,
             current_action_phase: action_phase,
             current_energy: energy,
+            current_need_energy: false,
             current_magic_energy: 0,
             current_damage: clamped_damage,
             current_construction: clamped_construction,
@@ -24044,6 +24065,17 @@ impl ObjectScopeContext {
     fn set_energy(&mut self, energy: i32) {
         self.current_energy = energy;
         self.pending_update.energy = Some(energy);
+    }
+
+    fn need_energy(&self) -> bool {
+        self.pending_update
+            .need_energy
+            .unwrap_or(self.current_need_energy)
+    }
+
+    fn set_need_energy(&mut self, need_energy: bool) {
+        self.current_need_energy = need_energy;
+        self.pending_update.need_energy = Some(need_energy);
     }
 
     /// C4Object::MagicEnergy (C4Object.h:139) through the pending overlay.
