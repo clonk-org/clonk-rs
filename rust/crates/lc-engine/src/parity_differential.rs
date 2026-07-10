@@ -947,7 +947,11 @@ func Trigger(object pOther) {
             0,
             "returned_early",
             0,
-            i64::from(exec_action.apply_physics_at_index(idx)),
+            i64::from(
+                exec_action
+                    .apply_physics_at_index(idx)
+                    .expect("action-direction physics applies"),
+            ),
         );
         let object = &exec_action.objects[idx];
         expect_eq(
@@ -1031,7 +1035,11 @@ func Trigger(object pOther) {
             0,
             "returned_early",
             0,
-            i64::from(exec_action.apply_physics_at_index(idx)),
+            i64::from(
+                exec_action
+                    .apply_physics_at_index(idx)
+                    .expect("swim-direction physics applies"),
+            ),
         );
         let object = &exec_action.objects[idx];
         expect_eq(

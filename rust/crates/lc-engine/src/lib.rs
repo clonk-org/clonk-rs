@@ -8041,6 +8041,7 @@ impl Definition {
         state: &ObjectState,
         object_id: ObjectId,
         action_name: &str,
+        abort_phase: Option<i32>,
         rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
@@ -8060,7 +8061,9 @@ impl Definition {
         // action) pair is the synthetic command-DSL convention.
         let args = if self.c4_callback_args {
             match kind {
-                ActionCallbackKind::Abort => vec![Value::Int(state.action.phase)],
+                ActionCallbackKind::Abort => {
+                    vec![Value::Int(abort_phase.unwrap_or(state.action.phase))]
+                }
                 _ => Vec::new(),
             }
         } else {
@@ -16857,7 +16860,7 @@ impl Engine {
             // may replace the live action through TurnAction, but C++ keeps
             // this entry for phase advance through the end of ExecAction.
             let exec_action_source = self.objects[idx].state.action.name.clone();
-            let exec_action_returned_early = self.apply_physics_at_index(idx);
+            let exec_action_returned_early = self.apply_physics_at_index(idx)?;
             dbg_stage(&self.objects[idx], "POSTACT");
 
             // Phase advance runs at the END of ExecAction
@@ -16955,6 +16958,7 @@ impl Engine {
                             &event.action,
                             Some(function_name),
                             Some(state_snapshot),
+                            None,
                         )?;
                         if self.objects[idx].destroyed
                             || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
@@ -17987,6 +17991,7 @@ impl Engine {
                 &current_action,
                 None,
                 None,
+                None,
             )?;
             if self.objects[index].destroyed
                 || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
@@ -17998,7 +18003,14 @@ impl Engine {
                 ActionTransitionKind::Natural => ActionCallbackKind::End,
                 ActionTransitionKind::Forced => ActionCallbackKind::Abort,
             };
-            self.invoke_action_callback(index, callback_kind, &event.previous_action, None, None)?;
+            self.invoke_action_callback(
+                index,
+                callback_kind,
+                &event.previous_action,
+                None,
+                None,
+                None,
+            )?;
             if self.objects[index].destroyed
                 || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
             {
@@ -18016,6 +18028,7 @@ impl Engine {
                 &current_action,
                 None,
                 None,
+                None,
             )?;
         }
 
@@ -18029,6 +18042,7 @@ impl Engine {
         action_name: &str,
         function_override: Option<&str>,
         state_override: Option<ObjectState>,
+        abort_phase: Option<i32>,
     ) -> Result<(), EngineError> {
         let definition_id = self.objects[index].definition_id.clone();
         let action_library = {
@@ -18081,6 +18095,7 @@ impl Engine {
             &state_snapshot,
             object_id,
             action_name,
+            abort_phase,
             rng_state,
             &global_view,
             self.physics,
@@ -21132,7 +21147,7 @@ impl Engine {
                 movement_outcome.contact_cnat,
                 definition_id,
                 solid_mask_indices,
-            );
+            )?;
             if self.objects[idx].destroyed
                 || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
             {
@@ -21161,9 +21176,9 @@ impl Engine {
         Ok(true)
     }
 
-    fn apply_physics_at_index(&mut self, idx: usize) -> bool {
+    fn apply_physics_at_index(&mut self, idx: usize) -> Result<bool, EngineError> {
         if idx >= self.objects.len() {
-            return false;
+            return Ok(false);
         }
         // Action.t_attach resets each ExecAction (C4Object.cpp:4692);
         // early returns below leave it CNAT_None for this frame's
@@ -21185,12 +21200,12 @@ impl Engine {
                 });
             if let Some(target) = switch {
                 let definition_id = self.objects[idx].definition_id.clone();
-                self.force_action_with_calls(idx, &definition_id, &target);
-                return true;
+                self.force_action_with_calls(idx, &definition_id, &target)?;
+                return Ok(true);
             }
         }
         if idx >= self.objects.len() {
-            return false;
+            return Ok(false);
         }
         let mut swim_walk_transition = false;
 
@@ -21266,32 +21281,32 @@ impl Engine {
         if matches!(procedure, ActionProcedure::Bridge)
             && !self.apply_bridge_procedure(idx, command_direction, &definition_id)
         {
-            return false;
+            return Ok(false);
         }
 
         if matches!(procedure, ActionProcedure::Build)
             && !self.apply_build_procedure(idx, &definition_id)
         {
-            return false;
+            return Ok(false);
         }
 
         if matches!(procedure, ActionProcedure::Fight)
             && !self.apply_fight_procedure(idx, &definition_id)
         {
-            return false;
+            return Ok(false);
         }
 
         if matches!(procedure, ActionProcedure::Attach)
             && !self.apply_attach_procedure(idx, &definition_id)
         {
-            return false;
+            return Ok(false);
         }
 
         let mut push_handled = false;
         if matches!(procedure, ActionProcedure::Push) {
             if !self.apply_push_procedure(idx, command_direction, movement_profile, &definition_id)
             {
-                return false;
+                return Ok(false);
             }
             push_handled = true;
         }
@@ -21300,7 +21315,7 @@ impl Engine {
         if matches!(procedure, ActionProcedure::Pull) {
             if !self.apply_pull_procedure(idx, command_direction, movement_profile, &definition_id)
             {
-                return false;
+                return Ok(false);
             }
             pull_handled = true;
         }
@@ -21708,7 +21723,7 @@ impl Engine {
         }
 
         if let Some(direction) = exec_set_direction {
-            self.set_exec_action_direction(idx, &definition_id, direction);
+            self.set_exec_action_direction(idx, &definition_id, direction)?;
         }
 
         if matches!(procedure, ActionProcedure::Lift)
@@ -21721,14 +21736,14 @@ impl Engine {
         // `return`s so the phase advance is skipped this frame
         // (C4Object.cpp:4956).
         if swim_walk_transition {
-            self.force_action_with_calls(idx, &definition_id, "Walk");
+            self.force_action_with_calls(idx, &definition_id, "Walk")?;
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
             object.swim_exit_this_frame = true;
-            return true;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     fn apply_lift_to_target(
@@ -22350,7 +22365,7 @@ impl Engine {
         idx: usize,
         definition_id: &DefinitionId,
         direction: Direction,
-    ) {
+    ) -> Result<(), EngineError> {
         let Some((current_direction, turn_action)) = self
             .definitions
             .get(definition_id)
@@ -22363,62 +22378,126 @@ impl Engine {
                 )
             })
         else {
-            return;
+            return Ok(());
         };
         if direction != current_direction {
             if let Some(turn_action) = turn_action {
-                self.force_action_with_calls(idx, definition_id, &turn_action);
+                self.force_action_with_calls(idx, definition_id, &turn_action)?;
             }
         }
         self.objects[idx].state.direction = direction;
+        Ok(())
     }
 
     /// SetActionByName-style forced transition from an engine path
     /// (ObjectActionWalk et al., C4ObjectCom.cpp:34-39): applies the named
-    /// action when the def has it, resyncs the fixed coords
-    /// (C4Object.cpp:4144) and records the transition event so the
-    /// StartCall/AbortCall pair fires from the drain.
+    /// action when the def has it, refreshes OCF, resyncs the fixed coords,
+    /// then synchronously runs StartCall followed by AbortCall
+    /// (C4Object.cpp:4142-4198).
     fn force_action_with_calls(
         &mut self,
         idx: usize,
         definition_id: &DefinitionId,
         name: &str,
-    ) -> bool {
+    ) -> Result<bool, EngineError> {
+        self.force_action_with_optional_target_and_calls(idx, definition_id, name, None)
+    }
+
+    fn force_action_with_target_and_calls(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<bool, EngineError> {
+        self.force_action_with_optional_target_and_calls(idx, definition_id, name, Some(target))
+    }
+
+    fn force_action_with_optional_target_and_calls(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        name: &str,
+        target: Option<ObjectId>,
+    ) -> Result<bool, EngineError> {
         let Some(library) = self
             .definitions
             .get(definition_id)
             .map(|definition| definition.action_library().clone())
         else {
-            return false;
+            return Ok(false);
         };
         if !library.contains(name) {
-            return false;
+            return Ok(false);
         }
         let previous = self.objects[idx].state.action.clone();
+        let object_id = self.objects[idx].id;
+        let original_definition_id = self.objects[idx].definition_id.clone();
         let update = ActionUpdate {
             name: Some(name.to_string()),
             phase: Some(0),
             ticks: Some(0),
             force: true,
             data: None,
-            target: None,
+            // SetAction assigns a target before SetOCF and callbacks when one
+            // is supplied (C4Object.cpp:4148-4178). None preserves the old
+            // target for ObjectActionWalk/Jump/etc.
+            target: target.map(Some),
             target2: None,
             callbacks_dispatched: false,
         };
-        let object = &mut self.objects[idx];
-        let result = object
-            .state
-            .action
-            .apply_update_with_library(&update, &library);
-        if matches!(result, ActionUpdateResult::Applied) {
+        let result = {
+            let object = &mut self.objects[idx];
+            object
+                .state
+                .action
+                .apply_update_with_library(&update, &library)
+        };
+        if !matches!(result, ActionUpdateResult::Applied) {
+            return Ok(false);
+        }
+
+        // SetOCF and fixed-position resync both precede StartCall in C++
+        // (C4Object.cpp:4165-4178).
+        self.refresh_object_ocf(idx);
+        {
+            let object = &mut self.objects[idx];
             object.fixed_position =
                 FixedVec2::from_ints(object.state.position.x, object.state.position.y);
-            if previous.name != object.state.action.name {
-                object.record_action_event(previous, ActionTransitionKind::Forced);
-            }
-            return true;
         }
-        false
+
+        let current_action = self.objects[idx].state.action.name.clone();
+        if !library.is_idle_action(&current_action) {
+            self.invoke_action_callback(
+                idx,
+                ActionCallbackKind::Start,
+                &current_action,
+                None,
+                None,
+                None,
+            )?;
+        }
+
+        // A StartCall that removes the object or changes its definition stops
+        // the remaining callback sequence (C4Object.cpp:4178-4198).
+        let callback_target_survived = self.objects.get(idx).is_some_and(|object| {
+            object.id == object_id
+                && object.definition_id == original_definition_id
+                && !object.destroyed
+                && !matches!(object.state.status, ObjectStatus::Deleted)
+        });
+        if callback_target_survived && !library.is_idle_action(&previous.name) {
+            self.invoke_action_callback(
+                idx,
+                ActionCallbackKind::Abort,
+                &previous.name,
+                None,
+                None,
+                Some(previous.phase),
+            )?;
+        }
+
+        Ok(true)
     }
 
     /// C4Object::ContactAction (C4Object.cpp:4307-4520): the hardcoded
@@ -22432,14 +22511,14 @@ impl Engine {
         t_contact: u32,
         definition_id: &DefinitionId,
         solid_mask_indices: &[usize],
-    ) {
+    ) -> Result<(), EngineError> {
         let Some(definition) = self.definitions.get(definition_id) else {
-            return;
+            return Ok(());
         };
         let library = definition.action_library().clone();
         let action_name = self.objects[idx].state.action.name.clone();
         if library.is_idle_action(&action_name) {
-            return;
+            return Ok(());
         }
         let procedure = library.procedure_for_action(&action_name);
         let physical = self.object_physical(idx);
@@ -22464,26 +22543,26 @@ impl Engine {
                     if self.objects[idx].fixed_velocity.y >= C4Fixed::ZERO {
                         // FlatHit / HardHit / Walk
                         if ocf & crate::ocf::HIT_SPEED4 != 0
-                            && self.object_action_flat(idx, definition_id, direction)
+                            && self.object_action_flat(idx, definition_id, direction)?
                         {
-                            return;
+                            return Ok(());
                         }
                         if ocf & crate::ocf::HIT_SPEED3 != 0
-                            && self.force_action_with_calls(idx, definition_id, "KneelDown")
+                            && self.force_action_with_calls(idx, definition_id, "KneelDown")?
                         {
                             let object = &mut self.objects[idx];
                             object.fixed_velocity = FixedVec2::ZERO;
                             object.state.velocity = Vector2::ZERO;
-                            return;
+                            return Ok(());
                         }
                         // Walk keeping horizontal momentum
                         // (C4Object.cpp:4330-4338).
                         let last_xdir = self.objects[idx].fixed_velocity.x;
-                        self.force_action_with_calls(idx, definition_id, "Walk");
+                        self.force_action_with_calls(idx, definition_id, "Walk")?;
                         let object = &mut self.objects[idx];
                         object.fixed_velocity = FixedVec2::new(last_xdir, C4Fixed::ZERO);
                         object.state.velocity = object.velocity_pixels();
-                        return;
+                        return Ok(());
                     }
                 }
                 ActionProcedure::Scale => {
@@ -22493,11 +22572,11 @@ impl Engine {
                             definition_id,
                             procedure,
                             solid_mask_indices,
-                        );
-                        return;
+                        )?;
+                        return Ok(());
                     }
-                    self.object_action_stand(idx, definition_id);
-                    return;
+                    self.object_action_stand(idx, definition_id)?;
+                    return Ok(());
                 }
                 ActionProcedure::Dig => match com_dir {
                     CommandDirection::DownLeft => {
@@ -22507,8 +22586,8 @@ impl Engine {
                         self.objects[idx].state.command_direction = CommandDirection::Right;
                     }
                     _ => {
-                        self.object_com_stop_dig(idx, definition_id);
-                        return;
+                        self.object_com_stop_dig(idx, definition_id)?;
+                        return Ok(());
                     }
                 },
                 ActionProcedure::Swim => {
@@ -22525,9 +22604,9 @@ impl Engine {
                             definition_id,
                             procedure,
                             solid_mask_indices,
-                        );
+                        )?;
                     }
-                    return;
+                    return Ok(());
                 }
                 _ => {}
             }
@@ -22537,8 +22616,8 @@ impl Engine {
         if t_contact & CNAT_TOP != 0 {
             match procedure {
                 ActionProcedure::Walk => {
-                    self.object_action_stand(idx, definition_id);
-                    return;
+                    self.object_action_stand(idx, definition_id)?;
+                    return Ok(());
                 }
                 ActionProcedure::Scale => {
                     if com_dir_like(com_dir, CommandDirection::Up) {
@@ -22548,8 +22627,8 @@ impl Engine {
                             } else {
                                 Direction::Left
                             };
-                            self.object_action_hangle(idx, definition_id, new_dir);
-                            return;
+                            self.object_action_hangle(idx, definition_id, new_dir)?;
+                            return Ok(());
                         }
                         self.objects[idx].state.command_direction = CommandDirection::Stop;
                     }
@@ -22562,15 +22641,15 @@ impl Engine {
                             direction,
                             C4Fixed::ZERO,
                             C4Fixed::ZERO,
-                        );
+                        )?;
                     } else if can_hangle {
-                        self.object_action_hangle(idx, definition_id, direction);
-                        return;
+                        self.object_action_hangle(idx, definition_id, direction)?;
+                        return Ok(());
                     }
                 }
                 ActionProcedure::Dig => {
-                    self.object_com_stop_dig(idx, definition_id);
-                    return;
+                    self.object_com_stop_dig(idx, definition_id)?;
+                    return Ok(());
                 }
                 ActionProcedure::Hang => {
                     self.objects[idx].state.command_direction = CommandDirection::Stop;
@@ -22606,17 +22685,17 @@ impl Engine {
                             wall_direction,
                             tumble_x,
                             C4Fixed::ZERO,
-                        );
+                        )?;
                     } else if can_scale {
-                        self.object_action_scale(idx, definition_id, wall_direction);
-                        return;
+                        self.object_action_scale(idx, definition_id, wall_direction)?;
+                        return Ok(());
                     }
                 }
                 ActionProcedure::Walk => {
                     if com_dir_like(com_dir, toward) {
                         if can_scale {
-                            self.object_action_scale(idx, definition_id, wall_direction);
-                            return;
+                            self.object_action_scale(idx, definition_id, wall_direction)?;
+                            return Ok(());
                         }
                         self.objects[idx].state.command_direction = CommandDirection::Stop;
                     }
@@ -22624,40 +22703,40 @@ impl Engine {
                         // Slide off (C4Object.cpp:4437/4491).
                         let xdir = self.objects[idx].fixed_velocity.x / 2;
                         let ydir = self.objects[idx].fixed_velocity.y;
-                        if self.force_action_with_calls(idx, definition_id, "Jump") {
+                        if self.force_action_with_calls(idx, definition_id, "Jump")? {
                             let object = &mut self.objects[idx];
                             object.fixed_velocity = FixedVec2::new(xdir, ydir);
                             object.state.velocity = object.velocity_pixels();
                             object.state.mobile = true;
                         }
                     }
-                    return;
+                    return Ok(());
                 }
                 ActionProcedure::Swim => {
                     if com_dir_like(com_dir, toward) && can_scale {
-                        self.object_action_scale(idx, definition_id, wall_direction);
-                        return;
+                        self.object_action_scale(idx, definition_id, wall_direction)?;
+                        return Ok(());
                     }
                     let _ = self.object_action_corner_scale(
                         idx,
                         definition_id,
                         procedure,
                         solid_mask_indices,
-                    );
-                    return;
+                    )?;
+                    return Ok(());
                 }
                 ActionProcedure::Hang => {
                     if can_scale
-                        && self.object_action_scale(idx, definition_id, wall_direction)
+                        && self.object_action_scale(idx, definition_id, wall_direction)?
                     {
-                        return;
+                        return Ok(());
                     }
                     self.objects[idx].state.command_direction = CommandDirection::Stop;
-                    return;
+                    return Ok(());
                 }
                 ActionProcedure::Dig => {
-                    self.object_com_stop_dig(idx, definition_id);
-                    return;
+                    self.object_com_stop_dig(idx, definition_id)?;
+                    return Ok(());
                 }
                 _ => {}
             }
@@ -22698,6 +22777,7 @@ impl Engine {
                 object.state.velocity = Vector2::ZERO;
             }
         }
+        Ok(())
     }
 
     /// C4Object::ForcePosition (C4Movement.cpp:531-539): fix always
@@ -22712,15 +22792,19 @@ impl Engine {
     }
 
     /// ObjectActionStand (C4ObjectCom.cpp:41-46): ComDir Stop then Walk.
-    fn object_action_stand(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
+    fn object_action_stand(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+    ) -> Result<bool, EngineError> {
         self.objects[idx].state.command_direction = CommandDirection::Stop;
-        if self.force_action_with_calls(idx, definition_id, "Walk") {
+        if self.force_action_with_calls(idx, definition_id, "Walk")? {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
-            return true;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     /// ObjectActionFlat (C4ObjectCom.cpp:96-102): "FlatUp", dirs zeroed.
@@ -22729,15 +22813,15 @@ impl Engine {
         idx: usize,
         definition_id: &DefinitionId,
         direction: Direction,
-    ) -> bool {
-        if self.force_action_with_calls(idx, definition_id, "FlatUp") {
+    ) -> Result<bool, EngineError> {
+        if self.force_action_with_calls(idx, definition_id, "FlatUp")? {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
             object.state.direction = direction;
-            return true;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     /// ObjectActionScale (C4ObjectCom.cpp:104-110).
@@ -22746,15 +22830,15 @@ impl Engine {
         idx: usize,
         definition_id: &DefinitionId,
         direction: Direction,
-    ) -> bool {
-        if self.force_action_with_calls(idx, definition_id, "Scale") {
+    ) -> Result<bool, EngineError> {
+        if self.force_action_with_calls(idx, definition_id, "Scale")? {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
             object.state.direction = direction;
-            return true;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     /// ObjectActionHangle (C4ObjectCom.cpp:112-118).
@@ -22763,15 +22847,15 @@ impl Engine {
         idx: usize,
         definition_id: &DefinitionId,
         direction: Direction,
-    ) -> bool {
-        if self.force_action_with_calls(idx, definition_id, "Hangle") {
+    ) -> Result<bool, EngineError> {
+        if self.force_action_with_calls(idx, definition_id, "Hangle")? {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
             object.state.direction = direction;
-            return true;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     /// ObjectActionTumble (C4ObjectCom.cpp:74-80).
@@ -22782,25 +22866,30 @@ impl Engine {
         direction: Direction,
         xdir: C4Fixed,
         ydir: C4Fixed,
-    ) -> bool {
-        if self.force_action_with_calls(idx, definition_id, "Tumble") {
+    ) -> Result<bool, EngineError> {
+        if self.force_action_with_calls(idx, definition_id, "Tumble")? {
             let object = &mut self.objects[idx];
             object.state.direction = direction;
             object.fixed_velocity = FixedVec2::new(xdir, ydir);
             object.state.velocity = object.velocity_pixels();
-            return true;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     /// ObjectComStopDig (C4ObjectCom.cpp:776-784): Stand + clear a Dig
     /// command at the stack top.
-    fn object_com_stop_dig(&mut self, idx: usize, definition_id: &DefinitionId) {
-        self.object_action_stand(idx, definition_id);
+    fn object_com_stop_dig(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+    ) -> Result<(), EngineError> {
+        self.object_action_stand(idx, definition_id)?;
         let object = &mut self.objects[idx];
         if object.commands.front_command_name() == Some("Dig") {
             object.commands.clear_front();
         }
+        Ok(())
     }
 
     /// C4Object::ContactCheck (C4Movement.cpp:166-182): perform the shape
@@ -22899,7 +22988,7 @@ impl Engine {
         definition_id: &DefinitionId,
         procedure: ActionProcedure,
         solid_mask_indices: &[usize],
-    ) -> bool {
+    ) -> Result<bool, EngineError> {
         const CORNER_RANGE: i32 = ATTACH_RANGE + 2;
         let corner_okay = |engine: &mut Engine, range_x: i32, range_y: i32| -> bool {
             let (position, direction) = {
@@ -22935,7 +23024,7 @@ impl Engine {
             }
             match found {
                 Some(ranges) => ranges,
-                None => return false,
+                None => return Ok(false),
             }
         } else {
             // Swimming: range min to max.
@@ -22943,13 +23032,13 @@ impl Engine {
             while !corner_okay(self, range, range) {
                 range += 1;
                 if range > CORNER_RANGE {
-                    return false;
+                    return Ok(false);
                 }
             }
             (range, range)
         };
-        if !self.force_action_with_calls(idx, definition_id, "KneelUp") {
-            self.force_action_with_calls(idx, definition_id, "Walk");
+        if !self.force_action_with_calls(idx, definition_id, "KneelUp")? {
+            self.force_action_with_calls(idx, definition_id, "Walk")?;
         }
         let object = &mut self.objects[idx];
         object.fixed_velocity = FixedVec2::ZERO;
@@ -22965,7 +23054,7 @@ impl Engine {
             fixtoi(object.fixed_position.y),
         );
         self.update_sector_for_index(idx);
-        true
+        Ok(true)
     }
 
     fn apply_no_attach_action(&mut self, idx: usize, library: &ActionLibrary) {
@@ -25100,8 +25189,12 @@ impl Engine {
                         self.apply_object_update(flag_id, ObjectUpdate::new().clear_container())?;
                         if let Some(flag_index) = self.find_object_index(flag_id) {
                             let flag_definition = self.objects[flag_index].definition_id.clone();
-                            self.force_action_with_calls(flag_index, &flag_definition, "FlyBase");
-                            self.objects[flag_index].state.action.target = Some(base_id);
+                            self.force_action_with_target_and_calls(
+                                flag_index,
+                                &flag_definition,
+                                "FlyBase",
+                                base_id,
+                            )?;
                         }
                         // Assign new base (:1013-1018); Contents.CloseMenus
                         // is app-side.
@@ -36207,6 +36300,179 @@ protected func OnOldAbort()
     }
 
     #[test]
+    fn engine_set_action_same_name_dispatches_start_then_abort_with_saved_phase(
+    ) -> Result<(), EngineError> {
+        // C4Object::SetAction saves iLastPhase before resetting Phase even for
+        // a same-action call (C4Object.cpp:4104-4105, 4132-4146), then runs
+        // StartCall before AbortCall and passes that saved phase
+        // (C4Object.cpp:4171-4193; default call mask C4Object.h:307-309).
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            hooks.set_on_call(move |name, args| {
+                if matches!(name, "OnLoopStart" | "OnLoopAbort") {
+                    calls.lock().unwrap().push((name.to_string(), args.to_vec()));
+                }
+            });
+        }
+        let mut definition = Definition::from_script(
+            "LOOP",
+            "Loop actor",
+            "#strict\nprotected func OnLoopStart() { return(1); }\nprotected func OnLoopAbort(int iPhase) { return(1); }\n",
+        )?;
+        definition.set_c4_callback_convention(true);
+        definition.set_debugger_hooks(hooks);
+        definition.configure_actions(
+            Some("Loop".to_string()),
+            HashMap::from([(
+                "Loop".to_string(),
+                ActionSpec::default()
+                    .with_start_call("OnLoopStart")
+                    .with_abort_call("OnLoopAbort"),
+            )]),
+        );
+
+        let mut action = ActionState::new("Loop");
+        action.phase = 7;
+        action.time = 42;
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        let id = engine.spawn_object(
+            SpawnConfig::new("LOOP")
+                .with_action(action)
+                .with_loaded(true),
+        )?;
+        let index = engine.find_object_index(id).expect("actor exists");
+        let definition_id = engine.objects[index].definition_id.clone();
+
+        assert!(engine.force_action_with_calls(index, &definition_id, "Loop")?);
+
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "OnLoopStart");
+        assert_eq!(calls[1].0, "OnLoopAbort");
+        assert_eq!(calls[1].1.first(), Some(&Value::Int(7)));
+        let action = &engine.objects[index].state.action;
+        assert_eq!(action.phase, 0, "same-name SetAction resets Phase");
+        assert_eq!(action.time, 42, "same-name SetAction preserves Time");
+        Ok(())
+    }
+
+    #[test]
+    fn engine_set_action_stops_callbacks_after_start_invalidates_receiver(
+    ) -> Result<(), EngineError> {
+        // After each callback C++ stops the SetAction sequence if the object
+        // was removed or its definition changed (C4Object.cpp:4178-4198).
+        // RemoveObject clears Status (C4Script.cpp:456-460); ChangeDef swaps
+        // Def in place (C4Object.cpp:1207-1227).
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            hooks.set_on_call(move |name, _args| {
+                if matches!(
+                    name,
+                    "RemoveOnStart" | "OldAbort" | "ChangeOnStart" | "AbortAfterChange"
+                ) {
+                    calls.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+
+        let mut remove_def = Definition::from_script(
+            "RMOV",
+            "Remove on start",
+            "#strict\nprotected func RemoveOnStart() { RemoveObject(); return(1); }\nprotected func OldAbort(int iPhase) { return(1); }\n",
+        )?;
+        remove_def.set_c4_callback_convention(true);
+        remove_def.set_debugger_hooks(hooks.clone());
+        remove_def.configure_actions(
+            Some("Old".to_string()),
+            HashMap::from([
+                (
+                    "Old".to_string(),
+                    ActionSpec::default().with_abort_call("OldAbort"),
+                ),
+                (
+                    "New".to_string(),
+                    ActionSpec::default().with_start_call("RemoveOnStart"),
+                ),
+            ]),
+        );
+        let mut remove_engine = Engine::new();
+        remove_engine.register_definition(remove_def)?;
+        let removed = remove_engine.spawn_object(
+            SpawnConfig::new("RMOV")
+                .with_action(ActionState::new("Old"))
+                .with_loaded(true),
+        )?;
+        let remove_index = remove_engine
+            .find_object_index(removed)
+            .expect("remove actor exists");
+        let remove_definition = remove_engine.objects[remove_index].definition_id.clone();
+        assert!(remove_engine.force_action_with_calls(
+            remove_index,
+            &remove_definition,
+            "New"
+        )?);
+        assert!(remove_engine.objects[remove_index].destroyed);
+        assert_eq!(calls.lock().unwrap().as_slice(), ["RemoveOnStart"]);
+
+        calls.lock().unwrap().clear();
+        let mut changed_def = Definition::from_script(
+            "NEWD",
+            "Changed definition",
+            "#strict\nprotected func AbortAfterChange(int iPhase) { return(1); }\n",
+        )?;
+        changed_def.set_c4_callback_convention(true);
+        changed_def.set_debugger_hooks(hooks.clone());
+        changed_def.configure_actions(
+            Some("Rest".to_string()),
+            HashMap::from([
+                ("Rest".to_string(), ActionSpec::default()),
+                (
+                    "Old".to_string(),
+                    ActionSpec::default().with_abort_call("AbortAfterChange"),
+                ),
+            ]),
+        );
+        let mut swap_def = Definition::from_script(
+            "SWAP",
+            "Change on start",
+            "#strict\nprotected func ChangeOnStart() { ChangeDef(NEWD); return(1); }\n",
+        )?;
+        swap_def.set_c4_callback_convention(true);
+        swap_def.set_debugger_hooks(hooks);
+        swap_def.configure_actions(
+            Some("Old".to_string()),
+            HashMap::from([
+                ("Old".to_string(), ActionSpec::default()),
+                (
+                    "New".to_string(),
+                    ActionSpec::default().with_start_call("ChangeOnStart"),
+                ),
+            ]),
+        );
+        let mut swap_engine = Engine::new();
+        swap_engine.register_definition(changed_def)?;
+        swap_engine.register_definition(swap_def)?;
+        let swapped = swap_engine.spawn_object(
+            SpawnConfig::new("SWAP")
+                .with_action(ActionState::new("Old"))
+                .with_loaded(true),
+        )?;
+        let swap_index = swap_engine
+            .find_object_index(swapped)
+            .expect("swap actor exists");
+        let swap_definition = swap_engine.objects[swap_index].definition_id.clone();
+        assert!(swap_engine.force_action_with_calls(swap_index, &swap_definition, "New")?);
+        assert_eq!(swap_engine.objects[swap_index].definition_id, "NEWD");
+        assert_eq!(calls.lock().unwrap().as_slice(), ["ChangeOnStart"]);
+        Ok(())
+    }
+
+    #[test]
     fn forced_action_change_triggers_abort_callbacks() {
         use std::sync::{Arc, Mutex};
 
@@ -43365,7 +43631,9 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
             vtx: 0,
         };
 
-        engine.apply_physics_at_index(idx);
+        engine
+            .apply_physics_at_index(idx)
+            .expect("walk physics applies");
 
         assert_eq!(
             engine.objects[idx].rotation_velocity,
@@ -43406,7 +43674,9 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
             vtx: 0,
         };
 
-        engine.apply_physics_at_index(idx);
+        engine
+            .apply_physics_at_index(idx)
+            .expect("stationary walk physics applies");
 
         assert_eq!(
             engine.objects[idx].rotation_velocity,
@@ -43447,7 +43717,9 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
         };
         engine.objects[idx].rotation_velocity = itofix(3);
 
-        engine.apply_physics_at_index(idx);
+        engine
+            .apply_physics_at_index(idx)
+            .expect("walk fallback physics applies");
 
         assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
     }
@@ -57635,12 +57907,16 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert_eq!(landscape.density_at(12, 8, &engine.materials), 100);
         assert_eq!(landscape.density_at(16, 4, &engine.materials), 0);
 
-        assert!(engine.object_action_corner_scale(
-            idx,
-            &definition_id,
-            ActionProcedure::Swim,
-            &[],
-        ));
+        assert!(
+            engine
+                .object_action_corner_scale(
+                    idx,
+                    &definition_id,
+                    ActionProcedure::Swim,
+                    &[],
+                )
+                .expect("corner scale action applies")
+        );
         let object = &engine.objects[idx];
         assert_eq!(object.state.position, Vector2::new(16, 4));
         assert_eq!(object.state.action.name, "Walk");
@@ -60431,7 +60707,8 @@ public func Probe(object target) {
             CNAT_RIGHT | CNAT_LEFT | CNAT_TOP,
             &definition_id,
             &[],
-        );
+        )
+        .expect("contact action applies");
 
         let object = &engine.objects[idx];
         assert_eq!(object.state.position, Vector2::new(10, 13));
@@ -61786,6 +62063,131 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
         );
     }
 
+    // ObjectActionCornerScale changes Swim -> Walk through SetAction before
+    // returning from movement (C4ObjectCom.cpp:191-217), so Walk's StartCall
+    // and Swim's AbortCall have both run synchronously (C4Object.cpp:4171-4197)
+    // before the later Def TimerCall arm in C4Object::Execute
+    // (C4Object.cpp:1047-1117). A TimerCall SetAction("Sit") must therefore
+    // dispatch Sitting exactly once, without replaying the movement transition
+    // against the now-current Sit action.
+    #[test]
+    fn movement_action_callbacks_run_before_timer_set_action_like_cpp() {
+        let script = r#"#strict
+local iWalkStarted;
+local iSwimAborted;
+local iSitting;
+local fMovementCallbacksRanBeforeTimer;
+protected func Activity()
+{
+  fMovementCallbacksRanBeforeTimer = (iWalkStarted == 1 && iSwimAborted == 1);
+  SetAction("Sit");
+  return(1);
+}
+private func WalkStart()
+{
+  iWalkStarted = iWalkStarted + 1;
+  return(1);
+}
+private func SwimAbort()
+{
+  iSwimAborted = iSwimAborted + 1;
+  return(1);
+}
+private func Sitting()
+{
+  if (GetEffect("PossessionSpell", this())) return();
+  iSitting = iSitting + 1;
+  Random(10);
+  return(1);
+}
+"#;
+        let mut definition =
+            Definition::from_script("WIPF", "Wipf", script).expect("script compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        definition.set_contact_density(50);
+        definition.set_physical(PhysicalInfo {
+            swim: 100_000,
+            ..PhysicalInfo::default()
+        });
+        definition.configure_actions(
+            Some("Swim".to_string()),
+            HashMap::from([
+                (
+                    "Swim".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("SWIM")
+                        .with_abort_call("SwimAbort"),
+                ),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_start_call("WalkStart"),
+                ),
+                (
+                    "Sit".to_string(),
+                    ActionSpec::default().with_start_call("Sitting"),
+                ),
+            ]),
+        );
+        definition.set_timer(1);
+        definition.set_timer_call(Some("Activity".to_string()));
+
+        let mut engine = Engine::with_seed(424_242);
+        let mut landscape = vehicle_grid_landscape(24, 24);
+        landscape.set_world_height(24);
+        for x in 0..24 {
+            landscape.grid_write_byte(x, 12, 1);
+        }
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let wipf = engine
+            .spawn_object(
+                SpawnConfig::new("WIPF")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_action(ActionState::new("Swim"))
+                    .with_direction(Direction::Right)
+                    .with_command_direction(CommandDirection::Down)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("wipf spawns");
+        let wipf_idx = engine.find_object_index(wipf).expect("wipf exists");
+        engine.objects[wipf_idx].state.in_liquid = true;
+        engine.objects[wipf_idx].fixed_velocity.y = itofix(1);
+        let count_before = engine.rng.count;
+
+        engine.tick().expect("timer callback succeeds");
+
+        let wipf_idx = engine.find_object_index(wipf).expect("wipf exists");
+        let locals = &engine.objects[wipf_idx].state.local_vars;
+        let observed = (
+            locals.get("fMovementCallbacksRanBeforeTimer").cloned(),
+            locals.get("iWalkStarted").cloned(),
+            locals.get("iSwimAborted").cloned(),
+            locals.get("iSitting").cloned(),
+            engine.rng.count - count_before,
+        );
+        assert_eq!(
+            observed,
+            (
+                Some(Value::Bool(true)),
+                Some(Value::Int(1)),
+                Some(Value::Int(1)),
+                Some(Value::Int(1)),
+                1,
+            ),
+            "CornerScale's Walk StartCall and Swim AbortCall precede TimerCall; \
+             the TimerCall's Sitting callback then consumes one Random(10) draw"
+        );
+    }
+
     #[test]
     fn timer_spawn_on_remaining_list_side_executes_in_the_same_frame_like_cpp() {
         // C4Game::ExecObjects walks a LIVE reverse-list iterator
@@ -62368,11 +62770,25 @@ func ReadRestoredSky() {
         let mut hut = Definition::from_script("HUT1", "Hut", BASIC_OBJECT_SCRIPT)?;
         hut.set_can_be_base(true);
         engine.register_definition(hut)?;
-        let mut flag = Definition::from_script("FLAG", "Flag", BASIC_OBJECT_SCRIPT)?;
+        let mut flag = Definition::from_script(
+            "FLAG",
+            "Flag",
+            r#"#strict
+local flyBaseStartTarget;
+protected func FlyBaseStart()
+{
+  flyBaseStartTarget = GetActionTarget();
+  return(1);
+}
+"#,
+        )?;
+        flag.set_c4_callback_convention(true);
         let mut actions = HashMap::new();
         actions.insert(
             "FlyBase".to_string(),
-            ActionSpec::default().with_procedure("attach"),
+            ActionSpec::default()
+                .with_procedure("attach")
+                .with_start_call("FlyBaseStart"),
         );
         flag.configure_actions(None, actions);
         engine.register_definition(flag)?;
@@ -62382,6 +62798,30 @@ func ReadRestoredSky() {
             SpawnConfig::new("FLAG").with_owner(1).with_container(hut),
         )?;
         Ok((hut, flag))
+    }
+
+    #[test]
+    fn exec_base_flybase_start_call_sees_base_target() -> Result<(), EngineError> {
+        // ExecBase passes the base as FlyBase's action target
+        // (C4Object.cpp:1010-1012). SetAction installs that target first
+        // (C4Object.cpp:4148-4150), before dispatching StartCall
+        // (C4Object.cpp:4171-4184).
+        let mut engine = Engine::new();
+        let (hut, flag) = base_fixture(&mut engine)?;
+        for _ in 0..11 {
+            engine.tick()?;
+        }
+
+        let flag_index = engine.find_object_index(flag).expect("flag exists");
+        assert_eq!(
+            engine.objects[flag_index]
+                .state
+                .local_vars
+                .get("flyBaseStartTarget"),
+            Some(&Value::Object(hut.as_u64())),
+            "FlyBase StartCall observes the supplied base target"
+        );
+        Ok(())
     }
 
     #[test]

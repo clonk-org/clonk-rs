@@ -1005,7 +1005,7 @@ impl Engine {
                     }
                 }
                 COM_DOWN => {
-                    self.object_com_stop(index);
+                    self.object_com_stop(index)?;
                 }
                 COM_DIG_D => self.object_com_dig_double(index)?,
                 COM_DIG_S => {
@@ -1031,14 +1031,14 @@ impl Engine {
             },
             ActionProcedure::Bridge | ActionProcedure::Build | ActionProcedure::Chop => {
                 if com == COM_DOWN {
-                    self.object_com_stop(index);
+                    self.object_com_stop(index)?;
                 }
             }
             ActionProcedure::Fight => match com {
                 COM_LEFT => self.object_com_movement(index, CommandDirection::Left)?,
                 COM_RIGHT => self.object_com_movement(index, CommandDirection::Right)?,
                 COM_DOWN => {
-                    self.object_com_stop(index);
+                    self.object_com_stop(index)?;
                 }
                 _ => {}
             },
@@ -1222,12 +1222,12 @@ impl Engine {
             },
             ActionProcedure::Bridge | ActionProcedure::Build | ActionProcedure::Chop => {
                 if com == COM_DOWN {
-                    self.object_com_stop(index);
+                    self.object_com_stop(index)?;
                 }
             }
             ActionProcedure::Fight => match com {
                 COM_DOWN => {
-                    self.object_com_stop(index);
+                    self.object_com_stop(index)?;
                 }
                 _ => self.auto_stop_update_com_dir(index)?,
             },
@@ -1301,7 +1301,7 @@ impl Engine {
         if new_com_dir == CommandDirection::Stop
             && self.object_procedure(index) == ActionProcedure::Dig
         {
-            self.object_com_stop(index);
+            self.object_com_stop(index)?;
             return Ok(());
         }
         self.object_com_movement(index, new_com_dir)
@@ -1739,7 +1739,7 @@ impl Engine {
     }
 
     /// `ObjectComStop` (C4ObjectCom.cpp:239-245): cease action, then stand.
-    fn object_com_stop(&mut self, index: usize) -> bool {
+    fn object_com_stop(&mut self, index: usize) -> Result<bool, EngineError> {
         let definition_id = self.objects[index].definition_id.clone();
         self.object_action_stand(index, &definition_id)
     }
@@ -1767,7 +1767,7 @@ impl Engine {
     fn object_com_dig(&mut self, index: usize) -> Result<bool, EngineError> {
         let physical = self.object_physical(index);
         let definition_id = self.objects[index].definition_id.clone();
-        if physical.can_dig == 0 || !self.force_action_with_calls(index, &definition_id, "Dig") {
+        if physical.can_dig == 0 || !self.force_action_with_calls(index, &definition_id, "Dig")? {
             return Ok(false);
         }
         // ObjectActionDig resets the Dig2Object request (:143).
@@ -1855,7 +1855,7 @@ impl Engine {
             return Ok(true);
         }
         let definition_id = self.objects[index].definition_id.clone();
-        if !self.force_action_with_calls(index, &definition_id, "Jump") {
+        if !self.force_action_with_calls(index, &definition_id, "Jump")? {
             return Ok(false);
         }
         let object = &mut self.objects[index];
@@ -1910,7 +1910,7 @@ impl Engine {
         }
         let target = self.objects[index].state.action.target;
         let definition_id = self.objects[index].definition_id.clone();
-        if !self.object_action_stand(index, &definition_id) {
+        if !self.object_action_stand(index, &definition_id)? {
             return Ok(false);
         }
         // CloseMenu (:269) is app-side.
