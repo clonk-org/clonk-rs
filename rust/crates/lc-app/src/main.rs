@@ -2001,7 +2001,7 @@ impl AudioContext {
         target: Option<ObjectId>,
         volume: u8,
         looped: bool,
-        _multiple: bool,
+        multiple: bool,
         custom_falloff: Option<i32>,
         snapshot: &SimulationSnapshot,
         focus: Option<&ObjectSnapshot>,
@@ -2011,6 +2011,19 @@ impl AudioContext {
             return Ok(());
         }
         let key = SoundInstanceKey::new(name, target);
+        // FnSound checks IsSoundPlaying before StartSoundEffect unless the
+        // caller explicitly requests multiple instances (C4Script.cpp:
+        // 2317-2319). Do this before asking the fixed-size mixer for a slot.
+        if !multiple {
+            let already_playing = self
+                .active_channels
+                .get(&key)
+                .is_some_and(|info| self.system.channel_is_playing(info.channel));
+            if already_playing {
+                return Ok(());
+            }
+            self.active_channels.remove(&key);
+        }
         let Some(handle) = self.ensure_sound(name)? else {
             return Ok(());
         };
@@ -13941,6 +13954,32 @@ mod tests {
         }
     }
 
+    fn silent_pcm_wav(duration_ms: u32) -> Vec<u8> {
+        const SAMPLE_RATE: u32 = 44_100;
+        const CHANNELS: u16 = 1;
+        const BITS_PER_SAMPLE: u16 = 16;
+        let sample_count = u64::from(duration_ms) * u64::from(SAMPLE_RATE) / 1_000;
+        let data_len = u32::try_from(sample_count * u64::from(BITS_PER_SAMPLE / 8))
+            .expect("test WAV fits u32");
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&CHANNELS.to_le_bytes());
+        bytes.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+        let byte_rate = SAMPLE_RATE * u32::from(CHANNELS) * u32::from(BITS_PER_SAMPLE / 8);
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        let block_align = CHANNELS * (BITS_PER_SAMPLE / 8);
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&BITS_PER_SAMPLE.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.resize(44 + data_len as usize, 0);
+        bytes
+    }
+
     struct EnvGuard {
         _lock: parking_lot::ReentrantMutexGuard<'static, ()>,
         saved: Vec<(String, Option<OsString>)>,
@@ -14120,6 +14159,44 @@ mod tests {
             compute_mix_values(&info, &snapshot, Some(&listener), Vector2::new(0, 0));
         assert!((volume - 0.8).abs() < 1e-6);
         assert_eq!(pan, 0.0);
+    }
+
+    #[test]
+    fn repeated_object_sound_reuses_the_cpp_instance_before_allocating_a_channel() {
+        // FnSound returns before StartSoundEffect when the same wildcard is
+        // already playing on the object (C4Script.cpp:2317-2319). This must
+        // happen before SDL_mixer asks for another free channel.
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Goldrush.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("HorseWalk1.wav"), silent_pcm_wav(1_000))
+            .expect("write horse sound");
+
+        let options = AudioOptions {
+            max_channels: 1,
+            ..AudioOptions::default()
+        };
+        let mut audio = AudioContext::try_new(options).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+
+        let horse = make_object(1, "HORS", Vector2::new(100, 100));
+        let snapshot = make_snapshot(vec![horse.clone()], Vec::new());
+        let play = |audio: &mut AudioContext| {
+            audio.start_sound(
+                "HorseWalk*",
+                Some(horse.id),
+                100,
+                false,
+                false,
+                None,
+                &snapshot,
+                Some(&horse),
+                horse.position,
+            )
+        };
+
+        play(&mut audio).expect("first horse step starts");
+        play(&mut audio).expect("duplicate horse step is already playing");
     }
 
     #[test]
