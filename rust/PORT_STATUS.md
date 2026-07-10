@@ -7,7 +7,7 @@ slices are recorded in `git log -- rust/ parity/`.
 
 Workspace nextest, strict clippy, snapshots, and parity are green. Scenario
 load/apply and activation are 93/93. The pinned Goldrush comparator first
-diverges at frame 1417 (`FXU1` #1796 is 10 px too high in Rust).
+diverges at frame 1417 (`WMPF` #1796 spawns 10 px too high; `FireTop` is missing).
 
 ```sh
 cargo nextest run --workspace
