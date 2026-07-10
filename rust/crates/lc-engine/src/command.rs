@@ -11308,6 +11308,25 @@ impl ThrowState {
             }
         }
 
+        // An untargeted Throw while contained is a put/take operation, not
+        // the outside Throw action (C4Command.cpp:966-970). ObjectComPutTake
+        // chooses the requested item or the actor's first content and enters
+        // it into the containing object (C4ObjectCom.cpp:700-712).
+        if let Some(container_id) = ctx.object.container {
+            let item_id = self
+                .target
+                .filter(|target| ctx.object.contents.contains(target))
+                .or_else(|| ctx.object.contents.first().copied());
+            let events = item_id
+                .map(|object_id| CommandEvent::ApplyObjectUpdate {
+                    object_id,
+                    update: ObjectUpdate::new().with_container(container_id),
+                })
+                .into_iter()
+                .collect();
+            return CommandStepResult::completed(pending_update).with_events(events);
+        }
+
         let mut update = pending_update.unwrap_or_default();
         update.command_direction = Some(CommandDirection::Stop);
 

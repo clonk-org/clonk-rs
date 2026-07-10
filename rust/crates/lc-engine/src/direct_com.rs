@@ -2790,6 +2790,56 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
         }
     }
 
+    #[test]
+    fn contained_throw_puts_carried_item_into_container_immediately() {
+        // ContainedControl executes C4CMD_Throw synchronously
+        // (C4Object.cpp:3280-3282); C4Command::Throw delegates a contained
+        // Clonk to ObjectComPutTake, which puts its first content into the
+        // containing object (C4Command.cpp:966-970; C4ObjectCom.cpp:700-712).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", "#strict\n").expect("hut compiles"),
+            )
+            .expect("register hut");
+        engine
+            .register_definition(
+                Definition::from_script("FLAG", "Flag", "#strict\n").expect("flag compiles"),
+            )
+            .expect("register flag");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn hut");
+        let flag = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(crew))
+            .expect("spawn carried flag");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+
+        engine.player_in_com(1, COM_THROW, 0).expect("throw");
+
+        let flag = engine.object_snapshot(flag).expect("flag snapshot");
+        assert_eq!(
+            flag.container,
+            Some(hut),
+            "the carried flag is put into the hut before control returns"
+        );
+        assert!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew snapshot")
+                .command_stack
+                .is_empty(),
+            "the synchronous Throw command has finished"
+        );
+    }
+
     /// Crew contained in a VehicleControl=Inside vehicle whose script is
     /// `vehicle_script`.
     fn inside_vehicle_fixture(engine: &mut Engine, vehicle_script: &str) -> (ObjectId, ObjectId) {
