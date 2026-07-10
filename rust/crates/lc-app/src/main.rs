@@ -8886,7 +8886,7 @@ impl GameApp {
                     }
                     self.status_text = "Control bindings reset to defaults".to_string();
                 }
-                ControlOptionsCommand::Close => self.show_main_menu(),
+                ControlOptionsCommand::Close => self.close_options_menu(),
                 ControlOptionsCommand::UnsupportedKey(key) => {
                     self.status_text =
                         format!("“{}” cannot be used for controls", format_key_label(key));
@@ -9144,7 +9144,7 @@ impl GameApp {
 
         for action in actions {
             match action {
-                OptionsDlgAction::Back => self.show_main_menu(),
+                OptionsDlgAction::Back => self.close_options_menu(),
                 OptionsDlgAction::SheetChanged(_) => self.play_ui_sound("Command"),
             }
         }
@@ -9429,6 +9429,10 @@ impl GameApp {
         self.startup_about_dialog = Some(dialog);
         self.startup_view = StartupView::About;
         self.status_text.clear();
+    }
+
+    fn close_options_menu(&mut self) {
+        self.show_main_menu();
     }
 
     fn show_main_menu(&mut self) {
