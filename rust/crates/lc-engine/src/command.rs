@@ -4724,6 +4724,66 @@ mod tests {
         }
     }
 
+    // C4Command::Build (C4Command.cpp:823-899) accepts every extant target,
+    // not only living objects. Its same-container arm at :887 is guarded by
+    // Target->Contained, so two uncontained objects still have to approach.
+    #[test]
+    fn build_moves_to_uncontained_nonliving_structure() {
+        let builder_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(0, 0);
+        builder.physical.can_construct = 1;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(100, 0);
+        target.status = ObjectStatus::Normal;
+        target.alive = false;
+        target.category = CATEGORY_STRUCTURE;
+        target.construction = FULL_CON * 4 / 5;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(target.id, target);
+
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut state = BuildState::from_request(
+            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
+        )
+        .expect("build state");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none(), "must not build remotely");
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.target, None);
+                assert_eq!(request.tx, Some(100));
+                assert_eq!(request.ty, Some(0));
+            }
+            other => panic!("expected MoveTo request, got {other:?}"),
+        }
+    }
+
     #[test]
     fn activate_completes_when_target_outside_container() {
         let actor_id = ObjectId::new(1);
@@ -8712,7 +8772,7 @@ impl BuildState {
             return CommandStepResult::failed(Some(update));
         };
 
-        if !target_snapshot.is_active() {
+        if !target_snapshot.is_status_active() {
             let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
             return CommandStepResult::failed(Some(update));
         }
@@ -8757,7 +8817,8 @@ impl BuildState {
             }
         };
 
-        let same_container = builder.container == target_snapshot.container;
+        let same_container =
+            target_snapshot.container.is_some() && builder.container == target_snapshot.container;
         let builder_inside_target = builder.container == Some(self.target);
         let target_inside_builder = target_snapshot.container == Some(builder.id);
 
