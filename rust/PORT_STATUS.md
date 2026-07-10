@@ -7,7 +7,7 @@ slices are recorded in `git log -- rust/ parity/`.
 
 Workspace nextest, strict clippy, snapshots, and parity are green. Scenario
 load/apply and activation are 93/93. The pinned Goldrush comparator first
-diverges at frame 1077 (object 642: Rust `Breeze`, C++ `Still`).
+diverges at frame 1085 (object 636: subpixel position/velocity).
 
 ```sh
 cargo nextest run --workspace
