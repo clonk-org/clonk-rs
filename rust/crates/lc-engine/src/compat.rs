@@ -2717,6 +2717,57 @@ fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnComponentAll (C4Script.cpp:1873-1883): the explicit object is required;
+/// every positive-count component other than `component` makes the result
+/// false. Zero-count C4IDList entries are ignored.
+fn component_all(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "ComponentAll",
+        "obj",
+    )?;
+    let component = parse_definition_argument(args.get(1), "ComponentAll")?;
+    let Some(target) = target else {
+        return Ok(Value::Nil);
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(object) = context.get_world_object(target) else {
+            return Ok(Value::Nil);
+        };
+        let components = context
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.components.clone())
+            .or_else(|| {
+                object
+                    .full_state()
+                    .map(|state| state.components.clone())
+            })
+            .unwrap_or_else(|| {
+                context
+                    .definition_metadata(object.definition_id())
+                    .map(|metadata| {
+                        metadata
+                            .components
+                            .iter()
+                            .map(|(id, count)| (DefinitionId::from(id.as_str()), *count))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+        Ok(Value::Bool(components.iter().all(|(id, count)| {
+            *count == 0
+                || component
+                    .as_deref()
+                    .is_some_and(|component| id.as_str().eq_ignore_ascii_case(component))
+        })))
+    })
+}
+
 /// FnInLiquid (C4Script.cpp:1864-1868): reads the object's CACHED
 /// InLiquid flag (updated during movement, C4Movement.cpp:443-460) —
 /// never the landscape at call time. Nil without an object.
@@ -6542,6 +6593,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Enter", enter);
     script.register_host_function("Exit", exit_container);
     script.register_host_function("GetComponent", get_component);
+    script.register_host_function("ComponentAll", component_all);
     script.register_host_function("GrabContents", grab_contents);
     script.register_host_function("InLiquid", in_liquid);
     script.register_host_function("Material", material);
@@ -26813,6 +26865,7 @@ mod tests {
         "CheckEnergyNeedChain",
         "ClearParticles",
         "CloseMenu",
+        "ComponentAll",
         "Contained",
         "Contents",
         "ContentsCount",
@@ -30688,6 +30741,89 @@ func ProbeBadIndex(id) {
             result.expect("GetComponent succeeds"),
             Value::C4Id("METL".into()),
             "index form returns the id"
+        );
+    }
+
+    #[test]
+    fn sawmill_component_all_accepts_only_pure_wood_components() {
+        // FnComponentAll (C4Script.cpp:1873-1883) rejects an object when
+        // any component OTHER than the requested id has a positive count.
+        // The real sawmill applies that predicate at Script.c:166-197,
+        // especially the fSawable expression on line 176.
+        let object = |id, definition: &str, components: &[(&str, u32)]| {
+            let mut state = crate::preview_spawn_state(
+                Vector2::ZERO,
+                OWNER_NONE,
+                OWNER_NONE,
+                DEFAULT_CATEGORY,
+                crate::FULL_CON,
+                Vec::new(),
+            );
+            state.components = components
+                .iter()
+                .map(|(id, count)| (DefinitionId::from(*id), *count))
+                .collect();
+            HostWorldObject::new(
+                ObjectId::new(id),
+                definition,
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                crate::FULL_CON,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            )
+            .with_full_state(Rc::new(state))
+        };
+        let world = HostWorldContext::from_objects([
+            object(2, "TRE2", &[("WOOD", 5), ("METL", 0)]),
+            object(3, "MIXD", &[("WOOD", 1), ("METL", 1)]),
+            object(4, "WOOD", &[]),
+        ]);
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                r#"#strict 2
+func Sawable(obj) {
+  return GetID(obj) != WOOD && GetComponent(WOOD, 0, obj)
+         && ComponentAll(obj, WOOD);
+}
+func Missing() { return ComponentAll(nil, WOOD); }
+"#,
+            )
+            .expect("sawmill predicate compiles");
+
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            assert_eq!(
+                engine.call("Sawable", &[Value::Object(2)])?,
+                Value::Bool(true),
+                "positive WOOD plus zero-count foreign entries is pure"
+            );
+            assert_eq!(
+                engine.call("Sawable", &[Value::Object(3)])?,
+                Value::Bool(false),
+                "a positive foreign component makes the object impure"
+            );
+            assert_eq!(
+                engine.call("Sawable", &[Value::Object(4)])?,
+                Value::Bool(false),
+                "the sawmill excludes loose WOOD before ComponentAll"
+            );
+            engine.call("Missing", &[])
+        });
+        assert_eq!(
+            result.expect("sawmill predicate runs"),
+            Value::Nil,
+            "a missing ComponentAll target returns nil"
         );
     }
 
