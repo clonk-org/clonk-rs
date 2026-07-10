@@ -1969,10 +1969,7 @@ fn get_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
-        match player.team {
-            Some(team) => Ok(Value::Int(team)),
-            None => Ok(Value::Nil),
-        }
+        Ok(Value::Int(player.team.unwrap_or(0)))
     })
 }
 
@@ -28237,7 +28234,9 @@ func Trigger(object pOther)
     }
 
     #[test]
-    fn get_player_team_returns_nil_when_unset() {
+    fn get_player_team_returns_zero_for_valid_unteamed_player_like_cpp() {
+        // FnGetPlayerTeam distinguishes a missing player (nil) from a valid
+        // player with no team (integer zero; C4Script.cpp:5716-5728).
         let player = PlayerState {
             id: 7,
             name: "Eta".into(),
@@ -28249,7 +28248,7 @@ func Trigger(object pOther)
         );
         let args = [Value::Int(7)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_player_team(&args));
-        assert_eq!(result.expect("GetPlayerTeam succeeds"), Value::Nil);
+        assert_eq!(result.expect("GetPlayerTeam succeeds"), Value::Int(0));
     }
 
     #[test]
