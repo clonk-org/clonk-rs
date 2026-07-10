@@ -20131,7 +20131,7 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
         index += 1;
         match arg {
             Value::String(name) if !name.is_empty() => Some(name.clone()),
-            Value::String(_) | Value::Nil => None,
+            Value::String(_) | Value::Nil | Value::Int(0) | Value::Bool(false) => None,
             other => {
                 return Err(RuntimeError::new(format!(
                     "SetGraphics: expected string or nil for action, got {}",
@@ -36284,6 +36284,30 @@ public func SeedFull()
         assert_eq!(overlay.mode, GraphicsOverlayMode::Action);
         assert_eq!(overlay.definition.as_deref(), Some("Clonk"));
         assert_eq!(overlay.action.as_deref(), Some("Walk"));
+    }
+
+    #[test]
+    fn set_graphics_converts_falsy_action_to_nil() {
+        // A pre-strict-nil engine call Set0()s every falsy parameter before
+        // converting it (C4AulExec.cpp:1364-1375), so FnSetGraphics' C4String*
+        // action accepts integer zero as null (C4Script.cpp:4372). Hazard's
+        // Sentry Gun relies on this exact optional slot
+        // (Sentry Gun.c4d/Script.c:51).
+        let (result, _) = with_object_host_context(|| {
+            set_graphics(&[
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Int(1),
+                Value::Int(GraphicsOverlayMode::Action as i32),
+                Value::Int(0),
+            ])
+        });
+
+        assert_eq!(
+            result.expect("zero action converts to nil"),
+            Value::Bool(false)
+        );
     }
 
     #[test]
