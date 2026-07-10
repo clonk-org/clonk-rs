@@ -48,8 +48,8 @@ use control_options::{
     binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
 };
 use game_over::{
-    GameOverAction, GameOverClassicResources, GameOverEntry, GameOverOutcome, GameOverState,
-    NextMissionButton,
+    EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction,
+    GameOverClassicResources, GameOverEntry, GameOverOutcome, GameOverState, NextMissionButton,
 };
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
 use ingame_menu::{
@@ -5741,6 +5741,116 @@ fn overlay_text_needs_update(current: &str, default_prefix: &str) -> bool {
     current.is_empty() || current.starts_with(default_prefix)
 }
 
+fn build_game_over_dialog(
+    snapshot: &SimulationSnapshot,
+    local_owner: i32,
+    screen_width: u32,
+    title: String,
+    next_mission: &lc_engine::NextMissionState,
+    mut definition_picture: impl FnMut(&str) -> Option<ImageData>,
+) -> GameOverState {
+    // C4GameOverDlg freezes C4RoundResults into presentation state; player
+    // results are joined through C4PlayerInfo::ID, not the runtime player
+    // number (C4GameOverDlg.cpp:145-220; C4PlayerInfoListBox.cpp:132-143,
+    // 344-425,1529-1592).
+    let goals = snapshot
+        .round_results
+        .goals
+        .iter()
+        .map(|definition_id| EvaluationGoal {
+            definition_id: definition_id.clone(),
+            fulfilled: snapshot
+                .round_results
+                .fulfilled_goals
+                .contains(definition_id),
+            picture: definition_picture(definition_id),
+        })
+        .collect();
+
+    // C++ presents winners before losers while retaining player-info order
+    // inside each group (C4PlayerInfoListBox.cpp:1529-1592).
+    let mut players = Vec::new();
+    for won in [true, false] {
+        for state in snapshot.players.iter().filter(|state| state.won == won) {
+            let Some(result) = snapshot
+                .round_results
+                .players
+                .iter()
+                .find(|result| result.player_info_id == state.player_info_id)
+            else {
+                continue;
+            };
+            let color = state
+                .color
+                .map(|RgbColor { r, g, b }| Color::opaque(r, g, b))
+                .unwrap_or_else(|| default_owner_color(state.id));
+            players.push(EvaluationPlayer {
+                player_info_id: state.player_info_id,
+                name: if state.name.trim().is_empty() {
+                    format!("Player {}", state.id)
+                } else {
+                    state.name.clone()
+                },
+                won: state.won,
+                color_dw: u32::from(color.r) << 16
+                    | u32::from(color.g) << 8
+                    | u32::from(color.b),
+                total_playing_time: result.total_playing_time,
+                score_old: if snapshot.round_results.hide_settlement_score {
+                    -1
+                } else {
+                    result.score_old
+                },
+                score_new: (!snapshot.round_results.hide_settlement_score)
+                    .then_some(result.score_new)
+                    .flatten(),
+                custom_evaluation_strings: result.custom_evaluation_strings.clone(),
+                big_icon: None,
+            });
+        }
+    }
+    let evaluation = EvaluationViewModel::new(goals, players);
+
+    // Keep the asset-less fallback usable, but derive it from the same frozen
+    // evaluation instead of treating every still-Active player as a winner or
+    // showing the unrelated in-round Points/Wealth/Value counters.
+    let entries = evaluation
+        .players()
+        .map(|player| {
+            let runtime = snapshot
+                .players
+                .iter()
+                .find(|state| state.player_info_id == player.player_info_id);
+            GameOverEntry {
+                player_id: runtime.map_or(player.player_info_id, |state| state.id),
+                name: player.name.clone(),
+                outcome: if player.won {
+                    GameOverOutcome::Victory
+                } else {
+                    GameOverOutcome::Defeat
+                },
+                wealth: 0,
+                score: player.score_new.unwrap_or(player.score_old),
+                value: 0,
+                is_local: runtime.is_some_and(|state| state.id == local_owner),
+                color: Some(Color::opaque(
+                    ((player.color_dw >> 16) & 0xff) as u8,
+                    ((player.color_dw >> 8) & 0xff) as u8,
+                    (player.color_dw & 0xff) as u8,
+                )),
+            }
+        })
+        .collect();
+    let next_mission = (!next_mission.path.is_empty()).then(|| NextMissionButton {
+        label: next_mission.text.clone(),
+        description: next_mission.description.clone(),
+    });
+    let mut dialog =
+        GameOverState::with_next_mission(title, entries, screen_width, next_mission);
+    dialog.set_evaluation(evaluation);
+    dialog
+}
+
 impl GameApp {
     fn new(
         width: u32,
@@ -9842,45 +9952,6 @@ impl GameApp {
         }
     }
 
-    fn build_game_over_entries(&self) -> Vec<GameOverEntry> {
-        self.snapshot
-            .players
-            .iter()
-            .map(|state| {
-                let name = if state.name.trim().is_empty() {
-                    format!("Player {}", state.id)
-                } else {
-                    state.name.clone()
-                };
-                let status_outcome = match state.status {
-                    PlayerStatus::Active => GameOverOutcome::Victory,
-                    PlayerStatus::Eliminated | PlayerStatus::Surrendered => GameOverOutcome::Defeat,
-                    PlayerStatus::Inactive | PlayerStatus::TeamSelection => {
-                        GameOverOutcome::Observer
-                    }
-                };
-                let outcome = if state.surrendered {
-                    GameOverOutcome::Defeat
-                } else {
-                    status_outcome
-                };
-                let color = state
-                    .color
-                    .map(|RgbColor { r, g, b }| Color::opaque(r, g, b));
-                GameOverEntry {
-                    player_id: state.id,
-                    name,
-                    outcome,
-                    wealth: state.wealth,
-                    score: state.points,
-                    value: state.value,
-                    is_local: state.id == self.local_owner,
-                    color,
-                }
-            })
-            .collect()
-    }
-
     fn dismiss_game_over_dialog(&mut self) {
         if self.game_over_dialog.take().is_some() {
             self.play_ui_sound("DoorClose");
@@ -9919,17 +9990,24 @@ impl GameApp {
             .as_ref()
             .map(|scenario| scenario.title.clone())
             .unwrap_or_else(|| "Scenario".to_string());
-        let entries = self.build_game_over_entries();
         let next_mission = self.engine.next_mission();
-        let next_mission = (!next_mission.path.is_empty()).then(|| NextMissionButton {
-            label: next_mission.text.clone(),
-            description: next_mission.description.clone(),
-        });
-        let mut dialog = GameOverState::with_next_mission(
-            scenario_title.clone(),
-            entries,
+        let mut dialog = build_game_over_dialog(
+            &self.snapshot,
+            self.local_owner,
             self.graphics.surface().width(),
+            scenario_title.clone(),
             next_mission,
+            |definition_id| {
+                self.engine
+                    .definition_picture_image(definition_id)
+                    .map(|picture| {
+                        ImageData::from_arc(
+                            picture.width(),
+                            picture.height(),
+                            picture.pixels(),
+                        )
+                    })
+            },
         );
         dialog.configure_classic_fonts(self.assets.clonk_fonts.as_deref());
         let status_message = if dialog.subtitle().is_empty() {
@@ -16546,6 +16624,121 @@ mod tests {
             Some("Tutorial.c4f/Tutorial02.c4s")
         );
         assert!(app.game_over_dialog.is_none());
+    }
+
+    #[test]
+    fn evaluation_dialog_joins_frozen_results_by_player_info_id() {
+        // C4GameOverDlg consumes C4RoundResults goals/player records, and
+        // C4PlayerInfoListBox joins each record through C4PlayerInfo::GetID,
+        // never C4Player::Number (C4GameOverDlg.cpp:145-220;
+        // C4PlayerInfoListBox.cpp:132-143,344-425,1529-1592).
+        let mut snapshot = make_snapshot(Vec::new(), Vec::new());
+        snapshot.players = vec![
+            PlayerState {
+                id: 99,
+                player_info_id: 41,
+                name: "Player".into(),
+                status: PlayerStatus::Eliminated,
+                won: true,
+                color: Some(RgbColor::new(0xe8, 0, 0)),
+                ..PlayerState::default()
+            },
+            PlayerState {
+                id: 41,
+                player_info_id: 7,
+                name: "Decoy".into(),
+                status: PlayerStatus::Active,
+                won: false,
+                ..PlayerState::default()
+            },
+        ];
+        snapshot.round_results = lc_engine::RoundResultsState {
+            goals: vec!["SCRG".into()],
+            fulfilled_goals: vec!["SCRG".into()],
+            players: vec![
+                lc_engine::RoundResultsPlayerState {
+                    player_info_id: 41,
+                    total_playing_time: 3_661,
+                    score_old: 10,
+                    score_new: Some(110),
+                    custom_evaluation_strings: String::new(),
+                },
+                lc_engine::RoundResultsPlayerState {
+                    player_info_id: 99,
+                    total_playing_time: 9,
+                    score_old: 900,
+                    score_new: Some(901),
+                    custom_evaluation_strings: "wrong runtime-number join".into(),
+                },
+            ],
+            ..lc_engine::RoundResultsState::default()
+        };
+        let next_mission = lc_engine::NextMissionState {
+            path: "Tutorial.c4f\\Tutorial02.c4s".into(),
+            text: "Next tutorial".into(),
+            description: "Continue learning".into(),
+        };
+        let picture = ImageData::new(1, 1, vec![12, 34, 56, 255]);
+
+        let dialog = build_game_over_dialog(
+            &snapshot,
+            99,
+            1024,
+            "decoy title".into(),
+            &next_mission,
+            |definition_id| (definition_id == "SCRG").then(|| picture.clone()),
+        );
+
+        assert_eq!(
+            dialog.actions(),
+            vec![
+                GameOverAction::End,
+                GameOverAction::Continue,
+                GameOverAction::NextMission,
+            ],
+            "Tutorial02 is exposed through the classic next-mission button"
+        );
+        assert_eq!(dialog.evaluation().goals().len(), 1);
+        let goal = &dialog.evaluation().goals()[0];
+        assert_eq!(goal.definition_id, "SCRG");
+        assert!(goal.fulfilled);
+        assert_eq!(
+            goal.picture.as_ref().map(|image| image.pixels().to_vec()),
+            Some(vec![12, 34, 56, 255])
+        );
+        let player = dialog
+            .evaluation()
+            .player_by_info_id(41)
+            .expect("result joins the profile ID");
+        assert_eq!(player.name, "Player");
+        assert!(player.won, "won comes from frozen player info, not Active");
+        assert_eq!(player.color_dw, 0x00e8_0000);
+        assert_eq!(player.total_playing_time, 3_661);
+        assert_eq!((player.score_old, player.score_new), (10, Some(110)));
+        assert_eq!(
+            dialog.evaluation().players().count(),
+            1,
+            "a result keyed like the runtime number must not attach to the player"
+        );
+
+        snapshot.round_results.hide_settlement_score = true;
+        let hidden = build_game_over_dialog(
+            &snapshot,
+            99,
+            1024,
+            "decoy title".into(),
+            &next_mission,
+            |_| None,
+        );
+        let player = hidden
+            .evaluation()
+            .player_by_info_id(41)
+            .expect("hidden result still joins the profile");
+        assert_eq!(
+            (player.score_old, player.score_new),
+            (-1, None),
+            "HideSettlementScoreInEvaluation suppresses the score line"
+        );
     }
 
     #[test]

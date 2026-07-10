@@ -910,7 +910,7 @@ impl GameOverState {
             None,
         );
 
-        self.render_classic_entries(surface, resources.fonts, layout.player_area);
+        self.render_classic_evaluation(surface, resources);
         for (index, (button, rect)) in self.buttons.iter().zip(layout.buttons).enumerate() {
             resources.skin.draw_button(
                 surface,
@@ -926,6 +926,107 @@ impl GameOverState {
         }
     }
 
+    fn render_classic_evaluation(
+        &self,
+        surface: &mut Surface,
+        resources: GameOverClassicResources<'_>,
+    ) {
+        let layout =
+            self.classic_evaluation_layout(surface.width(), surface.height(), resources.fonts);
+        for (goal, goal_layout) in self.evaluation.goals().iter().zip(&layout.goals) {
+            if let Some(picture) = goal.picture.as_ref() {
+                let grayscale = (!goal.fulfilled).then(|| grayscale_image(picture, 30));
+                draw_classic_image(
+                    surface,
+                    grayscale.as_ref().unwrap_or(picture),
+                    goal_layout.picture,
+                );
+            }
+            if goal.fulfilled {
+                let star = resources
+                    .gui_icons
+                    .and_then(|icons| crop_image(icons, CLASSIC_FULFILLED_STAR_SOURCE))
+                    .map(|star| lc_frontend::classic_gui::blacken_transparent_pixels(&star));
+                if let Some(star) = star.as_ref() {
+                    draw_classic_image(surface, star, goal_layout.fulfilled_star);
+                }
+            }
+        }
+
+        for (player, player_layout) in self.evaluation.players().zip(&layout.players) {
+            lc_frontend::classic_gui::draw_engine_box(
+                surface,
+                player_layout.row.x,
+                player_layout.row.y,
+                player_layout.row.x + player_layout.row.w - 1,
+                player_layout.row.y + player_layout.row.h - 1,
+                if player.won {
+                    0x4faf_7a00
+                } else {
+                    0x7faf_afaf
+                },
+                None,
+            );
+
+            let owner_color = Color::opaque(
+                ((player.color_dw >> 16) & 0xff) as u8,
+                ((player.color_dw >> 8) & 0xff) as u8,
+                (player.color_dw & 0xff) as u8,
+            );
+            let fallback_icon = resources
+                .player
+                .map(|image| lc_frontend::hud::colorize_by_owner(image, owner_color));
+            if let Some(icon) = player.big_icon.as_ref().or(fallback_icon.as_ref()) {
+                draw_classic_image(surface, icon, player_layout.icon);
+            }
+
+            draw_clonk_text(
+                surface,
+                &resources.fonts.text,
+                player_layout.name_anchor.0,
+                player_layout.name_anchor.1,
+                &format!(
+                    "{} ({})",
+                    player.name,
+                    if player.won { "won" } else { "lost" }
+                ),
+                if player.won {
+                    Color::opaque(0xff, 0xdf, 0x00)
+                } else {
+                    Color::opaque(0xff, 0xff, 0xff)
+                },
+                TextAlign::Left,
+            );
+
+            if player.score_old >= 0 {
+                render_settlement_score(
+                    surface,
+                    resources.fonts,
+                    resources.score,
+                    player_layout.score_anchor,
+                    player.score_old,
+                    player.score_new,
+                );
+            }
+            let total = player.total_playing_time;
+            draw_clonk_text(
+                surface,
+                &resources.fonts.text,
+                player_layout.time_anchor.0,
+                player_layout.time_anchor.1,
+                &format!(
+                    "Total playing time: {:02}:{:02}:{:02}",
+                    total / 3_600,
+                    (total / 60) % 60,
+                    total % 60
+                ),
+                Color::opaque(0xff, 0xff, 0xff),
+                TextAlign::Right,
+            );
+        }
+    }
+
+    #[allow(dead_code)]
     fn render_classic_entries(&self, surface: &mut Surface, fonts: &ClonkFontSet, area: IntRect) {
         let content_left = area.x;
         let content_right = area.x + area.w;
@@ -1069,6 +1170,111 @@ fn classic_button_width(fonts: &ClonkFontSet) -> i32 {
 
 fn surface_rect(rect: IntRect) -> Rect {
     Rect::new(rect.x, rect.y, rect.w.max(0) as u32, rect.h.max(0) as u32)
+}
+
+fn draw_classic_image(surface: &mut Surface, image: &ImageData, rect: IntRect) {
+    lc_frontend::draw_image_bilinear(
+        surface,
+        &lc_gui::Rect::new(
+            rect.x as f32,
+            rect.y as f32,
+            rect.w.max(0) as f32,
+            rect.h.max(0) as f32,
+        ),
+        image,
+        None,
+    );
+}
+
+fn crop_image(image: &ImageData, source: IntRect) -> Option<ImageData> {
+    let x = u32::try_from(source.x).ok()?;
+    let y = u32::try_from(source.y).ok()?;
+    let width = u32::try_from(source.w).ok()?;
+    let height = u32::try_from(source.h).ok()?;
+    (width > 0
+        && height > 0
+        && x.checked_add(width)? <= image.width()
+        && y.checked_add(height)? <= image.height())
+    .then(|| {
+        let source_pixels = image.pixels();
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for row in y..y + height {
+            let start = ((row * image.width() + x) * 4) as usize;
+            pixels.extend_from_slice(&source_pixels[start..start + (width * 4) as usize]);
+        }
+        ImageData::new(width, height, pixels)
+    })
+}
+
+fn grayscale_image(image: &ImageData, offset: i32) -> ImageData {
+    // CStdDDraw::Grayscale averages the three channels, adds 30 for goal
+    // pictures and clamps, preserving alpha (StdDDraw2.cpp:1241-1260).
+    let mut pixels = image.pixels().to_vec();
+    for pixel in pixels.chunks_exact_mut(4) {
+        let gray = ((i32::from(pixel[0]) + i32::from(pixel[1]) + i32::from(pixel[2])) / 3
+            + offset)
+            .clamp(0, 255) as u8;
+        pixel[..3].fill(gray);
+    }
+    ImageData::new(image.width(), image.height(), pixels)
+}
+
+fn render_settlement_score(
+    surface: &mut Surface,
+    fonts: &ClonkFontSet,
+    score_icon: Option<&ImageData>,
+    anchor: (i32, i32),
+    score_old: i32,
+    score_new: Option<i32>,
+) {
+    // C4PlayerInfoListBox::UpdateScoreLabel emits Ico:Settlement followed by
+    // gray old/gain and white new score. CStdFont scales the inline image to
+    // iGfxLineHgt while preserving aspect (C4PlayerInfoListBox.cpp:404-413;
+    // StdFont.cpp:845-896).
+    let text = score_new.map_or_else(
+        || format!("<c afafaf>({score_old})</c> Score"),
+        |score_new| {
+            format!(
+                "<c afafaf>{score_old} ({:+})</c> {score_new} Score",
+                score_new - score_old
+            )
+        },
+    );
+    let text_width = fonts.text.measure(&text, true).0;
+    let (icon_width, icon_height) = score_icon.map_or((0, 0), |icon| {
+        let height = fonts.text.cell_height;
+        (
+            (icon.width() as i32 * height / icon.height().max(1) as i32).max(1),
+            height,
+        )
+    });
+    let icon_advance = if icon_width > 0 {
+        icon_width + fonts.text.h_space
+    } else {
+        0
+    };
+    let x = anchor.0 - text_width - icon_advance;
+    if let Some(icon) = score_icon {
+        draw_classic_image(
+            surface,
+            icon,
+            IntRect {
+                x,
+                y: anchor.1,
+                w: icon_width,
+                h: icon_height,
+            },
+        );
+    }
+    draw_clonk_text(
+        surface,
+        &fonts.text,
+        x + icon_advance,
+        anchor.1,
+        &text,
+        Color::opaque(0xff, 0xff, 0xff),
+        TextAlign::Left,
+    );
 }
 
 fn draw_clonk_text(
@@ -1603,6 +1809,140 @@ mod tests {
             ),
             surface.get_pixel((layout.dialog.x + 20) as u32, footer_probe_y as u32),
             "classic dialog has no permanent description footer"
+        );
+    }
+
+    #[test]
+    fn classic_render_draws_cpp_goal_and_winner_row_instead_of_the_invented_table() {
+        // C4GoalDisplay draws each buffered 64x64 goal and overlays Ico_Star
+        // in its lower-right half. The evaluation PlayerListItem is 54px
+        // high and uses the winning engine box/name treatment, player icon,
+        // cumulative time and settlement-score line
+        // (C4GameOverDlg.cpp:25-78,145-220; C4PlayerInfoListBox.cpp:72-154,
+        // 344-425,651-680).
+        let fonts = endeavour_fonts();
+        let caption = solid_image(192, 23, [200, 0, 0, 255]);
+        let button = solid_image(128, 32, [0, 120, 0, 255]);
+        let button_down = solid_image(128, 32, [0, 0, 180, 255]);
+        let highlight = solid_image(16, 16, [80, 0, 0, 255]);
+        let goal_picture = solid_image(64, 64, [220, 10, 20, 255]);
+        let mut gui_icon_pixels = vec![0; 240 * 360 * 4];
+        for y in 320..360 {
+            for x in 0..40 {
+                let offset = ((y * 240 + x) * 4) as usize;
+                gui_icon_pixels[offset..offset + 4].copy_from_slice(&[0, 230, 40, 255]);
+            }
+        }
+        let gui_icons = ImageData::new(240, 360, gui_icon_pixels);
+        let player = solid_image(48, 48, [0, 0, 255, 255]);
+        let score = solid_image(60, 30, [0, 210, 240, 255]);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight));
+
+        let mut state = GameOverState::with_next_mission(
+            "decoy scenario title".into(),
+            vec![entry(99, "decoy table row", GameOverOutcome::Victory, true)],
+            1024,
+            Some(NextMissionButton {
+                label: "Next tutorial".into(),
+                description: "Continue learning".into(),
+            }),
+        );
+        state.set_evaluation(EvaluationViewModel::new(
+            vec![EvaluationGoal {
+                definition_id: "SCRG".into(),
+                fulfilled: true,
+                picture: Some(goal_picture),
+            }],
+            vec![EvaluationPlayer {
+                player_info_id: 41,
+                name: "Player".into(),
+                won: true,
+                color_dw: 0x00e8_0000,
+                total_playing_time: 3_661,
+                score_old: 10,
+                score_new: Some(110),
+                custom_evaluation_strings: String::new(),
+                big_icon: None,
+            }],
+        ));
+        let layout = state.classic_evaluation_layout(1024, 600, &fonts);
+        let background = Color::opaque(11, 22, 33);
+        let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
+        surface.fill(background);
+        state.render(
+            &mut surface,
+            &lc_graphics::BitmapFont::new(),
+            Some(GameOverClassicResources::new(
+                skin,
+                &fonts,
+                Some(&gui_icons),
+                Some(&player),
+                Some(&score),
+            )),
+        );
+
+        let goal = layout.goals[0];
+        assert_eq!(
+            surface.get_pixel((goal.picture.x + 12) as u32, (goal.picture.y + 12) as u32),
+            Some(Color::opaque(220, 10, 20)),
+            "the SCRG definition picture fills the classic 64px goal facet"
+        );
+        assert_eq!(
+            surface.get_pixel(
+                (goal.fulfilled_star.x + 16) as u32,
+                (goal.fulfilled_star.y + 16) as u32
+            ),
+            Some(Color::opaque(0, 230, 40)),
+            "fulfilled SCRG receives GUIIcons Ico_Star in its lower-right half"
+        );
+
+        let row = layout.players[0].row;
+        let mut expected = Surface::new(1, 1, lc_graphics::PixelFormat::Rgba8888);
+        expected.fill(background);
+        lc_frontend::classic_gui::draw_engine_box(
+            &mut expected,
+            0,
+            0,
+            0,
+            0,
+            lc_frontend::classic_gui::STANDARD_BACKGROUND_COLOR,
+            None,
+        );
+        lc_frontend::classic_gui::draw_engine_box(
+            &mut expected,
+            0,
+            0,
+            0,
+            0,
+            0x4faf_7a00,
+            None,
+        );
+        assert_eq!(
+            surface.get_pixel((row.x + 400) as u32, (row.y + row.h / 2) as u32),
+            expected.get_pixel(0, 0),
+            "winner row uses C4GUI_WinningBackgroundColor"
+        );
+        assert_eq!(
+            surface.get_pixel(
+                (layout.players[0].icon.x + 20) as u32,
+                (layout.players[0].icon.y + 20) as u32
+            ),
+            Some(Color::opaque(232, 0, 0)),
+            "the default Player.png icon is ColorByOwner-tinted"
+        );
+        assert!(
+            (row.y..row.y + fonts.text.cell_height).any(|y| {
+                (row.x + row.w - 300..row.x + row.w).any(|x| {
+                    surface.get_pixel(x as u32, y as u32)
+                        == Some(Color::opaque(0, 210, 240))
+                })
+            }),
+            "the settlement score line contains the Score.png inline icon"
+        );
+        assert_eq!(
+            surface.get_pixel(100, 75),
+            surface.get_pixel(100, 110),
+            "the fabricated Player/Outcome/Wealth/Score/Value table is gone"
         );
     }
 
