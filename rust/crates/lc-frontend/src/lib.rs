@@ -22,11 +22,11 @@ mod startup_menu;
 mod startup_options;
 
 use lc_engine::{
-    DefinitionActionGraphics, DefinitionRect, Direction, DrawTransform, EnvironmentFrame,
-    EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay,
-    ObjectId, ObjectSnapshot, ObjectStatus, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
-    SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent, CATEGORY_SORT_LIMIT, FULL_CON,
-    OWNER_NONE,
+    DefinitionActionGraphics, DefinitionId, DefinitionRect, Direction, DrawTransform,
+    EnvironmentFrame, EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape,
+    ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, RgbColor, SimulationSnapshot,
+    SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent,
+    CATEGORY_SORT_LIMIT, FULL_CON, OWNER_NONE,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -563,6 +563,20 @@ pub struct CrewOverlay {
     /// `Info->sRankName` for the extra rank line when `Rank > 0`
     /// (src/C4Game.cpp:1877-1881).
     pub rank_name: Option<String>,
+    /// The grouped sections of `cursor->Contents.DrawIDList`
+    /// (src/C4Viewport.cpp:911-917; src/C4ObjectList.cpp:343-372).
+    pub inventory: Vec<InventoryOverlay>,
+}
+
+/// Presentation data for one grouped cursor-inventory section. The first
+/// object represents the group, matching `C4ObjectListIterator::GetNext`
+/// (src/C4ObjectList.cpp:849-903).
+#[derive(Clone, Debug, PartialEq)]
+pub struct InventoryOverlay {
+    pub object_id: ObjectId,
+    pub definition_id: DefinitionId,
+    pub picture: Option<ImageData>,
+    pub count: usize,
 }
 
 #[derive(Debug)]
@@ -5480,6 +5494,7 @@ mod tests {
                 rank_symbols: None,
                 info_name: info_name.map(str::to_string),
                 rank_name: None,
+                inventory: Vec::new(),
             }],
             commands: Vec::new(),
         }];

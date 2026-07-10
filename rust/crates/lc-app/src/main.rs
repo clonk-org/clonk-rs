@@ -12318,6 +12318,7 @@ fn collect_player_overlays(
                 rank_symbols: None,
                 info_name: None,
                 rank_name: None,
+                inventory: Vec::new(),
             });
         }
         // C4Player::SelectCount (src/C4Viewport.cpp:1320); the initial
