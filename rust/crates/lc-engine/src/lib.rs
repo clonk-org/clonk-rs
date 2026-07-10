@@ -12616,6 +12616,7 @@ impl Engine {
                                 burn_turn_to: definition.burn_turn_to().map(str::to_string),
                                 incomplete_activity: definition.incomplete_activity(),
                                 no_burn_decay: definition.no_burn_decay(),
+                                no_burn_damage: definition.no_burn_damage(),
                                 contact_incinerate: definition.contact_incinerate(),
                                 contain_blast: definition.contain_blast(),
                                 no_horizontal_move: definition.no_horizontal_move(),
@@ -15616,13 +15617,60 @@ impl Engine {
                 }
                 // An earlier callback may have killed this fire mid-batch —
                 // C4Effect::Execute skips dead entries (C4Effect.cpp:326-336).
-                let still_burning = self.objects[idx]
+                let entry = self.objects[idx]
                     .state
                     .effects
                     .iter()
-                    .any(|effect| effect.number == event.effect.number);
-                if still_burning {
-                    let stop_events = self.exec_object_fire(idx, frame, event.effect.number);
+                    .find(|effect| effect.number == event.effect.number)
+                    .cloned();
+                if let Some(entry) = entry {
+                    if !entry.start_dispatched {
+                        // A check-chain survivor (AddEffect("Fire") with
+                        // higher-priority effects present) gets its engine
+                        // FnFxFireStart at the first execution — C++ ran it
+                        // inside the ctor after the Check pass
+                        // (C4Effect.cpp:118-133); the deferred protocol
+                        // lands here one frame later. The AddEffect rVals
+                        // still sit in vars [causedBy, blasted, incObj].
+                        let caused_by = match entry.vars().first() {
+                            Some(EffectVarValue::Int(value)) => *value,
+                            Some(EffectVarValue::Bool(flag)) => i32::from(*flag),
+                            _ => 0,
+                        };
+                        let blasted =
+                            matches!(entry.vars().get(1), Some(EffectVarValue::Bool(true)))
+                                || matches!(
+                                    entry.vars().get(1),
+                                    Some(EffectVarValue::Int(value)) if *value != 0
+                                );
+                        let incinerating = match entry.vars().get(2) {
+                            Some(EffectVarValue::Object(id)) => Some(ObjectId::new(*id)),
+                            _ => None,
+                        };
+                        if let Some(pending) = self.objects[idx]
+                            .state
+                            .effects
+                            .iter_mut()
+                            .find(|effect| effect.number == entry.number)
+                        {
+                            pending.start_dispatched = true;
+                        }
+                        let started = self.fire_effect_start_engine(
+                            idx,
+                            entry.number,
+                            caused_by,
+                            blasted,
+                            incinerating,
+                        )?;
+                        self.refresh_object_ocf(idx);
+                        if !started {
+                            // the denied Start kills the entry without a
+                            // Stop call (C4Effect ctor, C4Effect.cpp:128-131)
+                            self.objects[idx].remove_effect_by_number(entry.number);
+                            continue;
+                        }
+                    }
+                    let stop_events = self.exec_object_fire(idx, frame, entry.number);
                     segment.extend(stop_events);
                 }
             }
@@ -22634,6 +22682,33 @@ impl Engine {
             let (inserted, _) = self.objects[idx].insert_effect(entry);
             inserted.number
         };
+        if !self.fire_effect_start_engine(idx, fire_number, caused_by, blasted, incinerating)? {
+            // the denied Start kills the fresh effect without a Stop call
+            // (C4Effect ctor, C4Effect.cpp:128-131)
+            self.objects[idx].remove_effect_by_number(fire_number);
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// The engine FnFxFireStart body (C4Effect.cpp:560-641) against an
+    /// EXISTING fire effect entry: extinguisher gate, BurnTurnTo, contents
+    /// ejection, the ~FireMode determination, effect-var writes, ONE
+    /// FirePhase draw and the Incineration/IncinerationEx callback — in
+    /// C++ ledger order. False = C4Fx_Start_Deny (the caller removes the
+    /// entry).
+    fn fire_effect_start_engine(
+        &mut self,
+        idx: usize,
+        fire_number: i32,
+        caused_by: i32,
+        blasted: bool,
+        incinerating: Option<ObjectId>,
+    ) -> Result<bool, EngineError> {
+        // fail if already on fire (C4Effect.cpp:567)
+        if self.objects[idx].state.on_fire {
+            return Ok(false);
+        }
         // In extinguishing material: no fire caused (C4Effect.cpp:574-583)
         let position = self.objects[idx].state.position;
         let in_extinguisher = self
@@ -22677,9 +22752,6 @@ impl Engine {
         // (attached-object detach, C4Effect.cpp:595-600: needs the
         // DFA_ATTACH action scan — open)
         if !fire_caused {
-            // the denied Start kills the fresh effect without a Stop call
-            // (C4Effect ctor, C4Effect.cpp:128-131)
-            self.objects[idx].remove_effect_by_number(fire_number);
             // blasted but not incinerated: IncinerationEx (C4Effect.cpp:602-607)
             if blasted {
                 let _ =
@@ -30855,6 +30927,159 @@ mod tests {
             .effects
             .iter()
             .any(|effect| effect.name == "Fire"));
+        Ok(())
+    }
+
+    #[test]
+    fn script_fx_fire_timer_overload_shadows_and_chains_to_the_engine() -> Result<(), EngineError>
+    {
+        // FxFire* are engine functions (AddFunc, C4Script.cpp:6994-6997): a
+        // script FxFireTimer overloads them — the burn only runs when the
+        // overload chains via inherited(...) (C4Aul OwnerOverloaded
+        // includes engine functions).
+        let mut engine = Engine::with_seed(43);
+        engine.register_definition(
+            Definition::from_script(
+                "BARN",
+                "Barn",
+                "#strict\nfunc FxFireTimer(pObj, iNumber, iTime) { return inherited(pObj, iNumber, iTime); }\n",
+            )
+            .expect("barn compiles"),
+        )?;
+        engine.register_definition(
+            Definition::from_script(
+                "SHED",
+                "Shed",
+                "#strict\nfunc FxFireTimer(pObj, iNumber, iTime) { return 0; }\n",
+            )
+            .expect("shed compiles"),
+        )?;
+        let barn = engine.spawn_object(SpawnConfig::new("BARN"))?;
+        let shed = engine.spawn_object(SpawnConfig::new("SHED"))?;
+        let barn_idx = engine.find_object_index(barn).expect("barn exists");
+        let shed_idx = engine.find_object_index(shed).expect("shed exists");
+        assert!(engine.incinerate_object(barn_idx, 1, false, None)?);
+        assert!(engine.incinerate_object(shed_idx, 1, false, None)?);
+        let barn_con = engine.objects[barn_idx].state.construction;
+        let shed_con = engine.objects[shed_idx].state.construction;
+        engine.tick()?;
+        let barn_idx = engine.find_object_index(barn).expect("barn survives");
+        let shed_idx = engine.find_object_index(shed).expect("shed survives");
+        assert_eq!(
+            engine.objects[barn_idx].state.construction,
+            barn_con - 100,
+            "inherited() chains to the engine FnFxFireTimer burn"
+        );
+        assert_eq!(
+            engine.objects[shed_idx].state.construction,
+            shed_con,
+            "an overload that swallows the call replaces the engine burn"
+        );
+        assert!(
+            engine.objects[shed_idx]
+                .state
+                .effects
+                .iter()
+                .any(|effect| effect.name == "Fire"),
+            "FX_OK keeps the effect alive"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn add_effect_fire_runs_the_engine_fire_start() -> Result<(), EngineError> {
+        // AddEffect("Fire", pObj, 100, 1, ...) resolves the engine
+        // FnFxFireStart (C4Effect ctor pFnStart, C4Effect.cpp:118-133 +
+        // AddFunc C4Script.cpp:6994): the target ignites — OnFire, the
+        // FirePhase draw, effect vars [mode, causedBy, blasted, incObj]
+        // (C4Effect.cpp:609-634) — and AddEffect returns the number. A
+        // denied start (extinguishing material) marks the effect dead and
+        // returns 0 (C4Effect.cpp:128-133 + riStoredAsNumber).
+        let mut engine = Engine::with_seed(47);
+        engine.register_definition(
+            Definition::from_script(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc Torch(pVictim) { return AddEffect(\"Fire\", pVictim, 100, 1, 0, 0, 7, false); }\n",
+            )
+            .expect("actor compiles"),
+        )?;
+        engine.register_definition(simple_definition("Hut"))?;
+        let actor =
+            engine.spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))?;
+        let hut = engine.spawn_object(SpawnConfig::new("Hut"))?;
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        let mut mirror = engine.rng.clone();
+        let expected_phase = mirror.random(15);
+        let result =
+            engine.call_object_function(actor_idx, "Torch", vec![Value::Object(hut.as_u64())])?;
+        let hut_idx = engine.find_object_index(hut).expect("hut exists");
+        assert!(engine.objects[hut_idx].state.on_fire, "ignited");
+        assert_eq!(engine.objects[hut_idx].state.fire_phase, expected_phase);
+        assert_eq!(engine.objects[hut_idx].state.fire_caused_by, 7);
+        assert_eq!(engine.rng, mirror, "one FirePhase draw");
+        let fire = engine.objects[hut_idx]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Fire")
+            .cloned()
+            .expect("fire effect entry");
+        assert_eq!(result, Value::Int(fire.number), "AddEffect hands back the number");
+        assert_eq!(
+            fire.vars(),
+            &[
+                EffectVarValue::Int(2),
+                EffectVarValue::Int(7),
+                EffectVarValue::Bool(false),
+                EffectVarValue::Nil,
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn checked_fire_add_ignites_at_its_first_execution() -> Result<(), EngineError> {
+        // AddEffect("Fire") with same/higher-priority effects present runs
+        // the Fx*Effect check chain first (C4Effect ctor,
+        // C4Effect.cpp:97-116). A passing check ignites via the engine
+        // FnFxFireStart — deferred-protocol timing: at the effect's first
+        // execution instead of inside the ctor (documented divergence).
+        let mut engine = Engine::with_seed(53);
+        engine.register_definition(
+            Definition::from_script(
+                "BARN",
+                "Barn",
+                "#strict\nfunc FxShieldEffect(pObj, iNumber, szNew) { return 0; }\nfunc Kindle() { AddEffect(\"Shield\", this(), 200, 0); return AddEffect(\"Fire\", this(), 100, 1, 0, 0, 9); }\n",
+            )
+            .expect("barn compiles"),
+        )?;
+        let barn = engine.spawn_object(SpawnConfig::new("BARN"))?;
+        let barn_idx = engine.find_object_index(barn).expect("barn exists");
+        let _ = engine.call_object_function(barn_idx, "Kindle", Vec::new())?;
+        let barn_idx = engine.find_object_index(barn).expect("barn exists");
+        assert!(
+            !engine.objects[barn_idx].state.on_fire,
+            "the checked add defers the engine start"
+        );
+        let con_before = engine.objects[barn_idx].state.construction;
+        engine.tick()?;
+        let barn_idx = engine.find_object_index(barn).expect("barn survives");
+        assert!(engine.objects[barn_idx].state.on_fire, "ignited");
+        assert_eq!(engine.objects[barn_idx].state.fire_caused_by, 9);
+        assert_eq!(
+            engine.objects[barn_idx].state.construction,
+            con_before - 100,
+            "the first execution starts AND burns"
+        );
+        let fire = engine.objects[barn_idx]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Fire")
+            .expect("fire effect survives");
+        assert_eq!(fire.vars()[0], EffectVarValue::Int(2), "mode written");
+        assert_eq!(fire.vars()[1], EffectVarValue::Int(9), "cause remapped");
         Ok(())
     }
 
