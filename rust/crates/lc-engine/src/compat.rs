@@ -4,8 +4,9 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::command::{
-    CommandData, CommandId, CommandMode, CommandOperation, CommandRequest, CommandView,
-    MAX_COMMAND_STACK,
+    CommandData, CommandDefinitionSnapshot, CommandEvent, CommandId, CommandMode,
+    CommandObjectSnapshot, CommandOperation, CommandPlayerSnapshot, CommandRequest,
+    CommandRuntimeContext, CommandStack, CommandStackSnapshot, CommandView, MAX_COMMAND_STACK,
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::material::MaterialSet;
@@ -19,6 +20,7 @@ use crate::message::{
 use crate::ocf;
 use crate::rng::LcgRng;
 use crate::sector::{SectorMap, SectorObject};
+use crate::transfer::TransferZoneTable;
 #[cfg(test)]
 use crate::LiquidSegment;
 #[cfg(test)]
@@ -85,6 +87,7 @@ pub(crate) struct HostWorldObject {
     pub action_procedure: Option<String>,
     pub owner: i32,
     pub category: i32,
+    pub collectible: bool,
     pub energy: i32,
     pub construction: i32,
     #[allow(dead_code)]
@@ -107,6 +110,8 @@ pub(crate) struct HostWorldObject {
     /// (C4Script.cpp:918-945). A frame-start snapshot — mid-frame command
     /// changes are not re-read (C++ reads live).
     pub commands: Vec<CommandView>,
+    /// Full mutable command state for synchronous ExecuteCommand calls.
+    pub command_stack: CommandStackSnapshot,
     /// Full object-state snapshot for nested script calls (Find_Func,
     /// GameCall): lets host functions build a complete object scope for
     /// another object mid-VM-call. `None` in legacy fixture contexts.
@@ -337,6 +342,7 @@ impl HostWorldObject {
             action_procedure,
             owner,
             category,
+            collectible: false,
             energy,
             construction: construction.clamp(0, FULL_CON),
             damage,
@@ -352,6 +358,7 @@ impl HostWorldObject {
             contents: Vec::new(),
             draw_transform,
             commands: Vec::new(),
+            command_stack: CommandStackSnapshot::default(),
             state: None,
             last_energy_loss_cause: OWNER_NONE,
         }
@@ -362,8 +369,18 @@ impl HostWorldObject {
         self
     }
 
+    pub(crate) fn with_command_stack(mut self, command_stack: CommandStackSnapshot) -> Self {
+        self.command_stack = command_stack;
+        self
+    }
+
     pub(crate) fn with_alive(mut self, alive: bool) -> Self {
         self.alive = alive;
+        self
+    }
+
+    pub(crate) fn with_collectible(mut self, collectible: bool) -> Self {
+        self.collectible = collectible;
         self
     }
 
@@ -561,6 +578,9 @@ pub(crate) struct HostWorldContext {
     /// `Game.Script`, C4Script.cpp:3483). `None` when no scenario script is
     /// installed (and in fixture contexts).
     scenario_script: Option<Arc<ScriptEngine>>,
+    frame: u64,
+    base_buy_enabled: bool,
+    base_sell_enabled: bool,
 }
 
 impl Default for HostWorldContext {
@@ -586,11 +606,26 @@ impl Default for HostWorldContext {
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
             materials: None,
+            frame: 0,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
         }
     }
 }
 
 impl HostWorldContext {
+    pub(crate) fn with_command_settings(
+        mut self,
+        frame: u64,
+        base_buy_enabled: bool,
+        base_sell_enabled: bool,
+    ) -> Self {
+        self.frame = frame;
+        self.base_buy_enabled = base_buy_enabled;
+        self.base_sell_enabled = base_sell_enabled;
+        self
+    }
+
     pub(crate) fn with_structures_need_energy(mut self, value: bool) -> Self {
         self.structures_need_energy = value;
         self
@@ -724,6 +759,9 @@ impl HostWorldContext {
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
             materials: None,
+            frame: 0,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
         }
     }
 
@@ -5480,6 +5518,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
     script.register_host_function("GetComDir", get_com_dir);
+    script.register_host_function("ExecuteCommand", execute_command);
     script.register_host_function("SetCommand", set_command);
     script.register_host_function("AddCommand", add_command);
     script.register_host_function("AppendCommand", append_command);
@@ -7436,6 +7475,7 @@ pub(crate) struct EffectContextOutcome {
     pub player_commands: Vec<PlayerCommand>,
     pub object_order_commands: Vec<ObjectOrderCommand>,
     pub next_mission_commands: Vec<NextMissionCommand>,
+    pub menu_requests: Vec<crate::MenuRequest>,
     pub audio: AudioOutcome,
     pub trigger_game_over: bool,
     pub script_go: Option<bool>,
@@ -7486,6 +7526,7 @@ impl EffectContextOutcome {
             player_commands,
             object_order_commands,
             next_mission_commands: Vec::new(),
+            menu_requests: Vec::new(),
             audio,
             trigger_game_over,
             script_go,
@@ -7513,6 +7554,7 @@ impl EffectContextOutcome {
             player_commands: Vec::new(),
             object_order_commands: Vec::new(),
             next_mission_commands: Vec::new(),
+            menu_requests: Vec::new(),
             audio: AudioOutcome {
                 state: audio,
                 events: Vec::new(),
@@ -12199,11 +12241,8 @@ fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 /// FnGetCommand (C4Script.cpp:918-945): walk the command stack to entry
-/// iCommandNum and return the requested element. Element 0 (the C++
-/// CommandName string) is served from the world context's frame-start
-/// command-name snapshot; elements 1-5 (Target/Tx/Ty/Target2/Data) are
-/// not yet threaded through the host contexts and yield nil with a
-/// warning (documented gap).
+/// iCommandNum and return the requested element. Reads use the staged live
+/// stack when script has changed or executed commands in this call.
 fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let mut target_id: Option<ObjectId> = None;
@@ -12237,15 +12276,26 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(resolved) = resolved else {
             return Ok(Value::Nil);
         };
-        let Some(world_object) = context.get_world_object(resolved) else {
-            return Ok(Value::Nil);
-        };
         // `while (Command && iCommandNum--)` (C4Script.cpp:924): a negative
         // count walks off the list end -> nil.
         if command_num < 0 {
             return Ok(Value::Nil);
         }
-        let Some(view) = world_object.commands.get(command_num as usize) else {
+        let view = context
+            .object_scope(resolved)
+            .and_then(|scope| {
+                scope
+                    .live_commands
+                    .command_views()
+                    .get(command_num as usize)
+                    .cloned()
+            })
+            .or_else(|| {
+                context
+                    .get_world_object(resolved)
+                    .and_then(|object| object.commands.get(command_num as usize).cloned())
+            });
+        let Some(view) = view else {
             return Ok(Value::Nil);
         };
         // Element map (C4Script.cpp:926-945): 0 name, 1 Target, 2 Tx,
@@ -12957,6 +13007,9 @@ fn finish_command(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(object) = context.object_context_mut() else {
             return Ok(Value::Bool(false));
         };
+        object
+            .live_commands
+            .finish_entry_public(index, success);
         object
             .command_operations
             .push(CommandOperation::Finish { index, success });
@@ -15527,6 +15580,76 @@ fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 
         Ok(Value::Int(object.command_direction().to_script_value()))
     })
+}
+
+fn command_data_value(data: &CommandData) -> Value {
+    match data {
+        CommandData::Integer(value) => Value::Int(*value),
+        CommandData::Text(value) => Value::String(value.clone()),
+        CommandData::None => Value::Nil,
+    }
+}
+
+fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
+    let active = active_object_id();
+    let target = match args.first() {
+        Some(value) => parse_object_reference_argument(value, "ExecuteCommand", "target")?
+            .or(active),
+        None => active,
+    };
+    let Some(target) = target else {
+        return Ok(Value::Bool(false));
+    };
+    if active != Some(target) {
+        return match call_world_object_function(target, "ExecuteCommand", &[]) {
+            Some(result) => result,
+            None => Ok(Value::Bool(false)),
+        };
+    }
+
+    let random = RANDOM_CONTEXT.with(|cell| cell.borrow().clone());
+    let finished = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut().as_mut().and_then(|context| {
+            context.execute_command_preview(target, random.as_ref().map(|rng| &rng.rng))
+        })
+    });
+    let Some(finished) = finished else {
+        return Ok(Value::Bool(false));
+    };
+
+    if let Some(command) = finished {
+        let callback_args = [
+            Value::String(command.name),
+            command
+                .target
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil),
+            command.tx.map(Value::Int).unwrap_or(Value::Nil),
+            Value::Int(command.ty.unwrap_or(0)),
+            command
+                .target2
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil),
+            command_data_value(&command.data),
+        ];
+        if let Some(Err(error)) = call_world_object_function(
+            target,
+            "ControlCommandFinished",
+            &callback_args,
+        ) {
+            tracing::warn!(
+                %error,
+                "script error in ControlCommandFinished; continuing like the C++ fail-safe exec"
+            );
+        }
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                context.clear_finished_command_fronts(target);
+            }
+        });
+    }
+
+    Ok(Value::Bool(true))
 }
 
 fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -20878,6 +21001,7 @@ struct EffectHostContext {
     pending_particles: Vec<ParticleCommand>,
     transfer_zone_commands: Vec<TransferZoneCommand>,
     pending_messages: Vec<MessageCommand>,
+    pending_menu_requests: Vec<crate::MenuRequest>,
     pending_landscape_ops: Vec<LandscapeOperation>,
     audio: AudioRegistry,
     next_object_id: u64,
@@ -20913,7 +21037,7 @@ impl EffectHostContext {
         game_over_triggered: bool,
     ) -> Self {
         let team_home_base_rule = world.team_home_base_rule();
-        let object = object.map(|ctx| {
+        let mut object = object.map(|ctx| {
             let HostObjectContext {
                 id,
                 definition_id,
@@ -21010,6 +21134,13 @@ impl EffectHostContext {
                 scope
             }
         });
+        if let Some(scope) = object.as_mut() {
+            if let Some(world_object) = world.get(scope.id()) {
+                scope
+                    .live_commands
+                    .restore_from_snapshot(&world_object.command_stack);
+            }
+        }
         let global = Some(EffectScopeContext::new(global_effects));
         Self {
             object,
@@ -21027,6 +21158,7 @@ impl EffectHostContext {
             pending_particles: Vec::new(),
             transfer_zone_commands: Vec::new(),
             pending_messages: Vec::new(),
+            pending_menu_requests: Vec::new(),
             pending_landscape_ops: Vec::new(),
             audio,
             next_object_id,
@@ -21187,6 +21319,239 @@ impl EffectHostContext {
             object.contents.insert(position, child);
         }
         Some(object)
+    }
+
+    fn command_runtime_data(
+        &self,
+    ) -> (
+        HashMap<ObjectId, CommandObjectSnapshot>,
+        HashMap<i32, CommandPlayerSnapshot>,
+        HashMap<DefinitionId, CommandDefinitionSnapshot>,
+        TransferZoneTable,
+    ) {
+        let mut ids = self.world.order.as_ref().clone();
+        let pending_ids = self
+            .pending_order
+            .iter()
+            .copied()
+            .filter(|id| !ids.contains(id))
+            .collect::<Vec<_>>();
+        ids.extend(pending_ids);
+        let objects = ids
+            .into_iter()
+            .filter_map(|id| {
+                let object = self.get_world_object(id)?;
+                let scope = self.object_scope(id);
+                let metadata = self.world.definition_metadata(object.definition_id());
+                let position = scope
+                    .map(|scope| scope.current_position)
+                    .unwrap_or(object.position);
+                let construction = scope
+                    .map(ObjectScopeContext::construction)
+                    .unwrap_or(object.construction);
+                let vertices = scope
+                    .map(|scope| scope.vertices.as_slice())
+                    .unwrap_or(object.vertices.as_slice());
+                let local_shape = metadata
+                    .and_then(|metadata| metadata.shape)
+                    .unwrap_or_else(|| DefinitionRect::new(-1, -1, 2, 2));
+                let shape = DefinitionRect::new(
+                    position.x.saturating_add(local_shape.x),
+                    position.y.saturating_add(local_shape.y),
+                    local_shape.width,
+                    local_shape.height,
+                );
+                let contact = vertices.iter().fold(0, |bits, vertex| {
+                    bits
+                        | compute_vertex_contact(
+                            self.world.landscape.as_deref(),
+                            position,
+                            vertex,
+                            0,
+                        )
+                });
+                let owner = scope.map(ObjectScopeContext::owner).unwrap_or(object.owner);
+                let selected = self
+                    .world
+                    .crew_selection
+                    .get(&owner)
+                    .is_some_and(|selection| selection.selected.contains(&id));
+                let snapshot = CommandObjectSnapshot {
+                    id,
+                    definition_id: object.definition_id.clone(),
+                    position,
+                    status: scope.map(ObjectScopeContext::status).unwrap_or(object.status),
+                    destroyed: scope.is_some_and(|scope| scope.destroy),
+                    category: scope
+                        .map(ObjectScopeContext::category)
+                        .unwrap_or(object.category),
+                    container: scope
+                        .map(ObjectScopeContext::container)
+                        .unwrap_or(object.container),
+                    action_target: scope
+                        .and_then(|scope| scope.effective_action_target(0))
+                        .or(object.action_target),
+                    action_procedure: scope
+                        .map(ObjectScopeContext::effective_action_procedure)
+                        .unwrap_or_else(|| {
+                            object
+                                .procedure_name()
+                                .map(ActionProcedure::from_name)
+                                .unwrap_or_default()
+                        }),
+                    command_direction: scope
+                        .map(ObjectScopeContext::command_direction)
+                        .or_else(|| {
+                            object
+                                .full_state()
+                                .map(|state| state.command_direction)
+                        })
+                        .unwrap_or_default(),
+                    construction,
+                    direction: scope
+                        .map(|scope| scope.current_direction)
+                        .unwrap_or_else(|| Direction::from_script_value(object.direction)),
+                    physical: scope
+                        .map(|scope| scope.resolved_physical(false))
+                        .or_else(|| object.full_state().and_then(|state| state.temporary_physical))
+                        .or_else(|| object.full_state().and_then(|state| state.info_physical))
+                        .or_else(|| metadata.map(|metadata| metadata.physical))
+                        .unwrap_or_default(),
+                    owner,
+                    crew_member: scope
+                        .map(|scope| scope.crew_member)
+                        .or_else(|| object.full_state().map(|state| state.crew_member))
+                        .unwrap_or(false),
+                    selected,
+                    alive: scope.map(ObjectScopeContext::alive).unwrap_or(object.alive),
+                    contents: object.contents.clone(),
+                    line_connect: metadata.map(|metadata| metadata.line_connect).unwrap_or(0),
+                    ocf: scope
+                        .map(|scope| scope.staged_ocf(object.ocf))
+                        .unwrap_or(object.ocf),
+                    collectible: object.collectible,
+                    contact,
+                    action_time: scope
+                        .map(ObjectScopeContext::effective_action_ticks)
+                        .unwrap_or(object.action_ticks),
+                    shape_top: local_shape.y,
+                    shape,
+                };
+                Some((id, snapshot))
+            })
+            .collect();
+
+        let players = self
+            .world
+            .players
+            .iter()
+            .map(|(&id, state)| {
+                let state = self.player_overrides.get(&id).unwrap_or(state);
+                (
+                    id,
+                    CommandPlayerSnapshot {
+                        status: state.status,
+                        surrendered: state.surrendered,
+                        wealth: state.wealth,
+                        home_base_material: state.home_base_material.clone(),
+                        knowledge: state.knowledge.clone(),
+                    },
+                )
+            })
+            .collect();
+        let definitions = self
+            .world
+            .definitions
+            .iter()
+            .map(|(id, metadata)| {
+                (
+                    id.clone(),
+                    CommandDefinitionSnapshot {
+                        value: metadata.value,
+                        can_chop: metadata.action_library.specs().iter().any(|(_, spec)| {
+                            spec.procedure
+                                .as_deref()
+                                .is_some_and(|name| ActionProcedure::from_name(name) == ActionProcedure::Chop)
+                        }),
+                        chop_action: metadata.action_library.specs().iter().find_map(|(name, spec)| {
+                            spec.procedure
+                                .as_deref()
+                                .filter(|procedure| {
+                                    ActionProcedure::from_name(procedure) == ActionProcedure::Chop
+                                })
+                                .map(|_| name.clone())
+                        }),
+                        constructable: metadata.constructable,
+                        grab: metadata.fire.grab,
+                    },
+                )
+            })
+            .collect();
+        let transfers = TransferZoneTable::from_states(&self.world.transfer_zones);
+        (objects, players, definitions, transfers)
+    }
+
+    fn execute_command_preview(
+        &mut self,
+        target: ObjectId,
+        rng: Option<&RefCell<LcgRng>>,
+    ) -> Option<Option<CommandView>> {
+        let (objects, players, definitions, transfers) = self.command_runtime_data();
+        let object_snapshot = objects.get(&target)?;
+        let landscape = self.world.landscape.clone();
+        let context = CommandRuntimeContext {
+            rng,
+            frame: self.world.frame,
+            position: object_snapshot.position,
+            landscape: landscape.as_deref(),
+            object: object_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: self.world.structures_need_energy,
+            base_buy_enabled: self.world.base_buy_enabled,
+            base_sell_enabled: self.world.base_sell_enabled,
+            transfer_zones: &transfers,
+        };
+
+        let (mut events, finished) = {
+            let scope = self.object_scope_mut(target)?;
+            let result = scope.live_commands.execute_front(&context);
+            if result.is_some() {
+                scope.command_stack_replaced = true;
+            }
+            let mut events = Vec::new();
+            if let Some(mut result) = result {
+                if let Some(update) = result.update.take() {
+                    scope.stage_command_update(update);
+                }
+                events = result.events;
+            }
+            scope.command_count = scope.live_commands.len();
+            (events, scope.live_commands.finished_front_view())
+        };
+
+        let mut deferred_events = Vec::new();
+        for event in events.drain(..) {
+            match event {
+                CommandEvent::OpenMenu(request) => self.pending_menu_requests.push(request),
+                other => deferred_events.push(other),
+            }
+        }
+        if !deferred_events.is_empty() {
+            self.object_scope_mut(target)?
+                .queued_commands
+                .push(QueuedCommand::immediate(ObjectUpdate::default()).with_events(deferred_events));
+        }
+        Some(finished)
+    }
+
+    fn clear_finished_command_fronts(&mut self, target: ObjectId) {
+        if let Some(scope) = self.object_scope_mut(target) {
+            scope.live_commands.clear_finished_fronts();
+            scope.command_count = scope.live_commands.len();
+            scope.command_stack_replaced = true;
+        }
     }
 
     /// Every scope this call holds pending writes for, in a deterministic
@@ -21458,6 +21823,9 @@ impl EffectHostContext {
             metadata.physical,
         );
         scope.definition_id = Some(object.definition_id().to_string());
+        scope
+            .live_commands
+            .restore_from_snapshot(&object.command_stack);
         scope.current_magic_energy = state.magic_energy;
         // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358) —
         // nested scopes carry the snapshot mask like outer scopes do, not
@@ -21865,7 +22233,7 @@ impl EffectHostContext {
         let mut other_objects = Vec::new();
         for id in mem::take(&mut self.nested_order) {
             let Some(NestedScopeState {
-                scope,
+                mut scope,
                 mut local_vars,
             }) = self.nested_objects.remove(&id)
             else {
@@ -21874,6 +22242,7 @@ impl EffectHostContext {
             if let Some(cells) = cell_locals.remove(&id) {
                 local_vars.extend(cells);
             }
+            let command_operations = scope.final_command_operations();
             let mut update = scope.pending_update;
             // Mirror the outer call's unconditional local-vars store
             // (Definition::call_object_function).
@@ -21883,7 +22252,7 @@ impl EffectHostContext {
                 effects: scope.effects.into_commands(),
                 update: Some(update),
                 commands: scope.queued_commands,
-                command_operations: scope.command_operations,
+                command_operations,
                 destroy: scope.destroy,
             });
         }
@@ -21917,7 +22286,8 @@ impl EffectHostContext {
         }
         let (object_effects, object_update, object_commands, command_operations, destroy) =
             match self.object {
-                Some(object) => {
+                Some(mut object) => {
+                    let command_operations = object.final_command_operations();
                     let update = if object.pending_update.is_empty() {
                         None
                     } else {
@@ -21927,7 +22297,7 @@ impl EffectHostContext {
                         object.effects.into_commands(),
                         update,
                         object.queued_commands,
-                        object.command_operations,
+                        command_operations,
                         object.destroy,
                     )
                 }
@@ -21977,6 +22347,7 @@ impl EffectHostContext {
             self.script_go_request,
             self.next_object_id,
         );
+        outcome.menu_requests = self.pending_menu_requests;
         outcome.particles = self.pending_particles;
         outcome.next_mission_commands = self.next_mission_commands;
         outcome.other_objects = other_objects;
@@ -22120,6 +22491,8 @@ struct ObjectScopeContext {
     queued_commands: Vec<QueuedCommand>,
     command_count: usize,
     command_operations: Vec<CommandOperation>,
+    live_commands: CommandStack,
+    command_stack_replaced: bool,
     destroy: bool,
     action_library: ActionLibrary,
     current_action_name: String,
@@ -22221,6 +22594,8 @@ impl ObjectScopeContext {
             queued_commands: Vec::new(),
             command_count,
             command_operations: Vec::new(),
+            live_commands: CommandStack::new(),
+            command_stack_replaced: false,
             destroy: false,
             action_library,
             current_action_name: action_name,
@@ -22539,6 +22914,7 @@ impl ObjectScopeContext {
     }
 
     fn clear_command_stack(&mut self) {
+        self.live_commands.clear();
         self.command_operations.push(CommandOperation::Clear);
         self.command_count = 0;
     }
@@ -22554,6 +22930,9 @@ impl ObjectScopeContext {
         if self.command_count >= MAX_COMMAND_STACK {
             return false;
         }
+        if self.live_commands.push_front(request.clone()).is_err() {
+            return false;
+        }
         self.command_operations
             .push(CommandOperation::PushFront(request));
         self.command_count += 1;
@@ -22564,10 +22943,95 @@ impl ObjectScopeContext {
         if self.command_count >= MAX_COMMAND_STACK {
             return false;
         }
+        if self.live_commands.push_back(request.clone()).is_err() {
+            return false;
+        }
         self.command_operations
             .push(CommandOperation::PushBack(request));
         self.command_count += 1;
         true
+    }
+
+    fn final_command_operations(&mut self) -> Vec<CommandOperation> {
+        if !self.command_stack_replaced {
+            return mem::take(&mut self.command_operations);
+        }
+        let mut operations = mem::take(&mut self.command_operations)
+            .into_iter()
+            .filter(|operation| {
+                matches!(operation, CommandOperation::DecrementNoCollectDelay)
+            })
+            .collect::<Vec<_>>();
+        operations.push(CommandOperation::Restore(self.live_commands.snapshot()));
+        operations
+    }
+
+    /// Apply the current-object delta emitted by one C4Command execution
+    /// to the same live script scope. Command states only emit this core
+    /// field set; cross-object writes travel as CommandEvents.
+    fn stage_command_update(&mut self, mut update: ObjectUpdate) {
+        if let Some(position) = update.position.take() {
+            self.set_position(position);
+        }
+        let fixed_velocity = update.fixed_velocity.take();
+        if let Some(velocity) = update.velocity.take() {
+            self.current_fixed_velocity = FixedVec2::from_ints(velocity.x, velocity.y);
+            self.pending_update.velocity = Some(velocity);
+        }
+        if let Some(velocity) = fixed_velocity {
+            self.set_fixed_velocity(velocity);
+        }
+        if let Some(value) = update.fixed_velocity_x.take() {
+            self.set_fixed_velocity_component(VelocityComponent::X, value);
+        }
+        if let Some(value) = update.fixed_velocity_y.take() {
+            self.set_fixed_velocity_component(VelocityComponent::Y, value);
+        }
+        if let Some(direction) = update.direction.take() {
+            self.set_direction(direction);
+        }
+        if let Some(direction) = update.command_direction.take() {
+            self.set_command_direction(direction);
+        }
+        if let Some(container) = update.container.take() {
+            self.set_container(container);
+        }
+        if let Some(owner) = update.owner.take() {
+            self.set_owner(owner);
+        }
+        if let Some(status) = update.status.take() {
+            self.set_status(status);
+        }
+        if let Some(alive) = update.alive.take() {
+            self.set_alive(alive);
+        }
+        if let Some(action) = update.action.take() {
+            if let Some(name) = action.name.as_deref() {
+                self.update_effective_action(name);
+            }
+            if let Some(target) = action.target {
+                self.current_action_target = target;
+            }
+            if let Some(target) = action.target2 {
+                self.current_action_target2 = target;
+            }
+            if let Some(data) = action.data {
+                self.current_action_data = data;
+            }
+            if let Some(ticks) = action.ticks {
+                self.current_action_ticks = ticks;
+            }
+            if let Some(phase) = action.phase {
+                self.current_action_phase = phase;
+            }
+            match self.pending_update.action.as_mut() {
+                Some(existing) => existing.merge(action),
+                None => self.pending_update.action = Some(action),
+            }
+        }
+        if !update.is_empty() {
+            self.queued_commands.push(QueuedCommand::immediate(update));
+        }
     }
 
     fn ocf(&self) -> u32 {
@@ -23188,6 +23652,7 @@ mod tests {
         "EffectVar",
         "EnergyCheck",
         "Enter",
+        "ExecuteCommand",
         "Exit",
         "Extinguish",
         "ExtractMaterialAmount",

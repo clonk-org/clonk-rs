@@ -1369,13 +1369,19 @@ impl Engine {
                     .map(|idx| self.object_has_function(idx, "ContainedThrow"))
                     .unwrap_or(false);
                 if !has_contained_throw {
+                    let object_id = self.objects[index].id;
                     self.player_object_command(owner, CommandId::Throw, None, 0, 0)?;
+                    self.execute_object_command_now(object_id)?;
                 }
             }
             COM_THROW => {
-                // `PlayerObjectCommand(...) && ExecuteCommand()` (:3267):
-                // the queued command executes on the next command tick.
+                // `PlayerObjectCommand(...) && ExecuteCommand()`
+                // (C4Object.cpp:3280-3282):
+                // execute the calling clonk's freshly queued command before
+                // returning from ContainedControl.
+                let object_id = self.objects[index].id;
                 self.player_object_command(owner, CommandId::Throw, None, 0, 0)?;
+                self.execute_object_command_now(object_id)?;
             }
             COM_UP => {
                 // Base buy menu (:3269-3274): ValidPlr(Contained->Base),
@@ -2750,6 +2756,42 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
         engine.player_in_com(1, COM_LEFT, 0).expect("in_com");
         let snapshot = engine.object_snapshot(crew).expect("snapshot");
         assert_eq!(snapshot.command_stack.command_names(), vec!["Take"]);
+    }
+
+    #[test]
+    fn contained_throw_executes_the_new_command_immediately() {
+        // C4Object::ContainedControl evaluates
+        // `PlayerObjectCommand(..., C4CMD_Throw) && ExecuteCommand()` in
+        // one control call (C4Object.cpp:3280-3282). The completed Throw
+        // command is therefore gone before control returns.
+        for command in [COM_THROW, COM_THROW_D] {
+            let mut engine = Engine::new();
+            register_clonk(&mut engine, "CLNK", "#strict\n");
+            engine
+                .register_definition(
+                    Definition::from_script("HUT1", "Hut", "#strict\n")
+                        .expect("hut compiles"),
+                )
+                .expect("register");
+            engine
+                .register_player(PlayerConfig::new(1, "Test"))
+                .expect("player");
+            let crew = spawn_crew(&mut engine, "CLNK", 1);
+            let hut = engine
+                .spawn_object(SpawnConfig::new("HUT1"))
+                .expect("spawn hut");
+            engine
+                .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+                .expect("enter hut");
+
+            engine.player_in_com(1, command, 0).expect("throw");
+
+            let snapshot = engine.object_snapshot(crew).expect("snapshot");
+            assert!(
+                snapshot.command_stack.is_empty(),
+                "ContainedControl executes and clears Throw synchronously"
+            );
+        }
     }
 
     /// Crew contained in a VehicleControl=Inside vehicle whose script is

@@ -117,9 +117,9 @@ pub struct ContextMenuEntry {
 }
 
 use command::{
-    definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandDefinitionSnapshot,
-    CommandEvent, CommandId, CommandObjectSnapshot, CommandOperation, CommandPlayerSnapshot,
-    CommandRuntimeContext, CommandStack, CommandStepResult,
+    definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
+    CommandDefinitionSnapshot, CommandEvent, CommandId, CommandObjectSnapshot, CommandOperation,
+    CommandPlayerSnapshot, CommandRuntimeContext, CommandStack, CommandStepResult,
 };
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
@@ -4286,12 +4286,15 @@ impl Object {
                         self.state.no_collect_delay -= 1;
                     }
                 }
+                CommandOperation::Restore(snapshot) => {
+                    self.commands.restore_from_snapshot(&snapshot);
+                }
             }
         }
     }
 
     fn step_command_stack(&mut self, ctx: CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
-        self.commands.step(&ctx)
+        self.commands.execute_front(&ctx)
     }
 
     fn mark_destroyed(&mut self) -> Vec<EffectEvent> {
@@ -7322,6 +7325,7 @@ impl Definition {
             next_object_id,
             other_objects,
             context_locals: _,
+            menu_requests: _,
         } = host_effects;
         batch.other_objects.extend(other_objects);
         batch.audio.extend(host_audio.events);
@@ -7525,6 +7529,7 @@ impl Definition {
             next_object_id,
             other_objects,
             context_locals: _,
+            menu_requests: _,
         } = host_effects;
         batch.other_objects.extend(other_objects);
         batch.audio.extend(host_audio.events);
@@ -7693,6 +7698,7 @@ impl Definition {
             next_object_id,
             other_objects,
             context_locals: _,
+            menu_requests: _,
         } = host_effects;
         batch.other_objects.extend(other_objects);
         batch.audio.extend(host_audio.events);
@@ -9335,6 +9341,7 @@ impl ScenarioScript {
             next_object_id: _,
             other_objects,
             context_locals: _,
+            menu_requests: _,
         } = host_effects;
 
         if !host_object_effects.is_empty()
@@ -9496,6 +9503,7 @@ impl ScenarioScript {
             next_object_id: _,
             other_objects,
             context_locals: _,
+            menu_requests: _,
         } = host_effects;
 
         let mut batch = ScenarioBatch {
@@ -13003,9 +13011,11 @@ impl Engine {
                 ).with_direction(object.state.direction.to_script_value())
                 .with_contents(object.state.contents.clone())
                 .with_alive(object.state.alive)
+                .with_collectible(definition.is_some_and(Definition::is_collectible))
                 .with_in_liquid(object.state.in_liquid)
                 .with_ocf(ocf)
                 .with_commands(object.commands.command_views())
+                .with_command_stack(object.commands.snapshot())
                 .with_full_state(Rc::new(object.state.clone()))
                 .with_last_energy_loss_cause(object.last_energy_loss_cause)
             }),
@@ -13032,6 +13042,7 @@ impl Engine {
                 .map(ScenarioScript::script_arc),
         )
         .with_network_game(self.network_game)
+        .with_command_settings(self.frame, self.base_buy_enabled, self.base_sell_enabled)
         .with_structures_need_energy(self.structures_need_energy)
         .with_crew_name_sources(
             self.standard_names
@@ -15399,6 +15410,114 @@ impl Engine {
         }
     }
 
+    /// The synchronous `C4Object::ExecuteCommand` path used by controls
+    /// that issue and immediately execute an order (notably contained
+    /// Throw). It shares the retained-front callback/clear tail with the
+    /// ordinary object tick.
+    fn execute_object_command_now(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
+        let selected_objects = self
+            .crew_selection
+            .values()
+            .flat_map(|selection| {
+                selection
+                    .selected()
+                    .iter()
+                    .copied()
+                    .chain(selection.cursor())
+            })
+            .collect::<HashSet<_>>();
+        let command_snapshots = self
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| {
+                (
+                    object.id,
+                    self.live_command_snapshot(index, &selected_objects),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let player_snapshots = self
+            .players
+            .iter()
+            .map(|(&id, player)| {
+                (
+                    id,
+                    CommandPlayerSnapshot {
+                        status: player.status(),
+                        surrendered: player.surrendered(),
+                        wealth: player.wealth(),
+                        home_base_material: player.home_base_material().clone(),
+                        knowledge: player.knowledge().cloned().collect(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let definition_snapshots = self
+            .definitions
+            .iter()
+            .map(|(id, definition)| {
+                let chop_action = definition
+                    .action_library()
+                    .specs()
+                    .iter()
+                    .find_map(|(name, spec)| {
+                        spec.procedure
+                            .as_deref()
+                            .filter(|procedure| {
+                                ActionProcedure::from_name(procedure) == ActionProcedure::Chop
+                            })
+                            .map(|_| name.clone())
+                    });
+                (
+                    id.clone(),
+                    CommandDefinitionSnapshot {
+                        value: definition.value(),
+                        can_chop: chop_action.is_some(),
+                        chop_action,
+                        constructable: definition.is_constructable(),
+                        grab: definition.grab(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let transfer_zones = self.transfer_zones.clone();
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        let Some(object_snapshot) = command_snapshots.get(&object_id) else {
+            return Ok(());
+        };
+        let command_rng = std::cell::RefCell::new(std::mem::take(&mut self.rng));
+        let command_context = CommandRuntimeContext {
+            rng: Some(&command_rng),
+            frame: self.frame,
+            position: object_snapshot.position,
+            landscape: self.landscape.as_ref(),
+            object: object_snapshot,
+            objects: &command_snapshots,
+            players: &player_snapshots,
+            definitions: &definition_snapshots,
+            structures_need_energy: self.structures_need_energy,
+            base_buy_enabled: self.base_buy_enabled,
+            base_sell_enabled: self.base_sell_enabled,
+            transfer_zones: &transfer_zones,
+        };
+        let result = self.objects[index].step_command_stack(command_context);
+        self.rng = command_rng.into_inner();
+
+        if let Some(result) = result {
+            if let Some(update) = result.update {
+                self.apply_object_update(object_id, update)?;
+            }
+            for event in result.events {
+                self.apply_command_event(event)?;
+            }
+        }
+        self.finish_object_command_execution(object_id);
+        Ok(())
+    }
+
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
         self.exec_cursor = None;
         self.frame += 1;
@@ -15875,6 +15994,11 @@ impl Engine {
                 }
                 self.apply_particle_commands(emitted_particles);
             }
+
+            self.finish_object_command_execution(object_id);
+            let Some(idx) = self.find_object_index(object_id) else {
+                continue;
+            };
 
             if !queued_spawns.is_empty() {
                 spawn_requests.extend(queued_spawns);
@@ -17214,6 +17338,7 @@ impl Engine {
             player_commands,
             object_order_commands,
             next_mission_commands,
+            menu_requests,
             audio: outcome_audio,
             trigger_game_over,
             script_go,
@@ -17255,6 +17380,11 @@ impl Engine {
                 self.messages.apply_command(command);
             }
         }
+        let menu_requests = menu_requests
+            .into_iter()
+            .filter(|request| self.find_object_index(request.crew_id).is_some())
+            .collect::<Vec<_>>();
+        self.pending_menu_requests.extend(menu_requests);
 
         if let Some(go) = script_go {
             self.scenario_script_go = go;
@@ -26043,6 +26173,48 @@ impl Engine {
         Ok(())
     }
 
+    fn finish_object_command_execution(&mut self, object_id: ObjectId) {
+        let finished = self
+            .find_object_index(object_id)
+            .and_then(|index| self.objects[index].commands.finished_front_view());
+        if let Some(command) = finished {
+            let args = vec![
+                Value::String(command.name),
+                command
+                    .target
+                    .map(object_reference_value)
+                    .unwrap_or(Value::Nil),
+                command.tx.map(Value::Int).unwrap_or(Value::Nil),
+                Value::Int(command.ty.unwrap_or(0)),
+                command
+                    .target2
+                    .map(object_reference_value)
+                    .unwrap_or(Value::Nil),
+                match command.data {
+                    CommandData::Integer(value) => Value::Int(value),
+                    CommandData::Text(value) => Value::String(value),
+                    CommandData::None => Value::Nil,
+                },
+            ];
+            if let Some(index) = self.find_object_index(object_id) {
+                if let Err(error) = self.call_object_function(
+                    index,
+                    "ControlCommandFinished",
+                    args,
+                ) {
+                    tracing::warn!(
+                        %error,
+                        object = object_id.as_u64(),
+                        "script error in ControlCommandFinished; continuing like the C++ fail-safe exec"
+                    );
+                }
+            }
+        }
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects[index].commands.clear_finished_fronts();
+        }
+    }
+
     fn apply_call_result(
         &mut self,
         action: CallResultAction,
@@ -29462,6 +29634,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             ).with_direction(object.direction.to_script_value())
             .with_contents(object.contents.clone())
             .with_commands(object.command_stack.command_views())
+            .with_command_stack(object.command_stack.clone())
             .with_ocf(object.ocf)
             // Nested calls (obj->Method, foreign RemoveObject) need a full
             // scope for WORLD objects too — GoldRush re-runs the placed
@@ -40265,6 +40438,248 @@ func Trigger() {
         assert!(
             engine.objects[minion_idx].commands.command_names().is_empty(),
             "\"None\" cleared the foreign stack"
+        );
+    }
+
+    #[test]
+    fn tutorial_special2_executes_context_before_control_returns_like_cpp() {
+        // FnExecuteCommand dispatches synchronously to C4Object::ExecuteCommand
+        // (C4Script.cpp:835-838). ExecuteCommand calls
+        // ~ControlCommandFinished while the finished command is still the
+        // stack front, then clears all finished fronts (C4Object.cpp:3997-4007).
+        let script = r#"#strict
+local callback_name, callback_front, callback_comdir;
+
+protected func ControlSpecial2()
+{
+  SetCommand(this(), "Context", 0, 0, 0, this());
+  return ExecuteCommand();
+}
+
+protected func ControlCommandFinished(command)
+{
+  callback_name = command;
+  callback_front = GetCommand(0);
+  callback_comdir = GetComDir();
+}
+"#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Player"))
+            .expect("player registers");
+        let clonk = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_alive(true),
+            )
+            .expect("clonk spawns");
+        engine.select_crew(1, vec![clonk]).expect("crew selected");
+        engine
+            .set_crew_cursor(1, Some(clonk))
+            .expect("cursor selected");
+        let index = engine.find_object_index(clonk).expect("clonk exists");
+        engine.objects[index].state.command_direction = CommandDirection::Right;
+
+        assert!(
+            engine
+                .handle_control_command(1, ControlCommand::Special2, CommandKind::Press)
+                .expect("ControlSpecial2 succeeds")
+        );
+
+        let index = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("callback_name"),
+            Some(&Value::String("Context".to_string()))
+        );
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("callback_front"),
+            Some(&Value::String("Context".to_string())),
+            "the callback observes the finished command before it is cleared"
+        );
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("callback_comdir"),
+            Some(&Value::Int(CommandDirection::Stop.to_script_value()))
+        );
+        assert!(
+            engine.objects[index].commands.is_empty(),
+            "the finished front is cleared after the callback"
+        );
+        assert!(engine.pending_menu_requests.iter().any(|request| {
+            request.crew_id == clonk
+                && matches!(
+                    request.kind,
+                    MenuRequestKind::Context { target, .. } if target == clonk
+                )
+        }));
+    }
+
+    #[test]
+    fn normal_command_tick_calls_finished_before_clearing_like_cpp() {
+        // Every C4Object::Execute runs ExecuteCommand first
+        // (C4Object.cpp:1085,3997-4007), so the ordinary per-frame path
+        // owes the same callback-before-clear ordering as the script host.
+        let script = r#"#strict
+local callback_name, callback_front;
+public func Arm() { return SetCommand(this(), "Context", 0, 0, 0, this()); }
+protected func ControlCommandFinished(command)
+{
+  callback_name = command;
+  callback_front = GetCommand(0);
+}
+"#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Player"))
+            .expect("player registers");
+        let clonk = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_alive(true),
+            )
+            .expect("clonk spawns");
+        let index = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(index, "Arm", Vec::new())
+                .expect("command arms"),
+            Value::Bool(true)
+        );
+
+        engine.tick().expect("command tick succeeds");
+
+        let index = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("callback_name"),
+            Some(&Value::String("Context".to_string()))
+        );
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("callback_front"),
+            Some(&Value::String("Context".to_string()))
+        );
+        assert!(engine.objects[index].commands.is_empty());
+    }
+
+    #[test]
+    fn execute_command_targets_foreign_objects_and_empty_stacks_like_cpp() {
+        // FnExecuteCommand accepts an explicit object and falls back to the
+        // calling object only for null (C4Script.cpp:835-838). The object
+        // method returns true even when its command stack is empty
+        // (C4Object.cpp:3997-4007).
+        let caller_script = r#"#strict
+public func OpenOther(other)
+{
+  SetCommand(other, "Context", 0, 0, 0, other);
+  return ExecuteCommand(other);
+}
+public func ExecuteEmpty(other) { return ExecuteCommand(other); }
+"#;
+        let target_script = r#"#strict
+local finished;
+protected func ControlCommandFinished(command) { finished = command; }
+"#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("TARG", "Target", target_script)
+                    .expect("target compiles"),
+            )
+            .expect("target registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Player"))
+            .expect("player registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_alive(true))
+            .expect("caller spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("TARG")
+                    .with_owner(1)
+                    .with_alive(true),
+            )
+            .expect("target spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "OpenOther",
+                    vec![Value::Object(target.as_u64())],
+                )
+                .expect("foreign ExecuteCommand succeeds"),
+            Value::Bool(true)
+        );
+        let target_index = engine.find_object_index(target).expect("target exists");
+        assert_eq!(
+            engine.objects[target_index].state.local_vars.get("finished"),
+            Some(&Value::String("Context".to_string()))
+        );
+        assert!(engine.objects[target_index].commands.is_empty());
+
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "ExecuteEmpty",
+                    vec![Value::Object(target.as_u64())],
+                )
+                .expect("empty ExecuteCommand succeeds"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn finished_callback_can_replace_the_front_before_clear_like_cpp() {
+        // The clear loop re-reads `Command` after the callback
+        // (C4Object.cpp:4001-4005). A callback SetCommand therefore
+        // replaces the finished entry with an unfinished one that survives.
+        let script = r#"#strict
+public func Run()
+{
+  SetCommand(this(), "Context", 0, 0, 0, this());
+  return ExecuteCommand();
+}
+protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
+"#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK").with_alive(true))
+            .expect("clonk spawns");
+        let index = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine
+                .call_object_function(index, "Run", Vec::new())
+                .expect("Run succeeds"),
+            Value::Bool(true)
+        );
+        let index = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine.objects[index].commands.command_names(),
+            vec!["Wait".to_string()]
         );
     }
 

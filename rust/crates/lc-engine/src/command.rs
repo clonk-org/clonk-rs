@@ -7191,6 +7191,10 @@ pub enum CommandOperation {
     /// travels with the command ops so its order against Clear/Push is
     /// preserved through the staged script outcomes.
     DecrementNoCollectDelay,
+    /// Replace the staged command stack after a synchronous
+    /// `ExecuteCommand` host call. The command's mutable evaluation state
+    /// must cross the copy-in/copy-out script boundary with the stack.
+    Restore(CommandStackSnapshot),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7436,6 +7440,10 @@ pub struct CommandSnapshot {
     /// saves without it degrade to name-only views).
     #[serde(default)]
     request: Option<CommandRequest>,
+    /// C4Command::Finished. Normally transient until
+    /// C4Object::ExecuteCommand fires the callback and clears the front.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished: Option<CommandStatus>,
 }
 
 impl CommandSnapshot {
@@ -7446,6 +7454,7 @@ impl CommandSnapshot {
             retries: entry.retries,
             failures: entry.failures,
             request: entry.request.clone(),
+            finished: entry.finished,
         }
     }
 }
@@ -7619,6 +7628,83 @@ impl CommandStack {
             .collect();
     }
 
+    /// Execute the live front while retaining a finished entry for
+    /// C4Object::ExecuteCommand's callback/clear tail.
+    pub fn execute_front(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> Option<CommandStepResult> {
+        let (mode, mut result) = {
+            let front = self.entries.front_mut()?;
+            if front.finished.is_some() {
+                return None;
+            }
+            let mode = front.mode;
+            let result = front.step(ctx);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                front.finished = Some(result.status);
+            }
+            (mode, result)
+        };
+
+        if result.status == CommandStatus::Failed {
+            self.record_failure(mode);
+        }
+
+        for operation in std::mem::take(&mut result.operations) {
+            match operation {
+                CommandOperation::Clear => self.entries.clear(),
+                CommandOperation::PushFront(request) => {
+                    let _ = self.push_front(request);
+                }
+                CommandOperation::PushBack(request) => {
+                    let _ = self.push_back(request);
+                }
+                CommandOperation::Finish { index, success } => {
+                    self.finish_entry(index, success);
+                }
+                CommandOperation::DecrementNoCollectDelay => {}
+                CommandOperation::Restore(snapshot) => self.restore_from_snapshot(&snapshot),
+            }
+        }
+        Some(result)
+    }
+
+    /// The finished command C4Object::ExecuteCommand exposes to
+    /// `~ControlCommandFinished` before clearing it.
+    pub fn finished_front_view(&self) -> Option<CommandView> {
+        self.entries.front().and_then(|entry| {
+            entry.finished.map(|_| {
+                CommandView::from_entry(
+                    entry
+                        .state
+                        .id()
+                        .map(CommandId::to_name)
+                        .unwrap_or("None")
+                        .to_string(),
+                    entry.request.as_ref(),
+                    &entry.state,
+                )
+            })
+        })
+    }
+
+    /// C4Object::ExecuteCommand clears every finished stack front after
+    /// the callback, including finished commands uncovered by the first
+    /// removal.
+    pub fn clear_finished_fronts(&mut self) {
+        while self
+            .entries
+            .front()
+            .is_some_and(|entry| entry.finished.is_some())
+        {
+            self.entries.pop_front();
+        }
+    }
+
     pub fn push_front(&mut self, request: CommandRequest) -> Result<(), CommandError> {
         if self.entries.len() >= MAX_COMMAND_STACK {
             return Err(CommandError::StackFull);
@@ -7658,44 +7744,9 @@ impl CommandStack {
     }
 
     pub fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
-        let (mode, mut result) = {
-            let front = self.entries.front_mut()?;
-            let mode = front.mode;
-            let result = front.step(ctx);
-            (mode, result)
-        };
-
-        if matches!(
-            result.status,
-            CommandStatus::Completed | CommandStatus::Failed
-        ) {
-            // Remove the completed/failed command before handling failure propagation so that the
-            // base command (if any) becomes the new front entry, mirroring the C++ stack layout.
-            let _ = self.entries.pop_front();
-            if result.status == CommandStatus::Failed {
-                self.record_failure(mode);
-            }
-        }
-
-        for operation in std::mem::take(&mut result.operations) {
-            match operation {
-                CommandOperation::Clear => self.entries.clear(),
-                CommandOperation::PushFront(request) => {
-                    let _ = self.push_front(request);
-                }
-                CommandOperation::PushBack(request) => {
-                    let _ = self.push_back(request);
-                }
-                CommandOperation::Finish { index, success } => {
-                    self.finish_entry(index, success);
-                }
-                // Command internals use AddCommand, never SetCommand — the
-                // decrement only arrives via the engine/script staging
-                // paths, which apply against the object state.
-                CommandOperation::DecrementNoCollectDelay => {}
-            }
-        }
-        Some(result)
+        let result = self.execute_front(ctx);
+        self.clear_finished_fronts();
+        result
     }
 
     /// FnFinishCommand (C4Script.cpp:947-957): walk to the index-th
@@ -7715,7 +7766,9 @@ impl CommandStack {
             return;
         }
         if success {
-            self.entries.remove(index);
+            if let Some(entry) = self.entries.get_mut(index) {
+                entry.finished = Some(CommandStatus::Completed);
+            }
         } else if let Some(entry) = self.entries.get_mut(index) {
             entry.failures = entry.failures.saturating_add(1);
         }
@@ -12642,6 +12695,7 @@ struct ActiveCommand {
     /// (C4Script.cpp:926-945); persisted through CommandSnapshot so
     /// restored stacks keep their elements.
     request: Option<CommandRequest>,
+    finished: Option<CommandStatus>,
 }
 
 impl ActiveCommand {
@@ -12692,6 +12746,7 @@ impl ActiveCommand {
             retries: request.retries.max(0),
             failures: 0,
             request: Some(request),
+            finished: None,
         })
     }
 
@@ -12702,6 +12757,7 @@ impl ActiveCommand {
             retries: snapshot.retries,
             failures: snapshot.failures,
             request: snapshot.request,
+            finished: snapshot.finished,
         }
     }
 
