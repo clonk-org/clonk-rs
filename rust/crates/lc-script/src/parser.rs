@@ -14,6 +14,9 @@ pub struct Parser<'a> {
     lookahead_buffer: Vec<Token>,
     // Track consumed tokens during speculative parsing
     speculative_tokens: Option<Vec<Token>>,
+    // C4Aul's current per-script strictness. Legacy `Name:` declarations are
+    // legal only below STRICT2 (C4AulParse.cpp:1715-1717).
+    strict_level: u8,
 }
 
 impl<'a> Parser<'a> {
@@ -23,6 +26,7 @@ impl<'a> Parser<'a> {
             peeked: None,
             lookahead_buffer: Vec::new(),
             speculative_tokens: None,
+            strict_level: 0,
         }
     }
 
@@ -99,6 +103,7 @@ impl<'a> Parser<'a> {
                             }
                         }
                         strict_level = Some(level);
+                        self.strict_level = level;
                     }
                     _ => {
                         // Unknown directive, skip it
@@ -147,6 +152,9 @@ impl<'a> Parser<'a> {
             AccessLevel::Public // Default access level
         };
 
+        if !self.check_keyword(Keyword::Func)? {
+            return self.parse_old_style_function(access);
+        }
         self.expect_keyword(Keyword::Func, "expected 'func' declaration")?;
         // Check for optional & indicating reference return type
         let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
@@ -174,6 +182,63 @@ impl<'a> Parser<'a> {
             // Linked when a later script or an #include overload collides.
             overloaded: None,
         })
+    }
+
+    fn parse_old_style_function(&mut self, access: AccessLevel) -> Result<Function, ParseError> {
+        let name_token = self.expect_identifier("expected function declaration")?;
+        let name = match name_token.kind {
+            TokenKind::Identifier(name) | TokenKind::C4Id(name) => name,
+            _ => unreachable!(),
+        };
+        if self.strict_level >= 2 {
+            return Err(ParseError::new(
+                format!("declaration expected, but found identifier '{name}'"),
+                name_token.line,
+                name_token.column,
+            ));
+        }
+        self.expect_symbol(Symbol::Colon, "expected ':' after old-style function name")?;
+
+        let mut body = Vec::new();
+        while !self.is_eof()? && !self.is_old_style_function_boundary()? {
+            body.push(self.parse_statement()?);
+        }
+
+        Ok(Function {
+            name,
+            params: Vec::new(),
+            body,
+            access,
+            returns_reference: false,
+            strict_level: None,
+            overloaded: None,
+        })
+    }
+
+    /// Old-format functions end at EOF/directives, a new-format declaration,
+    /// an access modifier, or the next `Name:` label
+    /// (C4AulParse.cpp:1760-1805, 2167-2188, 2220-2238).
+    fn is_old_style_function_boundary(&mut self) -> Result<bool, ParseError> {
+        match &self.peek()?.kind {
+            TokenKind::Eof | TokenKind::Directive(_) => return Ok(true),
+            TokenKind::Keyword(
+                Keyword::Private
+                | Keyword::Protected
+                | Keyword::Public
+                | Keyword::Global
+                | Keyword::Func,
+            ) => return Ok(true),
+            TokenKind::Identifier(_) | TokenKind::C4Id(_) | TokenKind::Keyword(_) => {}
+            _ => return Ok(false),
+        }
+
+        self.begin_speculative();
+        let result = (|| {
+            self.consume()?;
+            self.check_symbol(Symbol::Colon)
+        })();
+        self.reset_speculative();
+        result
     }
 
     fn parse_parameter_list(&mut self) -> Result<Vec<Parameter>, ParseError> {
