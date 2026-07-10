@@ -7,7 +7,7 @@ slices are recorded in `git log -- rust/ parity/`.
 
 Workspace nextest, strict clippy, snapshots, and parity are green. Scenario
 load/apply and activation are 93/93. The pinned Goldrush comparator first
-diverges at frame 1627 (creature movement/action state, led by `SNKE` #569).
+diverges at frame 3327 (object #1451 is one pixel too low; RNG remains aligned).
 
 ```sh
 cargo nextest run --workspace
