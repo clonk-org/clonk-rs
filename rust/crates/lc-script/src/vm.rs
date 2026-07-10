@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use crate::ast::{
-    AssignmentTarget, BinaryOp, Expr, ForInit, Function, Parameter, Stmt, UnaryOp, VarDecl,
+    AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, Parameter, Stmt, UnaryOp,
+    VarDecl,
 };
 use crate::debugger::DebuggerHooks;
 use crate::engine::HostFunction;
@@ -789,6 +790,40 @@ impl<'a> Vm<'a> {
             .into_value()
     }
 
+    fn invoke_engine_value(
+        &self,
+        name: &str,
+        args: Vec<CallArg>,
+        depth: usize,
+        object_state: ObjectState,
+        caller_slots: Option<SlotMap>,
+    ) -> Result<Value, RuntimeError> {
+        if depth >= MAX_CALL_DEPTH {
+            return Err(RuntimeError::new("maximum call depth exceeded"));
+        }
+
+        maybe_grow(|| {
+            if let Some(function) = self.engine_script_function(name) {
+                return self
+                    .invoke_script_function(name, function, args, depth, object_state)?
+                    .into_value();
+            }
+
+            if let Some(function) = self.host_functions.get(name) {
+                let values = self.call_args_to_values(&args)?;
+                let _guard = CallerSlotsGuard::enter(caller_slots);
+                return self.invoke_host_function(name, function, &values);
+            }
+
+            Err(RuntimeError::new(format!("unknown function '{name}'")))
+        })
+    }
+
+    fn engine_script_function(&self, name: &str) -> Option<&Function> {
+        self.global_functions
+            .map_or_else(|| self.functions.get(name), |functions| functions.get(name))
+    }
+
     fn invoke_reference(
         &self,
         name: &str,
@@ -882,6 +917,7 @@ impl<'a> Vm<'a> {
         )?;
         env.inherited_target = function.overloaded.clone();
         env.function_name = function.name.clone();
+        env.engine_scope = function.access == AccessLevel::Global;
 
         // Script-level `local` declarations are object-local storage. Nested
         // calls share the same object state, matching C++ pObj->Local/LocalNamed.
@@ -1561,19 +1597,33 @@ impl<'a> Vm<'a> {
                                     return Ok(value);
                                 }
                             }
-                            let function = self.functions.get(name);
+                            let function = if env.engine_scope {
+                                self.engine_script_function(name)
+                            } else {
+                                self.functions.get(name)
+                            };
                             let mut evaluated_args =
                                 self.build_call_args(function, args, env, depth + 1)?;
                             if *forward_rest {
                                 Self::append_forwarded_args(&mut evaluated_args, env);
                             }
-                            self.invoke_value(
-                                name,
-                                evaluated_args,
-                                depth + 1,
-                                env.object_state.clone(),
-                                Some(env.var_slots.clone()),
-                            )
+                            if env.engine_scope {
+                                self.invoke_engine_value(
+                                    name,
+                                    evaluated_args,
+                                    depth + 1,
+                                    env.object_state.clone(),
+                                    Some(env.var_slots.clone()),
+                                )
+                            } else {
+                                self.invoke_value(
+                                    name,
+                                    evaluated_args,
+                                    depth + 1,
+                                    env.object_state.clone(),
+                                    Some(env.var_slots.clone()),
+                                )
+                            }
                         }
                         Expr::Property(base, name) => self.invoke_property_call(
                             base,
@@ -2702,6 +2752,9 @@ struct Environment {
     /// (C4Aul: script functions overload engine functions; OwnerOverloaded
     /// chains to the C4AulFunc base).
     function_name: String,
+    /// C4Aul global functions are owned by Game.ScriptEngine; unqualified
+    /// calls inside them resolve in engine scope, not against `this`'s def.
+    engine_scope: bool,
 }
 
 impl Environment {
@@ -2737,6 +2790,7 @@ impl Environment {
             named_param_count: params.len(),
             inherited_target: None,
             function_name: String::new(),
+            engine_scope: false,
         })
     }
 
@@ -2828,6 +2882,49 @@ mod tests {
         let var_decls: Vec<VarDecl> = Vec::new();
         let vm = Vm::new(&functions, &host_functions, &var_decls, None);
         vm.call(entry_point, args)
+    }
+
+    #[test]
+    fn calls_inside_global_functions_stay_in_engine_scope() {
+        // A global function is owned by Game.ScriptEngine, so its unqualified
+        // calls resolve through that engine rather than the current object's
+        // definition (C4AulParse.cpp:2808-2813). Hazard's AddLightCone must
+        // therefore call the global CreateLight, not FLHH::CreateLight.
+        let object_script = Parser::new(
+            r#"
+                func CreateLight() { return AddLightCone(); }
+                func Test() { return AddLightCone(); }
+            "#,
+        )
+        .parse_script()
+        .expect("object script parses");
+        let object_functions: HashMap<String, Function> = object_script
+            .functions
+            .into_iter()
+            .map(|function| (function.name.clone(), function))
+            .collect();
+        let global_script = Parser::new(
+            r#"
+                global func CreateLight() { return 42; }
+                global func AddLightCone() { return CreateLight(); }
+            "#,
+        )
+        .parse_script()
+        .expect("global script parses");
+        let global_functions: HashMap<String, Function> = global_script
+            .functions
+            .into_iter()
+            .map(|function| (function.name.clone(), function))
+            .collect();
+        let host_functions = HashMap::new();
+        let var_decls = Vec::new();
+        let vm = Vm::new(&object_functions, &host_functions, &var_decls, None)
+            .with_optional_globals(Some(&global_functions));
+
+        assert_eq!(
+            vm.call("Test", &[]).expect("global call resolves"),
+            Value::Int(42)
+        );
     }
 
     #[test]

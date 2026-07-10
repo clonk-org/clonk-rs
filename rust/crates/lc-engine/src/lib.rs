@@ -39153,10 +39153,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
-    fn global_scripts_resolve_after_own_definition_functions() {
-        // System.c4g `global func`s live on Game.ScriptEngine; resolution
-        // is own-def script first, engine-owned fallback (FindSameNameFunc,
-        // C4Aul.cpp:130-148). Installation reaches already-registered
+    fn global_function_bodies_resolve_in_engine_scope() {
+        // A `global func` is owned by Game.ScriptEngine, so calls in its body
+        // resolve through that engine, not the invoking object's definition
+        // (C4AulParse.cpp:2808-2813). Installation reaches already-registered
         // definitions too.
         let def_script = r#"
         func Shadowed() { return 2; }
@@ -39193,8 +39193,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             engine
                 .call_object_function(idx, "Probe2", Vec::new())
                 .expect("Probe2 runs"),
-            Value::Int(2),
-            "the own-def function shadows the global of the same name"
+            Value::Int(1),
+            "the global function stays in engine scope"
         );
     }
 
