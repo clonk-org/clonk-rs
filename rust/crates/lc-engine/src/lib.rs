@@ -44345,6 +44345,190 @@ func Overheal() {
         );
     }
 
+    #[test]
+    fn check_energy_need_chain_reports_the_calling_consumer_like_cpp() {
+        // FnEnergyCheck writes C4Object::NeedEnergy, then
+        // CheckEnergyNeedChain tests the current object's consumer bit and
+        // that flag before following any lines (C4Script.cpp:185-208,
+        // 1832-1849).
+        let script = r#"#strict
+func NeedsPower() {
+    EnergyCheck(1);
+    return(CheckEnergyNeedChain());
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.set_structures_need_energy(true);
+        let mut consumer =
+            Definition::from_script("ELEV", "Elevator", script).expect("consumer compiles");
+        consumer.set_line_connect(LINE_CONNECT_POWER_CONSUMER);
+        engine
+            .register_definition(consumer)
+            .expect("consumer registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("ELEV").with_category(CATEGORY_STRUCTURE))
+            .expect("consumer spawns");
+        let idx = engine.find_object_index(id).expect("consumer exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(idx, "NeedsPower", Vec::new())
+                .expect("energy-chain probe runs"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn check_energy_need_chain_follows_power_lines_and_breaks_cycles_like_cpp() {
+        // The recursive helper records each visited object, then scans
+        // Game.Objects.First-to-last for active PWRL objects whose
+        // Action.Target is the current node and recurses through Target2
+        // (C4Script.cpp:185-207). The first two lines form a cycle; the
+        // later branch must still reach the needy consumer.
+        let mut engine = Engine::with_seed(0);
+        engine.set_structures_need_energy(true);
+        let plant = Definition::from_script(
+            "POWR",
+            "Power Plant",
+            "#strict\nfunc Probe() { return(CheckEnergyNeedChain()); }\n\
+             func ProbeTarget(object target) { return(CheckEnergyNeedChain(target, 123)); }\n\
+             func ProbeNil() { return(CheckEnergyNeedChain(0)); }\n\
+             func ProbeFalse() { return(CheckEnergyNeedChain(false)); }\n",
+        )
+        .expect("plant compiles");
+        engine.register_definition(plant).expect("plant registers");
+        engine
+            .register_definition(simple_definition("RELY"))
+            .expect("relay registers");
+        let mut consumer = Definition::from_script(
+            "ELEV",
+            "Elevator",
+            "#strict\nfunc Arm() { return(EnergyCheck(1)); }\n\
+             func Disarm() { return(EnergyCheck(0)); }\n",
+        )
+        .expect("consumer compiles");
+        consumer.set_line_connect(LINE_CONNECT_POWER_CONSUMER);
+        engine
+            .register_definition(consumer)
+            .expect("consumer registers");
+        let mut line = simple_definition("PWRL");
+        line.configure_actions(
+            None,
+            HashMap::from([("Connect".to_string(), ActionSpec::default())]),
+        );
+        engine.register_definition(line).expect("line registers");
+        let mut wire = simple_definition("WIRE");
+        wire.configure_actions(
+            None,
+            HashMap::from([("Connect".to_string(), ActionSpec::default())]),
+        );
+        engine.register_definition(wire).expect("wire registers");
+
+        let plant = engine
+            .spawn_object(SpawnConfig::new("POWR").with_category(CATEGORY_STRUCTURE))
+            .expect("plant spawns");
+        let relay = engine
+            .spawn_object(SpawnConfig::new("RELY").with_category(CATEGORY_STRUCTURE))
+            .expect("relay spawns");
+        let consumer = engine
+            .spawn_object(SpawnConfig::new("ELEV").with_category(CATEGORY_STRUCTURE))
+            .expect("consumer spawns");
+        let connect = |definition: &str, from, to| {
+            let mut action = ActionState::new("Connect");
+            action.target = Some(from);
+            action.target2 = Some(to);
+            SpawnConfig::new(definition)
+                .with_category(CATEGORY_OBJECT)
+                .with_action(action)
+        };
+        engine
+            .spawn_object(connect("PWRL", plant, relay))
+            .expect("first cycle line spawns");
+        engine
+            .spawn_object(connect("PWRL", relay, plant))
+            .expect("second cycle line spawns");
+        engine
+            .spawn_object(
+                connect("PWRL", plant, consumer).with_status(ObjectStatus::Inactive),
+            )
+            .expect("inactive line spawns");
+        engine
+            .spawn_object(connect("WIRE", plant, consumer))
+            .expect("non-power line spawns");
+
+        let consumer_idx = engine
+            .find_object_index(consumer)
+            .expect("consumer exists");
+        assert_eq!(
+            engine
+                .call_object_function(consumer_idx, "Arm", Vec::new())
+                .expect("EnergyCheck runs"),
+            Value::Bool(false)
+        );
+        let plant_idx = engine.find_object_index(plant).expect("plant exists");
+        assert_eq!(
+            engine
+                .call_object_function(plant_idx, "Probe", Vec::new())
+                .expect("decoy-only probe runs"),
+            Value::Bool(false),
+            "inactive PWRL and active non-PWRL objects are ignored"
+        );
+        engine
+            .spawn_object(connect("PWRL", plant, consumer))
+            .expect("active consumer line spawns");
+        assert_eq!(
+            engine
+                .call_object_function(plant_idx, "Probe", Vec::new())
+                .expect("recursive probe runs"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    plant_idx,
+                    "ProbeTarget",
+                    vec![Value::Object(consumer.as_u64())],
+                )
+                .expect("explicit-target probe runs"),
+            Value::Bool(true),
+            "the declared object parameter is honored and surplus args are ignored"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(plant_idx, "ProbeNil", Vec::new())
+                .expect("nil-target probe runs"),
+            Value::Bool(true),
+            "zero converts to a nil object parameter and defaults to the caller"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(plant_idx, "ProbeFalse", Vec::new())
+                .expect("false-target probe runs"),
+            Value::Bool(true),
+            "false is Set0 before C4Object* conversion and defaults to the caller"
+        );
+        let consumer_snapshot = engine
+            .object_snapshot(consumer)
+            .expect("consumer snapshot exists");
+        assert!(
+            consumer_snapshot.need_energy,
+            "NeedEnergy is part of the persisted object snapshot (C4Object.cpp:2805)"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(consumer_idx, "Disarm", Vec::new())
+                .expect("clearing EnergyCheck runs"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(plant_idx, "Probe", Vec::new())
+                .expect("cleared recursive probe runs"),
+            Value::Bool(false),
+            "EnergyCheck's success branch clears NeedEnergy (C4Script.cpp:1842-1849)"
+        );
+    }
+
     // DoEnergy to zero kills: AssignDeath fires when a nonzero energy
     // reaches 0 (C4Object.cpp:1363) — including through the HOST DoEnergy
     // fold, not just engine damage paths.

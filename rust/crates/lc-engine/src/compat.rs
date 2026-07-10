@@ -5620,6 +5620,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Jump", jump);
     script.register_host_function("Punch", punch);
     script.register_host_function("EnergyCheck", energy_check);
+    script.register_host_function("CheckEnergyNeedChain", check_energy_need_chain);
     script.register_host_function("GetContact", get_contact);
     script.register_host_function("PathFree", path_free);
     script.register_host_function("GetPath", get_path);
@@ -13335,15 +13336,63 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnEnergyCheck (C4Script.cpp:1845-1856): true when the
-/// StructuresNeedEnergy rule is off, the object has enough energy, or
-/// the def is not a power consumer. (The NeedEnergy HUD flag is
-/// unmodeled.)
-fn energy_check(args: &[Value]) -> Result<Value, RuntimeError> {
-    let energy = value_to_i32(args.first().unwrap_or(&Value::Nil), "EnergyCheck", "energy")?;
+/// `CheckEnergyNeedChain` (C4Script.cpp:185-207): visit each object once,
+/// test power consumers' `NeedEnergy`, then follow active PWRL objects in
+/// master-list order from `Action.Target` to `Action.Target2`.
+fn energy_chain_needs_power(
+    context: &EffectHostContext,
+    target: ObjectId,
+    checked: &mut HashSet<ObjectId>,
+) -> bool {
+    if !checked.insert(target) {
+        return false;
+    }
+    let world_object = context.get_world_object(target);
+    let scope = context.object_scope(target);
+    let definition = scope
+        .and_then(|scope| scope.definition_id.as_deref())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            world_object
+                .as_ref()
+                .map(|object| object.definition_id().to_string())
+        });
+    let need_energy = scope
+        .map(ObjectScopeContext::need_energy)
+        .or_else(|| world_object.as_ref().map(|object| object.need_energy));
+    let (Some(definition), Some(need_energy)) = (definition, need_energy) else {
+        return false;
+    };
+    let is_consumer = context
+        .definition_metadata(&definition)
+        .is_some_and(|metadata| metadata.line_connect & crate::LINE_CONNECT_POWER_CONSUMER != 0);
+    if is_consumer && need_energy {
+        return true;
+    }
+    context.world_object_ids().into_iter().any(|line_id| {
+        let Some(line) = context.get_world_object(line_id) else {
+            return false;
+        };
+        line.status().is_active()
+            && line.definition_id() == "PWRL"
+            && line.action_target(0) == Some(target)
+            && line.action_target(1).is_some_and(|next| {
+                energy_chain_needs_power(context, next, checked)
+            })
+    })
+}
+
+/// FnCheckEnergyNeedChain (C4Script.cpp:1832-1837): nil/default target means
+/// the calling object; no object context returns nil.
+fn check_energy_need_chain(args: &[Value]) -> Result<Value, RuntimeError> {
     let target = args
-        .get(1)
-        .map(|arg| parse_object_reference_argument(arg, "EnergyCheck", "obj"))
+        .first()
+        .map(|arg| match arg {
+            // CheckConvertFunctionParameters Set0s every falsy parameter
+            // before converting to C4Object* (C4AulExec.cpp:1370-1396).
+            Value::Bool(false) => Ok(None),
+            _ => parse_object_reference_argument(arg, "CheckEnergyNeedChain", "object"),
+        })
         .transpose()?
         .flatten();
     HOST_CONTEXT.with(|cell| {
@@ -13351,25 +13400,79 @@ fn energy_check(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        if !context.world.structures_need_energy() {
-            return Ok(Value::Bool(true));
-        }
+        let target = target.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Bool(energy_chain_needs_power(
+            context,
+            target,
+            &mut HashSet::new(),
+        )))
+    })
+}
+
+/// FnEnergyCheck (C4Script.cpp:1839-1849): true when the
+/// StructuresNeedEnergy rule is off, the object has enough energy, or
+/// the def is not a power consumer; update `NeedEnergy` on every branch.
+fn energy_check(args: &[Value]) -> Result<Value, RuntimeError> {
+    let energy = value_to_i32(args.first().unwrap_or(&Value::Nil), "EnergyCheck", "energy")?;
+    let target = args
+        .get(1)
+        .map(|arg| match arg {
+            Value::Bool(false) => Ok(None),
+            _ => parse_object_reference_argument(arg, "EnergyCheck", "obj"),
+        })
+        .transpose()?
+        .flatten();
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
         let target = target.or_else(|| context.object_context().map(|object| object.id()));
         let Some(target) = target else {
             return Ok(Value::Nil);
         };
-        let Some(object) = context.get_world_object(target) else {
+        let scope_values = context.object_scope(target).map(|scope| {
+            (
+                scope.energy(),
+                scope
+                    .definition_id
+                    .as_deref()
+                    .map(ToOwned::to_owned),
+            )
+        });
+        let world_object = context.get_world_object(target);
+        let current_energy = scope_values
+            .as_ref()
+            .map(|(energy, _)| *energy)
+            .or_else(|| world_object.as_ref().map(HostWorldObject::energy));
+        let definition = scope_values
+            .and_then(|(_, definition)| definition)
+            .or_else(|| {
+                world_object
+                    .as_ref()
+                    .map(|object| object.definition_id().to_string())
+            });
+        let (Some(current_energy), Some(definition)) = (current_energy, definition) else {
             return Ok(Value::Nil);
         };
-        if object.energy >= energy {
-            return Ok(Value::Bool(true));
-        }
         let is_consumer = context
             .world
-            .definition_metadata(&object.definition_id)
-            .map(|metadata| metadata.line_connect & 32 != 0)
+            .definition_metadata(&definition)
+            .map(|metadata| metadata.line_connect & crate::LINE_CONNECT_POWER_CONSUMER != 0)
             .unwrap_or(false);
-        Ok(Value::Bool(!is_consumer))
+        let need_energy = context.world.structures_need_energy()
+            && current_energy < energy
+            && is_consumer;
+        if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
+            return Ok(Value::Nil);
+        }
+        if let Some(object) = context.object_scope_mut(target) {
+            object.set_need_energy(need_energy);
+        }
+        Ok(Value::Bool(!need_energy))
     })
 }
 
@@ -24415,6 +24518,7 @@ mod tests {
         "CastPXS",
         "CastParticles",
         "ChangeDef",
+        "CheckEnergyNeedChain",
         "ClearParticles",
         "CloseMenu",
         "Contained",
@@ -24966,6 +25070,25 @@ mod tests {
         // FnActIdle returns nullopt -> nil without an object
         // (C4Script.cpp:1831-1836).
         assert_eq!(act_idle(&[]).expect("ActIdle"), Value::Nil);
+    }
+
+    #[test]
+    fn check_energy_need_chain_validates_object_arguments_and_has_nil_without_context() {
+        // FnCheckEnergyNeedChain declares one C4Object* parameter, defaults a
+        // null parameter to cthr->Obj, and returns nullopt when both are null
+        // (C4Script.cpp:1832-1837). The Aul parameter conversion rejects a
+        // truthy string before the native function runs.
+        assert_eq!(
+            check_energy_need_chain(&[]).expect("no-context probe"),
+            Value::Nil
+        );
+        let error = check_energy_need_chain(&[Value::String("not an object".to_string())])
+            .expect_err("truthy strings are not object parameters");
+        assert!(
+            error.message().contains("expected object"),
+            "unexpected error: {}",
+            error.message()
+        );
     }
 
     #[test]
