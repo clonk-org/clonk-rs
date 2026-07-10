@@ -15382,8 +15382,8 @@ impl Engine {
     }
 
     pub fn spawn_object(&mut self, config: SpawnConfig) -> Result<ObjectId, EngineError> {
-        let (id, additional) = self.spawn_single(config)?;
-        self.process_spawn_queue(additional)?;
+        let (id, additional, nested_outcomes) = self.spawn_single(config)?;
+        self.process_spawn_queue_with_outcomes(additional, nested_outcomes)?;
         self.refresh_elimination_state();
         self.check_game_over()?;
         Ok(id)
@@ -17957,8 +17957,22 @@ impl Engine {
         &mut self,
         outcomes: Vec<compat::NestedObjectOutcome>,
     ) -> Result<(), EngineError> {
+        let _ = self.apply_nested_object_outcomes_retaining_missing(outcomes)?;
+        Ok(())
+    }
+
+    /// Applies every outcome whose target is live and returns only outcomes
+    /// for not-yet-materialized targets. Spawn queues use the returned tail
+    /// to bridge the gap between C++'s synchronous NewObject insertion and
+    /// Rust's deferred SpawnConfig materialization.
+    fn apply_nested_object_outcomes_retaining_missing(
+        &mut self,
+        outcomes: Vec<compat::NestedObjectOutcome>,
+    ) -> Result<Vec<compat::NestedObjectOutcome>, EngineError> {
+        let mut retained = Vec::new();
         for outcome in outcomes {
             let Some(index) = self.find_object_index(outcome.object_id) else {
+                retained.push(outcome);
                 continue;
             };
             let object_id = outcome.object_id;
@@ -18103,7 +18117,11 @@ impl Engine {
                     self.process_spawn_queue(effect_spawns)?;
                 }
                 if !effect_other_objects.is_empty() {
-                    self.apply_nested_object_outcomes(effect_other_objects)?;
+                    retained.extend(
+                        self.apply_nested_object_outcomes_retaining_missing(
+                            effect_other_objects,
+                        )?,
+                    );
                 }
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
@@ -18151,7 +18169,7 @@ impl Engine {
                 self.update_solid_mask(index);
             }
         }
-        Ok(())
+        Ok(retained)
     }
 
     pub fn queue_object_command(
@@ -29010,7 +29028,14 @@ impl Engine {
     fn spawn_single(
         &mut self,
         config: SpawnConfig,
-    ) -> Result<(ObjectId, Vec<SpawnConfig>), EngineError> {
+    ) -> Result<
+        (
+            ObjectId,
+            Vec<SpawnConfig>,
+            Vec<compat::NestedObjectOutcome>,
+        ),
+        EngineError,
+    > {
         let SpawnConfig {
             id: explicit_id,
             definition_id,
@@ -29323,6 +29348,12 @@ impl Engine {
         object.clamp_velocity(&self.physics);
 
         let mut additional_spawns = Vec::new();
+        // A callback may synchronously initialize an object that is still a
+        // pending SpawnConfig in this creation batch. C++ already has that
+        // object in Game.Objects (C4Game.cpp:1121-1138); Rust must retain the
+        // nested outcome until the queue materializes its target instead of
+        // dropping it as an unknown live object.
+        let mut pending_nested_outcomes = Vec::new();
         let mut deferred_transfer_zones: Vec<TransferZoneCommand> = Vec::new();
         // C++ Init runs SetOCF before any script callback
         // (C4Object.cpp:215): Construction/Initialize read a live mask.
@@ -29463,7 +29494,9 @@ impl Engine {
                 object.enqueue_commands(commands);
             }
             additional_spawns.extend(spawns);
-            self.apply_nested_object_outcomes(other_objects)?;
+            pending_nested_outcomes.extend(
+                self.apply_nested_object_outcomes_retaining_missing(other_objects)?,
+            );
             if !audio.is_empty() {
                 self.pending_audio.extend(audio);
             }
@@ -29609,7 +29642,9 @@ impl Engine {
                 object.enqueue_commands(commands);
             }
             additional_spawns = spawns;
-            self.apply_nested_object_outcomes(other_objects)?;
+            pending_nested_outcomes.extend(
+                self.apply_nested_object_outcomes_retaining_missing(other_objects)?,
+            );
             if !audio.is_empty() {
                 self.pending_audio.extend(audio);
             }
@@ -29666,12 +29701,10 @@ impl Engine {
             self.rng = new_rng;
             self.audio_registry = audio_state;
             self.sync_next_object_id(effect_next_object_id);
-            if !effect_spawns.is_empty() {
-                self.process_spawn_queue(effect_spawns)?;
-            }
-            if !effect_other_objects.is_empty() {
-                self.apply_nested_object_outcomes(effect_other_objects)?;
-            }
+            additional_spawns.extend(effect_spawns);
+            pending_nested_outcomes.extend(
+                self.apply_nested_object_outcomes_retaining_missing(effect_other_objects)?,
+            );
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
@@ -29749,7 +29782,7 @@ impl Engine {
             self.trigger_action_callbacks(index, None)?;
         }
         self.update_sector_for_index(index);
-        Ok((id, additional_spawns))
+        Ok((id, additional_spawns, pending_nested_outcomes))
     }
 
     /// BubbleOut (C4Effect.cpp:847-857): a bubble only from semi-solid
@@ -29841,13 +29874,26 @@ impl Engine {
         &mut self,
         queue: Vec<SpawnConfig>,
     ) -> Result<Vec<ObjectId>, EngineError> {
+        self.process_spawn_queue_with_outcomes(queue, Vec::new())
+    }
+
+    fn process_spawn_queue_with_outcomes(
+        &mut self,
+        queue: Vec<SpawnConfig>,
+        nested_outcomes: Vec<compat::NestedObjectOutcome>,
+    ) -> Result<Vec<ObjectId>, EngineError> {
         let mut pending: VecDeque<_> = queue.into_iter().collect();
         let mut created = Vec::new();
+        // Live targets must commit before the first pending object's
+        // Initialize. Only targets represented by an unmaterialized
+        // SpawnConfig remain deferred.
+        let mut nested_outcomes =
+            self.apply_nested_object_outcomes_retaining_missing(nested_outcomes)?;
         while let Some(config) = pending.pop_front() {
             // C++ CreateObject with an unknown id is C4Id2Def -> nullptr
             // (C4Script.cpp FnCreateObject): the call yields nil, never an
             // error, so unknown spawns are skipped rather than fatal.
-            let (id, additional) = match self.spawn_single(config) {
+            let (id, additional, additional_outcomes) = match self.spawn_single(config) {
                 Ok(result) => result,
                 Err(EngineError::UnknownDefinition(definition)) => {
                     tracing::warn!(
@@ -29859,10 +29905,18 @@ impl Engine {
                 Err(other) => return Err(other),
             };
             created.push(id);
+            nested_outcomes.extend(additional_outcomes);
+            // The just-created object is now a live target. Flush its
+            // retained outcomes before the next queued object's callbacks,
+            // preserving C++ NewObject's synchronous visibility.
+            nested_outcomes =
+                self.apply_nested_object_outcomes_retaining_missing(nested_outcomes)?;
             for spawn in additional {
                 pending.push_back(spawn);
             }
         }
+        // Any remainder belongs to a same-call object removed before its
+        // SpawnConfig materialized; preserve the prior silent-miss behavior.
         Ok(created)
     }
 }
@@ -46617,6 +46671,198 @@ func Initialize() { CreateObject(CHLD, 0, 0, -1); UnknownFn(); return(1); }
             next.as_u64(),
             parent_id.as_u64() + 2,
             "the burned id is never re-minted"
+        );
+    }
+
+    #[test]
+    fn nested_pending_creation_keeps_initialize_locals_after_materialization_like_cpp() {
+        // FnCreateObject enters C4Game::NewObject (C4Script.cpp:1886-1902),
+        // which adds the new object to Game.Objects BEFORE running its
+        // Construction/Initialize callbacks (C4Game.cpp:1121-1138). Thus a
+        // child created from another object's Initialize has live object
+        // locals immediately, and references written by the child's own
+        // Initialize remain callable after the outer creation returns.
+        let parent_script = r#"#strict
+func Initialize() { CreateObject(CHLD, 0, 0, -1); }
+"#;
+        let child_script = r#"#strict
+local helper;
+func Initialize() { helper = CreateObject(HELP, 0, 0, -1); }
+func Probe() { return helper->Ping(); }
+"#;
+        let helper_script = r#"#strict
+func Ping() { return 17; }
+"#;
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("PRNT", "Parent", parent_script).expect("parent compiles"),
+            )
+            .expect("parent registers");
+        engine
+            .register_definition(
+                Definition::from_script("CHLD", "Child", child_script).expect("child compiles"),
+            )
+            .expect("child registers");
+        engine
+            .register_definition(
+                Definition::from_script("HELP", "Helper", helper_script)
+                    .expect("helper compiles"),
+            )
+            .expect("helper registers");
+
+        engine
+            .spawn_object(SpawnConfig::new("PRNT").with_category(CATEGORY_OBJECT))
+            .expect("outer creation succeeds");
+
+        let child = engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "CHLD")
+            .expect("nested child materialized");
+        let helper = engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "HELP")
+            .expect("helper materialized");
+        assert_eq!(
+            child.local_vars.get("helper"),
+            Some(&Value::Object(helper.id.as_u64())),
+            "the pending child's Initialize local survives materialization"
+        );
+        let child_index = engine
+            .find_object_index(child.id)
+            .expect("child remains callable");
+        assert_eq!(
+            engine
+                .call_object_function(child_index, "Probe", Vec::new())
+                .expect("the persisted helper reference is callable"),
+            Value::Int(17)
+        );
+    }
+
+    #[test]
+    fn parent_creation_queue_observes_prior_live_mutation_like_cpp() {
+        // FnSetXDir writes the live target immediately (C4Script.cpp:697-705),
+        // and the later FnCreateObject synchronously enters NewObject and its
+        // Initialize callback (C4Script.cpp:1886-1902; C4Game.cpp:1121-1138).
+        // Therefore CHLD's GetXDir (C4Script.cpp:1168-1174) must observe the
+        // marker mutation represented by PRNT's returned outcome before its
+        // queued child runs Initialize.
+        let child_script = r#"#strict
+local seen;
+func Initialize() { seen = GetXDir(FindObject(MARK), 100); }
+"#;
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(simple_definition("MARK"))
+            .expect("marker registers");
+        engine
+            .register_definition(
+                Definition::from_script("CHLD", "Child", child_script).expect("child compiles"),
+            )
+            .expect("child registers");
+
+        let marker_id = engine
+            .spawn_object(SpawnConfig::new("MARK").with_category(CATEGORY_OBJECT))
+            .expect("already-live marker spawns");
+
+        let mut update = ObjectUpdate::default();
+        update.fixed_velocity_x = Some(math::itofix_prec(300, 100));
+        let parent_outcome = compat::NestedObjectOutcome {
+            object_id: marker_id,
+            effects: Vec::new(),
+            update: Some(update),
+            commands: Vec::new(),
+            command_operations: Vec::new(),
+            destroy: false,
+        };
+        engine
+            .process_spawn_queue_with_outcomes(
+                vec![SpawnConfig::new("CHLD").with_category(CATEGORY_OBJECT)],
+                vec![parent_outcome],
+            )
+            .expect("parent's child queue succeeds");
+
+        let child = engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "CHLD")
+            .expect("nested child materialized");
+        assert_eq!(
+            child.local_vars.get("seen"),
+            Some(&Value::Int(300)),
+            "the child Initialize sees the earlier synchronous marker write"
+        );
+    }
+
+    #[test]
+    fn retained_pending_outcome_applies_before_later_initializer_like_cpp() {
+        // Each C4Game::NewObject inserts and fully initializes one object
+        // before FnCreateObject returns (C4Game.cpp:1121-1138). A mutation
+        // made to that object is therefore live before a later CreateObject
+        // enters the next object's Initialize (C4Script.cpp:1886-1902).
+        let child_script = r#"#strict
+local flag;
+func Read() { return flag; }
+"#;
+        let observer_script = r#"#strict
+local seen;
+func Initialize() { seen = FindObject(CHLD)->Read(); }
+"#;
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CHLD", "Child", child_script).expect("child compiles"),
+            )
+            .expect("child registers");
+        engine
+            .register_definition(
+                Definition::from_script("OBSV", "Observer", observer_script)
+                    .expect("observer compiles"),
+            )
+            .expect("observer registers");
+
+        let child_id = ObjectId::new(40);
+        let observer_id = ObjectId::new(41);
+        let mut update = ObjectUpdate::default();
+        update.local_vars = Some(HashMap::from([("flag".to_string(), Value::Int(99))]));
+        let retained = compat::NestedObjectOutcome {
+            object_id: child_id,
+            effects: Vec::new(),
+            update: Some(update),
+            commands: Vec::new(),
+            command_operations: Vec::new(),
+            destroy: false,
+        };
+
+        engine
+            .process_spawn_queue_with_outcomes(
+                vec![
+                    SpawnConfig::new("CHLD")
+                        .with_id(child_id)
+                        .with_category(CATEGORY_OBJECT),
+                    SpawnConfig::new("OBSV")
+                        .with_id(observer_id)
+                        .with_category(CATEGORY_OBJECT),
+                ],
+                vec![retained],
+            )
+            .expect("creation queue succeeds");
+
+        let observer = engine
+            .object_snapshot(observer_id)
+            .expect("observer materialized");
+        assert_eq!(
+            observer.local_vars.get("seen"),
+            Some(&Value::Int(99)),
+            "the retained child mutation commits before the observer Initialize"
         );
     }
 
