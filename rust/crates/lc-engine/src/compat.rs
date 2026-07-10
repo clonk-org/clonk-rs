@@ -558,6 +558,9 @@ pub(crate) struct HostWorldContext {
     master_order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
     definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
+    /// Runtime `Game.Defs` order after C4DefList::SortByID. Definition-indexing
+    /// APIs must never observe the nondeterministic order of `definitions`.
+    definition_order: Rc<Vec<DefinitionId>>,
     /// Lazily built on the first sector query: most callbacks never run
     /// one, and an eager build per host context made every tick quadratic
     /// in the object count.
@@ -623,6 +626,7 @@ impl Default for HostWorldContext {
             master_order: Rc::new(Vec::new()),
             landscape: None,
             definitions: Rc::new(HashMap::new()),
+            definition_order: Rc::new(Vec::new()),
             sectors: RefCell::new(None),
             transfer_zones: Rc::new(Vec::new()),
             players: Rc::new(HashMap::new()),
@@ -776,6 +780,7 @@ impl HostWorldContext {
             order,
             landscape: landscape.map(Rc::new),
             definitions,
+            definition_order: Rc::new(Vec::new()),
             sectors,
             transfer_zones: Rc::new(transfer_zones),
             player_order: Rc::new({
@@ -848,6 +853,11 @@ impl HostWorldContext {
         definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
     ) -> Self {
         self.definitions = definitions;
+        self
+    }
+
+    pub(crate) fn with_definition_order(mut self, order: Rc<Vec<DefinitionId>>) -> Self {
+        self.definition_order = order;
         self
     }
 

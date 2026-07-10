@@ -9246,6 +9246,7 @@ impl ScenarioScript {
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
+        definition_order: Rc<Vec<DefinitionId>>,
         network_game: bool,
         engine_next_object_id: u64,
         scenario_script_counter: i32,
@@ -9273,6 +9274,7 @@ impl ScenarioScript {
             particle_defs,
             definition_scripts,
             definition_metadata,
+            definition_order,
             network_game,
             engine_next_object_id,
             scenario_script_counter,
@@ -9293,6 +9295,7 @@ impl ScenarioScript {
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
+        definition_order: Rc<Vec<DefinitionId>>,
         network_game: bool,
         engine_next_object_id: u64,
         scenario_script_counter: i32,
@@ -9322,6 +9325,7 @@ impl ScenarioScript {
             particle_defs,
             definition_scripts,
             definition_metadata,
+            definition_order,
             network_game,
             engine_next_object_id,
             scenario_script_counter,
@@ -9353,6 +9357,7 @@ impl ScenarioScript {
         particle_defs: HashSet<String>,
         definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         definition_metadata: Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>,
+        definition_order: Rc<Vec<DefinitionId>>,
         network_game: bool,
         engine_next_object_id: u64,
         scenario_script_counter: i32,
@@ -9373,6 +9378,7 @@ impl ScenarioScript {
         // intro _TLK collided with a burned same-frame FXU1 id here).
         let world = host_world_context_from_snapshot(snapshot)
             .with_definition_metadata(definition_metadata)
+            .with_definition_order(definition_order)
             .with_particle_defs(particle_defs)
             .with_definition_scripts(definition_scripts)
             .with_network_game(network_game)
@@ -9733,6 +9739,9 @@ pub struct Engine {
     /// which decides the overload chain when several appends hit the same
     /// target function.
     definition_load_order: Vec<DefinitionId>,
+    /// Runtime `Game.Defs` order after C4DefList::SortByID. This is distinct
+    /// from script-host registration order, which still controls linking.
+    runtime_definition_order: Rc<Vec<DefinitionId>>,
     /// The engine-global `static` table (Game.ScriptEngine.GlobalNamed):
     /// one shared named-variable table for every script host (scenario
     /// script, definitions, appended scripts). pub(crate) for tests.
@@ -11439,6 +11448,7 @@ impl Engine {
         let mut engine = Self {
             definitions: HashMap::new(),
             definition_load_order: Vec::new(),
+            runtime_definition_order: Rc::new(Vec::new()),
             script_globals: lc_script::new_global_variables(),
             script_global_consts: lc_script::new_global_variables(),
             append_script_sources: Vec::new(),
@@ -13145,6 +13155,7 @@ impl Engine {
             self.next_object_id,
             self.team_home_base_rule,
         )
+        .with_definition_order(Rc::clone(&self.runtime_definition_order))
         // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
         // execution. FindBase is one of the APIs that explicitly walks the
         // forward master list (C4Game.cpp:1582,3732-3744).
@@ -13278,17 +13289,12 @@ impl Engine {
     pub(crate) fn initialize_definition_scripts(
         &mut self,
     ) -> Result<Vec<ObjectId>, EngineError> {
-        let mut definition_ids = self.definition_load_order.clone();
-        definition_ids.sort_by_key(|id| {
-            definition_id_to_c4id(id.as_str())
-                .map(|id| id as u32)
-                .unwrap_or_default()
-        });
+        let definition_ids = Rc::clone(&self.runtime_definition_order);
         let mut created = Vec::new();
-        for definition_id in definition_ids {
+        for definition_id in definition_ids.iter() {
             let Some((script_name, script)) = self
                 .definitions
-                .get(&definition_id)
+                .get(definition_id)
                 .filter(|definition| definition.script.has_function("InitializeDef"))
                 .map(|definition| (definition.id.clone(), definition.script_arc()))
             else {
@@ -13336,6 +13342,7 @@ impl Engine {
         let particle_defs = self.particle_system.def_names();
         let definition_scripts = self.definition_script_table();
         let definition_metadata_table = self.definition_metadata_table();
+        let definition_order = Rc::clone(&self.runtime_definition_order);
         let network_game = self.network_game;
         let next_object_id = self.next_object_id;
         let scenario_script_counter = self.scenario_script_counter;
@@ -13353,6 +13360,7 @@ impl Engine {
             particle_defs,
             definition_scripts,
             definition_metadata_table,
+            definition_order,
             network_game,
             next_object_id,
             scenario_script_counter,
@@ -13458,6 +13466,7 @@ impl Engine {
         let particle_defs = self.particle_system.def_names();
         let definition_scripts = self.definition_script_table();
         let definition_metadata_for_call = self.definition_metadata_table();
+        let definition_order = Rc::clone(&self.runtime_definition_order);
         let network_game = self.network_game;
         let engine_next_object_id = self.next_object_id;
         let scenario_script_counter = self.scenario_script_counter;
@@ -13479,6 +13488,7 @@ impl Engine {
             particle_defs,
             definition_scripts,
             definition_metadata_for_call,
+            definition_order,
             network_game,
             engine_next_object_id,
             scenario_script_counter,
@@ -14794,7 +14804,14 @@ impl Engine {
             self.append_script_sources
                 .push(AppendScriptSource::Definition(definition_id.clone()));
         }
-        self.definition_load_order.push(definition_id);
+        self.definition_load_order.push(definition_id.clone());
+        let runtime_order = Rc::make_mut(&mut self.runtime_definition_order);
+        runtime_order.push(definition_id);
+        runtime_order.sort_unstable_by_key(|id| {
+            definition_id_to_c4id(id.as_str())
+                .map(|id| id as u32)
+                .unwrap_or_default()
+        });
         self.definitions.insert(id, definition);
         self.definition_metadata_cache.borrow_mut().take();
         Ok(())
@@ -15677,6 +15694,7 @@ impl Engine {
             let global_effects = self.global_effects.clone();
             let particle_defs = self.particle_system.def_names();
             let definition_metadata_table = self.definition_metadata_table();
+            let definition_order = Rc::clone(&self.runtime_definition_order);
             let network_game = self.network_game;
             let engine_next_object_id = self.next_object_id;
             let scenario_script_counter = self.scenario_script_counter;
@@ -15698,6 +15716,7 @@ impl Engine {
                     particle_defs,
                     definition_scripts,
                     definition_metadata_table.clone(),
+                    definition_order,
                     network_game,
                     engine_next_object_id,
                     scenario_script_counter,
