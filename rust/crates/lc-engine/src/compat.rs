@@ -19279,6 +19279,231 @@ fn placement_find_liquid(
     false
 }
 
+struct PlacementObjectRegistration {
+    target: ObjectId,
+    growth: i32,
+    shape: Option<DefinitionRect>,
+    stretch_growth: bool,
+    line: i32,
+}
+
+/// Register the zero-construction object that C4Game::NewObject exposes
+/// before PSF_Construction. Runtime placement hosts share this exact preview
+/// and pending-spawn setup; the callback/DoCon half lives in
+/// [`finish_placement_object_creation`].
+fn register_placement_object(
+    context: &mut EffectHostContext,
+    definition: String,
+    metadata: DefinitionMetadata,
+    position: Vector2,
+    growth: i32,
+) -> PlacementObjectRegistration {
+    let id = context.allocate_object_id();
+    let mut spawn = SpawnConfig::new(definition.clone())
+        .with_position(position)
+        .with_owner(OWNER_NONE)
+        .with_controller(OWNER_NONE)
+        .with_category(metadata.category)
+        .with_construction(0)
+        .with_id(id);
+    // NewObject's callbacks and initial DoCon run below while this host
+    // call is live. Materialization must not repeat either operation.
+    spawn.initialized = true;
+    spawn.position_adjusted = true;
+    let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
+    let preview_ocf = ocf::compute(
+        metadata.ocf_base,
+        metadata.crew_member,
+        initial_alive,
+        ObjectStatus::Normal,
+        false,
+        0,
+        metadata.category,
+    );
+    let preview = HostWorldObject::with_category(
+        id,
+        definition,
+        ObjectStatus::Normal,
+        "Idle",
+        None,
+        None,
+        None,
+        OWNER_NONE,
+        metadata.category,
+        if initial_alive {
+            metadata.physical.energy
+        } else {
+            0
+        },
+        0,
+        0,
+        position,
+        Vector2::ZERO,
+        0,
+        metadata.vertices.clone(),
+        0,
+        0,
+        0,
+        None,
+        None,
+    )
+    .with_alive(initial_alive)
+    .with_ocf(preview_ocf)
+    .with_full_state(Rc::new({
+        let mut state = crate::preview_spawn_state(
+            position,
+            OWNER_NONE,
+            OWNER_NONE,
+            metadata.category,
+            0,
+            metadata.vertices,
+        );
+        state.alive = initial_alive;
+        state.energy = if initial_alive {
+            metadata.physical.energy
+        } else {
+            0
+        };
+        state.crew_member = metadata.crew_member;
+        state.blit_mode = metadata.blit_mode;
+        state
+    }));
+    context.register_spawn(spawn, preview);
+    context.ensure_object_scope(id);
+    PlacementObjectRegistration {
+        target: id,
+        growth: growth.clamp(0, FULL_CON),
+        shape: metadata.shape,
+        stretch_growth: metadata.stretch_growth,
+        line: metadata.line,
+    }
+}
+
+/// Complete C4Game::NewObject after the object has become script-visible:
+/// Construction(nil), initial DoCon, Completion/Initialize on the full-con
+/// transition, and nullptr if any callback assigned removal.
+fn finish_placement_object_creation(
+    registration: PlacementObjectRegistration,
+) -> Result<Value, RuntimeError> {
+    let PlacementObjectRegistration {
+        target,
+        growth,
+        shape,
+        stretch_growth,
+        line,
+    } = registration;
+
+    if let Some(Err(error)) =
+        call_world_object_own_function(target, "Construction", &[Value::Nil])
+    {
+        tracing::warn!(
+            id = target.as_u64(),
+            callback = "Construction",
+            %error,
+            "creation callback failed; continuing like C++ fail-safe Call"
+        );
+    }
+    let removed = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| context.nested_object_destroyed(target))
+            .unwrap_or(false)
+    });
+    if removed {
+        return Ok(Value::Nil);
+    }
+
+    let crossed_full_con = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        let (was_full, final_construction, pre_growth_position, adjusted_position) = {
+            let Some(scope) = context.object_scope_mut(target) else {
+                return false;
+            };
+            let entry_construction = scope.construction();
+            let was_full = entry_construction >= FULL_CON;
+            let final_construction = entry_construction
+                .saturating_add(growth)
+                .clamp(0, FULL_CON);
+            let pre_growth_position = scope.effective_position();
+            let adjusted_position = Vector2::new(
+                pre_growth_position.x,
+                crate::docon_initial_center_y(
+                    shape,
+                    stretch_growth,
+                    line,
+                    final_construction,
+                    pre_growth_position.y,
+                ),
+            );
+            scope.current_construction = final_construction;
+            scope.pending_update.construction = None;
+            scope.current_position = adjusted_position;
+            scope.pending_update.position = None;
+            (
+                was_full,
+                final_construction,
+                pre_growth_position,
+                adjusted_position,
+            )
+        };
+        if let Some(spawn) = context
+            .pending_spawns
+            .iter_mut()
+            .find(|spawn| spawn.id == Some(target))
+        {
+            spawn.position = adjusted_position;
+            spawn.construction = final_construction;
+            spawn.fixed_position = (adjusted_position != pre_growth_position)
+                .then_some(FixedVec2::from_ints(
+                    pre_growth_position.x,
+                    pre_growth_position.y,
+                ));
+        }
+        !was_full && final_construction >= FULL_CON
+    });
+    if crossed_full_con {
+        if let Some(Err(error)) = call_world_object_own_function(target, "Completion", &[]) {
+            tracing::warn!(
+                id = target.as_u64(),
+                callback = "Completion",
+                %error,
+                "creation callback failed; continuing like C++ fail-safe Call"
+            );
+        }
+        let removed = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| context.nested_object_destroyed(target))
+                .unwrap_or(false)
+        });
+        if !removed {
+            if let Some(Err(error)) = call_world_object_own_function(target, "Initialize", &[]) {
+                tracing::warn!(
+                    id = target.as_u64(),
+                    callback = "Initialize",
+                    %error,
+                    "creation callback failed; continuing like C++ fail-safe Call"
+                );
+            }
+        }
+    }
+
+    let removed = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| context.nested_object_destroyed(target))
+            .unwrap_or(false)
+    });
+    Ok(if removed {
+        Value::Nil
+    } else {
+        object_reference_value(target)
+    })
+}
+
 fn place_vegetation(args: &[Value]) -> Result<Value, RuntimeError> {
     let definition = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
@@ -19429,201 +19654,18 @@ fn place_vegetation(args: &[Value]) -> Result<Value, RuntimeError> {
             _ => return Ok(None),
         };
 
-        let id = context.allocate_object_id();
-        let mut spawn = SpawnConfig::new(definition.clone())
-            .with_position(bottom)
-            .with_owner(OWNER_NONE)
-            .with_controller(OWNER_NONE)
-            .with_category(metadata.category)
-            .with_construction(0)
-            .with_id(id);
-        // NewObject's callbacks and initial DoCon run below while this host
-        // call is live. Materialization must not repeat either operation.
-        spawn.initialized = true;
-        spawn.position_adjusted = true;
-        let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
-        let preview_ocf = ocf::compute(
-            metadata.ocf_base,
-            metadata.crew_member,
-            initial_alive,
-            ObjectStatus::Normal,
-            false,
-            0,
-            metadata.category,
-        );
-        let preview = HostWorldObject::with_category(
-            id,
+        Ok(Some(register_placement_object(
+            context,
             definition,
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            metadata.category,
-            if initial_alive {
-                metadata.physical.energy
-            } else {
-                0
-            },
-            0,
-            0,
+            metadata,
             bottom,
-            Vector2::ZERO,
-            0,
-            metadata.vertices.clone(),
-            0,
-            0,
-            0,
-            None,
-            None,
-        )
-        .with_alive(initial_alive)
-        .with_ocf(preview_ocf)
-        .with_full_state(Rc::new({
-            let mut state = crate::preview_spawn_state(
-                bottom,
-                OWNER_NONE,
-                OWNER_NONE,
-                metadata.category,
-                0,
-                metadata.vertices,
-            );
-            state.alive = initial_alive;
-            state.energy = if initial_alive {
-                metadata.physical.energy
-            } else {
-                0
-            };
-            state.crew_member = metadata.crew_member;
-            state.blit_mode = metadata.blit_mode;
-            state
-        }));
-        context.register_spawn(spawn, preview);
-        context.ensure_object_scope(id);
-        Ok(Some((
-            id,
-            growth.clamp(0, FULL_CON),
-            metadata.shape,
-            metadata.stretch_growth,
-            metadata.line,
+            growth,
         )))
     })?;
-    let Some((target, growth, shape, stretch_growth, line)) = registration else {
+    let Some(registration) = registration else {
         return Ok(Value::Nil);
     };
-
-    // C4Game::NewObject calls Construction before the initial DoCon, with a
-    // null creator for PlaceVegetation (C4Game.cpp:1135-1144, 3020-3022).
-    if let Some(Err(error)) =
-        call_world_object_own_function(target, "Construction", &[Value::Nil])
-    {
-        tracing::warn!(
-            id = target.as_u64(),
-            callback = "Construction",
-            %error,
-            "creation callback failed; continuing like C++ fail-safe Call"
-        );
-    }
-    let removed = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|context| context.nested_object_destroyed(target))
-            .unwrap_or(false)
-    });
-    if removed {
-        return Ok(Value::Nil);
-    }
-
-    let crossed_full_con = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
-        let (was_full, final_construction, pre_growth_position, adjusted_position) = {
-            let Some(scope) = context.object_scope_mut(target) else {
-                return false;
-            };
-            let entry_construction = scope.construction();
-            let was_full = entry_construction >= FULL_CON;
-            let final_construction = entry_construction
-                .saturating_add(growth)
-                .clamp(0, FULL_CON);
-            let pre_growth_position = scope.effective_position();
-            let adjusted_position = Vector2::new(
-                pre_growth_position.x,
-                crate::docon_initial_center_y(
-                    shape,
-                    stretch_growth,
-                    line,
-                    final_construction,
-                    pre_growth_position.y,
-                ),
-            );
-            scope.current_construction = final_construction;
-            scope.pending_update.construction = None;
-            scope.current_position = adjusted_position;
-            scope.pending_update.position = None;
-            (
-                was_full,
-                final_construction,
-                pre_growth_position,
-                adjusted_position,
-            )
-        };
-        if let Some(spawn) = context
-            .pending_spawns
-            .iter_mut()
-            .find(|spawn| spawn.id == Some(target))
-        {
-            spawn.position = adjusted_position;
-            spawn.construction = final_construction;
-            spawn.fixed_position = (adjusted_position != pre_growth_position)
-                .then_some(FixedVec2::from_ints(
-                    pre_growth_position.x,
-                    pre_growth_position.y,
-                ));
-        }
-        !was_full && final_construction >= FULL_CON
-    });
-    if crossed_full_con {
-        if let Some(Err(error)) = call_world_object_own_function(target, "Completion", &[]) {
-            tracing::warn!(
-                id = target.as_u64(),
-                callback = "Completion",
-                %error,
-                "creation callback failed; continuing like C++ fail-safe Call"
-            );
-        }
-        let removed = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .map(|context| context.nested_object_destroyed(target))
-                .unwrap_or(false)
-        });
-        if !removed {
-            if let Some(Err(error)) = call_world_object_own_function(target, "Initialize", &[]) {
-                tracing::warn!(
-                    id = target.as_u64(),
-                    callback = "Initialize",
-                    %error,
-                    "creation callback failed; continuing like C++ fail-safe Call"
-                );
-            }
-        }
-    }
-
-    let removed = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|context| context.nested_object_destroyed(target))
-            .unwrap_or(false)
-    });
-    Ok(if removed {
-        Value::Nil
-    } else {
-        object_reference_value(target)
-    })
+    finish_placement_object_creation(registration)
 }
 
 fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
