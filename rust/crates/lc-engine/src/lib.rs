@@ -12575,11 +12575,20 @@ impl Engine {
             .with_owner(number)
             .with_crew_member(true);
         if let Some(base) = first_base {
-            // Enter the base; the exit command (C4Player.cpp:517/564) is
-            // not queued yet.
             config = config.with_container(base);
         }
         let id = self.spawn_object(config)?;
+        if first_base.is_some() {
+            if let Some(index) = self.find_object_index(id) {
+                // Enter(FirstBase), then SetCommand(C4CMD_Exit) before the
+                // Recruitment callback (C4Player.cpp:551-564, :557-558).
+                self.objects[index].apply_command_operations([
+                    CommandOperation::DecrementNoCollectDelay,
+                    CommandOperation::Clear,
+                    CommandOperation::PushFront(command::CommandRequest::new(CommandId::Exit)),
+                ]);
+            }
+        }
         self.crew_object_infos.insert(
             id,
             CrewObjectInfo {

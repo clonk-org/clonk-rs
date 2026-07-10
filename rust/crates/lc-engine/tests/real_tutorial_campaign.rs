@@ -99,3 +99,44 @@ fn tutorial02_ready_balloon_exits_the_first_base() {
         "the queued Exit must move BALN out of HUT3"
     );
 }
+
+#[test]
+fn tutorial02_ready_crew_exits_the_first_base() {
+    // C4Player::PlaceReadyCrew enters each newly created crew member into the
+    // first base and immediately replaces its command stack with Exit before
+    // Recruitment runs (C4Player.cpp:551-564, especially :557-558).
+    let (mut engine, player) = load_tutorial(2);
+    let clonk = engine
+        .crew_cursor(player)
+        .expect("Tutorial02 joins one selected CLNK");
+    let joined = engine
+        .object_snapshot(clonk)
+        .expect("Tutorial02 ready crew exists");
+    let hut = engine
+        .object_snapshot(joined.container.expect("CLNK starts in the first base"))
+        .expect("CLNK container exists");
+    assert_eq!(hut.definition_id, "HUT3");
+    assert_eq!(
+        joined.command_stack.command_names(),
+        vec!["Exit".to_string()],
+        "PlaceReadyCrew must queue the C++ Exit command"
+    );
+
+    for _ in 0..80 {
+        if engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.container.is_none())
+        {
+            break;
+        }
+        engine.tick().expect("ready crew Exit frame");
+    }
+    assert_eq!(
+        engine
+            .object_snapshot(clonk)
+            .expect("CLNK survives its Exit")
+            .container,
+        None,
+        "the queued Exit must move the CLNK out of HUT3"
+    );
+}

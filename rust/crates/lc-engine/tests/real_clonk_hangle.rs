@@ -172,18 +172,22 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
         0,
         "full-con HUT3 exposes its DefCore entrance"
     );
-    // C4Player::PlaceReadyCrew enters freshly joined crew into the ready
-    // base before gameplay (C4Player.cpp:695-730). Keep that real join
-    // path intact: forcing containment here would hide a player-placement
-    // or auto-context regression like the one visible in the app.
+    // PlaceReadyCrew immediately queues Exit after entering the ready base
+    // (C4Player.cpp:551-564), so by the time Tick10 assigns Base the CLNK is
+    // outside. The entrance control path has its own regression below; put
+    // the CLNK back inside here to isolate the tutorial's subsequent
+    // Context -> Buy -> Contents sequence.
     assert_eq!(
         engine
             .object_snapshot(clonk)
             .expect("joined Tutorial03 clonk")
             .container,
-        Some(hut.id),
-        "ready crew starts inside the real HUT3"
+        None,
+        "ready crew must have executed the C++ Exit command"
     );
+    engine
+        .apply_object_update(clonk, ObjectUpdate::new().with_container(hut.id))
+        .expect("model the completed enter-building step");
 
     engine.tick().expect("auto-context frame");
     let context = engine
