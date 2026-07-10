@@ -1099,6 +1099,10 @@ impl PlayerConfig {
         self.id
     }
 
+    pub(crate) fn player_info_id(&self) -> i32 {
+        self.player_info_id
+    }
+
     pub fn build(self) -> Player {
         Player::from_config(self)
     }

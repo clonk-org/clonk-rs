@@ -116,6 +116,7 @@ use winit::window::{Fullscreen, Window, WindowBuilder};
 const PLAYER_OWNER: i32 = 1;
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_666); // ~60 FPS
 const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
+const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
@@ -1535,6 +1536,7 @@ fn main() -> Result<()> {
 
     let mut previous_instant = Instant::now();
     let mut accumulator = Duration::ZERO;
+    let mut game_clock_accumulator = Duration::ZERO;
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -1565,10 +1567,14 @@ fn main() -> Result<()> {
                 let now = Instant::now();
                 let frame_time = now.saturating_duration_since(previous_instant);
                 previous_instant = now;
+                let mut did_update = advance_game_clock_from_elapsed(
+                    &mut app,
+                    &mut game_clock_accumulator,
+                    frame_time,
+                );
                 let clamped = frame_time.min(MAX_ACCUMULATED_TIME);
                 accumulator = (accumulator + clamped).min(MAX_ACCUMULATED_TIME);
 
-                let mut did_update = false;
                 while accumulator >= FRAME_INTERVAL {
                     if let Err(err) = app.update() {
                         // Script errors during the simulation tick show in
@@ -1618,6 +1624,22 @@ fn main() -> Result<()> {
             }
         }
     });
+}
+
+/// Drive C4Game's scheduler-owned one-second callback independently from the
+/// fixed-step frame accumulator (StdAppUnix.cpp:286-291).
+fn advance_game_clock_from_elapsed(
+    app: &mut GameApp,
+    accumulator: &mut Duration,
+    elapsed: Duration,
+) -> bool {
+    *accumulator += elapsed;
+    let mut changed = false;
+    while *accumulator >= GAME_SECOND_INTERVAL {
+        changed |= app.sec1_timer();
+        *accumulator -= GAME_SECOND_INTERVAL;
+    }
+    changed
 }
 
 fn handle_window_event(
@@ -3156,9 +3178,6 @@ struct GameApp {
     /// Last player-list row click (index, time) for forwarding the list box's
     /// double-click event (C4StartupPlrSelDlg.cpp:574-575).
     plrsel_last_click: Option<(usize, Instant)>,
-    /// Wall clock of the scenario start; `Game.Time` counts real seconds
-    /// while the game runs (C4Game::Sec1Timer, src/C4Game.cpp:1737-1741).
-    run_started: Option<Instant>,
     /// The message board's current log line and the frame it expires
     /// (fade-in + strlen delay + fade-out at Speed 1,
     /// src/C4MessageBoard.cpp:163-212).
@@ -5896,7 +5915,6 @@ impl GameApp {
             menu_backdrop_cache: StartupBackdropCache::default(),
             scensel_last_click: None,
             plrsel_last_click: None,
-            run_started: None,
             board_line: None,
             show_startup_hint: false,
             debug_hud: std::env::var("LC_APP_HUD_DEBUG").map(|v| v == "1").unwrap_or(false),
@@ -6024,28 +6042,45 @@ impl GameApp {
         if self.engine.player(self.local_owner).is_some() {
             return Ok(());
         }
-        let (color_dw, pref_color, pref_position, crew, control_style) = self
+        let (
+            name,
+            color_dw,
+            pref_color,
+            pref_position,
+            crew,
+            control_style,
+            score,
+            total_playing_time,
+        ) = self
             .selected_player_file
             .as_ref()
             .map(|player| {
+                let name = if self.player_name == "Player" {
+                    player.name.clone()
+                } else {
+                    self.player_name.clone()
+                };
                 (
+                    name,
                     player.pref_color_dw & 0x00ff_ffff,
                     player.pref_color,
                     player.pref_position,
                     player.crew.clone(),
                     player.pref_control_style,
+                    player.score,
+                    player.total_playing_time,
                 )
             })
             .unwrap_or_else(|| {
                 // The C++ new-player dialog opts fresh players into
                 // Jump'n'Run controls (C4StartupPlrSelDlg.cpp:1103-1113).
-                (0xff, 0, 0, Vec::new(), true)
+                (self.player_name.clone(), 0xff, 0, 0, Vec::new(), true, 0, 0)
             });
         let joined = self.engine.join_player(JoinPlayerConfig {
-            name: self.player_name.clone(),
+            name,
             player_info_id: 0,
-            score: 0,
-            total_playing_time: 0,
+            score,
+            total_playing_time,
             team: None,
             color_dw,
             pref_color,
@@ -9726,6 +9761,20 @@ impl GameApp {
         Ok(())
     }
 
+    /// Consume C4Game's scheduler-owned one-second callback. Headless callers
+    /// stay deterministic because only the window loop drives this method;
+    /// tests and other hosts may pulse it explicitly.
+    fn sec1_timer(&mut self) -> bool {
+        let before = self.engine.game_time();
+        self.engine.sec1_timer();
+        let after = self.engine.game_time();
+        if after == before {
+            return false;
+        }
+        self.snapshot.game_time = after;
+        true
+    }
+
     fn handle_menu_requests(&mut self) {
         if !matches!(self.mode, AppMode::Running) {
             return;
@@ -10469,12 +10518,9 @@ impl GameApp {
         Ok(())
     }
 
-    /// `Game.Time`: real seconds since the run started
-    /// (C4Game::Sec1Timer, src/C4Game.cpp:1737-1741).
+    /// `Game.Time` from the last deterministic engine snapshot.
     fn game_time_seconds(&self) -> u64 {
-        self.run_started
-            .map(|started| started.elapsed().as_secs())
-            .unwrap_or(0)
+        self.snapshot.game_time.max(0) as u64
     }
 
     /// The message board's current log line, dropped once its C++ fade
@@ -11482,8 +11528,8 @@ impl GameApp {
         self.script_menu_presentation = None;
         self.game_over_handled = false;
         self.mode = AppMode::Running;
-        // Game clock + startup hint + join log line for the HUD.
-        self.run_started = Some(Instant::now());
+        // Startup hint + join log line for the HUD. Game.Time is owned by the
+        // engine and pulsed by the event loop's one-second accumulator.
         // ShowStartup is set on player init (C4Player.cpp:1735).
         self.show_startup_hint = true;
         // C4PlayerList::JoinNew logs IDS_PRC_JOINPLR "Player join: %s"
@@ -13780,6 +13826,41 @@ mod tests {
     }
 
     #[test]
+    fn event_loop_second_accumulator_pulses_the_engine_clock() {
+        // StdApp's one-second callback is independent from frame scheduling
+        // (StdAppUnix.cpp:286-291); C4Game::Sec1Timer consumes TimeGo
+        // (C4Game.cpp:1755-1759). Partial elapsed durations accumulate, but
+        // headless Engine::tick calls alone never advance Game.Time.
+        let mut app = new_menu_app(320, 200);
+        let mut seconds = Duration::ZERO;
+        app.engine.tick().expect("tick arms clock");
+        advance_game_clock_from_elapsed(
+            &mut app,
+            &mut seconds,
+            Duration::from_millis(400),
+        );
+        assert_eq!(app.game_time_seconds(), 0);
+        advance_game_clock_from_elapsed(
+            &mut app,
+            &mut seconds,
+            Duration::from_millis(600),
+        );
+        assert_eq!(app.game_time_seconds(), 1);
+
+        // Two elapsed seconds without another game tick are two timer pulses
+        // but still only observe the already-consumed bool latch.
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_secs(2));
+        assert_eq!(app.game_time_seconds(), 1);
+    }
+
+    #[test]
+    fn hud_game_time_reads_the_engine_snapshot() {
+        let mut app = new_menu_app(320, 200);
+        app.snapshot.game_time = 61;
+        assert_eq!(app.game_time_seconds(), 61);
+    }
+
+    #[test]
     fn scenario_join_places_ready_crew_and_selects_cursor() {
         // C4Player::Join runs ScenarioInit -> PlaceReadyCrew for the
         // scenario's [PlayerN] Crew= spec (C4Player.cpp:670-777, 528-570)
@@ -13854,7 +13935,7 @@ mod tests {
         fs::write(
             player_dir.join("Player.txt"),
             format!(
-                "[Player]\nName=Tyler\n\n[Preferences]\nAutoStopControl={}\n",
+                "[Player]\nName=Tyler\nScore=250\nTotalPlayingTime=1234\n\n[Preferences]\nAutoStopControl={}\n",
                 i32::from(auto_stop)
             ),
         )
@@ -13878,7 +13959,7 @@ mod tests {
             Some(&paths),
             RuntimeConfig {
                 player_owner: 1,
-                player_name: "Tyler".to_string(),
+                player_name: "Player".to_string(),
                 network: None,
                 record_enabled: false,
             },
@@ -13907,18 +13988,22 @@ mod tests {
 
         app.join_local_player().expect("join selected player");
 
+        let player = app
+            .engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|player| player.id == app.local_owner)
+            .expect("joined player");
         assert_eq!(
-            app.engine
-                .snapshot()
-                .players
-                .iter()
-                .find(|player| player.id == app.local_owner)
-                .expect("joined player")
-                .control
-                .control_style,
+            player.control.control_style,
             auto_stop,
             "the selected player's AutoStopControl preference must reach C4Player"
         );
+        assert_eq!(player.player_info_id, 1);
+        assert_eq!(player.name, "Tyler");
+        assert_eq!(player.score, 250);
+        assert_eq!(player.total_playing_time, 1_234);
 
         let cursor = app
             .engine
@@ -16488,7 +16573,13 @@ mod tests {
             for _ in 0..5 {
                 app.update().expect("tick before save");
             }
+            assert_eq!(
+                app.snapshot.game_time, 0,
+                "headless frame updates do not synthesize real-time pulses"
+            );
+            assert!(app.sec1_timer(), "explicit pulse consumes the tick latch");
             let saved_frame = app.snapshot.frame;
+            let saved_game_time = app.snapshot.game_time;
 
             app.quick_save().expect("quick save succeeds");
             assert!(
@@ -16507,16 +16598,23 @@ mod tests {
             for _ in 0..3 {
                 app.update().expect("advance after save");
             }
+            assert!(app.sec1_timer(), "later pulse advances Game.Time");
             assert!(
                 app.snapshot.frame > saved_frame,
                 "frame should advance after save"
             );
+            assert!(app.snapshot.game_time > saved_game_time);
 
             app.quick_load().expect("quick load succeeds");
             assert_eq!(
                 app.snapshot.frame, saved_frame,
                 "quick load should restore saved frame"
             );
+            assert_eq!(
+                app.snapshot.game_time, saved_game_time,
+                "quick load should restore Game.Time"
+            );
+            assert_eq!(app.game_time_seconds(), saved_game_time.max(0) as u64);
             assert!(
                 matches!(app.mode, AppMode::Running),
                 "quick load should keep the game running"

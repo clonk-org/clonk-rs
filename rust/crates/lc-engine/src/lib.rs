@@ -11867,14 +11867,16 @@ impl Engine {
             ((config.color_dw >> 8) & 0xff) as u8,
             (config.color_dw & 0xff) as u8,
         );
+        let player_info_id = self.assign_player_info_id(config.player_info_id);
         let mut player_config = PlayerConfig::new(number, config.name.clone())
-            .with_player_info_id(config.player_info_id)
+            .with_player_info_id(player_info_id)
             .with_score(config.score)
             .with_total_playing_time(config.total_playing_time);
         if config.team.is_some() {
             player_config = player_config.with_team(config.team);
         }
         let mut player = player_config.with_color(Some(color)).build();
+        player.set_game_join_time(self.game_time);
         // C4Player::InitControl (C4Player.cpp:1747, 2371-2380): flash both
         // markers and let ForcedControlStyle override the player preference.
         player.control.select_flash = 30;
@@ -12661,7 +12663,9 @@ impl Engine {
         if self.players.contains_key(&id) {
             return Err(EngineError::PlayerAlreadyExists(id));
         }
-        let mut player = config.build();
+        let player_info_id = self.assign_player_info_id(config.player_info_id());
+        let mut player = config.with_player_info_id(player_info_id).build();
+        player.set_game_join_time(self.game_time);
         // C4Player::InitControl flashes both markers at the join
         // (C4Player.cpp:1747).
         player.control.select_flash = 30;
@@ -12995,6 +12999,24 @@ impl Engine {
 
     pub fn game_time(&self) -> i32 {
         self.game_time
+    }
+
+    /// `C4Game::Sec1Timer`: consume the per-frame TimeGo latch and advance
+    /// the real game clock at most once (`C4Game.cpp:1755-1759`).
+    pub fn sec1_timer(&mut self) {
+        if std::mem::take(&mut self.time_go) {
+            self.game_time = self.game_time.wrapping_add(1);
+        }
+    }
+
+    fn assign_player_info_id(&mut self, requested: i32) -> i32 {
+        if requested == 0 {
+            self.last_player_info_id = self.last_player_info_id.wrapping_add(1);
+            self.last_player_info_id
+        } else {
+            self.last_player_info_id = self.last_player_info_id.max(requested);
+            requested
+        }
     }
 
     pub fn configure_objectives(&mut self, objectives: ScenarioObjectives) {
@@ -16144,6 +16166,9 @@ impl Engine {
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
         self.exec_cursor = None;
         self.frame += 1;
+        // C4Game::Ticks only arms the external one-second timer; it does not
+        // increment Game.Time itself (C4Game.cpp:1899-1913).
+        self.time_go = true;
         self.objective_check_counter =
             (self.objective_check_counter + 1) % GAME_OVER_CHECK_INTERVAL;
         let frame = self.frame;
@@ -18932,7 +18957,18 @@ impl Engine {
                 Some((chunk * pxs::PXS_CHUNK_SIZE + slot) as u32),
             )
         }));
-        let mut players: Vec<_> = self.players.values().map(Player::to_state).collect();
+        let mut players: Vec<_> = self
+            .players
+            .values()
+            .map(|player| {
+                let mut state = player.to_state();
+                if !state.evaluated {
+                    let current_stint = self.game_time.wrapping_sub(player.game_join_time());
+                    state.total_playing_time = state.total_playing_time.wrapping_add(current_stint);
+                }
+                state
+            })
+            .collect();
         players.sort_unstable_by_key(|player| player.id);
 
         EngineState {
@@ -46418,7 +46454,11 @@ func CrewSelection()
         let player = restored.player(2).expect("restored player");
         assert_eq!(player.game_join_time(), 731);
         assert_eq!(player.score(), 250);
-        assert_eq!(player.total_playing_time(), 1_234);
+        assert_eq!(
+            player.total_playing_time(),
+            1_965,
+            "save projects the 731-second current stint"
+        );
 
         let mut stale_counter = decoded;
         stale_counter.last_player_info_id = 17;
@@ -46458,9 +46498,150 @@ func CrewSelection()
         assert_eq!(
             player.game_join_time(),
             0,
-            "join clock behavior is deferred"
+            "join baseline uses current game time"
         );
-        assert_eq!(engine.last_player_info_id, 0, "allocation is deferred");
+        assert_eq!(engine.last_player_info_id, 41);
+    }
+
+    #[test]
+    fn game_ticks_latch_exactly_one_second_increment() {
+        // C4Game::Ticks only sets TimeGo; the external Sec1Timer consumes
+        // that bool and increments Time once (C4Game.cpp:1755-1759,
+        // 1899-1913). Multiple frames coalesce, as do timer pulses without
+        // another executed frame.
+        let mut engine = Engine::new();
+        engine.sec1_timer();
+        assert_eq!(engine.game_time(), 0);
+
+        engine.tick().expect("first tick");
+        engine.tick().expect("second tick");
+        assert_eq!(engine.game_time(), 0, "frames are not seconds");
+        engine.sec1_timer();
+        assert_eq!(engine.game_time(), 1);
+        engine.sec1_timer();
+        assert_eq!(engine.game_time(), 1, "latch was already consumed");
+
+        engine.tick().expect("third tick");
+        engine.sec1_timer();
+        assert_eq!(engine.game_time(), 2);
+    }
+
+    #[test]
+    fn register_and_join_allocate_player_info_ids_and_anchor_game_time() {
+        // C4PlayerInfoList::AssignPlayerIDs allocates only zero IDs from the
+        // monotonically increasing counter (C4PlayerInfo.cpp:781-799), and
+        // C4Player::Init anchors GameJoinTime to current Game.Time after the
+        // profile loads (C4Player.cpp:246-390).
+        let mut registered = Engine::new();
+        registered.game_time = 37;
+        registered
+            .register_player(PlayerConfig::new(7, "First"))
+            .expect("first player registers");
+        assert_eq!(registered.player(7).expect("first").player_info_id(), 1);
+        assert_eq!(registered.player(7).expect("first").game_join_time(), 37);
+
+        registered
+            .register_player(PlayerConfig::new(8, "Explicit").with_player_info_id(9))
+            .expect("explicit player registers");
+        registered
+            .register_player(PlayerConfig::new(9, "Next"))
+            .expect("next player registers");
+        assert_eq!(registered.player(8).expect("explicit").player_info_id(), 9);
+        assert_eq!(registered.player(9).expect("next").player_info_id(), 10);
+        assert_eq!(registered.last_player_info_id, 10);
+
+        let config = |name: &str, player_info_id| JoinPlayerConfig {
+            name: name.to_string(),
+            player_info_id,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0xff0000,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            startup_player_count: 1,
+        };
+        let mut joined = Engine::new();
+        joined.game_time = 55;
+        let first = joined.join_player(config("First", 0)).expect("first joins");
+        let explicit = joined
+            .join_player(config("Explicit", 12))
+            .expect("explicit joins");
+        let next = joined.join_player(config("Next", 0)).expect("next joins");
+        assert_eq!(
+            joined.player(first.number).expect("first").player_info_id(),
+            1
+        );
+        assert_eq!(
+            joined.player(first.number).expect("first").game_join_time(),
+            55
+        );
+        assert_eq!(
+            joined
+                .player(explicit.number)
+                .expect("explicit")
+                .player_info_id(),
+            12
+        );
+        assert_eq!(
+            joined.player(next.number).expect("next").player_info_id(),
+            13
+        );
+        assert_eq!(joined.last_player_info_id, 13);
+    }
+
+    #[test]
+    fn capture_projects_current_stint_without_mutating_live_player() {
+        // C4Player::LocalSync/Evaluate add Game.Time-GameJoinTime exactly
+        // once (C4Player.cpp:930-968,2080-2096). capture_state has `&self`,
+        // so project that delta into non-evaluated PlayerState while leaving
+        // the live baseline untouched; evaluated totals are already final.
+        let mut engine = Engine::new();
+        engine.game_time = 15;
+        let mut active = PlayerConfig::new(1, "Active")
+            .with_player_info_id(1)
+            .with_total_playing_time(100)
+            .build();
+        active.set_game_join_time(7);
+        engine.players.insert(1, active);
+
+        let mut evaluated = Player::from_state(PlayerState {
+            id: 2,
+            player_info_id: 2,
+            evaluated: true,
+            total_playing_time: 200,
+            ..PlayerState::default()
+        });
+        evaluated.set_game_join_time(7);
+        engine.players.insert(2, evaluated);
+
+        for _ in 0..2 {
+            let state = engine.capture_state();
+            let active = state
+                .players
+                .iter()
+                .find(|player| player.id == 1)
+                .expect("active state");
+            let evaluated = state
+                .players
+                .iter()
+                .find(|player| player.id == 2)
+                .expect("evaluated state");
+            assert_eq!(active.total_playing_time, 108);
+            assert_eq!(evaluated.total_playing_time, 200);
+        }
+        let live = engine.player(1).expect("live active player");
+        assert_eq!(live.total_playing_time(), 100);
+        assert_eq!(live.game_join_time(), 7);
+
+        let state = engine.capture_state();
+        let mut restored = Engine::new();
+        restored.restore_state(&state).expect("state restores");
+        let restored_player = restored.player(1).expect("restored player");
+        assert_eq!(restored_player.total_playing_time(), 108);
+        assert_eq!(restored_player.game_join_time(), 15);
     }
 
     #[test]
