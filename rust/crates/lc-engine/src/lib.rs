@@ -7103,9 +7103,15 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(CommandBatch, AudioRegistry, LcgRng, u64), EngineError> {
+    ) -> Result<(CommandBatch, AudioRegistry, LcgRng, u64, Option<EngineError>), EngineError> {
         if !self.has_initialize {
-            return Ok((CommandBatch::default(), audio, rng, world.next_object_id()));
+            return Ok((
+                CommandBatch::default(),
+                audio,
+                rng,
+                world.next_object_id(),
+                None,
+            ));
         }
         // C++ Initialize runs with no parameters (PSF_Initialize broadcast);
         // (state, random) is the synthetic command-DSL convention.
@@ -7122,6 +7128,10 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
+        // Cells live OUTSIDE the session so a mid-call error keeps the
+        // pre-error local writes (C4AulExec aborts the call but rolls
+        // nothing back, C4AulExec.cpp:1318-1342).
+        let cells = lc_script::LocalCells::from_local_vars(&state.local_vars);
         let (result, host_effects) = compat::with_effect_context_with_state(
             Some(
                 compat::HostObjectContext::with_category(
@@ -7175,20 +7185,42 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.run_live_object_session("Initialize", &args, &state.local_vars, object_id),
+            || {
+                compat::register_session_local_cells(object_id, cells.clone());
+                self.script.call_with_cells_and_this(
+                    "Initialize",
+                    &args,
+                    &cells,
+                    compat::object_reference_value(object_id),
+                )
+            },
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
-        let (result, updated_local_vars) = result.map_err(|source| EngineError::Script {
-            definition: self.id.clone(),
-            function: "Initialize".to_string(),
-            source,
-            recovery: None,
-        })?;
-        let mut batch = parse_command(&self.id, "Initialize", result)?;
+        // A script error aborts the call but the partial outcome below
+        // still folds — C++'s CreateObject/SetTransferZone/Random side
+        // effects all landed live before the unwind and NewObj's
+        // `Number = ++ObjectEnumerationIndex` (C4Game.cpp:1119) stays
+        // advanced; the error surfaces to the caller as a value.
+        let (returned, script_error) = match result {
+            Ok(value) => (Some(value), None),
+            Err(source) => (
+                None,
+                Some(EngineError::Script {
+                    definition: self.id.clone(),
+                    function: "Initialize".to_string(),
+                    source,
+                    recovery: None,
+                }),
+            ),
+        };
+        let mut batch = match returned {
+            Some(value) => parse_command(&self.id, "Initialize", value)?,
+            None => CommandBatch::default(),
+        };
         // Store updated local variables in the delta so they persist
-        batch.delta.local_vars = Some(updated_local_vars);
+        batch.delta.local_vars = Some(cells.snapshot());
         let compat::EffectContextOutcome {
             object: host_object_effects,
             global: host_global_effects,
@@ -7270,7 +7302,7 @@ impl Definition {
             batch.script_go = host_script_go;
         }
         let audio_state = audio_guard.finish();
-        Ok((batch, audio_state, rng, next_object_id))
+        Ok((batch, audio_state, rng, next_object_id, script_error))
     }
 
     fn call_construction(
@@ -7285,9 +7317,15 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(CommandBatch, AudioRegistry, LcgRng, u64), EngineError> {
+    ) -> Result<(CommandBatch, AudioRegistry, LcgRng, u64, Option<EngineError>), EngineError> {
         if !self.has_construction {
-            return Ok((CommandBatch::default(), audio, rng, world.next_object_id()));
+            return Ok((
+                CommandBatch::default(),
+                audio,
+                rng,
+                world.next_object_id(),
+                None,
+            ));
         }
         // Construction() takes no arguments
         let args: [Value; 0] = [];
@@ -7296,6 +7334,9 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
+        // Cells live OUTSIDE the session so a mid-call error keeps the
+        // pre-error local writes (C4AulExec.cpp:1318-1342, no rollback).
+        let cells = lc_script::LocalCells::from_local_vars(&state.local_vars);
         let (result, host_effects) = compat::with_effect_context_with_state(
             Some(
                 compat::HostObjectContext::with_category(
@@ -7349,23 +7390,34 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.run_live_object_session("Construction", &args, &state.local_vars, object_id),
+            || {
+                compat::register_session_local_cells(object_id, cells.clone());
+                self.script.call_with_cells_and_this(
+                    "Construction",
+                    &args,
+                    &cells,
+                    compat::object_reference_value(object_id),
+                )
+            },
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
-        let (_result, updated_local_vars) = result.map_err(|source| EngineError::Script {
+        // A script error aborts the call but the partial outcome below
+        // still folds (C4AulExec.cpp:1318-1342, no rollback) — the error
+        // surfaces to the caller as a value.
+        let script_error = result.err().map(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "Construction".to_string(),
             source,
             recovery: None,
-        })?;
+        });
         // Construction() return value is not used (it just returns 0 or nil)
         // We only care about side effects (initializing local variables, etc.)
         // But we DO need to capture updated local variable values
         let mut batch = CommandBatch::default();
         // Store updated local variables in the delta so they persist
-        batch.delta.local_vars = Some(updated_local_vars);
+        batch.delta.local_vars = Some(cells.snapshot());
         let compat::EffectContextOutcome {
             object: host_object_effects,
             global: host_global_effects,
@@ -7427,7 +7479,7 @@ impl Definition {
             batch.script_go = host_script_go;
         }
         let audio_state = audio_guard.finish();
-        Ok((batch, audio_state, rng, next_object_id))
+        Ok((batch, audio_state, rng, next_object_id, script_error))
     }
 
     fn call_step(
@@ -28013,12 +28065,13 @@ impl Engine {
                 audio_state,
                 new_rng,
                 next_object_id,
+                construction_error,
             ) = {
                 let definition = self
                     .definitions
                     .get(&definition_id)
                     .expect("definition must exist");
-                let callback = definition.call_construction(
+                definition.call_construction(
                     &object.state,
                     id,
                     rng_state,
@@ -28029,19 +28082,17 @@ impl Engine {
                     self.host_world_context(),
                     self.game_over_triggered,
                     self.audio_registry.clone(),
-                );
-                // Fail-safe game call: a script error logs and the object
-                // spawns without the callback's effects.
-                match tolerate_script_error(callback)? {
-                    Some(result) => result,
-                    None => (
-                        CommandBatch::default(),
-                        self.audio_registry.clone(),
-                        self.rng.clone(),
-                        self.next_object_id,
-                    ),
-                }
+                )?
             };
+            // Fail-safe game call: a script error logs and the object
+            // spawns WITH the callback's pre-error effects — C4AulExec
+            // aborts the call but rolls nothing back
+            // (C4AulExec.cpp:1318-1342), so pre-error creations persist
+            // and their burned enumeration numbers stay consumed
+            // (C4Game.cpp:1119).
+            if let Some(error) = construction_error {
+                tolerate_script_error::<()>(Err(error))?;
+            }
             self.rng = new_rng;
             self.sync_next_object_id(next_object_id);
             self.audio_registry = audio_state;
@@ -28153,12 +28204,13 @@ impl Engine {
                 audio_state,
                 new_rng,
                 next_object_id,
+                initialize_error,
             ) = {
                 let definition = self
                     .definitions
                     .get(&definition_id)
                     .expect("definition must exist");
-                let callback = definition.call_initialize(
+                definition.call_initialize(
                     &object.state,
                     id,
                     random,
@@ -28170,19 +28222,17 @@ impl Engine {
                     self.host_world_context(),
                     self.game_over_triggered,
                     self.audio_registry.clone(),
-                );
-                // Fail-safe game call: a script error logs and the object
-                // spawns without the callback's effects.
-                match tolerate_script_error(callback)? {
-                    Some(result) => result,
-                    None => (
-                        CommandBatch::default(),
-                        self.audio_registry.clone(),
-                        self.rng.clone(),
-                        self.next_object_id,
-                    ),
-                }
+                )?
             };
+            // Fail-safe game call: a script error logs and the object
+            // spawns WITH the callback's pre-error effects — C4AulExec
+            // aborts the call but rolls nothing back
+            // (C4AulExec.cpp:1318-1342), so pre-error creations persist
+            // and their burned enumeration numbers stay consumed
+            // (C4Game.cpp:1119).
+            if let Some(error) = initialize_error {
+                tolerate_script_error::<()>(Err(error))?;
+            }
             self.rng = new_rng;
             self.sync_next_object_id(next_object_id);
             self.audio_registry = audio_state;
@@ -43069,6 +43119,88 @@ func Initialize() { SetTransferZone(-4, -38, 37, 82); return(1); }
             (zone.x, zone.y, zone.width, zone.height),
             (96, 162, 37, 82),
             "iX/iY are object-relative (C4Script.cpp:3154)"
+        );
+    }
+
+    #[test]
+    fn failed_initialize_keeps_pre_error_creations_and_burned_ids_like_cpp() {
+        // C4AulExec errors abort the call but roll NOTHING back
+        // (C4AulExec.cpp:1318-1342): a CreateObject before the error has
+        // already run C4Game::NewObject, so the child object exists and
+        // `Number = ++ObjectEnumerationIndex` (C4Game.cpp:1119) stays
+        // advanced — the burned number is never re-minted. AH_Predator's
+        // HZCK Initialize creates its helper, then dies on the missing
+        // GetHUD; C++ keeps the helper AND the number, so the next
+        // creation (CHOS's TIM1) gets a fresh id.
+        let script = r#"#strict
+func Initialize() { CreateObject(CHLD, 0, 0, -1); UnknownFn(); return(1); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        let parent = Definition::from_script("PRNT", "Parent", script).expect("compiles");
+        engine.register_definition(parent).expect("registers");
+        let child = Definition::from_script("CHLD", "Child", "#strict\n").expect("compiles");
+        engine.register_definition(child).expect("registers");
+        let parent_id = engine
+            .spawn_object(SpawnConfig::new("PRNT").with_category(CATEGORY_OBJECT))
+            .expect("the erroring Initialize is a fail-safe game call");
+        let snapshot = engine.snapshot();
+        let child_object = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id.as_str() == "CHLD")
+            .expect("the pre-error CreateObject persists like C++");
+        assert_eq!(
+            child_object.id.as_u64(),
+            parent_id.as_u64() + 1,
+            "the in-flight preview id materializes verbatim"
+        );
+        let next = engine
+            .spawn_object(SpawnConfig::new("CHLD").with_category(CATEGORY_OBJECT))
+            .expect("spawns");
+        assert_eq!(
+            next.as_u64(),
+            parent_id.as_u64() + 2,
+            "the burned id is never re-minted"
+        );
+    }
+
+    #[test]
+    fn failed_construction_keeps_pre_error_creations_and_burned_ids_like_cpp() {
+        // Same no-rollback contract as the Initialize twin, on the
+        // Construction callback C4Object::Init fires first
+        // (C4Object.cpp:198-215 via C4Game::NewObject): C4AulExec errors
+        // abort the call but keep every prior side effect
+        // (C4AulExec.cpp:1318-1342) and `++ObjectEnumerationIndex`
+        // (C4Game.cpp:1119) never rewinds.
+        let script = r#"#strict
+func Construction() { CreateObject(CHLD, 0, 0, -1); UnknownFn(); return(1); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        let parent = Definition::from_script("PRNT", "Parent", script).expect("compiles");
+        engine.register_definition(parent).expect("registers");
+        let child = Definition::from_script("CHLD", "Child", "#strict\n").expect("compiles");
+        engine.register_definition(child).expect("registers");
+        let parent_id = engine
+            .spawn_object(SpawnConfig::new("PRNT").with_category(CATEGORY_OBJECT))
+            .expect("the erroring Construction is a fail-safe game call");
+        let snapshot = engine.snapshot();
+        let child_object = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id.as_str() == "CHLD")
+            .expect("the pre-error CreateObject persists like C++");
+        assert_eq!(
+            child_object.id.as_u64(),
+            parent_id.as_u64() + 1,
+            "the in-flight preview id materializes verbatim"
+        );
+        let next = engine
+            .spawn_object(SpawnConfig::new("CHLD").with_category(CATEGORY_OBJECT))
+            .expect("spawns");
+        assert_eq!(
+            next.as_u64(),
+            parent_id.as_u64() + 2,
+            "the burned id is never re-minted"
         );
     }
 
