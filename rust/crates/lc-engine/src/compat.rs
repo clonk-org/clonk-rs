@@ -9,7 +9,9 @@ use crate::command::{
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::material::MaterialSet;
-use crate::math::{fixed100, fixtoi_prec, integer_distance, itofix, itofix_prec, C4Fixed, FixedVec2};
+use crate::math::{
+    fixed10, fixed100, fixtoi_prec, integer_distance, itofix, itofix_prec, C4Fixed, FixedVec2,
+};
 use crate::message::{
     MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_MULTIPLE,
     HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
@@ -175,6 +177,9 @@ pub(crate) struct DefinitionMetadata {
     /// DefCore StretchGrowth (the con-scaling mode; DoCon's bottom
     /// adjust shape math).
     pub stretch_growth: bool,
+    /// DefCore Rotateable; C4Object::Init clears initial rotation/rdir
+    /// when this is zero (C4Object.cpp:169-170).
+    pub rotateable: i32,
     /// DefCore Line type (C4D_Line*; nonzero skips con-scaling and the
     /// DoCon bottom adjust — C4Object::UpdateShape's early return).
     pub line: i32,
@@ -3017,14 +3022,32 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_mut() else {
             return Ok(Value::Bool(false));
         };
-        let known = context.world.definition_metadata(&new_id).is_some();
-        if !known {
+        let Some(new_blit_mode) = context
+            .world
+            .definition_metadata(&new_id)
+            .map(|metadata| metadata.blit_mode)
+        else {
             return Ok(Value::Bool(false)); // C4Id2Def miss
-        }
+        };
+        let Some(object_id) = context.object_context().map(|object| object.id()) else {
+            return Ok(Value::Bool(false));
+        };
+        let follows_definition = context
+            .object_blit_mode(object_id)
+            .is_none_or(|mode| mode & GFX_BLIT_CUSTOM == 0);
+        let had_pending_blit = context
+            .object_context()
+            .is_some_and(|object| object.pending_update.blit_mode.is_some());
         let Some(object) = context.object_context_mut() else {
             return Ok(Value::Bool(false));
         };
         object.pending_update.change_def = Some(new_id);
+        // A preceding SetObjectBlitMode already staged a write, so update that
+        // write to the new default. A pure ChangeDef needs no separate write:
+        // the engine's definition swap applies the default atomically.
+        if follows_definition && had_pending_blit {
+            object.pending_update.blit_mode = Some(new_blit_mode);
+        }
         Ok(Value::Bool(true))
     })
 }
@@ -4987,6 +5010,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetID", get_id);
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
+    script.register_host_function("CastObjects", cast_objects);
     script.register_host_function("CreateConstruction", create_construction);
     // FnFindConstructionSite (C4Script.cpp:1958-1981) — the caller-Var
     // staging seam behind the System.c4g FindConstructionSiteX wrapper.
@@ -5051,6 +5075,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetObjectLayer", get_object_layer);
     script.register_host_function("SetObjectLayer", set_object_layer);
+    script.register_host_function("GetObjectBlitMode", get_object_blit_mode);
+    script.register_host_function("SetObjectBlitMode", set_object_blit_mode);
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("InsertMaterial", insert_material);
     script.register_host_function("ExtractMaterialAmount", extract_material_amount);
@@ -15529,6 +15555,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -15648,6 +15675,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 metadata.vertices.clone(),
             );
             state.layer = creator_layer;
+            state.blit_mode = metadata.blit_mode;
             state
         }));
 
@@ -15676,6 +15704,351 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
     created
+}
+
+fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
+    // FnCastObjects -> C4Game::CastObjects (C4Script.cpp:2476-2480,
+    // C4Game.cpp:1727-1739): every attempt draws rdir, ydir, xdir and
+    // rotation in that order, then creates the object synchronously.
+    if args.len() > 5 {
+        return Err(RuntimeError::new(
+            "CastObjects: additional arguments are not supported",
+        ));
+    }
+
+    let definition = match args.first().unwrap_or(&Value::Nil) {
+        Value::String(name) | Value::C4Id(name) if !name.is_empty() => Some(name.clone()),
+        Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => None,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "CastObjects: expected id for definition, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let amount = args
+        .get(1)
+        .map(|value| value_to_i32(value, "CastObjects", "amount"))
+        .transpose()?
+        .unwrap_or(0);
+    let level = args
+        .get(2)
+        .map(|value| value_to_i32(value, "CastObjects", "level"))
+        .transpose()?
+        .unwrap_or(0);
+    let x_offset = args
+        .get(3)
+        .map(|value| value_to_i32(value, "CastObjects", "x"))
+        .transpose()?
+        .unwrap_or(0);
+    let y_offset = args
+        .get(4)
+        .map(|value| value_to_i32(value, "CastObjects", "y"))
+        .transpose()?
+        .unwrap_or(0);
+
+    let (creator, base_position, owner, controller) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("CastObjects requires an active engine context"))?;
+        let creator = context.object_context().map(ObjectScopeContext::id);
+        let base_position = context
+            .object_context()
+            .map(ObjectScopeContext::effective_position)
+            .unwrap_or(Vector2::ZERO);
+        let owner = context
+            .object_context()
+            .map(ObjectScopeContext::owner)
+            .unwrap_or(OWNER_NONE);
+        let controller = context
+            .object_context()
+            .map(ObjectScopeContext::controller)
+            .unwrap_or(OWNER_NONE);
+        Ok((creator, base_position, owner, controller))
+    })?;
+
+    let spread = level.wrapping_mul(2).wrapping_add(1);
+    for _ in 0..amount {
+        // Force the C++ argument-evaluation order. Definition lookup happens
+        // only after these draws, so missing ids consume the same ledger.
+        let sampled_rdir = itofix(draw_context_random(3)? + 1);
+        let ydir = fixed10(draw_context_random(spread)?.wrapping_sub(level));
+        let xdir = fixed10(draw_context_random(spread)?.wrapping_sub(level));
+        let sampled_rotation = draw_context_random(360)?;
+
+        let Some(definition) = definition.as_ref() else {
+            continue;
+        };
+        let target = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let context = borrow.as_mut().ok_or_else(|| {
+                RuntimeError::new("CastObjects requires an active engine context")
+            })?;
+            if context.world.definition_known(definition) == Some(false) {
+                return Ok(None);
+            }
+
+            let metadata = context
+                .definition_metadata(definition)
+                .cloned()
+                .unwrap_or_else(|| DefinitionMetadata {
+                    name: String::new(),
+                    category: context
+                        .definition_category(definition)
+                        .unwrap_or(DEFAULT_CATEGORY),
+                    blit_mode: 0,
+                    ocf_base: ocf::NORMAL,
+                    crew_member: false,
+                    action_library: ActionLibrary::default(),
+                    value: 0,
+                    mass: 0,
+                    constructable: false,
+                    shape: None,
+                    construction_offset: 0,
+                    basement: 0,
+                    physical: PhysicalInfo::default(),
+                    components: Vec::new(),
+                    line_connect: 0,
+                    clonk_name_newlines: None,
+                    stretch_growth: false,
+                    rotateable: 0,
+                    line: 0,
+                    vertices: Vec::new(),
+                });
+            // C4Object::Init discards sampled rotation/rdir for definitions
+            // without Rotateable, after the synced draws already happened.
+            let (rotation, rdir) = if metadata.rotateable == 0 {
+                (0, C4Fixed::ZERO)
+            } else {
+                (sampled_rotation, sampled_rdir)
+            };
+            let fixed_velocity = FixedVec2::new(xdir, ydir);
+            let initial_controller = if controller > OWNER_NONE {
+                controller
+            } else {
+                owner
+            };
+            // Init reads pCreator->pLayer for every object; an earlier
+            // synchronous callback may have changed the creator's layer.
+            let creator_layer = creator.and_then(|id| context.object_layer(id));
+            let raw_position = Vector2::new(
+                base_position.x.saturating_add(x_offset),
+                base_position.y.saturating_add(y_offset),
+            );
+            let position = Vector2::new(
+                raw_position.x,
+                crate::docon_initial_center_y(
+                    metadata.shape,
+                    metadata.stretch_growth,
+                    metadata.line,
+                    crate::FULL_CON,
+                    raw_position.y,
+                ),
+            );
+            let id = context.allocate_object_id();
+            let mut spawn = SpawnConfig::new(definition.clone())
+                .with_position(position)
+                .with_fixed_velocity(fixed_velocity)
+                .with_rotation(rotation)
+                .with_rotation_velocity(rdir)
+                .with_owner(owner)
+                .with_controller(controller)
+                .with_category(metadata.category)
+                .with_id(id);
+            if let Some(layer) = creator_layer {
+                spawn = spawn.with_layer(layer);
+            }
+            // NewObject callbacks run below while this host call is live.
+            spawn.initialized = true;
+            spawn.position_adjusted = true;
+            if position.y != raw_position.y {
+                spawn.fixed_position = Some(FixedVec2::from_ints(raw_position.x, raw_position.y));
+            }
+
+            let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
+            let preview_ocf = ocf::compute(
+                metadata.ocf_base,
+                metadata.crew_member,
+                initial_alive,
+                ObjectStatus::Normal,
+                false,
+                0,
+            );
+            let preview_velocity = Vector2::new(fixed_velocity.int_x(), fixed_velocity.int_y());
+            let preview = HostWorldObject::with_category(
+                id,
+                definition.clone(),
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                owner,
+                metadata.category,
+                if initial_alive {
+                    metadata.physical.energy
+                } else {
+                    0
+                },
+                0,
+                0,
+                raw_position,
+                preview_velocity,
+                rotation,
+                metadata.vertices.clone(),
+                0,
+                0,
+                0,
+                None,
+                None,
+            )
+            .with_alive(initial_alive)
+            .with_ocf(preview_ocf)
+            .with_full_state(Rc::new({
+                let mut state = crate::preview_spawn_state(
+                    raw_position,
+                    owner,
+                    initial_controller,
+                    metadata.category,
+                    0,
+                    metadata.vertices,
+                );
+                state.velocity = preview_velocity;
+                state.script_fixed_velocity = Some(fixed_velocity);
+                state.rotation = rotation;
+                state.alive = initial_alive;
+                state.energy = if initial_alive {
+                    metadata.physical.energy
+                } else {
+                    0
+                };
+                state.crew_member = metadata.crew_member;
+                state.layer = creator_layer;
+                state.blit_mode = metadata.blit_mode;
+                state.mobile = metadata.category != crate::CATEGORY_STATIC_BACK
+                    && (fixed_velocity != FixedVec2::ZERO || rdir.is_nonzero());
+                state
+            }));
+            context.register_spawn(spawn, preview);
+            // Seed exact fixed dirs into the pending object's live scope so
+            // its synchronous callbacks observe the Init values.
+            if context.ensure_object_scope(id) {
+                if let Some(scope) = context.object_scope_mut(id) {
+                    scope.current_fixed_velocity = fixed_velocity;
+                    scope.pending_update.rotation_velocity = Some(rdir);
+                }
+            }
+            Ok(Some((
+                id,
+                metadata.shape,
+                metadata.stretch_growth,
+                metadata.line,
+            )))
+        })?;
+        let Some((target, shape, stretch_growth, line)) = target else {
+            continue;
+        };
+
+        let creator_arg = creator.map(object_reference_value).unwrap_or(Value::Nil);
+        if let Some(Err(error)) =
+            call_world_object_own_function(target, "Construction", &[creator_arg])
+        {
+            tracing::warn!(
+                id = target.as_u64(),
+                callback = "Construction",
+                %error,
+                "creation callback failed; continuing like C++ fail-safe Call"
+            );
+        }
+        let removed = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| context.nested_object_destroyed(target))
+                .unwrap_or(false)
+        });
+        if removed {
+            continue;
+        }
+
+        // NewObject calls Construction while Con is still zero, then its
+        // initial DoCon grows to FullCon, moves the straight shape's bottom,
+        // and only on that transition calls Completion then Initialize
+        // (C4Game.cpp:1117-1127; C4Object.cpp:1506-1511).
+        let crossed_full_con = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return false;
+            };
+            let (was_full, pre_growth_position, adjusted_position) = {
+                let Some(scope) = context.object_scope_mut(target) else {
+                    return false;
+                };
+                let was_full = scope.construction() >= FULL_CON;
+                let pre_growth_position = scope.effective_position();
+                let adjusted_position = Vector2::new(
+                    pre_growth_position.x,
+                    crate::docon_initial_center_y(
+                        shape,
+                        stretch_growth,
+                        line,
+                        FULL_CON,
+                        pre_growth_position.y,
+                    ),
+                );
+                // Fold the pre-insertion Construction writes into the spawn
+                // itself. Completion must see the adjusted integer y, but
+                // initial DoCon leaves fix_y at the pre-growth center.
+                scope.current_construction = FULL_CON;
+                scope.pending_update.construction = None;
+                scope.current_position = adjusted_position;
+                scope.pending_update.position = None;
+                (was_full, pre_growth_position, adjusted_position)
+            };
+            if let Some(spawn) = context
+                .pending_spawns
+                .iter_mut()
+                .find(|spawn| spawn.id == Some(target))
+            {
+                spawn.position = adjusted_position;
+                spawn.construction = FULL_CON;
+                spawn.fixed_position = (adjusted_position != pre_growth_position).then_some(
+                    FixedVec2::from_ints(pre_growth_position.x, pre_growth_position.y),
+                );
+            }
+            !was_full
+        });
+        if crossed_full_con {
+            if let Some(Err(error)) = call_world_object_own_function(target, "Completion", &[]) {
+                tracing::warn!(
+                    id = target.as_u64(),
+                    callback = "Completion",
+                    %error,
+                    "creation callback failed; continuing like C++ fail-safe Call"
+                );
+            }
+            let removed = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .map(|context| context.nested_object_destroyed(target))
+                    .unwrap_or(false)
+            });
+            if !removed {
+                if let Some(Err(error)) =
+                    call_world_object_own_function(target, "Initialize", &[])
+                {
+                    tracing::warn!(
+                        id = target.as_u64(),
+                        callback = "Initialize",
+                        %error,
+                        "creation callback failed; continuing like C++ fail-safe Call"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(Value::Nil)
 }
 
 fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -15795,6 +16168,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -15892,6 +16266,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 metadata.vertices.clone(),
             );
             state.layer = creator_layer;
+            state.blit_mode = metadata.blit_mode;
             state
         }));
 
@@ -17300,6 +17675,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -17379,6 +17755,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 );
                 state.container = Some(container);
                 state.layer = creator_layer;
+                state.blit_mode = metadata.blit_mode;
                 state
             }));
             context.register_spawn(spawn, preview);
@@ -18303,14 +18680,18 @@ fn incinerate_landscape_at(x: i32, y: i32) -> Result<Value, RuntimeError> {
             None,
         )
         .with_ocf(preview_ocf)
-        .with_full_state(Rc::new(crate::preview_spawn_state(
-            Vector2::new(x, y),
-            OWNER_NONE,
-            OWNER_NONE,
-            metadata.category,
-            FULL_CON,
-            metadata.vertices.clone(),
-        )));
+        .with_full_state(Rc::new({
+            let mut state = crate::preview_spawn_state(
+                Vector2::new(x, y),
+                OWNER_NONE,
+                OWNER_NONE,
+                metadata.category,
+                FULL_CON,
+                metadata.vertices.clone(),
+            );
+            state.blit_mode = metadata.blit_mode;
+            state
+        }));
         context.register_spawn(spawn, preview);
         Ok(Value::Bool(true))
     })
@@ -18444,6 +18825,105 @@ fn set_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
         Ok(Value::Bool(true))
+    })
+}
+
+const GFX_BLIT_CUSTOM: u32 = 128;
+
+/// FnGetObjectBlitMode (C4Script.cpp:5663-5679): read the raw base-object
+/// mode or one existing graphics overlay's literal mode.
+fn get_object_blit_mode(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "GetObjectBlitMode expects at most 2 arguments: object and overlay id",
+        ));
+    }
+    let target_id = args
+        .first()
+        .map(|value| parse_object_reference_argument(value, "GetObjectBlitMode", "object"))
+        .transpose()?
+        .flatten();
+    let overlay_id = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetObjectBlitMode",
+        "overlay id",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Nil);
+        };
+        let mode = if overlay_id == 0 {
+            context.object_blit_mode(target)
+        } else {
+            context.object_overlay_blit_mode(target, overlay_id)
+        };
+        Ok(mode
+            .map(|mode| Value::Int(mode as i32))
+            .unwrap_or(Value::Nil))
+    })
+}
+
+/// FnSetObjectBlitMode (C4Script.cpp:5634-5661): base-object nonzero modes
+/// gain CUSTOM, zero resets to the effective definition default; overlays
+/// store the literal mode and return true rather than their previous value.
+fn set_object_blit_mode(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "SetObjectBlitMode expects at most 3 arguments: mode, object and overlay id",
+        ));
+    }
+    let requested = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetObjectBlitMode",
+        "mode",
+    )? as u32;
+    let target_id = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "SetObjectBlitMode", "object"))
+        .transpose()?
+        .flatten();
+    let overlay_id = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetObjectBlitMode",
+        "overlay id",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Nil);
+        };
+
+        if overlay_id != 0 {
+            return Ok(if context.set_object_overlay_blit_mode(target, overlay_id, requested) {
+                Value::Int(1)
+            } else {
+                Value::Nil
+            });
+        }
+
+        let Some(previous) = context.object_blit_mode(target) else {
+            return Ok(Value::Nil);
+        };
+        let mode = if requested == 0 {
+            context.object_definition_blit_mode(target).unwrap_or(0)
+        } else {
+            requested | GFX_BLIT_CUSTOM
+        };
+        if !context.set_object_blit_mode(target, mode) {
+            return Ok(Value::Nil);
+        }
+        Ok(Value::Int(previous as i32))
     })
 }
 
@@ -20099,6 +20579,98 @@ impl EffectHostContext {
             .is_some()
     }
 
+    /// Effective C4Object::BlitMode, including pending same-call writes.
+    fn object_blit_mode(&self, target: ObjectId) -> Option<u32> {
+        let scope = self.object_scope(target);
+        if let Some(blit_mode) = scope.and_then(|scope| scope.pending_update.blit_mode) {
+            return Some(blit_mode);
+        }
+        let current = self
+            .get_world_object(target)
+            .and_then(|object| object.full_state().map(|state| state.blit_mode))?;
+        if current & GFX_BLIT_CUSTOM == 0 {
+            if let Some(blit_mode) = scope
+                .and_then(|scope| scope.pending_update.change_def.as_deref())
+                .and_then(|definition| self.definition_metadata(definition))
+                .map(|metadata| metadata.blit_mode)
+            {
+                return Some(blit_mode);
+            }
+        }
+        Some(current)
+    }
+
+    fn set_object_blit_mode(&mut self, target: ObjectId, blit_mode: u32) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        self.object_scope_mut(target)
+            .map(|scope| scope.pending_update.blit_mode = Some(blit_mode))
+            .is_some()
+    }
+
+    /// The target's effective definition follows a same-call ChangeDef.
+    fn object_definition_blit_mode(&self, target: ObjectId) -> Option<u32> {
+        let definition_id = self
+            .object_scope(target)
+            .and_then(|scope| {
+                scope
+                    .pending_update
+                    .change_def
+                    .clone()
+                    .or_else(|| scope.definition_id.clone())
+            })
+            .or_else(|| {
+                self.get_world_object(target)
+                    .map(|object| object.definition_id().to_string())
+            })?;
+        self.definition_metadata(&definition_id)
+            .map(|metadata| metadata.blit_mode)
+    }
+
+    fn object_overlay_blit_mode(&self, target: ObjectId, overlay_id: i32) -> Option<u32> {
+        if let Some(scope) = self.object_scope(target) {
+            return scope
+                .graphics_overlays
+                .iter()
+                .find(|overlay| overlay.id == overlay_id)
+                .map(|overlay| overlay.blit_mode);
+        }
+        self.get_world_object(target)
+            .and_then(|object| object.full_state().cloned())
+            .and_then(|state| {
+                state
+                    .graphics_overlays
+                    .iter()
+                    .find(|overlay| overlay.id == overlay_id)
+                    .map(|overlay| overlay.blit_mode)
+            })
+    }
+
+    fn set_object_overlay_blit_mode(
+        &mut self,
+        target: ObjectId,
+        overlay_id: i32,
+        blit_mode: u32,
+    ) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        let Some(scope) = self.object_scope_mut(target) else {
+            return false;
+        };
+        let Some(overlay) = scope
+            .graphics_overlays
+            .iter_mut()
+            .find(|overlay| overlay.id == overlay_id)
+        else {
+            return false;
+        };
+        overlay.blit_mode = blit_mode;
+        scope.pending_update.graphics_overlays = Some(scope.graphics_overlays.clone());
+        true
+    }
+
     /// C4Object::Status of `target` as the current call sees it.
     fn object_status_active(&self, target: ObjectId) -> bool {
         self.object_scope(target)
@@ -21524,6 +22096,7 @@ mod tests {
         "C4Id",
         "Call",
         "CastBackParticles",
+        "CastObjects",
         "CastParticles",
         "ChangeDef",
         "ClearParticles",
@@ -21625,6 +22198,7 @@ mod tests {
         "GetMenuSelection",
         "GetName",
         "GetOCF",
+        "GetObjectBlitMode",
         "GetObjectLayer",
         "GetObjectStatus",
         "GetObjectVal",
@@ -21734,6 +22308,7 @@ mod tests {
         "SetName",
         "SetObjDrawTransform",
         "SetObjDrawTransform2",
+        "SetObjectBlitMode",
         "SetObjectLayer",
         "SetObjectStatus",
         "SetOwner",
@@ -23412,6 +23987,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -23459,6 +24035,7 @@ func ProbeBadIndex(id) {
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,
+                    rotateable: 0,
                     line: 0,
                     vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -23484,6 +24061,7 @@ func ProbeBadIndex(id) {
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,
+                    rotateable: 0,
                     line: 0,
                     vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -23533,6 +24111,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -23594,6 +24173,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -23665,6 +24245,7 @@ func ProbeBadIndex(id) {
             line_connect: 0,
             clonk_name_newlines: None,
             stretch_growth: false,
+            rotateable: 0,
             line: 0,
             vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -24090,6 +24671,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -24136,6 +24718,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -24198,6 +24781,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -28415,6 +28999,7 @@ func ProbeBadIndex(id) {
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
+                rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),
@@ -28474,6 +29059,7 @@ func ProbeBadIndex(id) {
             line_connect: 0,
             clonk_name_newlines: None,
             stretch_growth: false,
+            rotateable: 0,
             line: 0,
             vertices: Vec::new(),
                 fire: DefinitionFireMetadata::default(),

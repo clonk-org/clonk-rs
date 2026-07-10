@@ -520,7 +520,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut object_mass: i32 = 0;
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
-    let blit_mode: u32 = 0;
+    let mut blit_mode: u32 = 0;
     let mut shape: Option<PictureRect> = None;
     let mut shape_width: Option<i32> = None;
     let mut shape_height: Option<i32> = None;
@@ -646,6 +646,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "colorbyowner" => {
                 color_by_owner = parse_i32(value).unwrap_or(0) != 0;
+            }
+            "blitmode" => {
+                blit_mode = parse_i32(value).unwrap_or(0) as u32;
             }
             "shape" => {
                 shape = parse_rect(value);
@@ -2021,15 +2024,20 @@ mod tests {
             Name=Clonk
             Category=C4D_Living|C4D_Object
             CrewMember=1
+            BlitMode=2
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
         assert_eq!(parsed.id, "CLNK");
         assert_eq!(parsed.name.as_deref(), Some("Clonk"));
         assert_eq!(parsed.category, (1 << 3) | (1 << 4));
         assert!(parsed.crew_member);
+        assert_eq!(parsed.blit_mode, 2);
         assert_eq!(parsed.collection, None);
         assert_eq!(parsed.collection_limit, None);
         assert!(!parsed.collectible);
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("default parses");
+        assert_eq!(defaulted.blit_mode, 0);
     }
 
     #[test]
