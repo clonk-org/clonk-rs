@@ -2962,6 +2962,8 @@ fn basic_map_params(landscape: &LegacyLandscape) -> crate::map_creator::BasicMap
 /// C4Wrappers.h:110-145, C4Landscape.cpp:2832-2839): a pixel byte's low 7
 /// bits are the texmap index (bit 0x80 = IFT); index 0, unmapped entries
 /// and unknown materials are sky (MNone, density 0).
+const C4M_MAX_TEX_INDEX: usize = 127;
+
 pub(crate) struct MapPixelClassifier {
     state: RuntimeTexMapState,
 }
@@ -3074,7 +3076,7 @@ impl MapPixelClassifier {
         tex_name: Option<&str>,
         add_if_not_exist: bool,
     ) -> u8 {
-        for slot in 1..128usize {
+        for slot in 1..C4M_MAX_TEX_INDEX {
             if let Some(existing) = &self.state.material_names[slot] {
                 if existing.eq_ignore_ascii_case(mat_name)
                     && tex_name
@@ -3102,8 +3104,8 @@ impl MapPixelClassifier {
                 return 0;
             }
         }
-        let Some(slot) = (1..128usize).find(|&slot| self.state.material_names[slot].is_none())
-        else {
+        let Some(slot) = (1..C4M_MAX_TEX_INDEX)
+            .find(|&slot| self.state.material_names[slot].is_none()) else {
             return 0;
         };
         self.state.material_names[slot] = Some(mat_name.to_string());
@@ -3139,9 +3141,10 @@ impl MapPixelClassifier {
                 return index;
             }
         }
-        // Game.Material.Map[iMaterial].DefaultMatTex (the CrossMapMaterials
-        // default entry): the first slot carrying the material.
-        self.get_index(material, None, false)
+        // Game.Material.Map[iMaterial].DefaultMatTex: the exact entry stored
+        // by CrossMapMaterials, not the first texmap slot with this material
+        // (C4Material.cpp:349-370; C4Texture.cpp:360-367).
+        self.state.default_material_entry(material).unwrap_or(0)
     }
 }
 
@@ -11975,6 +11978,57 @@ public func ActualizePhase(pClonk)
             40,
             "all-sky border column opens the full height"
         );
+    }
+
+    #[test]
+    fn get_index_mat_tex_returns_cross_mapped_default_not_first_material_slot() {
+        // C4MaterialMap::CrossMapMaterials stores the exact overlay entry in
+        // DefaultMatTex (C4Material.cpp:349-370), and GetIndexMatTex returns
+        // that field after its explicit-texture attempts (C4Texture.cpp:
+        // 346-367). An earlier Earth-Ridge slot must not replace the recorded
+        // Earth-Smooth default.
+        let mut names = vec![None; 128];
+        names[4] = Some("Earth".to_string());
+        names[30] = Some("Earth".to_string());
+        let mut textures = vec![None; 128];
+        textures[4] = Some("Ridge".to_string());
+        textures[30] = Some("Smooth".to_string());
+        let mut classifier = MapPixelClassifier::from_slots(
+            [0; 128],
+            names,
+            textures,
+            vec![None; 128],
+        );
+        classifier.state.set_default_material_entry("Earth", 30);
+
+        assert_eq!(classifier.get_index_mat_tex("Earth", None), 30);
+    }
+
+    #[test]
+    fn get_index_never_allocates_reserved_diff_slot_127() {
+        // C4M_MaxTexIndex is 127 and index 127 is reserved for landscape
+        // diffs (C4Constants.h:63). C4TextureMap::GetIndex searches and
+        // allocates only `byIndex < C4M_MaxTexIndex` (C4Texture.cpp:319-340),
+        // so a map whose usable slots 1..=126 are full must return 0.
+        let mut names = vec![None; 128];
+        for (slot, name) in names.iter_mut().enumerate().take(127).skip(1) {
+            *name = Some(format!("Taken{slot}"));
+        }
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material]\nName=Earth\nDensity=100\nShape=2\n",
+        )
+        .expect("material parses");
+        let mut classifier = MapPixelClassifier::from_slots_with_library(
+            [0; 128],
+            names,
+            vec![None; 128],
+            vec![None; 128],
+            library,
+            vec!["smooth".to_string()],
+        );
+
+        assert_eq!(classifier.get_index("Earth", Some("Smooth"), true), 0);
+        assert!(classifier.state.material_names[127].is_none());
     }
 
     #[test]
