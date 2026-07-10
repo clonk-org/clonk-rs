@@ -21272,24 +21272,34 @@ impl Engine {
             let velocity = self.objects[idx].fixed_velocity;
             if !velocity.y.is_nonzero() {
                 let allow_down = i32::from(t_contact & CNAT_BOTTOM == 0);
-                let position = self.objects[idx].state.position;
                 if t_contact & CNAT_RIGHT != 0 {
+                    let position = self.objects[idx].state.position;
                     self.force_object_position(
                         idx,
                         Vector2::new(position.x - 1, position.y + allow_down),
                     );
+                    let object = &mut self.objects[idx];
+                    object.fixed_velocity = FixedVec2::ZERO;
+                    object.state.velocity = Vector2::ZERO;
                 }
                 if t_contact & CNAT_LEFT != 0 {
+                    let position = self.objects[idx].state.position;
                     self.force_object_position(
                         idx,
                         Vector2::new(position.x + 1, position.y + allow_down),
                     );
+                    let object = &mut self.objects[idx];
+                    object.fixed_velocity = FixedVec2::ZERO;
+                    object.state.velocity = Vector2::ZERO;
                 }
             }
             let velocity = self.objects[idx].fixed_velocity;
             if !velocity.x.is_nonzero() && t_contact & CNAT_TOP != 0 {
                 let position = self.objects[idx].state.position;
                 self.force_object_position(idx, Vector2::new(position.x, position.y + 1));
+                let object = &mut self.objects[idx];
+                object.fixed_velocity = FixedVec2::ZERO;
+                object.state.velocity = Vector2::ZERO;
             }
         }
     }
@@ -21300,8 +21310,6 @@ impl Engine {
         let object = &mut self.objects[idx];
         object.fixed_position = FixedVec2::from_ints(target.x, target.y);
         object.state.position = target;
-        object.fixed_velocity = FixedVec2::ZERO;
-        object.state.velocity = Vector2::ZERO;
         let object_id = object.id;
         let _ = object_id;
         self.update_sector_for_index(idx);
@@ -54780,6 +54788,81 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             "#,
         )
         .expect("script compiles")
+    }
+
+    #[test]
+    fn flight_slide_free_uses_live_position_for_each_contact() {
+        // C4Object::ContactAction applies Right, Left, then Top corrections
+        // through ForcePosition using the live x/y after every move
+        // (C4Object.cpp:4543-4567). GoldRush MONS #582 reaches all three
+        // contacts together at frame 410.
+        let mut definition = simple_definition("MONS");
+        definition.configure_actions(
+            Some("Jump".to_string()),
+            HashMap::from([(
+                "Jump".to_string(),
+                ActionSpec::default().with_procedure("FLIGHT"),
+            )]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("monster definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("MONS")
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_action(ActionState::new("Jump"))
+                    .with_loaded(true),
+            )
+            .expect("monster spawns");
+        let idx = engine.find_object_index(id).expect("monster exists");
+        let definition_id = engine.objects[idx].definition_id.clone();
+
+        engine.exec_contact_action(
+            idx,
+            CNAT_RIGHT | CNAT_LEFT | CNAT_TOP,
+            &definition_id,
+            &[],
+        );
+
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.position, Vector2::new(10, 13));
+        assert_eq!(object.fixed_position, FixedVec2::from_ints(10, 13));
+        assert_eq!(object.fixed_velocity, FixedVec2::ZERO);
+        assert_eq!(object.state.velocity, Vector2::ZERO);
+    }
+
+    #[test]
+    fn force_position_preserves_velocity_like_cpp() {
+        // C4Object::ForcePosition only resynchronizes fix_x/fix_y and updates
+        // spatial bookkeeping; callers zero xdir/ydir explicitly when needed
+        // (C4Movement.cpp:531-539).
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(simple_definition("Rock"))
+            .expect("rock registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Rock")
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("rock spawns");
+        let idx = engine.find_object_index(id).expect("rock exists");
+        let velocity = FixedVec2::new(itofix(2), itofix(-3));
+        engine.objects[idx].set_fixed_velocity(velocity);
+
+        engine.force_object_position(idx, Vector2::new(12, 14));
+
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.position, Vector2::new(12, 14));
+        assert_eq!(object.fixed_position, FixedVec2::from_ints(12, 14));
+        assert_eq!(object.fixed_velocity, velocity);
+        assert_eq!(object.state.velocity, Vector2::new(2, -3));
     }
 
     #[test]
