@@ -146,6 +146,15 @@ shadow, recording the new first mismatch.
   entries, engine-internal menus staying invisible to `GetMenu`,
   AutoContextMenu/CloseCommand, and presentation layout.
 
+- **Creation-number skew (the numbering epic):** AH_Predator's Initialize
+  exposes a preview-vs-final id mismatch — the teleporters' deferred
+  SetTransferZone commands record in-flight ids (53/69/84) that the
+  materialized objects never receive, so their zones drop with a WARN
+  (C++-faithful fallback: zones die with their object; the C4TransferZones
+  entry cannot outlive it). The zones SHOULD land — diagnosing why the
+  mid-call preview allocator and spawn materialization disagree in this
+  scenario is the reproducible entry point for the numbering epic.
+
 ## Accepted or comparator-only divergences
 
 - The parser accepts comma expressions outside C++'s legal return context.

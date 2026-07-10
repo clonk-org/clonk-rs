@@ -26691,7 +26691,19 @@ impl Engine {
         for command in commands {
             match command {
                 TransferZoneCommand::Set { owner, rect } => {
-                    self.set_transfer_zone(owner, rect)?;
+                    // A zone whose owner vanished before the deferred apply
+                    // cannot exist in C++ (C4TransferZones entries die with
+                    // their object) — drop it instead of aborting the batch.
+                    match self.set_transfer_zone(owner, rect) {
+                        Ok(()) => {}
+                        Err(EngineError::UnknownObject(missing)) => {
+                            tracing::warn!(
+                                owner = missing.as_u64(),
+                                "transfer zone owner vanished before the deferred apply; dropped"
+                            );
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 TransferZoneCommand::Clear { owner } => {
                     self.transfer_zones.clear(owner);
@@ -41476,6 +41488,30 @@ protected func Activity() { SetActionTargets(); return(1); }
 
         // One-way like C4Player::Eliminate (C4Player.cpp:2015-2017).
         assert!(restored.is_owner_eliminated(1));
+    }
+
+    #[test]
+    fn transfer_zone_set_for_a_vanished_owner_drops_instead_of_aborting() {
+        // C++ has no failure mode here: C4TransferZones entries die with
+        // their object, so a deferred Set whose owner is gone must drop
+        // (warn) rather than abort the batch (the AH_Predator apply
+        // regression class).
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+        engine
+            .apply_transfer_zone_commands(vec![TransferZoneCommand::Set {
+                owner: ObjectId::new(9999),
+                rect: TransferZoneRect {
+                    x: 0,
+                    y: 0,
+                    width: 8,
+                    height: 8,
+                },
+            }])
+            .expect("missing owner drops, never errors");
+        assert!(engine.capture_state().transfer_zones.is_empty());
     }
 
     #[test]
