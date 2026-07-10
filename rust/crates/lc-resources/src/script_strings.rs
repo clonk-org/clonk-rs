@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::{Group, GroupError};
 
@@ -25,6 +26,15 @@ pub fn localize_script_source<S: AsRef<str>>(
     source: &str,
     languages: &[S],
 ) -> Result<String, GroupError> {
+    let (table, table_path) = load_script_string_table(group, languages)?;
+    let entries = parse_string_table(&table);
+    Ok(replace_localization_keys(source, &entries, &table_path))
+}
+
+fn load_script_string_table<S: AsRef<str>>(
+    group: &Group,
+    languages: &[S],
+) -> Result<(String, PathBuf), GroupError> {
     let mut selected_name = None;
     let mut table = None;
     for candidate in std::iter::once("StringTbl.txt".to_string()).chain(
@@ -40,11 +50,10 @@ pub fn localize_script_source<S: AsRef<str>>(
         break;
     }
 
-    let entries = table.as_deref().map(parse_string_table).unwrap_or_default();
     let table_path = group
         .root()
         .join(selected_name.as_deref().unwrap_or("StringTbl.txt"));
-    Ok(replace_localization_keys(source, &entries, &table_path))
+    Ok((table.unwrap_or_default(), table_path))
 }
 
 fn parse_string_table(table: &str) -> HashMap<&str, &str> {
