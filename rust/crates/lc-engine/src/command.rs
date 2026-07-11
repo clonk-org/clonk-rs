@@ -2394,9 +2394,18 @@ mod tests {
         assert_eq!(result.status, CommandStatus::Completed);
         let update = result.update.expect("enter should produce an update");
         assert_eq!(update.command_direction, Some(CommandDirection::Stop));
-        assert_eq!(update.container, Some(Some(target_id)));
-        assert_eq!(update.position, Some(Vector2::new(18, 16)));
-        assert_eq!(update.velocity, Some(Vector2::ZERO));
+        assert!(
+            update.container.is_none(),
+            "C4Object::Enter is an ordered engine event, not a plain delta"
+        );
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(
+            result.events[0],
+            CommandEvent::EnterObject {
+                object_id: actor_id,
+                container_id: target_id,
+            }
+        );
         assert!(result.operations.is_empty());
     }
 
@@ -7670,6 +7679,13 @@ pub enum CommandEvent {
         object_id: ObjectId,
         update: ObjectUpdate,
     },
+    /// Run C4Object::Enter as one ordered operation so the engine can make
+    /// the container link visible before Collection2 and Entrance callbacks
+    /// execute (C4Object.cpp:1598-1630).
+    EnterObject {
+        object_id: ObjectId,
+        container_id: ObjectId,
+    },
     /// ObjectComThrow -> ObjectActionThrow is one ordered operation: the
     /// action transition must succeed before Random(360) and C4Object::Exit
     /// run (C4ObjectCom.cpp:120-137).
@@ -8901,7 +8917,7 @@ impl EnterState {
         // against the target's shape (Target->At(cx, cy, ocf),
         // C4Command.cpp:586-588).
         if target_snapshot.at_point(ctx.position.x, ctx.position.y) {
-            let mut update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+            let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
             if !target_snapshot.entrance_status {
                 let event = CommandEvent::CallObjectFunction {
                     object_id: self.target,
@@ -8914,10 +8930,11 @@ impl EnterState {
                 };
                 return CommandStepResult::running(Some(update)).with_events(vec![event]);
             }
-            update.container = Some(Some(self.target));
-            update.position = Some(target_snapshot.position);
-            update.velocity = Some(Vector2::ZERO);
-            return CommandStepResult::completed(Some(update));
+            let event = CommandEvent::EnterObject {
+                object_id: ctx.object.id,
+                container_id: self.target,
+            };
+            return CommandStepResult::completed(Some(update)).with_events(vec![event]);
         }
 
         let mut result = CommandStepResult::running(self.update_to_stop(ctx));

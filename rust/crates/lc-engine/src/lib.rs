@@ -25277,6 +25277,7 @@ impl Engine {
                         Err(EngineError::UnknownObject(_)) => continue,
                         Err(err) => return Err(err),
                     }
+                    self.run_object_enter_callbacks(candidate_id, obj1_id)?;
                     // C4Object::Collect enters with fCopyMotion=false
                     // (C4Object.cpp:5698): the pinned stand-in re-applies
                     // the explicit position and zero velocity AFTER the
@@ -28122,6 +28123,151 @@ impl Engine {
         Ok(())
     }
 
+    /// The callback tail shared by every engine-owned successful Enter.
+    /// The new containment relation must already be live. Collection2 may
+    /// move the entering object; Entrance then receives its current
+    /// container (C4Object.cpp:1625-1630).
+    fn run_object_enter_callbacks(
+        &mut self,
+        object_id: ObjectId,
+        target_id: ObjectId,
+    ) -> Result<(), EngineError> {
+        if let Some(target_index) = self.find_object_index(target_id) {
+            let _ = tolerate_script_error(self.call_object_function(
+                target_index,
+                "Collection2",
+                vec![object_reference_value(object_id)],
+            ))?;
+        }
+        let current_container = self
+            .find_object_index(object_id)
+            .and_then(|index| self.objects[index].state.container);
+        let current_container_live = current_container.is_some_and(|container_id| {
+            self.find_object_index(container_id).is_some_and(|index| {
+                !self.objects[index].destroyed && self.objects[index].state.status.is_active()
+            })
+        });
+        let target_live = self.find_object_index(target_id).is_some_and(|index| {
+            !self.objects[index].destroyed && self.objects[index].state.status.is_active()
+        });
+        if current_container_live && target_live {
+            if let (Some(object_index), Some(container_id)) =
+                (self.find_object_index(object_id), current_container)
+            {
+                let _ = tolerate_script_error(self.call_object_function(
+                    object_index,
+                    "Entrance",
+                    vec![object_reference_value(container_id)],
+                ))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `C4Object::Enter` for engine-owned callers such as C4CMD_Enter:
+    /// reject before mutation, Exit a previous container, establish the new
+    /// link, then call target Collection2 before the entering object's
+    /// Entrance (C4Object.cpp:1566-1636). Script errors are fail-safe calls.
+    fn try_object_enter(
+        &mut self,
+        object_id: ObjectId,
+        target_id: ObjectId,
+    ) -> Result<bool, EngineError> {
+        if object_id == target_id {
+            return Ok(false);
+        }
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let Some(target_index) = self.find_object_index(target_id) else {
+            return Ok(false);
+        };
+        if self.objects[object_index].destroyed
+            || !self.objects[object_index].state.status.is_active()
+            || self.objects[target_index].destroyed
+            || !self.objects[target_index].state.status.is_active()
+        {
+            return Ok(false);
+        }
+
+        // RejectEntrance belongs to the ENTERING object and runs before
+        // cycle detection or Exit (C4Object.cpp:1575-1581).
+        let rejected = tolerate_script_error(self.call_object_function(
+            object_index,
+            "RejectEntrance",
+            vec![object_reference_value(target_id)],
+        ))?
+        .is_some_and(|value| value.as_bool());
+        if rejected {
+            return Ok(false);
+        }
+
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let Some(target_index) = self.find_object_index(target_id) else {
+            return Ok(false);
+        };
+        if self.objects[object_index].destroyed
+            || !self.objects[object_index].state.status.is_active()
+            || self.objects[target_index].destroyed
+            || !self.objects[target_index].state.status.is_active()
+        {
+            return Ok(false);
+        }
+        let mut container = self.objects[target_index].state.container;
+        let mut seen = HashSet::new();
+        while let Some(container_id) = container {
+            if container_id == object_id || !seen.insert(container_id) {
+                return Ok(false);
+            }
+            container = self
+                .find_object_index(container_id)
+                .and_then(|index| self.objects[index].state.container);
+        }
+
+        // A transfer is an actual Exit first. Ejection precedes Departure;
+        // either callback may re-enter, in which case Exit reports false and
+        // the outer Enter aborts (C4Object.cpp:1592-1594, 1560-1563).
+        let previous = self.objects[object_index].state.container;
+        if let Some(previous_id) = previous {
+            self.apply_container_change(object_id, Some(previous_id), None, false)?;
+            if let Some(previous_index) = self.find_object_index(previous_id) {
+                let _ = tolerate_script_error(self.call_object_function(
+                    previous_index,
+                    "Ejection",
+                    vec![object_reference_value(object_id)],
+                ))?;
+            }
+            if let Some(object_index) = self.find_object_index(object_id) {
+                let _ = tolerate_script_error(self.call_object_function(
+                    object_index,
+                    "Departure",
+                    vec![object_reference_value(previous_id)],
+                ))?;
+            }
+        }
+
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let Some(target_index) = self.find_object_index(target_id) else {
+            return Ok(false);
+        };
+        if self.objects[object_index].state.container.is_some()
+            || self.objects[object_index].destroyed
+            || !self.objects[object_index].state.status.is_active()
+            || self.objects[target_index].destroyed
+            || !self.objects[target_index].state.status.is_active()
+        {
+            return Ok(false);
+        }
+
+        self.apply_container_change(object_id, None, Some(target_id), false)?;
+        self.run_object_enter_callbacks(object_id, target_id)?;
+        Ok(true)
+    }
+
     /// ObjectActionThrow (C4ObjectCom.cpp:120-137): resolve the physical
     /// force/facing first, honor the ordinary SetAction gate, then consume
     /// exactly one synced rotation draw and perform C4Object::Exit.
@@ -28251,6 +28397,15 @@ impl Engine {
         match event {
             CommandEvent::ApplyObjectUpdate { object_id, update } => {
                 self.apply_object_update(object_id, update)?;
+            }
+            CommandEvent::EnterObject {
+                object_id,
+                container_id,
+            } => {
+                // C4Command::Enter ignores C4Object::Enter's boolean and
+                // finishes successfully after making the attempt
+                // (C4Command.cpp:600-605).
+                let _ = self.try_object_enter(object_id, container_id)?;
             }
             CommandEvent::ThrowObject {
                 actor_id,
@@ -64776,6 +64931,189 @@ protected func FlyBaseStart()
 
         let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
         assert_eq!(item_snapshot.container, Some(crew));
+        Ok(())
+    }
+
+    #[test]
+    fn command_enter_runs_collection_then_entrance_and_transfers_contents_like_cpp(
+    ) -> Result<(), EngineError> {
+        // C4Command::Enter calls cObj->Enter(Target) (C4Command.cpp:600-605).
+        // C4Object::Enter links the object first, then calls Collection2 on
+        // the target and Entrance on the entering object in that order
+        // (C4Object.cpp:1598-1630). LORY's Entrance depends on the ordering:
+        // it transfers its load with pNewContainer->GrabContents(this())
+        // (Objects.c4d/Vehicles.c4d/Lorry.c4d/Script.c:82-91).
+        let mut engine = Engine::new();
+        let lorry_script = r#"#strict
+local callback_order, collection_target, collection_container, entrance_target;
+
+public func Board(pTarget)
+{
+  return(SetCommand(this(), "Enter", pTarget));
+}
+
+public func CollectedBy(pTarget)
+{
+  callback_order = callback_order * 10 + 1;
+  collection_target = pTarget;
+  collection_container = Contained();
+  return(1);
+}
+
+protected func Entrance(pTarget)
+{
+  callback_order = callback_order * 10 + 2;
+  entrance_target = pTarget;
+  pTarget->GrabContents(this());
+  return(1);
+}
+"#;
+        let foundry_script = r#"#strict
+protected func Collection2(pObject)
+{
+  pObject->~CollectedBy(this());
+  return(1);
+}
+"#;
+        let mut lorry = Definition::from_script("LORY", "Lorry", lorry_script)?;
+        lorry.set_c4_callback_convention(true);
+        let mut foundry = Definition::from_script("FNDR", "Foundry", foundry_script)?;
+        foundry.set_c4_callback_convention(true);
+        foundry.set_shape_rect(Some(DefinitionRect::new(-20, -20, 40, 40)));
+        foundry.set_entrance_rect(Some(DefinitionRect::new(-20, -20, 40, 40)));
+        engine.register_definition(lorry)?;
+        engine.register_definition(foundry)?;
+        engine.register_definition(simple_definition("ORE1"))?;
+
+        // A shaped spawn at y=120 grows upward to center y=100.
+        let foundry_id = engine.spawn_object(
+            SpawnConfig::new("FNDR").with_position(Vector2::new(100, 120)),
+        )?;
+        let foundry_idx = engine
+            .find_object_index(foundry_id)
+            .expect("foundry exists");
+        engine.objects[foundry_idx].state.entrance_status = true;
+        engine.refresh_object_ocf(foundry_idx);
+        let lorry_id = engine.spawn_object(
+            SpawnConfig::new("LORY").with_position(Vector2::new(100, 100)),
+        )?;
+        let ore_id = engine.spawn_object(SpawnConfig::new("ORE1").with_container(lorry_id))?;
+
+        let lorry_idx = engine.find_object_index(lorry_id).expect("lorry exists");
+        assert_eq!(
+            engine.call_object_function(
+                lorry_idx,
+                "Board",
+                vec![object_reference_value(foundry_id)],
+            )?,
+            Value::Bool(true)
+        );
+        engine.tick()?;
+
+        let lorry_idx = engine.find_object_index(lorry_id).expect("lorry exists");
+        let locals = &engine.objects[lorry_idx].state.local_vars;
+        assert_eq!(
+            locals.get("callback_order"),
+            Some(&Value::Int(12)),
+            "Collection2 must run before Entrance (C4Object.cpp:1626-1629)"
+        );
+        assert_eq!(
+            locals.get("collection_target"),
+            Some(&object_reference_value(foundry_id))
+        );
+        assert_eq!(
+            locals.get("collection_container"),
+            Some(&object_reference_value(foundry_id)),
+            "Collection2 observes the already-linked object (C4Object.cpp:1598-1626)"
+        );
+        assert_eq!(
+            locals.get("entrance_target"),
+            Some(&object_reference_value(foundry_id))
+        );
+        assert_eq!(engine.objects[lorry_idx].state.container, Some(foundry_id));
+        let ore_idx = engine.find_object_index(ore_id).expect("ore exists");
+        assert_eq!(
+            engine.objects[ore_idx].state.container,
+            Some(foundry_id),
+            "LORY-style Entrance must be able to GrabContents into the new container"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_collection_runs_collection_then_entrance_like_cpp(
+    ) -> Result<(), EngineError> {
+        // C4Object::Collect calls Enter(collector, true, false,
+        // &reject_collect) (C4Object.cpp:5696-5704), so successful automatic
+        // collection shares Enter's Collection2-before-Entrance callback
+        // order (C4Object.cpp:1625-1630). Tutorial08 relies on WIPF::Entrance
+        // when caught animals subsequently enter a LORY.
+        let mut engine = Engine::new();
+        let collector_script = r#"#strict
+protected func Collection2(pObject)
+{
+  pObject->~CollectedBy(this());
+  return(1);
+}
+"#;
+        let item_script = r#"#strict
+local callback_order, collection_target, entrance_target;
+
+public func CollectedBy(pTarget)
+{
+  callback_order = callback_order * 10 + 1;
+  collection_target = pTarget;
+  return(1);
+}
+
+protected func Entrance(pTarget)
+{
+  callback_order = callback_order * 10 + 2;
+  entrance_target = pTarget;
+  return(1);
+}
+"#;
+        let mut collector = Definition::from_script("CLNK", "Clonk", collector_script)?;
+        collector.set_c4_callback_convention(true);
+        collector.set_shape_rect(Some(DefinitionRect::new(-12, -9, 24, 18)));
+        collector.set_collection_rect(Some(DefinitionRect::new(-12, -9, 24, 18)));
+        let mut item = Definition::from_script("WIPF", "Wipf", item_script)?;
+        item.set_c4_callback_convention(true);
+        item.set_collectible(true);
+        engine.register_definition(collector)?;
+        engine.register_definition(item)?;
+
+        let collector_id = engine.spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_alive(true)
+                .with_position(Vector2::new(100, 100)),
+        )?;
+        let item_id = engine.spawn_object(
+            SpawnConfig::new("WIPF")
+                .with_category(CATEGORY_VEHICLE)
+                .with_position(Vector2::new(100, 95)),
+        )?;
+
+        for _ in 0..3 {
+            engine.tick()?;
+        }
+
+        let item_idx = engine.find_object_index(item_id).expect("wipf exists");
+        assert_eq!(engine.objects[item_idx].state.container, Some(collector_id));
+        let locals = &engine.objects[item_idx].state.local_vars;
+        assert_eq!(
+            locals.get("callback_order"),
+            Some(&Value::Int(12)),
+            "Collect must reuse C4Object::Enter's callback order"
+        );
+        assert_eq!(
+            locals.get("collection_target"),
+            Some(&object_reference_value(collector_id))
+        );
+        assert_eq!(
+            locals.get("entrance_target"),
+            Some(&object_reference_value(collector_id))
+        );
         Ok(())
     }
 
