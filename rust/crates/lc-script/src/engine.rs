@@ -687,6 +687,13 @@ impl Engine {
         self.functions.contains_key(name)
     }
 
+    /// Own linked script functions, including inherited definition functions.
+    /// Consumers such as C4MN_Context need the retained C4Aul description
+    /// metadata, not merely name-based execution.
+    pub fn functions(&self) -> &HashMap<String, Function> {
+        &self.functions
+    }
+
     /// Own functions OR the engine-global table. Object callbacks
     /// (Initialize/TimerCall/…) resolve own-script only, but EFFECT
     /// callbacks recurse up the C4Aul tree to the script engine

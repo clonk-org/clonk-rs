@@ -155,6 +155,11 @@ pub struct Function {
     pub body: Vec<Stmt>,
     pub access: AccessLevel,
     pub returns_reference: bool,
+    /// Raw localized function-description metadata from the leading
+    /// `[caption|Image=...|Condition=...]` block. C4Aul retains this on the
+    /// script function for context-menu discovery (C4AulParse.cpp:1825-1853;
+    /// C4ObjectMenu.cpp:670-682).
+    pub description: Option<String>,
     /// The `#strict` level of the script this function came from (C++ uses the
     /// owning script's strict level for `==`/`!=`, `Fn->pOrgScript->Strict`).
     /// `None` = no `#strict` directive (NONSTRICT). Stamped in `Script::from_ast`.
@@ -177,6 +182,7 @@ impl Function {
                 && a.body == b.body
                 && a.access == b.access
                 && a.returns_reference == b.returns_reference
+                && a.description == b.description
                 && a.strict_level == b.strict_level
         }
         let mut tail = &mut self.overloaded;

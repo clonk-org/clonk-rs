@@ -426,18 +426,23 @@ impl<'a> Lexer<'a> {
         &mut self,
         opening_line: usize,
         opening_column: usize,
-    ) -> Result<(), ParseError> {
+    ) -> Result<String, ParseError> {
         let mut brackets_open = 1usize;
+        let mut description = String::new();
         while let Some((_, ch, _, _)) = self.bump_char() {
             match ch {
-                '[' => brackets_open += 1,
+                '[' => {
+                    brackets_open += 1;
+                    description.push(ch);
+                }
                 ']' => {
                     brackets_open -= 1;
                     if brackets_open == 0 {
-                        return Ok(());
+                        return Ok(description);
                     }
+                    description.push(ch);
                 }
-                _ => {}
+                _ => description.push(ch),
             }
         }
 

@@ -168,7 +168,7 @@ impl<'a> Parser<'a> {
         let params = self.parse_parameter_list()?;
         self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
         self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
-        self.skip_function_description()?;
+        let description = self.parse_function_description()?;
         let body = self.parse_block_statements()?;
         self.expect_symbol(Symbol::RBrace, "expected '}' after function body")?;
 
@@ -178,6 +178,7 @@ impl<'a> Parser<'a> {
             body,
             access,
             returns_reference,
+            description,
             // Stamped with the script's #strict level in Script::from_ast.
             strict_level: None,
             // Linked when a later script or an #include overload collides.
@@ -199,7 +200,7 @@ impl<'a> Parser<'a> {
             ));
         }
         self.expect_symbol(Symbol::Colon, "expected ':' after old-style function name")?;
-        self.skip_function_description()?;
+        let description = self.parse_function_description()?;
 
         let mut body = Vec::new();
         while !self.is_eof()? && !self.is_old_style_function_boundary()? {
@@ -212,6 +213,7 @@ impl<'a> Parser<'a> {
             body,
             access,
             returns_reference: false,
+            description,
             strict_level: None,
             overloaded: None,
         })
@@ -437,14 +439,15 @@ impl<'a> Parser<'a> {
         Ok(statements)
     }
 
-    fn skip_function_description(&mut self) -> Result<(), ParseError> {
+    fn parse_function_description(&mut self) -> Result<Option<String>, ParseError> {
         if !self.check_symbol(Symbol::LBracket)? {
-            return Ok(());
+            return Ok(None);
         }
 
         let opening = self.consume()?;
         self.lexer
             .skip_function_description(opening.line, opening.column)
+            .map(Some)
     }
 
     fn parse_stmt_or_block_vec(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -1901,6 +1904,11 @@ fn static_const_multi_declarators_parse() {
             script.functions[0].body.as_slice(),
             [Stmt::Return(Some(Expr::Literal(Literal::Int(42))))]
         ));
+        assert_eq!(
+            script.functions[0].description.as_deref(),
+            Some("Put/Get object | Image=CLNK | Options=[fast/slow] @ menu"),
+            "C4Aul function metadata must retain the localized menu description"
+        );
     }
 
     #[test]
@@ -1924,6 +1932,10 @@ fn static_const_multi_declarators_parse() {
             script.functions[0].body.as_slice(),
             [Stmt::Return(Some(Expr::Literal(Literal::Int(42))))]
         ));
+        assert_eq!(
+            script.functions[0].description.as_deref(),
+            Some("Put/Get | Options=[fast/slow] @ menu")
+        );
     }
 
     #[test]
