@@ -13077,20 +13077,17 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
-    let mut param_count = args.len();
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(Value::Proplist(_)) = args.last() {
-        param_count -= 1;
-        target_id =
-            parse_object_reference_argument(&args[param_count], "SetBridgeActionData", "object")?;
-    }
-
-    if param_count > 4 {
+    if args.len() > 5 {
         return Err(RuntimeError::new(
-            "SetBridgeActionData accepts at most 4 arguments before the object parameter",
+            "SetBridgeActionData expects at most 5 arguments: length, move flag, wall flag, material, object",
         ));
     }
+    let param_count = args.len().min(4);
+    let target_id = args
+        .get(4)
+        .map(|value| parse_object_reference_argument(value, "SetBridgeActionData", "object"))
+        .transpose()?
+        .flatten();
 
     let length = if param_count > 0 {
         value_to_i32(&args[0], "SetBridgeActionData", "length")?
@@ -13117,24 +13114,42 @@ fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
         -1
     };
 
-    let encoded = encode_bridge_action_data(length, move_clonk, wall, material);
-
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut().ok_or_else(|| {
             RuntimeError::new("SetBridgeActionData requires an active engine context")
         })?;
 
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
-        };
+        // C4Action::SetBridgeData clamps to the last loaded material before
+        // packing the low byte (C4Object.cpp:54-62). A loaded empty table has
+        // Num-1 == -1 and therefore stores the no-material sentinel 0xff.
+        let material = context
+            .world
+            .materials()
+            .map(|materials| {
+                if materials.is_empty() {
+                    -1
+                } else {
+                    material.min(materials.len().saturating_sub(1) as i32)
+                }
+            })
+            .unwrap_or(material);
+        let encoded = encode_bridge_action_data(length, move_clonk, wall, material);
 
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        // FnSetBridgeActionData defaults pObj to cthr->Obj, but an explicit
+        // object may be foreign (C4Script.cpp:757-765). LOAM::StartBridge
+        // runs in the loam's scope after ObjectSetAction staged "Bridge" on
+        // the Clonk, so read and write that target's live nested scope.
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
 
         if !object.status().is_active() {
             return Ok(Value::Bool(false));
@@ -32408,6 +32423,138 @@ func Missing() { return ComponentAll(nil, WOOD); }
         let update = outcome.object_update.expect("object update recorded");
         let action = update.action.expect("action update present");
         assert_eq!(action.data, Some(255));
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // HostWorldContext owns definition scripts in Arc; this fixture stays on one thread.
+    fn set_bridge_action_data_accepts_the_fifth_object_parameter() {
+        // FnSetBridgeActionData's pObj is parameter five and may differ from
+        // cthr->Obj (C4Script.cpp:757-765). LOAM::StartBridge runs on LOAM,
+        // first ObjectSetActions the CLNK, then writes bridge data to that
+        // foreign CLNK (Loam.c4d/Script.c:82-96).
+        let loam = ObjectId::new(1);
+        let clonk = ObjectId::new(2);
+        let library = ActionLibrary::new(
+            Some("Walk".to_string()),
+            HashMap::from([
+                ("Walk".to_string(), ActionSpec::default().with_procedure("walk")),
+                (
+                    "Bridge".to_string(),
+                    ActionSpec::default().with_procedure("bridge"),
+                ),
+            ]),
+        );
+        let mut state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            Vec::new(),
+        );
+        state.action = crate::ActionState::new("Walk");
+        let target = HostWorldObject::new(
+            clonk,
+            "CLNK",
+            ObjectStatus::Normal,
+            "Walk",
+            None,
+            None,
+            Some("walk".into()),
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(state));
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        let materials = lc_resources::MaterialLibrary::parse(
+            "[Material Sky]\nName=Sky\n\n[Material Earth]\nName=Earth\n",
+        )
+        .expect("material library parses");
+        let world = HostWorldContext::from_objects(vec![target])
+            .with_definition_metadata(Rc::new(HashMap::from([(
+                DefinitionId::from("CLNK"),
+                DefinitionMetadata {
+                    action_library: library,
+                    ..DefinitionMetadata::default()
+                },
+            )])))
+            .with_definition_scripts(HashMap::from([(
+                DefinitionId::from("CLNK"),
+                Arc::new(script),
+            )]))
+            .with_materials(Some(Rc::new(MaterialSet::from_resource_library(
+                &materials,
+            ))));
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                loam,
+                None,
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                0,
+                None,
+                None,
+                &[],
+                crate::FULL_CON,
+            )),
+            &[],
+            world,
+            1,
+            || {
+                assert_eq!(
+                    object_set_action(&[
+                        object_reference_value(clonk),
+                        Value::String("Bridge".into()),
+                    ])?,
+                    Value::Bool(true)
+                );
+                set_bridge_action_data(&[
+                    Value::Int(100),
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Int(7),
+                    object_reference_value(clonk),
+                ])
+            },
+        );
+
+        assert_eq!(result.expect("SetBridgeActionData succeeds"), Value::Bool(true));
+        let target = outcome
+            .other_objects
+            .iter()
+            .find(|outcome| outcome.object_id == clonk)
+            .expect("foreign CLNK outcome recorded");
+        let action = target
+            .update
+            .as_ref()
+            .expect("foreign update recorded")
+            .action
+            .as_ref()
+            .expect("action update present");
+        assert_eq!(action.name.as_deref(), Some("Bridge"));
+        assert_eq!(
+            action.data,
+            Some(encode_bridge_action_data(100, true, false, 1)),
+            "C4Action::SetBridgeData clamps material 7 to Num-1"
+        );
     }
 
     #[test]

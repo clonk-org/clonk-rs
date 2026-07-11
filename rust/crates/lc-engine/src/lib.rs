@@ -1353,7 +1353,7 @@ struct BridgeParameters {
     duration: u32,
     move_clonk: bool,
     wall: bool,
-    _material: Option<u8>,
+    material: Option<MaterialId>,
 }
 
 impl BridgeParameters {
@@ -1364,16 +1364,14 @@ impl BridgeParameters {
         let move_clonk = (raw & 0x100) != 0;
         let wall = (raw & 0x200) != 0;
         let material_byte = (raw & 0xFF) as u8;
-        let material = if material_byte == 0xFF {
-            None
-        } else {
-            Some(material_byte)
-        };
+        let material = (material_byte != 0xFF)
+            .then(|| MaterialId::new(usize::from(material_byte)))
+            .flatten();
         Self {
             duration,
             move_clonk,
             wall,
-            _material: material,
+            material,
         }
     }
 
@@ -17098,7 +17096,11 @@ impl Engine {
                         }
                         _ => 1,
                     };
-                    let increment_live_time = object.state.action.name == exec_action_source;
+                    let increment_live_time = object.state.action.name == exec_action_source
+                        && !matches!(
+                            action_library.procedure_for_action(&exec_action_source),
+                            ActionProcedure::Bridge
+                        );
                     action_library.advance_state_from_action_by(
                         &mut object.state.action,
                         &exec_action_source,
@@ -21557,10 +21559,21 @@ impl Engine {
         // reads Action.t_attach (C4Script.cpp:5444).
         self.objects[idx].state.t_attach = self.objects[idx].frame_t_attach;
 
-        if matches!(procedure, ActionProcedure::Bridge)
-            && !self.apply_bridge_procedure(idx, command_direction, &definition_id)
-        {
-            return Ok(false);
+        if matches!(procedure, ActionProcedure::Bridge) {
+            // Action.Time++ precedes the procedure switch in C++
+            // (C4Object.cpp:4755-4756), and DoBridge observes the incremented
+            // value (:4585-4603). The generic phase tail must therefore not
+            // increment Bridge a second time.
+            self.objects[idx].state.action.time = self.objects[idx]
+                .state
+                .action
+                .time
+                .saturating_add(1);
+            if !self.apply_bridge_procedure(idx, command_direction, &definition_id)? {
+                // `if (!DoBridge(this)) return;` skips the phase tail
+                // (C4Object.cpp:4998-4999).
+                return Ok(true);
+            }
         }
 
         if matches!(procedure, ActionProcedure::Build)
@@ -21982,6 +21995,20 @@ impl Engine {
                         }
                     });
                 }
+                ActionProcedure::Bridge => {
+                    // DFA_BRIDGE faces along its horizontal ComDir after
+                    // DoBridge succeeds (C4Object.cpp:5000-5004).
+                    exec_set_direction = match command_direction {
+                        CommandDirection::Left | CommandDirection::UpLeft => {
+                            Some(Direction::Left)
+                        }
+                        CommandDirection::Right | CommandDirection::UpRight => {
+                            Some(Direction::Right)
+                        }
+                        _ => None,
+                    };
+                    object.state.mobile = true;
+                }
                 ActionProcedure::Push => {
                     if object.state.velocity.x < 0 {
                         object.state.direction = Direction::Left;
@@ -22210,47 +22237,200 @@ impl Engine {
         idx: usize,
         command_direction: CommandDirection,
         definition_id: &DefinitionId,
-    ) -> bool {
+    ) -> Result<bool, EngineError> {
         let parameters = BridgeParameters::from_action_data(self.objects[idx].state.action.data);
-        let action_time = self.objects[idx].state.action.phase.max(0) as u32;
+        let action_time = self.objects[idx].state.action.time;
 
         if action_time >= parameters.duration {
-            self.reset_action_to_default(idx, definition_id, false);
-            return false;
+            // ObjectActionStand runs inside DoBridge, before DFA_BRIDGE can
+            // OR in CNAT_Bottom for this frame (C4Object.cpp:4584,
+            // 4996-5006). Preserve only the earlier UprightAttach arm.
+            let upright_attach = self.objects[idx].upright_t_attach;
+            self.objects[idx].frame_t_attach = upright_attach;
+            self.objects[idx].state.t_attach = upright_attach;
+            let _ = self.object_action_stand(idx, definition_id)?;
+            return Ok(false);
         }
 
         let Some(step_interval) = parameters.step_interval(command_direction) else {
-            return true;
+            return Ok(true);
         };
 
         if step_interval == 0 || action_time % step_interval != 0 {
-            return true;
+            return Ok(true);
         }
 
-        let step_index = (action_time / step_interval) as i32;
-        let direction_sign: i32 = match command_direction {
-            CommandDirection::Left | CommandDirection::UpLeft | CommandDirection::DownLeft => -1,
-            CommandDirection::Right | CommandDirection::UpRight | CommandDirection::DownRight => 1,
-            _ => 0,
+        let (base_position, shape_width, shape_height, facing) = {
+            let object = &self.objects[idx];
+            let shape = object.current_shape_rect();
+            (
+                object.state.position,
+                shape.map(|rect| rect.width).unwrap_or(0),
+                shape.map(|rect| rect.height).unwrap_or(0),
+                object.state.direction,
+            )
+        };
+        let mut clonk_x = base_position.x;
+        let mut clonk_y = base_position.y;
+        let mut target_x = base_position.x;
+        let mut target_y = base_position.y + shape_height / 2;
+        let delta_time = if parameters.move_clonk {
+            0
+        } else {
+            (action_time / step_interval) as i32
         };
 
-        let base_position = self.objects[idx].state.position;
-        let target_column = base_position
-            .x
-            .saturating_add(direction_sign.saturating_mul(step_index));
-
-        if let Some(landscape) = self.landscape.as_mut() {
-            let start = target_column;
-            let end = target_column.saturating_add(1);
-            landscape.lower_range(start, end, base_position.y);
+        // The target formulas are the DoBridge switch verbatim
+        // (C4Object.cpp:4605-4630). Keeping all arms here prevents the
+        // Tutorial-2 UpLeft path from inheriting the old x-only shortcut.
+        if parameters.wall {
+            match command_direction {
+                CommandDirection::Left => {
+                    target_x -= shape_width / 2;
+                    target_y -= delta_time;
+                }
+                CommandDirection::Right => {
+                    target_x += shape_width / 2;
+                    target_y -= delta_time;
+                }
+                CommandDirection::Up => {
+                    let x0 = if parameters.move_clonk {
+                        -3
+                    } else {
+                        (parameters.duration / step_interval) as i32 / -2
+                    };
+                    let direction = if facing == Direction::Right { 1 } else { -1 };
+                    target_x += (x0 + delta_time) * direction;
+                    clonk_x += direction;
+                    target_y -= shape_height + 3;
+                }
+                CommandDirection::UpLeft => {
+                    target_x -= -4 + delta_time;
+                    target_y += -shape_height - 7 + delta_time;
+                }
+                CommandDirection::UpRight => {
+                    target_x += -4 + delta_time;
+                    target_y += -shape_height - 7 + delta_time;
+                }
+                _ => return Ok(true),
+            }
+        } else {
+            match command_direction {
+                CommandDirection::Left => {
+                    target_x += -2 - delta_time;
+                    clonk_x -= 1;
+                }
+                CommandDirection::Right => {
+                    target_x += 2 + delta_time;
+                    clonk_x += 1;
+                }
+                CommandDirection::Up => {
+                    let stationary = i32::from(!parameters.move_clonk);
+                    target_x += (-shape_width / 2
+                        + (shape_width - 1) * i32::from(facing == Direction::Right))
+                        * stationary;
+                    target_y += -delta_time - i32::from(parameters.move_clonk);
+                    clonk_y -= 1;
+                }
+                CommandDirection::UpLeft => {
+                    target_x += -5 - delta_time + i32::from(parameters.move_clonk) * 3;
+                    target_y += 2 - delta_time - i32::from(parameters.move_clonk) * 3;
+                    clonk_x -= 1;
+                    clonk_y -= 1;
+                }
+                CommandDirection::UpRight => {
+                    target_x += 5 + delta_time - i32::from(parameters.move_clonk) * 2;
+                    target_y += 2 - delta_time - i32::from(parameters.move_clonk) * 3;
+                    clonk_x += 1;
+                    clonk_y -= 1;
+                }
+                _ => return Ok(true),
+            }
         }
 
-        if parameters.move_clonk && direction_sign != 0 && action_time > 0 {
+        // Shape.CheckContact(cx, cy-1) runs before drawing. A blocked moving
+        // bridge rewrites the remaining bridge as stationary and immediately
+        // retries at Action.Time 0 (C4Object.cpp:4631-4646).
+        if parameters.move_clonk
+            && self.object_shape_contacts_at(idx, Vector2::new(clonk_x, clonk_y - 1))
+        {
+            let mut remaining = parameters.duration.saturating_sub(action_time);
+            let mut retry_time = 0;
+            if parameters.wall && command_direction == CommandDirection::Up {
+                retry_time = remaining;
+                remaining = remaining.saturating_mul(2).min(0xffff);
+            }
+            let material = parameters
+                .material
+                .map(|material| material.index() as i32)
+                .unwrap_or(-1);
             let object = &mut self.objects[idx];
-            object.state.position.x = object.state.position.x.saturating_add(direction_sign);
+            object.state.action.time = retry_time;
+            object.state.action.data =
+                encode_bridge_action_data(remaining as i32, false, parameters.wall, material);
+            return self.apply_bridge_procedure(idx, command_direction, definition_id);
         }
 
-        true
+        if let Some(material) = parameters.material {
+            self.draw_bridge_material_rect(material, target_x - 2, target_y, 4, 3);
+        }
+
+        if parameters.move_clonk {
+            // C4Object::MovePosition removes/re-puts the solid mask with rider
+            // backup, adds integer deltas to the true fixed coordinates, and
+            // updates sectors (C4Movement.cpp:547-556).
+            let attachments = self.remove_solid_mask_for_movement(idx);
+            let object = &mut self.objects[idx];
+            object.state.position = Vector2::new(clonk_x, clonk_y);
+            object.fixed_position.x += itofix(clonk_x - base_position.x);
+            object.fixed_position.y += itofix(clonk_y - base_position.y);
+            self.update_sector_for_index(idx);
+            self.update_solid_mask(idx);
+            self.restore_solid_mask_attachments(idx, attachments);
+        }
+
+        Ok(true)
+    }
+
+    /// C4Landscape::DrawMaterialRect (C4Landscape.cpp:1064-1072): direct
+    /// Surface8 writes, with density first and DigFree as the equal-density
+    /// tie-break. SetPix preserves the destination IFT bit. Unlike script
+    /// DrawMaterialQuad this deliberately does not enter PrepareChange.
+    fn draw_bridge_material_rect(
+        &mut self,
+        material: MaterialId,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) {
+        let Some(bridge) = self.materials.get_by_id(material) else {
+            return;
+        };
+        let bridge_density = bridge.density();
+        let bridge_dig_free = i32::from(bridge.dig_free());
+        let materials = &self.materials;
+        let Some(landscape) = self.landscape.as_mut() else {
+            return;
+        };
+
+        for target_y in y..y.saturating_add(height) {
+            for target_x in x..x.saturating_add(width) {
+                let current_density = landscape.density_at(target_x, target_y, materials);
+                let current_dig_free = landscape
+                    .border_material_at(target_x, target_y)
+                    .and_then(|current| materials.get_by_id(current))
+                    .map(|current| i32::from(current.dig_free()))
+                    // MatDigFree(MNone) is 1 (C4Wrappers.h:153-157).
+                    .unwrap_or(1);
+                if bridge_density > current_density
+                    || (bridge_density == current_density
+                        && bridge_dig_free <= current_dig_free)
+                {
+                    let _ = landscape.insert_material_pix(target_x, target_y, material);
+                }
+            }
+        }
     }
 
     fn apply_build_procedure(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
@@ -38251,7 +38431,9 @@ protected func OnOldAbort()
             .object_snapshot(id)
             .expect("object snapshot available");
         assert_eq!(snapshot.energy, 1);
-        let expected = encode_bridge_action_data(200, true, false, 7);
+        // The fixture has no loaded materials, so C4Action::SetBridgeData
+        // clamps material 7 through Num-1 (-1) to the 0xff sentinel.
+        let expected = encode_bridge_action_data(200, true, false, -1);
         assert_eq!(snapshot.action.data, expected);
     }
 
@@ -38316,56 +38498,213 @@ protected func OnOldAbort()
     }
 
     #[test]
-    fn bridge_procedure_updates_landscape_height() {
+    fn moving_up_left_bridge_uses_action_time_and_draws_cpp_rectangles() {
+        // DoBridge (C4Object.cpp:4581-4652): Action.Time has already been
+        // incremented when the procedure runs; a moving UpLeft bridge advances
+        // at times 6,12,...,96, draws a 4x3 material rect at
+        // (x-4, y+Shape.Hgt/2-1), and MovePosition(-1,-1)s the Clonk.
         let mut definition =
             Definition::from_script("Bridger", "Bridger", PROCEDURE_MOVEMENT_SCRIPT)
                 .expect("script compiles");
+        definition.set_shape_rect(Some(DefinitionRect::new(-5, -10, 10, 20)));
         let mut actions = HashMap::new();
         actions.insert("Idle".to_string(), ActionSpec::default());
         actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
             "Bridge".to_string(),
-            ActionSpec::default()
-                .with_procedure("bridge")
-                .with_length(10)
-                .with_delay(1),
+            ActionSpec::default().with_procedure("bridge"),
         );
         definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
 
         let mut engine = Engine::with_seed(17);
         engine
             .register_definition(definition)
             .expect("definition registers");
-
-        let mut heights = vec![5; 16];
-        for column in 6..16 {
-            heights[column] = 0;
-        }
-        engine.set_landscape(Landscape::new(16, heights).expect("landscape constructs"));
+        engine.set_materials(materials);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        let grid = landscape::PixelGrid::new(
+            160,
+            160,
+            vec![0; 160 * 160],
+            vec![0, 80],
+            vec![None, Some("Earth".into())],
+            vec![None; 2],
+        );
+        let mut landscape = Landscape::new(160, vec![160; 160]).expect("landscape constructs");
+        landscape.set_world_height(160);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
 
         let mut action = ActionState::new("Bridge");
-        action.data = encode_bridge_action_data(10, false, false, -1);
+        action.data = encode_bridge_action_data(100, true, false, earth.index() as i32);
 
         let id = engine
             .spawn_object(
                 SpawnConfig::new("Bridger")
-                    .with_position(Vector2::new(5, 5))
+                    .with_position(Vector2::new(100, 80))
+                    .with_fixed_position(FixedVec2::from_ints(100, 80))
                     .with_direction(Direction::Right)
-                    .with_command_direction(CommandDirection::Right)
-                    .with_action(action),
+                    .with_command_direction(CommandDirection::UpLeft)
+                    .with_action(action)
+                    .with_mobile(true)
+                    .with_loaded(true),
             )
             .expect("spawn succeeds");
 
-        let mut snapshot = engine.tick().expect("tick succeeds");
-        for _ in 1..10 {
-            snapshot = engine.tick().expect("tick succeeds");
+        for _ in 0..5 {
+            engine.tick().expect("pre-advance tick succeeds");
+        }
+        let object = engine
+            .object_snapshot(id)
+            .expect("object remains before first bridge step");
+        assert_eq!(object.position, Vector2::new(100, 80));
+        assert_eq!(object.action.time, 5);
+
+        engine.tick().expect("first bridge step succeeds");
+        let object = engine
+            .object_snapshot(id)
+            .expect("object remains after first bridge step");
+        assert_eq!(object.position, Vector2::new(99, 79));
+        let index = engine.find_object_index(id).expect("object index remains");
+        assert_eq!(engine.objects[index].fixed_position, FixedVec2::from_ints(99, 79));
+        let landscape = engine.landscape().expect("landscape present");
+        for y in 89..92 {
+            for x in 96..100 {
+                assert_eq!(landscape.material_at(x, y), Some(earth));
+            }
         }
 
-        let landscape = snapshot.landscape.as_ref().expect("landscape present");
-        assert_eq!(landscape.surface()[5], 5);
-        assert_eq!(landscape.surface()[6], 5);
+        for _ in 6..100 {
+            engine.tick().expect("bridge tick succeeds");
+        }
 
-        let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.action.name, "Idle");
+        let object = engine.object_snapshot(id).expect("object present");
+        assert_eq!(object.position, Vector2::new(84, 64));
+        let index = engine.find_object_index(id).expect("object index remains");
+        assert_eq!(engine.objects[index].fixed_position, FixedVec2::from_ints(84, 64));
+        assert_eq!(object.direction, Direction::Left);
+        assert_eq!(
+            object.action.name, "Walk",
+            "ObjectActionStand selects Walk even though the fixture default is Idle"
+        );
+        assert_eq!(object.command_direction, CommandDirection::Stop);
+        assert_eq!(object.velocity, Vector2::ZERO);
+        assert_eq!(object.action.time, 0);
+        let index = engine.find_object_index(id).expect("object index remains");
+        assert_eq!(engine.objects[index].frame_t_attach, CNAT_NONE);
+        assert_eq!(engine.objects[index].state.t_attach, CNAT_NONE);
+    }
+
+    #[test]
+    fn blocked_moving_bridge_retries_stationary_and_preserves_ift() {
+        // DoBridge's moving collision arm (C4Object.cpp:4631-4646) tests the
+        // candidate one pixel upward, converts the remaining duration to a
+        // stationary bridge, resets Action.Time to zero, and recursively draws
+        // that frame. DrawMaterialRect keeps the destination IFT bit
+        // (C4Landscape.cpp:1064-1072).
+        let mut definition =
+            Definition::from_script("Bridger", "Bridger", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        definition.set_shape_rect(Some(DefinitionRect::new(-5, -10, 10, 20)));
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        definition.set_contact_density(50);
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Bridge".to_string(),
+                    ActionSpec::default().with_procedure("bridge"),
+                ),
+            ]),
+        );
+
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+
+            [Material Granite]
+            Name=Granite
+            Density=100
+            DigFree=0
+            "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut bytes = vec![0; 160 * 160];
+        bytes[78 * 160 + 99] = 2; // candidate CheckContact(99, 78)
+        bytes[92 * 160 + 93] = 0x80; // first stationary bridge pixel
+        let grid = landscape::PixelGrid::new(
+            160,
+            160,
+            bytes,
+            vec![0, 80, 100],
+            vec![None, Some("Earth".into()), Some("Granite".into())],
+            vec![None; 3],
+        );
+        let mut landscape = Landscape::new(160, vec![160; 160]).expect("landscape constructs");
+        landscape.set_world_height(160);
+        landscape.set_pixel_grid(grid);
+
+        let mut engine = Engine::with_seed(19);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+
+        let mut action = ActionState::new("Bridge");
+        action.data = encode_bridge_action_data(100, true, false, earth.index() as i32);
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Bridger")
+                    .with_position(Vector2::new(100, 80))
+                    .with_command_direction(CommandDirection::UpLeft)
+                    .with_action(action)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("spawn succeeds");
+
+        for _ in 0..6 {
+            engine.tick().expect("bridge tick succeeds");
+        }
+
+        let object = engine.object_snapshot(id).expect("object present");
+        assert_eq!(object.position, Vector2::new(100, 80));
+        assert_eq!(object.action.time, 0);
+        let retry = BridgeParameters::from_action_data(object.action.data);
+        assert_eq!(retry.duration, 94);
+        assert!(!retry.move_clonk);
+        assert_eq!(
+            engine
+                .landscape()
+                .expect("landscape remains")
+                .grid_byte_at(93, 92),
+            Some(0x81),
+            "stationary retry draws Earth while preserving tunnel IFT"
+        );
     }
 
     #[test]

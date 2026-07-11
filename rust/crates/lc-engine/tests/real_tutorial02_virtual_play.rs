@@ -42,7 +42,7 @@ fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
 }
 
 #[test]
-fn tutorial02_virtual_player_flies_to_the_far_island_and_collects_loam(
+fn tutorial02_virtual_player_flies_to_the_far_island_and_builds_a_loam_bridge(
 ) -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (mut engine, owner) = load_tutorial02();
@@ -303,5 +303,89 @@ fn tutorial02_virtual_player_flies_to_the_far_island_and_collects_loam(
         180,
         |engine| tutorial_message_contains(engine, "Select the option 'diagonal left'"),
     )?;
+    player.menu_left()?;
+    let selected = player
+        .engine()
+        .cursor_object_menu(owner)
+        .and_then(|(_, menu)| usize::try_from(menu.selection).ok().map(|index| (menu, index)))
+        .and_then(|(menu, index)| menu.items.get(index))
+        .map(|item| item.caption.as_str());
+    assert_eq!(selected, Some("Diagonal left"));
+
+    let bridge_start = player
+        .engine()
+        .object_snapshot(clonk)
+        .expect("CLNK starts the bridge")
+        .position;
+    player.menu_enter()?;
+    player.wait_until("CLNK enters the real Bridge action", 10, |engine| {
+        engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.action.name == "Bridge")
+    })?;
+    player.ticks(6)?;
+    let first_bridge_step = player
+        .engine()
+        .object_snapshot(clonk)
+        .expect("CLNK survives the first bridge step");
+    assert_eq!(first_bridge_step.action.name, "Bridge");
+    assert_eq!(first_bridge_step.action.time, 6);
+    assert_eq!(
+        first_bridge_step.action.data, 0x0064_0110,
+        "real LOAM must request the C++ moving, non-wall Earth bridge"
+    );
+    assert_eq!(
+        first_bridge_step.position,
+        lc_engine::Vector2::new(bridge_start.x - 1, bridge_start.y - 1),
+        "C++ DoBridge advances the moving UpLeft bridge for the first time at Action.Time 6 \
+         (src/C4Object.cpp:4581-4652)"
+    );
+    player.wait_until(
+        "the 100-frame moving diagonal bridge completes",
+        114,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        },
+    )?;
+    let bridge_end = player
+        .engine()
+        .object_snapshot(clonk)
+        .expect("CLNK survives the bridge")
+        .position;
+    assert_eq!(
+        (bridge_end.x - bridge_start.x, bridge_end.y - bridge_start.y),
+        (-16, -16),
+        "C++ increments Action.Time before DoBridge and moves at times 6..96 \
+         (src/C4Object.cpp:4581-4601,4755-4756)"
+    );
+    let earth = player
+        .engine()
+        .materials()
+        .id_of("Earth")
+        .expect("Tutorial02 loads Earth");
+    let landscape = player
+        .engine()
+        .landscape()
+        .expect("Tutorial02 keeps its landscape");
+    let mut earth_pixels_per_step = Vec::new();
+    for step in 0..16 {
+        let x = bridge_start.x - step - 4;
+        let y = bridge_start.y - step + 9;
+        let mut earth_pixels = 0;
+        for pixel_y in y..y + 3 {
+            for pixel_x in x..x + 4 {
+                earth_pixels +=
+                    usize::from(landscape.material_at(pixel_x, pixel_y) == Some(earth));
+            }
+        }
+        earth_pixels_per_step.push(earth_pixels);
+    }
+    assert!(
+        earth_pixels_per_step.contains(&12),
+        "at least one real 4x3 bridge rectangle in open air must be all Earth; \
+         per-step Earth pixels={earth_pixels_per_step:?}"
+    );
     Ok(())
 }
