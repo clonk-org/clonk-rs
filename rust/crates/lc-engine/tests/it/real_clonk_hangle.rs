@@ -693,7 +693,9 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     // Tutorial01 Script210/215 asks the player to carry GOLD into HUT2,
     // then fulfills SCRG and selects Tutorial02 (Script.c:171-182). The
     // normal Up control must take C4ObjectCom's entrance path before Jump
-    // (C4ObjectCom.cpp:335-348); GOLD remains nested in the carried CLNK.
+    // (C4ObjectCom.cpp:335-348). Once Enter's callbacks finish, HUT2
+    // synchronously auto-sells nested BaseAutoSell GOLD
+    // (C4Object.cpp:1625-1634,970-995).
     engine
         .apply_object_update(
             clonk,
@@ -738,12 +740,13 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         "the normal Up control must carry the CLNK into HUT2"
     );
     assert_eq!(
-        engine
-            .object_snapshot(gold)
-            .expect("GOLD carried into HUT2")
-            .container,
-        Some(clonk),
-        "Tutorial01 carries GOLD inside the entering CLNK rather than dropping it into HUT2"
+        engine.player(joined.number).expect("player exists").wealth(),
+        5,
+        "HUT2 sells GOLD in the successful Enter call"
+    );
+    assert!(
+        engine.object_snapshot(gold).is_none(),
+        "Sell2Home removes the nested GOLD synchronously"
     );
 
     // Script215 runs on the scenario host's Tick10 cadence after the Clonk

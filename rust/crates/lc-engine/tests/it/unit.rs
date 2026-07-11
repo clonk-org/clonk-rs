@@ -31727,6 +31727,76 @@ protected func FlyBaseStart()
         Ok((hut, flag))
     }
 
+    fn register_auto_sell_enter_definitions(engine: &mut Engine) -> Result<(), EngineError> {
+        let mut crew = Definition::from_script(
+            "CLNK",
+            "Clonk",
+            r#"#strict
+public func Board(pTarget)
+{
+  return(SetCommand(this(), "Enter", pTarget));
+}
+"#,
+        )?;
+        crew.set_c4_callback_convention(true);
+        crew.set_crew_member(true);
+        engine.register_definition(crew)?;
+
+        let mut gold = Definition::from_script("GOLD", "Gold", BASIC_OBJECT_SCRIPT)?;
+        gold.set_value(5);
+        gold.set_base_auto_sell(true);
+        gold.set_rebuyable(false);
+        engine.register_definition(gold)?;
+        Ok(())
+    }
+
+    fn enterable_base_definition(id: &str, script: &str) -> Result<Definition, EngineError> {
+        let mut base = Definition::from_script(id, id, script)?;
+        base.set_c4_callback_convention(true);
+        base.set_shape_rect(Some(DefinitionRect::new(-20, -20, 40, 40)));
+        base.set_entrance_rect(Some(DefinitionRect::new(-20, -20, 40, 40)));
+        Ok(base)
+    }
+
+    fn activate_test_base(
+        engine: &mut Engine,
+        definition_id: &str,
+        position: Vector2,
+        owner: i32,
+    ) -> Result<ObjectId, EngineError> {
+        let base = engine.spawn_object(
+            SpawnConfig::new(definition_id)
+                .with_category(CATEGORY_STRUCTURE)
+                .with_position(position),
+        )?;
+        let base_index = engine
+            .find_object_index(base)
+            .ok_or(EngineError::UnknownObject(base))?;
+        engine.objects[base_index].state.base = owner;
+        engine.objects[base_index].state.entrance_status = true;
+        engine.refresh_object_ocf(base_index);
+        Ok(base)
+    }
+
+    fn queue_enter_command(
+        engine: &mut Engine,
+        crew: ObjectId,
+        target: ObjectId,
+    ) -> Result<(), EngineError> {
+        let crew_index = engine
+            .find_object_index(crew)
+            .ok_or(EngineError::UnknownObject(crew))?;
+        assert_eq!(
+            engine.call_object_function(
+                crew_index,
+                "Board",
+                vec![object_reference_value(target)],
+            )?,
+            Value::Bool(true)
+        );
+        Ok(())
+    }
+
     #[test]
     fn exec_base_flybase_start_call_sees_base_target() -> Result<(), EngineError> {
         // ExecBase passes the base as FlyBase's action target
@@ -31975,6 +32045,162 @@ protected func Sale(int player)
             "Sale(player) runs after wealth and stock update"
         );
         assert!(engine.object_snapshot(sold).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn command_enter_auto_sells_base_contents_synchronously_like_cpp() -> Result<(), EngineError> {
+        // C4Object::Enter invokes Contained->AutoSellContents immediately
+        // after Collection2 and Entrance; it does not wait for ExecBase's
+        // Tick35 pass (src/C4Object.cpp:1625-1634,970-995).
+        let mut engine = Engine::new();
+        engine.register_player(PlayerConfig::new(1, "Test"))?;
+        register_auto_sell_enter_definitions(&mut engine)?;
+        engine.register_definition(enterable_base_definition("BASE", "#strict\n")?)?;
+
+        let base = activate_test_base(&mut engine, "BASE", Vector2::new(100, 120), 1)?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_owner(1)
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_position(Vector2::new(100, 100)),
+        )?;
+        let gold = engine.spawn_object(SpawnConfig::new("GOLD").with_container(crew))?;
+        queue_enter_command(&mut engine, crew, base)?;
+
+        engine.tick()?;
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        assert_eq!(engine.objects[crew_index].state.container, Some(base));
+        assert_eq!(
+            engine.player(1).expect("player exists").wealth(),
+            5,
+            "the Enter frame must include the GOLD sale"
+        );
+        assert!(
+            engine.object_snapshot(gold).is_none(),
+            "the synchronously sold GOLD is removed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn enter_auto_sell_re_resolves_container_and_requires_original_target_live_like_cpp(
+    ) -> Result<(), EngineError> {
+        // Collection2 may move the entrant. Entrance and auto-sale use its
+        // current Contained, but both tails still require the original
+        // pTarget to remain live (src/C4Object.cpp:1625-1634).
+        fn run_case(remove_original: bool) -> Result<(Engine, ObjectId, ObjectId), EngineError> {
+            let mut engine = Engine::new();
+            engine.register_player(PlayerConfig::new(1, "Test"))?;
+            register_auto_sell_enter_definitions(&mut engine)?;
+            engine.register_definition(enterable_base_definition("DEST", "#strict\n")?)?;
+            engine.register_definition(enterable_base_definition(
+                "TARG",
+                r#"#strict
+local destination, removeOriginal;
+protected func Collection2(pObject)
+{
+  Enter(destination, pObject);
+  if (removeOriginal) RemoveObject();
+  return(1);
+}
+"#,
+            )?)?;
+
+            let destination =
+                activate_test_base(&mut engine, "DEST", Vector2::new(300, 120), 1)?;
+            let target = engine.spawn_object(
+                SpawnConfig::new("TARG")
+                    .with_category(CATEGORY_STRUCTURE)
+                    .with_position(Vector2::new(100, 120))
+                    .with_local_vars(HashMap::from([
+                        ("destination".to_string(), object_reference_value(destination)),
+                        (
+                            "removeOriginal".to_string(),
+                            Value::Int(i32::from(remove_original)),
+                        ),
+                    ])),
+            )?;
+            let target_index = engine
+                .find_object_index(target)
+                .expect("original target exists");
+            engine.objects[target_index].state.entrance_status = true;
+            engine.refresh_object_ocf(target_index);
+
+            let crew = engine.spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_position(Vector2::new(100, 100)),
+            )?;
+            let gold = engine.spawn_object(SpawnConfig::new("GOLD").with_container(crew))?;
+            queue_enter_command(&mut engine, crew, target)?;
+            engine.tick()?;
+
+            let crew_index = engine.find_object_index(crew).expect("crew exists");
+            assert_eq!(
+                engine.objects[crew_index].state.container,
+                Some(destination),
+                "Collection2 redirected the entrant before the callback tail"
+            );
+            Ok((engine, gold, target))
+        }
+
+        let (live_target, live_gold, _target) = run_case(false)?;
+        assert_eq!(
+            live_target.player(1).expect("player exists").wealth(),
+            5,
+            "auto-sale uses the live post-Collection2 container"
+        );
+        assert!(live_target.object_snapshot(live_gold).is_none());
+
+        let (removed_target, retained_gold, target) = run_case(true)?;
+        assert!(
+            removed_target.object_snapshot(target).is_none(),
+            "Collection2 removed the original target"
+        );
+        assert_eq!(
+            removed_target.player(1).expect("player exists").wealth(),
+            0,
+            "a removed original pTarget aborts the post-callback auto-sale"
+        );
+        assert!(
+            removed_target.object_snapshot(retained_gold).is_some(),
+            "the redirected GOLD remains unsold when pTarget died"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn command_enter_skips_auto_sell_when_base_functionality_is_disabled_like_cpp(
+    ) -> Result<(), EngineError> {
+        // C4Object::Enter gates its synchronous AutoSellContents call on
+        // BASEFUNC_AutoSellContents (src/C4Object.cpp:1631-1634).
+        let mut engine = Engine::new();
+        engine.set_base_auto_sell_enabled(false);
+        engine.register_player(PlayerConfig::new(1, "Test"))?;
+        register_auto_sell_enter_definitions(&mut engine)?;
+        engine.register_definition(enterable_base_definition("BASE", "#strict\n")?)?;
+
+        let base = activate_test_base(&mut engine, "BASE", Vector2::new(100, 120), 1)?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_owner(1)
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_position(Vector2::new(100, 100)),
+        )?;
+        let gold = engine.spawn_object(SpawnConfig::new("GOLD").with_container(crew))?;
+        queue_enter_command(&mut engine, crew, base)?;
+
+        engine.tick()?;
+
+        assert_eq!(engine.player(1).expect("player exists").wealth(), 0);
+        let gold_index = engine.find_object_index(gold).expect("GOLD remains");
+        assert_eq!(engine.objects[gold_index].state.container, Some(crew));
         Ok(())
     }
 

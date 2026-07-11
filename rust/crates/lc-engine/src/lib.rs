@@ -28799,6 +28799,30 @@ impl Engine {
 
         self.apply_container_change(object_id, None, Some(target_id), false)?;
         self.run_object_enter_callbacks(object_id, target_id)?;
+
+        // Collection2 and Entrance may both move the entering object. C++
+        // re-reads Contained after the callbacks, still requires the original
+        // pTarget to be live, and only then performs the synchronous base
+        // auto-sale (C4Object.cpp:1625-1634).
+        let target_live = self.find_object_index(target_id).is_some_and(|index| {
+            !self.objects[index].destroyed && self.objects[index].state.status.is_active()
+        });
+        if self.base_auto_sell_enabled && target_live {
+            let active_container = self
+                .find_object_index(object_id)
+                .and_then(|index| self.objects[index].state.container)
+                .and_then(|container_id| self.find_object_index(container_id))
+                .filter(|&index| {
+                    !self.objects[index].destroyed
+                        && self.objects[index].state.status.is_active()
+                })
+                .map(|index| (index, self.objects[index].state.base));
+            if let Some((container_index, base_owner)) = active_container {
+                if self.players.contains_key(&base_owner) {
+                    self.auto_sell_base_contents(container_index, base_owner)?;
+                }
+            }
+        }
         Ok(true)
     }
 
