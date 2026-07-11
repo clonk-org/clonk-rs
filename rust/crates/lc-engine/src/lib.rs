@@ -22646,7 +22646,7 @@ impl Engine {
                 if is_structure {
                     return Ok(true);
                 }
-                let _ = self.object_action_stand(idx, definition_id)?;
+                let _ = self.object_com_stop_action(idx, definition_id)?;
                 return Ok(false);
             }
         };
@@ -22654,23 +22654,21 @@ impl Engine {
         let target_idx = match self.find_object_index(target_id) {
             Some(index) if index != idx => index,
             _ => {
-                let _ = self.object_action_stand(idx, definition_id)?;
+                let _ = self.object_com_stop_action(idx, definition_id)?;
                 return Ok(false);
             }
         };
 
         if self.objects[target_idx].destroyed || !self.objects[target_idx].state.status.is_active()
         {
-            let _ = self.object_action_stand(idx, definition_id)?;
+            let _ = self.object_com_stop_action(idx, definition_id)?;
             return Ok(false);
         }
 
         if self.objects[target_idx].state.construction >= FULL_CON {
-            // Target::Build returns false once full; DFA_BUILD first loses
-            // only Action.Target and returns. The following no-target frame
-            // calls ObjectComStop -> ObjectActionStand (C4Object.cpp:
-            // 5010-5038), rather than resetting to ActIdle immediately.
-            self.objects[idx].state.action.target = None;
+            // Target::Build returns false once full; DFA_BUILD calls
+            // ObjectComStop in that same frame (C4Object.cpp:5033-5042).
+            let _ = self.object_com_stop_action(idx, definition_id)?;
             return Ok(false);
         }
 
@@ -22730,7 +22728,7 @@ impl Engine {
             // Target::Build returned false because the next construction
             // fraction has no material: DFA_BUILD calls ObjectComStop before
             // returning (C4Object.cpp:5033-5050).
-            let _ = self.object_action_stand(idx, definition_id)?;
+            let _ = self.object_com_stop_action(idx, definition_id)?;
             return Ok(false);
         }
 

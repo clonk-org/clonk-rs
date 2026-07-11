@@ -1,5 +1,5 @@
 use lc_engine::{
-    ActionSpec, ActionState, Definition, Engine, SpawnConfig, Vector2, CATEGORY_STRUCTURE, FULL_CON,
+    ActionSpec, ActionState, Definition, Engine, SpawnConfig, Vector2, CATEGORY_OBJECT, FULL_CON,
 };
 use std::collections::HashMap;
 
@@ -19,7 +19,10 @@ fn builder_definition() -> Definition {
             .with_step(1),
     );
     definition.configure_actions(Some("Idle".to_string()), actions);
-    definition.set_category(CATEGORY_STRUCTURE);
+    // A crew/object builder stops when Target::Build reports FullCon. C++
+    // deliberately exempts structure builders with no target from stopping
+    // (src/C4Object.cpp:5010-5016), so this fixture must not be a structure.
+    definition.set_category(CATEGORY_OBJECT);
     definition
 }
 
@@ -79,7 +82,22 @@ fn build_procedure_advances_construction_and_stops_when_complete(
     let builder_snapshot = last_snapshot
         .object(builder_id)
         .expect("builder exists after construction");
-    assert_eq!(builder_snapshot.action.name, "Idle");
+    assert_eq!(
+        builder_snapshot.action.name, "Build",
+        "the FullCon crossing frame still sees Target::Build succeed"
+    );
+
+    // The next Build frame sees Target::Build fail at FullCon and executes
+    // ObjectComStop immediately (src/C4Object.cpp:5033-5042).
+    let stopped = engine.tick()?;
+    assert_eq!(
+        stopped
+            .object(builder_id)
+            .expect("builder exists after stopping")
+            .action
+            .name,
+        "Idle"
+    );
 
     Ok(())
 }

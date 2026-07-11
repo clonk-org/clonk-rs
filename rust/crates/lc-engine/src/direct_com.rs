@@ -2550,7 +2550,7 @@ impl Engine {
     /// `ObjectComStop` (C4ObjectCom.cpp:239-245): cease action, then stand.
     fn object_com_stop(&mut self, index: usize) -> Result<bool, EngineError> {
         let definition_id = self.objects[index].definition_id.clone();
-        self.object_action_stand(index, &definition_id)
+        self.object_com_stop_action(index, &definition_id)
     }
 
     /// `ObjectComUp` (C4ObjectCom.cpp:335-351): entrance first, then jump.
