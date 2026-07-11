@@ -8,11 +8,12 @@ through the C++-matching victory flow, then resume the Goldrush comparator.
 
 ## Gate
 
-Workspace nextest, strict clippy, snapshots, and parity are green. Scenario
-load/apply and activation are 93/93. The pinned Goldrush comparator first
-diverges at frame 3327 (object #1451 Decay/DoCon Y sync; RNG remains aligned).
-Tutorial03's real ready-base path reaches classic Context→Buy/Contents and buys
-the Lorry; scripted production/context rows remain open.
+The integration baseline is green: workspace nextest, strict clippy, snapshots,
+parity, and 93/93 scenario load/apply+activation. Current focused slices are
+green; rerun the full battery before handoff. Input-only virtual playthroughs
+complete Tutorials 01–04; Tutorial 05 is active and Tutorial 08 reaches its
+first real lorry catch. Goldrush first diverges at frame 3327 (object #1451
+Decay/DoCon Y sync; RNG remains aligned).
 
 ```sh
 cargo nextest run --workspace
