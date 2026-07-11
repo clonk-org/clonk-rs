@@ -3,7 +3,7 @@ mod support;
 
 use std::error::Error;
 
-use lc_engine::{Engine, ObjectId, COM_DOWN, COM_UP};
+use lc_engine::{Engine, ObjectId, COM_DOWN, COM_LEFT, COM_UP};
 use support::real_scenario::{join_local_player, load_tutorial};
 use support::virtual_player::VirtualPlayer;
 
@@ -31,8 +31,18 @@ fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
         .any(|message| message.lines.iter().any(|line| line.contains(needle)))
 }
 
+fn clonk_carries_loam(engine: &Engine, clonk: ObjectId) -> bool {
+    engine.object_snapshot(clonk).is_some_and(|clonk| {
+        clonk.contents.iter().any(|item| {
+            engine
+                .object_snapshot(*item)
+                .is_some_and(|item| item.definition_id == "LOAM")
+        })
+    })
+}
+
 #[test]
-fn tutorial02_virtual_player_boards_and_flies_the_balloon_to_the_far_island(
+fn tutorial02_virtual_player_flies_to_the_far_island_and_collects_loam(
 ) -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (mut engine, owner) = load_tutorial02();
@@ -175,5 +185,53 @@ fn tutorial02_virtual_player_boards_and_flies_the_balloon_to_the_far_island(
         |engine| tutorial_message_contains(engine, "Let go of the balloon"),
     )?;
 
+    // The tutorial's next natural input is the repeated Down taught by
+    // Script3. BALN has no ControlDownDouble override, so DFA_PUSH handles it
+    // as ObjectComUnGrab (src/C4Object.cpp:3520-3567).
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("Clonk lets go of the balloon", 30, |engine| {
+        engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.action.name != "Push")
+    })?;
+
+    // Script3's wait(20) resumes the scenario script after 200 frames; Script4
+    // observes the completed ungrab. The C++ counter then visits the missing
+    // Script6..Script19 names at its 10-frame cadence before Script20 introduces
+    // the collectibles placed by CreateMaterial (Tutorial02/Script.c:27-34,
+    // 65-105; C4ScriptHost.cpp:222-231).
+    let pickup_prompt = player.wait_until(
+        "Tutorial02 asks the player to pick up a loam chunk",
+        450,
+        |engine| tutorial_message_contains(engine, "Pick up one of the loam chunks"),
+    );
+    if let Err(error) = pickup_prompt {
+        panic!(
+            "{error}; clonk={:?}; balloon={:?}; global_effects={:?}; hud={:?}",
+            player.engine().object_snapshot(clonk),
+            player.engine().object_snapshot(balloon),
+            player.engine().global_effects(),
+            player.engine().snapshot().hud
+        );
+    }
+
+    if !clonk_carries_loam(player.engine(), clonk) {
+        let collected = player.hold_until(
+            COM_LEFT,
+            "Clonk naturally collects Tutorial02 loam",
+            180,
+            |engine| clonk_carries_loam(engine, clonk),
+        );
+        if let Err(error) = collected {
+            panic!(
+                "{error}; clonk={:?}; loam={:?}; flag={:?}",
+                player.engine().object_snapshot(clonk),
+                object_with_definition(player.engine(), "LOAM")
+                    .and_then(|id| player.engine().object_snapshot(id)),
+                object_with_definition(player.engine(), "FLAG")
+                    .and_then(|id| player.engine().object_snapshot(id))
+            );
+        }
+    }
     Ok(())
 }
