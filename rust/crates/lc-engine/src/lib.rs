@@ -28862,6 +28862,32 @@ impl Engine {
                 }
                 let _ = self.spawn_object(config)?;
             }
+            CommandEvent::CreateLine {
+                definition_id,
+                owner,
+                from,
+                to,
+            } => {
+                if !self.definitions.contains_key(definition_id.as_str()) {
+                    return Err(EngineError::UnknownDefinition(definition_id));
+                }
+                let Some(from_index) = self.find_object_index(from) else {
+                    return Ok(());
+                };
+                if self.find_object_index(to).is_none() {
+                    return Ok(());
+                }
+                let position = self.objects[from_index].state.position;
+                let mut action = ActionState::new("Connect");
+                action.target = Some(from);
+                action.target2 = Some(to);
+                let _ = self.spawn_object(
+                    SpawnConfig::new(definition_id)
+                        .with_position(position)
+                        .with_owner(owner)
+                        .with_action(action),
+                )?;
+            }
             CommandEvent::CallObjectFunction {
                 object_id,
                 function,

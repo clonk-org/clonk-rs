@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Maximum number of commands that may be queued for an object.
 pub const MAX_COMMAND_STACK: usize = 35;
 const LINEKIT_DEFINITION: &str = "LNKT";
+const POWERLINE_DEFINITION: &str = "PWRL";
 const CONKIT_DEFINITION: &str = "CNKT";
 const ACQUIRE_REQUEST_INTERVAL: u32 = 50;
 const COMMAND_FLAG_ENTER_PUSH_TARGET: i32 = 0b10;
@@ -5617,6 +5618,74 @@ mod tests {
     }
 
     #[test]
+    fn energy_starts_a_power_line_at_the_nearby_supply() {
+        // C4Command::Energy keeps running after it has a line kit: at the
+        // supply it creates PWRL from the supply to that kit
+        // (C4Command.cpp:2259-2289).
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let supply_id = ObjectId::new(30);
+        let linekit_id = ObjectId::new(40);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 1;
+        builder.contents.push(linekit_id);
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(100, 0);
+        target.line_connect = LINE_CONNECT_POWER_INPUT;
+
+        let mut supply = snapshot_with_id(supply_id.as_u64());
+        supply.definition_id = "POWR".into();
+        supply.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        supply.ocf |= ocf::POWER_SUPPLY;
+
+        let mut linekit = snapshot_with_id(linekit_id.as_u64());
+        linekit.definition_id = LINEKIT_DEFINITION.into();
+        linekit.container = Some(builder_id);
+
+        let mut objects = HashMap::new();
+        objects.insert(target_id, target);
+        objects.insert(supply_id, supply);
+        objects.insert(linekit_id, linekit);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: true,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
+        )
+        .expect("energy state");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            CommandEvent::CreateLine {
+                definition_id,
+                owner: 1,
+                from,
+                to,
+            } if definition_id == "PWRL"
+                && *from == supply_id
+                && *to == linekit_id
+        )));
+    }
+
+    #[test]
     fn acquire_completes_when_inventory_contains_item() {
         let builder_id = ObjectId::new(1);
         let item_id = ObjectId::new(2);
@@ -8084,6 +8153,15 @@ pub enum CommandEvent {
         container: Option<ObjectId>,
         #[serde(default)]
         construction: Option<i32>,
+    },
+    /// Atomically create a CONNECT line with both live endpoints. A plain
+    /// SpawnObject would execute once with null targets and break before a
+    /// later update could attach it (CreateLine, C4Command.cpp:2244,2285-2289).
+    CreateLine {
+        definition_id: DefinitionId,
+        owner: i32,
+        from: ObjectId,
+        to: ObjectId,
     },
     CallObjectFunction {
         object_id: ObjectId,
@@ -13555,6 +13633,15 @@ impl HomeState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct EnergyState {
     target: ObjectId,
+    #[serde(default)]
+    source: Option<ObjectId>,
+    #[serde(default)]
+    linekit: Option<ObjectId>,
+    #[serde(default)]
+    line: Option<ObjectId>,
+    #[serde(default)]
+    line_spawn_requested: bool,
+    #[serde(default)]
     acquire_requested: bool,
 }
 
@@ -13563,16 +13650,68 @@ impl EnergyState {
         let target = request.target.ok_or(CommandError::Unsupported)?;
         Ok(Self {
             target,
+            source: request.target2,
+            linekit: None,
+            line: None,
+            line_spawn_requested: false,
             acquire_requested: false,
         })
     }
 
-    fn builder_has_linekit(&self, ctx: &CommandRuntimeContext<'_>) -> bool {
+    fn builder_linekit(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
         ctx.object
             .contents
             .iter()
             .filter_map(|id| ctx.resolve(*id))
-            .any(|snapshot| snapshot.definition_id == LINEKIT_DEFINITION)
+            .find(|snapshot| snapshot.definition_id == LINEKIT_DEFINITION)
+            .map(|snapshot| snapshot.id)
+    }
+
+    fn resolve_source(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+        if let Some(source) = self.source {
+            return ctx.resolve(source).and_then(|snapshot| {
+                (snapshot.is_status_active()
+                    && snapshot.line_connect & crate::LINE_CONNECT_POWER_OUTPUT != 0)
+                    .then_some(source)
+            });
+        }
+        let target = ctx.resolve(self.target)?;
+        let source = ctx
+            .objects
+            .values()
+            .filter(|snapshot| {
+                snapshot.id != self.target
+                    && snapshot.is_status_active()
+                    && snapshot.ocf & ocf::POWER_SUPPLY != 0
+                    && snapshot.line_connect & crate::LINE_CONNECT_POWER_OUTPUT != 0
+            })
+            .min_by_key(|snapshot| {
+                let dx = i64::from(snapshot.position.x - target.position.x);
+                let dy = i64::from(snapshot.position.y - target.position.y);
+                (dx * dx + dy * dy, snapshot.id)
+            })?
+            .id;
+        self.source = Some(source);
+        Some(source)
+    }
+
+    fn spawned_line(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        source: &CommandObjectSnapshot,
+    ) -> Option<ObjectId> {
+        ctx.objects
+            .values()
+            .filter(|snapshot| {
+                snapshot.definition_id == POWERLINE_DEFINITION
+                    && snapshot.is_status_active()
+                    && snapshot.owner == ctx.object.owner
+                    && snapshot.action_target == Some(source.id)
+            })
+            // The just-created line follows older lines from the same
+            // supply in C4ObjectList order; ObjectId is monotonic here.
+            .max_by_key(|snapshot| snapshot.id)
+            .map(|snapshot| snapshot.id)
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -13588,34 +13727,110 @@ impl EnergyState {
             return CommandStepResult::failed(update_to_stop());
         };
 
-        if !target_snapshot.is_active() {
+        if !target_snapshot.is_status_active() {
             return CommandStepResult::failed(update_to_stop());
         }
 
-        if !ctx.structures_need_energy
-            || (target_snapshot.line_connect & LINE_CONNECT_POWER_INPUT) == 0
-        {
+        if !ctx.structures_need_energy {
             return CommandStepResult::completed(None);
         }
-
-        if self.builder_has_linekit(ctx) {
-            return CommandStepResult::completed(None);
+        if (target_snapshot.line_connect & LINE_CONNECT_POWER_INPUT) == 0 {
+            return CommandStepResult::failed(update_to_stop());
         }
 
-        if self.acquire_requested {
-            return CommandStepResult::running(update_to_stop());
+        let Some(source_id) = self.resolve_source(ctx) else {
+            return CommandStepResult::failed(update_to_stop());
+        };
+        let Some(source_snapshot) = ctx.resolve(source_id) else {
+            return CommandStepResult::failed(update_to_stop());
+        };
+        let dx = i64::from(ctx.position.x - source_snapshot.position.x);
+        let dy = i64::from(ctx.position.y - source_snapshot.position.y);
+        if dx * dx + dy * dy > 650_i64.pow(2) {
+            return CommandStepResult::failed(update_to_stop());
         }
 
-        let mut operations = Vec::new();
-        if let Some(c4id) = definition_id_to_c4id(LINEKIT_DEFINITION) {
-            let request = CommandRequest::new(CommandId::Acquire)
-                .with_data(CommandData::Integer(c4id))
-                .with_update_interval(ACQUIRE_REQUEST_INTERVAL);
-            operations.push(CommandOperation::PushFront(request));
-            self.acquire_requested = true;
+        let linekit_id = self
+            .linekit
+            .filter(|id| ctx.object.contents.contains(id))
+            .or_else(|| self.builder_linekit(ctx));
+        let Some(linekit_id) = linekit_id else {
+            if self.acquire_requested {
+                return CommandStepResult::running(update_to_stop());
+            }
+
+            let mut operations = Vec::new();
+            if let Some(c4id) = definition_id_to_c4id(LINEKIT_DEFINITION) {
+                let request = CommandRequest::new(CommandId::Acquire)
+                    .with_data(CommandData::Integer(c4id))
+                    .with_update_interval(ACQUIRE_REQUEST_INTERVAL);
+                operations.push(CommandOperation::PushFront(request));
+                self.acquire_requested = true;
+            }
+            return CommandStepResult::running(update_to_stop()).with_operations(operations);
+        };
+        self.linekit = Some(linekit_id);
+        self.acquire_requested = false;
+
+        if self.line.is_none() {
+            if self.line_spawn_requested {
+                let Some(line_id) = self.spawned_line(ctx, source_snapshot) else {
+                    return CommandStepResult::running(update_to_stop());
+                };
+                self.line = Some(line_id);
+            } else {
+                if !source_snapshot.at_point(ctx.position.x, ctx.position.y) {
+                    let request = CommandRequest::new(CommandId::MoveTo)
+                        .with_target(Some(source_id))
+                        .with_update_interval(50)
+                        .with_mode(CommandMode::Sub);
+                    return CommandStepResult::running(update_to_stop())
+                        .with_operations(vec![CommandOperation::PushFront(request)]);
+                }
+
+                self.line_spawn_requested = true;
+                return CommandStepResult::running(update_to_stop()).with_events(vec![
+                    CommandEvent::CreateLine {
+                        definition_id: POWERLINE_DEFINITION.into(),
+                        owner: ctx.object.owner,
+                        from: source_id,
+                        to: linekit_id,
+                    },
+                ]);
+            }
         }
 
-        CommandStepResult::running(update_to_stop()).with_operations(operations)
+        if !target_snapshot.at_point(ctx.position.x, ctx.position.y) {
+            let request = CommandRequest::new(CommandId::MoveTo)
+                .with_target(Some(self.target))
+                .with_update_interval(50)
+                .with_mode(CommandMode::Sub);
+            return CommandStepResult::running(update_to_stop())
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+
+        let line_id = self.line.expect("line is present");
+        let line_update = ObjectUpdate::new().with_action_update(
+            ActionUpdate::default()
+                .with_name("Connect")
+                .with_force(true)
+                .with_target(Some(source_id))
+                .with_target2(Some(self.target)),
+        );
+        let linekit_update = ObjectUpdate::new()
+            .clear_container()
+            .with_status(ObjectStatus::Deleted)
+            .with_alive(false);
+        CommandStepResult::completed(update_to_stop()).with_events(vec![
+            CommandEvent::ApplyObjectUpdate {
+                object_id: line_id,
+                update: line_update,
+            },
+            CommandEvent::ApplyObjectUpdate {
+                object_id: linekit_id,
+                update: linekit_update,
+            },
+        ])
     }
 }
 
