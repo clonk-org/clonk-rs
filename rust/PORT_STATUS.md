@@ -9,8 +9,9 @@ Tutorials 01–10 complete their real victory flows through player controls and
 live menus. Tutorial 02 separately pins the Clonk to BALN's moving platform,
 including a real-scenario app replay through physical X/X/S keys. App tests
 also replay Tutorial 03 through physical C/S/X/A keys into its localized,
-mouse-disabled context and C++-style Buy menu. S/Z/X/C mapping, unbound arrows,
-jumping, and classic/AutoStop release behavior are pinned.
+mouse-disabled context and C++-style Buy menu, and Tutorial 04 through physical
+Z/S/A/D keys from HUT2 to CNKT's component menu and an ELEV site. S/Z/X/C
+mapping, unbound arrows, jumping, and classic/AutoStop release behavior are pinned.
 
 Next: close tutorial presentation/UI parity, then resume Goldrush at its pinned
 first mismatch: frame 3327, object #1451, Decay/DoCon Y synchronization; RNG is
@@ -21,7 +22,7 @@ still aligned.
 ```sh
 cargo nextest run -p lc-engine -E 'test(/^(real_tutorial(0[1-9]|10)_(virtual_play|route)|real_tutorial02_balloon_platform)::/)'
 cargo nextest run -p lc-engine -E 'test(/^virtual_player_harness::/)'
-cargo nextest run -p lc-app -E 'test(/app_virtual_keyboard_(keeps_tutorial02|enters_tutorial03)/)'
+cargo nextest run -p lc-app -E 'test(/app_virtual_keyboard_(keeps_tutorial02|enters_tutorial03|builds_tutorial04)/)'
 cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask engine-snapshots verify
