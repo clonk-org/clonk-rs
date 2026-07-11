@@ -9491,7 +9491,11 @@ impl Definition {
         args.push(
             carrier
                 .map(|(state, object_id)| {
-                    build_state_value(&self.id, object_id, state, &self.action_library)
+                    if self.c4_callback_args {
+                        compat::object_reference_value(object_id)
+                    } else {
+                        build_state_value(&self.id, object_id, state, &self.action_library)
+                    }
                 })
                 .unwrap_or(Value::Nil),
         );

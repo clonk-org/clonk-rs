@@ -2,14 +2,14 @@
 
 use std::error::Error;
 
-use lc_engine::{
-    Direction, Engine, JoinPlayerConfig, ObjectId, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG,
-    COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
-};
 use crate::support::real_scenario::load_tutorial;
 use crate::support::virtual_player::VirtualPlayer;
+use lc_engine::{
+    ActionUpdate, Direction, EffectVarValue, Engine, JoinPlayerConfig, ObjectId, ObjectUpdate,
+    COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
+};
 
-fn load_tutorial05() -> (Engine, i32) {
+fn load_tutorial05_with_controls(control_style: bool, auto_context_menu: bool) -> (Engine, i32) {
     let mut engine = load_tutorial(5, 0);
     let owner = engine
         .join_player(JoinPlayerConfig {
@@ -22,13 +22,17 @@ fn load_tutorial05() -> (Engine, i32) {
             pref_color: 0,
             pref_position: 0,
             crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
+            control_style,
+            auto_context_menu,
             startup_player_count: 1,
         })
         .expect("local Tutorial05 virtual player joins")
         .number;
     (engine, owner)
+}
+
+fn load_tutorial05() -> (Engine, i32) {
+    load_tutorial05_with_controls(false, false)
 }
 
 fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
@@ -71,6 +75,172 @@ fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
         .messages
         .iter()
         .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+}
+
+#[test]
+fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Result<(), Box<dyn Error>>
+{
+    // C4Object::CallControl notifies the pushed CATA's ControlUpdate after
+    // every Jump'n'Run input edge. CATA forwards the held ComDir to the real
+    // JumpAndRun.c AimUpdate helper, whose IntJnRAim timer advances one Ready
+    // phase every eight frames (C4Object.cpp:3313-3323;
+    // Catapult.c4d/Script.c:121-163; planet/System.c4g/JumpAndRun.c:53-119).
+    let (mut engine, owner) = load_tutorial05_with_controls(true, true);
+    let constructor = engine
+        .crew_cursor(owner)
+        .expect("Tutorial05 starts on its constructor CLNK");
+    engine
+        .player_in_com(owner, COM_CURSOR_RIGHT, 0)
+        .expect("real CursorRight selects the valley CLNK");
+    let valley = engine
+        .crew_cursor(owner)
+        .expect("Tutorial05 has a valley CLNK");
+    assert_ne!(valley, constructor);
+
+    let valley_cata = object_with_definition_near_x(&engine, "CATA", 240)
+        .expect("Tutorial05 creates its valley CATA");
+    let wood = object_with_definition_near_x(&engine, "WOOD", 280)
+        .expect("Tutorial05 creates its valley WOOD");
+    // Grabbing/loading are covered by the Classic route below and are not the
+    // subject of this regression. Preserve the real CLNK/WOOD/CATA objects
+    // and scripts while arranging the two prerequisites for the held-control
+    // seam and eventual ControlThrow -> Fire -> Projectile assertion.
+    engine.apply_object_update(wood, ObjectUpdate::new().with_container(valley_cata))?;
+    engine.apply_object_update(
+        valley,
+        ObjectUpdate::new().with_action_update(
+            ActionUpdate::default()
+                .with_name("Push")
+                .with_target(Some(valley_cata)),
+        ),
+    )?;
+
+    let mut player = VirtualPlayer::new(&mut engine, owner);
+    player.assert_milestone("the selected valley CLNK pushes the real CATA", |engine| {
+        engine.object_snapshot(valley).is_some_and(|object| {
+            object.action.name == "Push" && object.action.target == Some(valley_cata)
+        })
+    })?;
+
+    player.press(COM_DOWN)?;
+    let pressed = player
+        .engine()
+        .object_snapshot(valley_cata)
+        .expect("valley CATA survives held Down");
+    let pressed_effect = pressed
+        .effects
+        .iter()
+        .find(|effect| effect.name == "IntJnRAim")
+        .unwrap_or_else(|| {
+            panic!(
+                "held Jump'n'Run Down must synchronously create IntJnRAim; \
+                 CATA action={:?}, CLNK action={:?}, CATA effects={:?}",
+                pressed.action,
+                player
+                    .engine()
+                    .object_snapshot(valley)
+                    .map(|object| object.action),
+                pressed.effects
+            )
+        });
+    assert_eq!(pressed_effect.priority, 1, "AimUpdate effect priority");
+    assert_eq!(pressed_effect.interval, 8, "CATA aim cadence");
+    assert_eq!(pressed_effect.timer, 0, "new aim timer starts at zero");
+    assert!(
+        pressed_effect.start_dispatched,
+        "priority-one FxIntJnRAimStart must run synchronously"
+    );
+    assert_eq!(
+        pressed_effect.vars.first(),
+        Some(&EffectVarValue::String("ControlConf".to_owned())),
+        "FxIntJnRAimStart stores CATA's configuration callback; effect={pressed_effect:?}"
+    );
+    assert_eq!(pressed_effect.vars.get(1), Some(&EffectVarValue::Int(1)));
+    assert_eq!(
+        pressed_effect.vars.get(2),
+        Some(&EffectVarValue::Object(valley.as_u64())),
+        "FxIntJnRAimStart stores the pushing CLNK"
+    );
+
+    for elapsed in 1_i32..=52 {
+        player.ticks(1)?;
+        let cata = player
+            .engine()
+            .object_snapshot(valley_cata)
+            .expect("valley CATA survives its aim timer");
+        let effect = cata
+            .effects
+            .iter()
+            .find(|effect| effect.name == "IntJnRAim")
+            .unwrap_or_else(|| {
+                panic!(
+                    "IntJnRAim disappeared while Down remained held at tick {elapsed}; \
+                     CATA action={:?}, CLNK action={:?}, effects={:?}",
+                    cata.action,
+                    player
+                        .engine()
+                        .object_snapshot(valley)
+                        .map(|object| object.action),
+                    cata.effects
+                )
+            });
+        // ExecuteControl synthesizes DownSingle after C4DoubleClick. Its
+        // CallControl still invokes ControlUpdate, so AimCancel recreates
+        // IntJnRAim at elapsed 11 with timer zero while preserving phase 1
+        // (C4Player.cpp:1215-1229; C4Object.cpp:3327-3337).
+        let expected_timer = if elapsed <= 10 { elapsed } else { elapsed - 11 };
+        let expected_phase = if elapsed < 8 {
+            0
+        } else if elapsed <= 10 {
+            1
+        } else {
+            1 + ((elapsed - 11) / 8).min(5)
+        };
+        assert_eq!(
+            effect.timer, expected_timer,
+            "IntJnRAim timer mismatch at held-Down tick {elapsed}; CATA={cata:?}"
+        );
+        assert_eq!(
+            cata.action.phase,
+            expected_phase,
+            "CATA must advance exactly at 8-frame boundaries while Down is held; \
+             elapsed={elapsed}, effect={effect:?}, CLNK={:?}",
+            player.engine().object_snapshot(valley)
+        );
+    }
+
+    player.release(COM_DOWN)?;
+    let released = player
+        .engine()
+        .object_snapshot(valley_cata)
+        .expect("valley CATA survives Down release");
+    assert!(
+        released
+            .effects
+            .iter()
+            .all(|effect| effect.name != "IntJnRAim"),
+        "released ControlUpdate/COMD_Stop must synchronously AimCancel; CATA={released:?}"
+    );
+    assert_eq!(released.action.phase, 6, "release preserves full tension");
+
+    player.tap(COM_THROW)?;
+    let firing = player
+        .engine()
+        .object_snapshot(valley_cata)
+        .expect("valley CATA survives firing");
+    assert_eq!(firing.action.name, "Fire", "ControlThrow starts Fire");
+    assert_eq!(firing.action.phase, 1, "Fire starts at 7 - iPhase");
+    player.wait_until(
+        "real CATA Projectile ejects its WOOD after the Fire animation",
+        20,
+        |engine| {
+            engine
+                .object_snapshot(wood)
+                .is_some_and(|object| object.container.is_none())
+        },
+    )?;
+
+    Ok(())
 }
 
 #[test]

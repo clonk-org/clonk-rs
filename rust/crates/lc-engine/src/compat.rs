@@ -9313,7 +9313,7 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     // here, resolved DoCall-style (the global check chain is a
     // documented residual).
     let global_scope = matches!(scope, EffectScope::Global);
-    let synchronous_start = global_scope || (priority == 1 && command_target.is_some());
+    let synchronous_start = global_scope || priority == 1;
     // The engine-internal fire start (FnFxFireStart, AddFunc
     // C4Script.cpp:6994) runs synchronously inside the C4Effect ctor
     // (C4Effect.cpp:118-133) — unless a script global overloads
@@ -9392,22 +9392,12 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         // effects resolve like C4Effect::DoCall — command target script,
         // command-id def script, else the engine-global function table
         // (C4Effect.cpp:439-456 via AssignCallbackFunctions :42-57).
-        let start_result = if global_scope {
-            dispatch_effect_fx_callback(
-                command_target,
-                command_id_for_start.as_deref(),
-                &callback,
-                &call_args,
-            )
-        } else {
-            command_target.and_then(|target| {
-                call_world_object_script_function(
-                    ObjectId::new(target as u64),
-                    &callback,
-                    &call_args,
-                )
-            })
-        };
+        let start_result = dispatch_effect_fx_callback(
+            command_target,
+            command_id_for_start.as_deref(),
+            &callback,
+            &call_args,
+        );
         if let Some(result) = start_result {
             // fPassErrors=true (C4Script.cpp:5451): errors abort the
             // calling script like C++.
