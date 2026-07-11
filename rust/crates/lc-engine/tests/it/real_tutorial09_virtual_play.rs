@@ -6,7 +6,7 @@ use lc_engine::{
     Engine, JoinPlayerConfig, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
 };
 use crate::support::real_scenario::load_tutorial;
-use crate::support::virtual_player::VirtualPlayer;
+use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
 
 fn load_tutorial09() -> (Engine, i32) {
     let mut engine = load_tutorial(9, 0);
@@ -239,6 +239,37 @@ fn resurface_near_western_shore(
             object.action.name != "Swim" || (object.position.x <= 195 && object.position.y <= 190)
         })
     })?;
+    Ok(())
+}
+
+fn leave_igloo_for_western_ocean(
+    player: &mut VirtualPlayer<'_>,
+    clonk: ObjectId,
+) -> Result<(), Box<dyn Error>> {
+    let reaches_ocean = |engine: &Engine| {
+        engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.action.name == "Swim")
+    };
+    // Dynamic snow/PXS can eventually block IGLO's exact C++ exit midpoint
+    // and more of the western slope. A player can clear each obstruction
+    // with the ordinary Dig control, then keep walking left into the ocean.
+    for attempt in 0..8 {
+        match player.hold_until(
+            COM_LEFT,
+            format!("the Clonk returns to the western ocean (attempt {attempt})"),
+            80,
+            reaches_ocean,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(VirtualPlayerError::Timeout { .. }) => {
+                player.tap(COM_DIG)?;
+                player.wait_out_double_click()?;
+            }
+            Err(error) => return Err(Box::new(error)),
+        }
+    }
+    player.assert_milestone("the Clonk clears the western slope into the ocean", reaches_ocean)?;
     Ok(())
 }
 
@@ -478,16 +509,7 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         })?;
         // Leave through IGLO's still-open western entrance before its door
         // closes (FarWorlds Igloo DefCore Entrance=-28,-4,23,18).
-        player.hold_until(
-            COM_LEFT,
-            "the Clonk returns to the western ocean",
-            300,
-            |engine| {
-                engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.action.name == "Swim")
-            },
-        )?;
+        leave_igloo_for_western_ocean(&mut player, clonk)?;
         swim_until_fish_count(&mut player, clonk, 1, 400)?;
         swim_to_x(&mut player, clonk, 180)?;
         resurface_near_western_shore(&mut player, clonk)?;

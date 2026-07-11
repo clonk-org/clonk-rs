@@ -284,6 +284,9 @@ pub struct DefCore {
     /// when BASEFUNC_AutoSellContents is active. GOLD defaults to true.
     pub base_auto_sell: bool,
     pub mass: i32,
+    /// `MoveToRange` (C4Def.cpp:400): positive values override the command's
+    /// default five-pixel arrival range for non-crew objects.
+    pub move_to_range: i32,
     pub picture: Option<PictureRect>,
     pub color_by_owner: bool,
     /// Definition-default C4Object::BlitMode (DefCore `BlitMode`).
@@ -628,6 +631,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut rebuyable = false;
     let mut base_auto_sell: Option<bool> = None;
     let mut object_mass: i32 = 0;
+    let mut move_to_range: i32 = 0;
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
     let mut blit_mode: u32 = 0;
@@ -748,6 +752,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "mass" => {
                 object_mass = parse_i32(value).unwrap_or(0).max(0);
+            }
+            "movetorange" => {
+                move_to_range = parse_i32(value).unwrap_or(0);
             }
             "category" => {
                 category = parse_category(value)?;
@@ -1004,6 +1011,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         rebuyable,
         base_auto_sell,
         mass: object_mass,
+        move_to_range,
         picture,
         color_by_owner,
         blit_mode,
@@ -2321,6 +2329,7 @@ mod tests {
             Category=C4D_Living|C4D_Object
             CrewMember=1
             BlitMode=2
+            MoveToRange=17
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
         assert_eq!(parsed.id, "CLNK");
@@ -2328,12 +2337,18 @@ mod tests {
         assert_eq!(parsed.category, (1 << 3) | (1 << 4));
         assert!(parsed.crew_member);
         assert_eq!(parsed.blit_mode, 2);
+        assert_eq!(parsed.move_to_range, 17);
         assert_eq!(parsed.collection, None);
         assert_eq!(parsed.collection_limit, None);
         assert!(!parsed.collectible);
 
         let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("default parses");
         assert_eq!(defaulted.blit_mode, 0);
+        assert_eq!(defaulted.move_to_range, 0);
+
+        let signed = parse_def_core(b"[DefCore]\nid=SIGN\nMoveToRange=-3\n")
+            .expect("signed range parses");
+        assert_eq!(signed.move_to_range, -3);
     }
 
     #[test]

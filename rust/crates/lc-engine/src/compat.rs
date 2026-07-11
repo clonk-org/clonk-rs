@@ -102,9 +102,12 @@ pub(crate) struct HostWorldObject {
     #[allow(dead_code)]
     pub damage: i32,
     pub ocf: u32,
+    move_to_range: i32,
     pub position: Vector2,
+    fixed_position: FixedVec2,
     #[allow(dead_code)]
     pub velocity: Vector2,
+    fixed_velocity: FixedVec2,
     pub rotation: i32,
     pub vertices: Vec<ObjectVertex>,
     #[allow(dead_code)]
@@ -292,6 +295,21 @@ pub struct ObjectOrderCommand {
 }
 
 impl HostWorldObject {
+    pub(crate) fn with_move_to_range(mut self, move_to_range: i32) -> Self {
+        self.move_to_range = move_to_range;
+        self
+    }
+
+    pub(crate) fn with_fixed_motion(
+        mut self,
+        position: FixedVec2,
+        velocity: FixedVec2,
+    ) -> Self {
+        self.fixed_position = position;
+        self.fixed_velocity = velocity;
+        self
+    }
+
     pub(crate) fn with_direction(mut self, direction: i32) -> Self {
         self.direction = direction;
         self
@@ -385,8 +403,11 @@ impl HostWorldObject {
             construction: construction.clamp(0, FULL_CON),
             damage,
             ocf: ocf::NORMAL,
+            move_to_range: 0,
             position,
+            fixed_position: FixedVec2::from_ints(position.x, position.y),
             velocity,
+            fixed_velocity: FixedVec2::from_ints(velocity.x, velocity.y),
             rotation,
             vertices,
             action_data,
@@ -8189,6 +8210,8 @@ pub(crate) struct HostObjectContext<'a> {
     pub physical_changes: Vec<(String, i32)>,
     pub definition_physical: PhysicalInfo,
     pub walk_rotation: WalkRotationSeed,
+    /// The TRUE fix_x/fix_y at call time; None reconstructs whole pixels.
+    pub script_fixed_position: Option<FixedVec2>,
     /// The TRUE sub-pixel dirs at call time (C++ Fn(Get|Set)XDir read the
     /// live C4Fixed xdir/ydir, C4Script.cpp:697-732/:1160-1180); None
     /// falls back to the int-velocity reconstruction.
@@ -8322,12 +8345,18 @@ impl<'a> HostObjectContext<'a> {
             physical_changes: Vec::new(),
             definition_physical: PhysicalInfo::default(),
             walk_rotation: WalkRotationSeed::default(),
+            script_fixed_position: None,
             script_fixed_velocity: None,
         }
     }
 
     pub fn with_walk_rotation(mut self, walk_rotation: WalkRotationSeed) -> Self {
         self.walk_rotation = walk_rotation;
+        self
+    }
+
+    pub fn with_script_fixed_position(mut self, position: Option<FixedVec2>) -> Self {
+        self.script_fixed_position = position;
         self
     }
 
@@ -24789,6 +24818,7 @@ impl EffectHostContext {
                 physical_changes,
                 definition_physical,
                 walk_rotation,
+                script_fixed_position,
                 script_fixed_velocity,
             } = ctx;
             {
@@ -24839,6 +24869,9 @@ impl EffectHostContext {
                 scope.current_selected = world
                     .get(scope.id())
                     .is_some_and(|object| object.selected);
+                if let Some(position) = script_fixed_position {
+                    scope.current_fixed_position = position;
+                }
                 // Seed the TRUE fixed dirs when the caller provided them —
                 // GetXDir must see a 0.4 px/f drift as 4 at precision 10
                 // like C++ reading pObj->xdir (C4Script.cpp:1167).
@@ -25107,14 +25140,13 @@ impl EffectHostContext {
                     id,
                     definition_id: object.definition_id.clone(),
                     position,
-                    // Host-world script snapshots do not yet expose fix_x/fix_y;
-                    // keep the command view coherent with their pixel position.
-                    fixed_position: FixedVec2::from_ints(position.x, position.y),
+                    fixed_position: scope
+                        .map(ObjectScopeContext::fixed_position)
+                        .unwrap_or(object.fixed_position),
                     fixed_velocity: scope
                         .map(ObjectScopeContext::fixed_velocity)
-                        .unwrap_or_else(|| {
-                            FixedVec2::from_ints(object.velocity.x, object.velocity.y)
-                        }),
+                        .unwrap_or(object.fixed_velocity),
+                    move_to_range: object.move_to_range,
                     status: scope.map(ObjectScopeContext::status).unwrap_or(object.status),
                     destroyed: scope.is_some_and(|scope| scope.destroy),
                     category: scope
@@ -25571,6 +25603,8 @@ impl EffectHostContext {
             state.physical_changes.clone(),
             metadata.physical,
         );
+        scope.current_fixed_position = object.fixed_position;
+        scope.current_fixed_velocity = object.fixed_velocity;
         scope.definition_id = Some(object.definition_id().to_string());
         scope
             .live_commands
@@ -26313,6 +26347,7 @@ struct ObjectScopeContext {
     current_direction: Direction,
     current_command_direction: CommandDirection,
     current_position: Vector2,
+    current_fixed_position: FixedVec2,
     /// Sub-pixel velocity in 16.16 fixed-point. Precision-aware velocity
     /// surfaces (`SetXDir`/`GetXDir`) read and write this directly so that
     /// fractional `C4Fixed` velocity survives the script boundary. Seeded from
@@ -26413,6 +26448,7 @@ impl ObjectScopeContext {
             current_direction: direction,
             current_command_direction: command_direction,
             current_position: position,
+            current_fixed_position: FixedVec2::from_ints(position.x, position.y),
             current_fixed_velocity: FixedVec2::from_ints(velocity.x, velocity.y),
             // Seed the RAW engine r: the movement circle bounds keep it
             // within (-180, 180] and FnGetR reads it unnormalized; only
@@ -27254,11 +27290,16 @@ impl ObjectScopeContext {
             .unwrap_or(self.current_position)
     }
 
+    fn fixed_position(&self) -> FixedVec2 {
+        self.current_fixed_position
+    }
+
     fn set_position(&mut self, position: Vector2) {
         if self.effective_position() == position && self.pending_update.position.is_none() {
             return;
         }
         self.current_position = position;
+        self.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
         self.pending_update.position = Some(position);
     }
 

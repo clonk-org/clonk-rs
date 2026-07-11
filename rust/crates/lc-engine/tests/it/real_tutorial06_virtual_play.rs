@@ -547,12 +547,6 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .is_some_and(|object| object.action.name == "Swim")
         },
     )?;
-    if clonk_carries(player.engine(), builder, "COAL") {
-        player.tap(COM_THROW)?;
-        player.wait_until("the rescuer drops its incidental COAL", 60, |engine| {
-            !clonk_carries(engine, builder, "COAL")
-        })?;
-    }
     player.hold_until(
         COM_UP,
         "the rescuer rises through the pre-cleared upper passage",
@@ -573,6 +567,16 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .is_some_and(|object| object.position.x >= 310 && object.action.name != "Swim")
         },
     )?;
+    // Keep incidental COAL carried until the rescuer has left the drain.
+    // Dropping it beside CRYS made the later pickup depend on ELEC's old
+    // two-frame MoveTo overshoot: at the C++-exact stop position COAL is
+    // collected first and fills the single collection slot.
+    if clonk_carries(player.engine(), builder, "COAL") {
+        player.tap(COM_THROW)?;
+        player.wait_until("the rescuer drops incidental COAL outside the drain", 60, |engine| {
+            !clonk_carries(engine, builder, "COAL")
+        })?;
+    }
     player.tap(COM_DOWN)?;
     player.wait_until(
         "the lower outlet drains the upper passage",
@@ -667,6 +671,19 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         "the builder retrieves CRYS from the drain",
         180,
         |engine| clonk_carries(engine, builder, "CRYS"),
+    )?;
+    // The C++-exact carriage stop leaves the pickup slightly west of the
+    // shaft. Center underneath ELEC before surfacing instead of depending
+    // on the former overshoot to do that implicitly.
+    player.hold_until(
+        COM_RIGHT,
+        "the CRYS-carrying builder reaches the ELEC shaft",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.position.x >= 300)
+        },
     )?;
     player.hold_until(
         COM_UP,

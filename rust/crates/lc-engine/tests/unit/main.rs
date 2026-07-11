@@ -11695,6 +11695,59 @@ protected func ControlCommandFinished(command)
     }
 
     #[test]
+    fn synchronous_float_move_to_uses_subpixel_position_like_cpp() {
+        // FnExecuteCommand reads the live object's fix_x/fix_y. With target
+        // (110,130), x=100.25 makes the strict 3:1 threshold choose Down;
+        // reconstructing x=100 lands on the boundary and chooses DownRight
+        // (C4Command.cpp:393-410).
+        let script = r#"#strict
+public func Steer()
+{
+  SetCommand(this(), "MoveTo", 0, 110, 130);
+  ExecuteCommand();
+  return ExecuteCommand();
+}
+"#;
+        let mut floater =
+            Definition::from_script("FLTR", "Floater", script).expect("script compiles");
+        floater.set_physical(PhysicalInfo {
+            float: 100,
+            ..PhysicalInfo::default()
+        });
+        floater.configure_actions(
+            Some("Float".to_string()),
+            HashMap::from([(
+                "Float".to_string(),
+                ActionSpec::default().with_procedure("FLOAT"),
+            )]),
+        );
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(floater)
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("FLTR")
+                    .with_position(Vector2::new(100, 100))
+                    .with_fixed_position(FixedVec2::new(
+                        itofix(100) + fixed100(25),
+                        itofix(100),
+                    ))
+                    .with_action(ActionState::new("Float"))
+                    .with_alive(true),
+            )
+            .expect("floater spawns");
+        let index = engine.find_object_index(object).expect("floater exists");
+
+        engine
+            .call_object_function(index, "Steer", Vec::new())
+            .expect("synchronous command runs");
+
+        let object = engine.object_snapshot(object).expect("floater remains");
+        assert_eq!(object.command_direction, CommandDirection::Down);
+    }
+
+    #[test]
     fn normal_command_tick_calls_finished_before_clearing_like_cpp() {
         // Every C4Object::Execute runs ExecuteCommand first
         // (C4Object.cpp:1085,3997-4007), so the ordinary per-frame path
@@ -25966,6 +26019,26 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             definition.top_face(),
             Some(DefinitionTargetRect::new(0, 1, 24, 26, -12, -13))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn definition_from_resource_carries_signed_move_to_range_like_cpp() -> Result<(), EngineError> {
+        // C4Def stores MoveToRange as a signed int (src/C4Def.cpp:400);
+        // C4Command applies only positive values later (:213-215).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Mover.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=MOVE\nName=Mover\nMoveToRange=-7\n",
+        )
+        .expect("write defcore");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource)?;
+
+        assert_eq!(definition.move_to_range(), -7);
         Ok(())
     }
 

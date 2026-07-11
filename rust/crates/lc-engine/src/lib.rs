@@ -2216,6 +2216,10 @@ pub struct ObjectState {
     pub custom_name: Option<String>,
     pub position: Vector2,
     pub velocity: Vector2,
+    /// Transient script-call mirror of fix_x/fix_y. Like
+    /// `script_fixed_velocity`, this is never persisted.
+    #[serde(skip)]
+    pub script_fixed_position: Option<FixedVec2>,
     /// Transient script-call mirror of the object's TRUE sub-pixel dirs:
     /// C++ Fn(Get|Set)XDir/YDir read/write the LIVE C4Fixed xdir/ydir
     /// (C4Script.cpp:697-732, :1160-1180) — an INT-seeded scope reads a
@@ -2447,6 +2451,7 @@ pub(crate) fn preview_spawn_state(
 ) -> ObjectState {
     ObjectState {
         custom_name: None,
+        script_fixed_position: None,
         script_fixed_velocity: None,
         position,
         velocity: Vector2::ZERO,
@@ -3795,6 +3800,7 @@ impl Object {
     /// (C4Script.cpp:1160-1180) instead of the int-quantized mirror.
     fn script_state_snapshot(&self) -> ObjectState {
         let mut state = self.state.clone();
+        state.script_fixed_position = Some(self.fixed_position);
         state.script_fixed_velocity = Some(self.fixed_velocity);
         state
     }
@@ -6177,6 +6183,7 @@ pub struct Definition {
     /// while BASEFUNC_AutoSellContents is active.
     base_auto_sell: bool,
     mass: i32,
+    move_to_range: i32,
     picture: Option<DefinitionPicture>,
     picture_image: Option<DefinitionPictureImage>,
     /// First def portrait (C4CFN_Portraits, src/C4Components.h:88) — HUD
@@ -6394,6 +6401,7 @@ impl Definition {
             rebuyable: false,
             base_auto_sell,
             mass: 0,
+            move_to_range: 0,
             picture: None,
             picture_image: None,
             portrait_image: None,
@@ -6674,6 +6682,7 @@ impl Definition {
         definition.set_incomplete_activity(resource.core.incomplete_activity);
         definition.set_no_breath(resource.core.no_breath);
         definition.set_grab(resource.core.grab);
+        definition.set_move_to_range(resource.core.move_to_range);
         definition.float_line = resource.core.float_line;
         definition.set_physical(resource.core.physical);
         definition.set_collectible(resource.core.collectible);
@@ -7096,6 +7105,14 @@ impl Definition {
 
     pub fn set_mass(&mut self, mass: i32) {
         self.mass = mass.max(0);
+    }
+
+    pub fn move_to_range(&self) -> i32 {
+        self.move_to_range
+    }
+
+    pub fn set_move_to_range(&mut self, move_to_range: i32) {
+        self.move_to_range = move_to_range;
     }
 
     /// `Grab` DefCore value (C4Def.h): 0 = not grabbable, 1 = grab and
@@ -7776,6 +7793,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
                 .with_need_energy(state.need_energy)
@@ -7994,6 +8012,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
                 .with_need_energy(state.need_energy)
@@ -8184,6 +8203,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
                 .with_need_energy(state.need_energy)
@@ -8390,6 +8410,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
                 .with_need_energy(state.need_energy)
@@ -8507,7 +8528,8 @@ impl Definition {
         )
         .with_base_graphics(state.base_graphics.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
-                .with_script_fixed_velocity(state.script_fixed_velocity)
+        .with_script_fixed_position(state.script_fixed_position)
+        .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
         .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
@@ -8640,7 +8662,8 @@ impl Definition {
         )
         .with_base_graphics(state.base_graphics.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
-                .with_script_fixed_velocity(state.script_fixed_velocity)
+        .with_script_fixed_position(state.script_fixed_position)
+        .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
         .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
@@ -8883,7 +8906,8 @@ impl Definition {
             *self.physical(),
         )
         .with_walk_rotation(self.walk_rotation_seed(state))
-                .with_script_fixed_velocity(state.script_fixed_velocity)
+        .with_script_fixed_position(state.script_fixed_position)
+        .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
         .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
@@ -9064,7 +9088,8 @@ impl Definition {
         )
         .with_base_graphics(state.base_graphics.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
-                .with_script_fixed_velocity(state.script_fixed_velocity)
+        .with_script_fixed_position(state.script_fixed_position)
+        .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
         .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
@@ -9585,6 +9610,7 @@ impl Definition {
                 )
                 .with_base_graphics(state.base_graphics.clone())
                 .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
                 .with_need_energy(state.need_energy)
@@ -13863,7 +13889,10 @@ impl Engine {
                     object.state.action.phase,
                     object.state.container,
                     object.state.draw_transform,
-                ).with_direction(object.state.direction.to_script_value())
+                )
+                .with_fixed_motion(object.fixed_position, object.fixed_velocity)
+                .with_move_to_range(definition.map_or(0, Definition::move_to_range))
+                .with_direction(object.state.direction.to_script_value())
                 .with_selected(object.state.selected)
                 .with_crew_disabled(object.state.crew_disabled)
                 .with_contents(object.state.contents.clone())
@@ -16648,7 +16677,7 @@ impl Engine {
         index: usize,
     ) -> CommandObjectSnapshot {
         let object = &self.objects[index];
-        let (procedure, line_connect, collectible) = self
+        let (procedure, line_connect, collectible, move_to_range) = self
             .definitions
             .get(&object.definition_id)
             .map(|definition| {
@@ -16658,15 +16687,17 @@ impl Engine {
                         .procedure_for_action(&object.state.action.name),
                     definition.line_connect(),
                     definition.is_collectible(),
+                    definition.move_to_range(),
                 )
             })
-            .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false));
+            .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0));
         CommandObjectSnapshot {
             id: object.id,
             definition_id: object.definition_id.clone(),
             position: object.state.position,
             fixed_position: object.fixed_position,
             fixed_velocity: object.fixed_velocity,
+            move_to_range,
             contact: {
                 let landscape = self.landscape.as_ref();
                 object.state.vertices.iter().fold(0u32, |bits, vertex| {
@@ -16883,7 +16914,7 @@ impl Engine {
         let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
             HashMap::with_capacity(self.objects.len());
         for object in &self.objects {
-            let (procedure, line_connect, collectible) = self
+            let (procedure, line_connect, collectible, move_to_range) = self
                 .definitions
                 .get(&object.definition_id)
                 .map(|definition| {
@@ -16894,9 +16925,10 @@ impl Engine {
                         procedure,
                         definition.line_connect(),
                         definition.is_collectible(),
+                        definition.move_to_range(),
                     )
                 })
-                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false));
+                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0));
             // ExecuteCommand reads the CACHED obj->OCF (C4Command.cpp uses
             // Target->OCF etc. straight off the objects).
             let ocf = object.state.ocf;
@@ -16908,6 +16940,7 @@ impl Engine {
                     position: object.state.position,
                     fixed_position: object.fixed_position,
                     fixed_velocity: object.fixed_velocity,
+                    move_to_range,
                     // t_contact equivalent: live vertex probe (CNAT bits);
                     // shape top from the current (con-scaled) rect
                     // (C4Command JumpControl, C4Command.cpp:1857-1920).
@@ -17979,7 +18012,7 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
-            let (procedure, line_connect, collectible) = self
+            let (procedure, line_connect, collectible, move_to_range) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
                 .map(|definition| {
@@ -17989,12 +18022,14 @@ impl Engine {
                             .procedure_for_action(&self.objects[idx].state.action.name),
                         definition.line_connect(),
                         definition.is_collectible(),
+                        definition.move_to_range(),
                     )
                 })
                 .unwrap_or((
                     action_library.procedure_for_action(&self.objects[idx].state.action.name),
                     OCF_NORMAL,
                     false,
+                    0,
                 ));
             // ExecuteCommand reads the CACHED obj->OCF (refreshed at this
             // object's Execute-start, C4Object.cpp:1058).
@@ -18007,6 +18042,7 @@ impl Engine {
                     position: self.objects[idx].state.position,
                     fixed_position: self.objects[idx].fixed_position,
                     fixed_velocity: self.objects[idx].fixed_velocity,
+                    move_to_range,
                     contact: {
                         let landscape = self.landscape.as_ref();
                         self.objects[idx]
@@ -19909,6 +19945,7 @@ impl Engine {
                 snapshot.definition_id.clone(),
                 ObjectState {
                     custom_name: snapshot.custom_name.clone(),
+                    script_fixed_position: None,
                     script_fixed_velocity: None,
                     position: snapshot.position,
                     velocity: snapshot.velocity,
@@ -31864,6 +31901,7 @@ impl Engine {
             definition_id.clone(),
             ObjectState {
                 custom_name,
+                script_fixed_position: None,
                 script_fixed_velocity: None,
                 position,
                 velocity,
@@ -32814,6 +32852,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
 fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
     ObjectState {
         custom_name: snapshot.custom_name.clone(),
+        script_fixed_position: None,
         script_fixed_velocity: None,
         position: snapshot.position,
         velocity: snapshot.velocity,
@@ -32948,7 +32987,16 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.action.phase,
                 object.container,
                 object.draw_transform,
-            ).with_direction(object.direction.to_script_value())
+            )
+            .with_fixed_motion(
+                object
+                    .fixed_position
+                    .unwrap_or_else(|| FixedVec2::from_ints(object.position.x, object.position.y)),
+                object
+                    .fixed_velocity
+                    .unwrap_or_else(|| FixedVec2::from_ints(object.velocity.x, object.velocity.y)),
+            )
+            .with_direction(object.direction.to_script_value())
             .with_contents(object.contents.clone())
             .with_need_energy(object.need_energy)
             .with_commands(object.command_stack.command_views())

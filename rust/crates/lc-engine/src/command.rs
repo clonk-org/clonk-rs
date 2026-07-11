@@ -34,6 +34,8 @@ pub struct CommandObjectSnapshot {
     pub fixed_position: FixedVec2,
     /// Authoritative C4Object xdir/ydir used by momentum-aware steering.
     pub fixed_velocity: FixedVec2,
+    /// Raw DefCore MoveToRange; positive values override the default five.
+    pub move_to_range: i32,
     pub status: ObjectStatus,
     pub destroyed: bool,
     pub category: i32,
@@ -275,6 +277,7 @@ mod tests {
             position: Vector2::ZERO,
             fixed_position: FixedVec2::ZERO,
             fixed_velocity: FixedVec2::ZERO,
+            move_to_range: 0,
             status: ObjectStatus::Normal,
             destroyed: false,
             category: 0,
@@ -393,6 +396,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn move_to_uses_positive_definition_range_for_noncrew_like_cpp() {
+        // C4Command::MoveTo replaces the default five-pixel range only when
+        // Def->MoveToRange is positive (C4Command.cpp:213-215); signed zero
+        // and negative DefCore values retain the default.
+        let mut mover = snapshot_with_id(1);
+        mover.position = Vector2::new(100, 100);
+        mover.fixed_position = FixedVec2::from_ints(100, 100);
+        mover.move_to_range = 20;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(115))
+            .with_ty(Some(100));
+        let ctx = move_to_ctx_at_frame(&mover, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(&request);
+        assert_eq!(state.step(&ctx).status, CommandStatus::Completed);
+
+        mover.move_to_range = -3;
+        let ctx = move_to_ctx_at_frame(&mover, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(&request);
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Right)
+        );
+    }
+
     // C4Command::MoveTo DFA_SWIM arm (C4Command.cpp:370-382): on Tick2
     // frames (Game.iTick2 != 0, i.e. odd FrameCounter) the swimmer steers
     // horizontally toward Tx (with target range); on !Tick2 frames it
@@ -433,6 +466,84 @@ mod tests {
             result.update.and_then(|update| update.command_direction),
             Some(CommandDirection::Down),
             "!Tick2 swim steering is vertical (C4Command.cpp:377-381)"
+        );
+    }
+
+    #[test]
+    fn move_to_float_steers_against_fixed_momentum_like_cpp() {
+        // DFA_FLOAT aims for a Float-physical velocity toward the target,
+        // then steers from the fixed-point difference to current momentum
+        // (C4Command.cpp:393-410). A floater already moving upward while its
+        // target is due right therefore corrects DownRight, not merely Right.
+        let mut floater = snapshot_with_id(1);
+        floater.position = Vector2::new(100, 100);
+        floater.fixed_position = FixedVec2::from_ints(100, 100);
+        floater.fixed_velocity = FixedVec2::from_ints(0, -1);
+        floater.action_procedure = ActionProcedure::Float;
+        floater.physical.float = 100;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&floater, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(200))
+                .with_ty(Some(100)),
+        );
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::DownRight)
+        );
+
+        // At the desired rightward velocity the correction falls below
+        // FIXED100(20), so this newly created command must explicitly clear
+        // the object's pre-existing Right ComDir with COMD_None/Stop.
+        floater.command_direction = CommandDirection::Right;
+        floater.fixed_velocity = FixedVec2::from_ints(1, 0);
+        let ctx = move_to_ctx_at_frame(&floater, &objects, &players, &definitions, 2);
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(200))
+                .with_ty(Some(100)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Stop)
+        );
+    }
+
+    #[test]
+    fn move_to_float_finishes_immediately_inside_range_like_cpp() {
+        // The target-reached branch precedes procedure steering and finishes
+        // in this Execute (C4Command.cpp:286-307). Besides avoiding a second
+        // arrival frame, this keeps DFA_FLOAT from normalizing a zero vector.
+        let mut floater = snapshot_with_id(1);
+        floater.position = Vector2::new(100, 100);
+        floater.fixed_position = FixedVec2::from_ints(100, 100);
+        floater.action_procedure = ActionProcedure::Float;
+        floater.command_direction = CommandDirection::Right;
+        floater.physical.float = 100;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&floater, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(100))
+                .with_ty(Some(100)),
+        );
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Stop)
         );
     }
 
@@ -667,7 +778,7 @@ mod tests {
 
         // Mid-air target straight up: AdjustMoveToTarget drops it to the
         // bottom of free space (109) then lifts it Shape.Hgt/2 -> y 99,
-        // one pixel off the walker's center — no vertical steer.
+        // one pixel off the walker's center — inside the crew range.
         let request = CommandRequest::new(CommandId::MoveTo)
             .with_tx(Some(100))
             .with_ty(Some(50));
@@ -681,10 +792,11 @@ mod tests {
         let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
         ctx.landscape = Some(&landscape);
         let second = state.step(&ctx);
+        assert_eq!(second.status, CommandStatus::Completed);
         assert_eq!(
             second.update.and_then(|update| update.command_direction),
-            None,
-            "adjusted target sits at the walker's level (C4Command.cpp:1640)"
+            Some(CommandDirection::Stop),
+            "the adjusted in-range target finishes immediately (C4Command.cpp:294-307)"
         );
 
         // NoPosAdjust keeps the raw (100,50): the walker steers Up.
@@ -8876,7 +8988,6 @@ struct MoveToState {
     update_interval: u32,
     tolerance: i32,
     last_direction: CommandDirection,
-    arrived_frames: u32,
 }
 
 impl MoveToState {
@@ -8893,7 +9004,6 @@ impl MoveToState {
             update_interval: request.update_interval,
             tolerance: 5,
             last_direction: CommandDirection::Stop,
-            arrived_frames: 0,
         }
     }
 
@@ -9012,21 +9122,18 @@ impl MoveToState {
         // `iTargetRange = Shape.Wdt / 5` (C4Command.cpp:286-292).
         let target_range = if ctx.object.ocf & ocf::CREW_MEMBER != 0 {
             ctx.object.shape.width / 5
+        } else if ctx.object.move_to_range > 0 {
+            ctx.object.move_to_range
         } else {
             self.tolerance
         };
         if dx.abs() <= target_range && dy.abs() <= target_range {
-            self.arrived_frames += 1;
-        } else {
-            self.arrived_frames = 0;
-        }
-
-        if self.arrived_frames >= 2 {
             let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
             self.last_direction = CommandDirection::Stop;
             return CommandStepResult::completed(Some(update));
         }
 
+        let float_steering = ctx.object.action_procedure == ActionProcedure::Float;
         let direction = match ctx.object.action_procedure {
             // DFA_SWIM (C4Command.cpp:370-382): Tick2 frames (Game.iTick2
             // != 0 — odd FrameCounter) steer horizontally with the target
@@ -9085,6 +9192,44 @@ impl MoveToState {
                     self.last_direction
                 }
             }
+            // DFA_FLOAT (C4Command.cpp:393-410): normalize the fixed-point
+            // target vector to Physical.Float, subtract current momentum,
+            // then choose the closest of the eight control directions.
+            ActionProcedure::Float => {
+                let mut fixed_dx = math::itofix(target.x) - ctx.object.fixed_position.x;
+                let mut fixed_dy = math::itofix(target.y) - ctx.object.fixed_position.y;
+                let scale = math::fixed100(ctx.object.physical.float)
+                    / fixed_dx.abs().max(fixed_dy.abs());
+                fixed_dx *= scale;
+                fixed_dy *= scale;
+                fixed_dx -= ctx.object.fixed_velocity.x;
+                fixed_dy -= ctx.object.fixed_velocity.y;
+                if fixed_dx.abs() + fixed_dy.abs() < math::fixed100(20) {
+                    CommandDirection::Stop
+                } else if fixed_dy.abs() * 3 < fixed_dx {
+                    CommandDirection::Right
+                } else if fixed_dy.abs() * 3 < -fixed_dx {
+                    CommandDirection::Left
+                } else if fixed_dx.abs() * 3 < fixed_dy {
+                    CommandDirection::Down
+                } else if fixed_dx.abs() * 3 < -fixed_dy {
+                    CommandDirection::Up
+                } else if fixed_dx > crate::C4Fixed::ZERO
+                    && fixed_dy > crate::C4Fixed::ZERO
+                {
+                    CommandDirection::DownRight
+                } else if fixed_dx < crate::C4Fixed::ZERO
+                    && fixed_dy > crate::C4Fixed::ZERO
+                {
+                    CommandDirection::DownLeft
+                } else if fixed_dx > crate::C4Fixed::ZERO
+                    && fixed_dy < crate::C4Fixed::ZERO
+                {
+                    CommandDirection::UpRight
+                } else {
+                    CommandDirection::UpLeft
+                }
+            }
             _ => {
                 if dx > target_range {
                     CommandDirection::Right
@@ -9100,7 +9245,10 @@ impl MoveToState {
             }
         };
 
-        let steer = if direction != self.last_direction {
+        // The C++ Float arm writes ComDir every execution. In particular,
+        // COMD_None must stop momentum correction even when this new command
+        // has not observed the object's pre-existing ComDir.
+        let steer = if float_steering || direction != self.last_direction {
             self.last_direction = direction;
             Some(direction)
         } else {
