@@ -7910,25 +7910,23 @@ fn message(args: &[Value]) -> Result<Value, RuntimeError> {
 
         if !played_speech {
             let text = display_text.clone();
-            if !text.trim().is_empty() {
-                let spec = MessageSpec {
-                    kind: if target_raw.is_some() {
-                        MessageKind::Target
-                    } else {
-                        MessageKind::Global
-                    },
-                    text,
-                    target: target_raw.map(ObjectId::new),
-                    player: None,
-                    offset: Vector2::ZERO,
-                    color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-                    flags: 0,
-                    width: None,
-                    decoration: None,
-                    portrait: None,
-                };
-                context.register_message(MessageCommand::Add(spec));
-            }
+            let spec = MessageSpec {
+                kind: if target_raw.is_some() {
+                    MessageKind::Target
+                } else {
+                    MessageKind::Global
+                },
+                text,
+                target: target_raw.map(ObjectId::new),
+                player: None,
+                offset: Vector2::ZERO,
+                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+                flags: 0,
+                width: None,
+                decoration: None,
+                portrait: None,
+            };
+            context.register_message(MessageCommand::Add(spec));
         }
 
         Ok(Value::Bool(true))
@@ -7989,27 +7987,25 @@ fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
         if !played_speech {
             let text = display_text.clone();
-            if !text.trim().is_empty() {
-                let kind = match (target_raw.is_some(), resolved_player.is_some()) {
-                    (true, true) => MessageKind::TargetPlayer,
-                    (true, false) => MessageKind::Target,
-                    (false, true) => MessageKind::GlobalPlayer,
-                    (false, false) => MessageKind::Global,
-                };
-                let spec = MessageSpec {
-                    kind,
-                    text,
-                    target: target_raw.map(ObjectId::new),
-                    player: resolved_player,
-                    offset: Vector2::ZERO,
-                    color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-                    flags: 0,
-                    width: None,
-                    decoration: None,
-                    portrait: None,
-                };
-                context.register_message(MessageCommand::Add(spec));
-            }
+            let kind = match (target_raw.is_some(), resolved_player.is_some()) {
+                (true, true) => MessageKind::TargetPlayer,
+                (true, false) => MessageKind::Target,
+                (false, true) => MessageKind::GlobalPlayer,
+                (false, false) => MessageKind::Global,
+            };
+            let spec = MessageSpec {
+                kind,
+                text,
+                target: target_raw.map(ObjectId::new),
+                player: resolved_player,
+                offset: Vector2::ZERO,
+                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+                flags: 0,
+                width: None,
+                decoration: None,
+                portrait: None,
+            };
+            context.register_message(MessageCommand::Add(spec));
         }
 
         Ok(Value::Bool(true))
@@ -8106,26 +8102,24 @@ fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
         if !played_speech {
             let text = display_text.clone();
-            if !text.trim().is_empty() {
-                let kind = if resolved_player.is_some() {
-                    MessageKind::GlobalPlayer
-                } else {
-                    MessageKind::Global
-                };
-                let spec = MessageSpec {
-                    kind,
-                    text,
-                    target: None,
-                    player: resolved_player,
-                    offset: Vector2::ZERO,
-                    color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-                    flags: 0,
-                    width: None,
-                    decoration: None,
-                    portrait: None,
-                };
-                context.register_message(MessageCommand::Add(spec));
-            }
+            let kind = if resolved_player.is_some() {
+                MessageKind::GlobalPlayer
+            } else {
+                MessageKind::Global
+            };
+            let spec = MessageSpec {
+                kind,
+                text,
+                target: None,
+                player: resolved_player,
+                offset: Vector2::ZERO,
+                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+                flags: 0,
+                width: None,
+                decoration: None,
+                portrait: None,
+            };
+            context.register_message(MessageCommand::Add(spec));
         }
 
         Ok(Value::Bool(true))
@@ -28586,6 +28580,70 @@ func Trigger(object pOther)
                 assert!(spec.player.is_none());
             }
         }
+    }
+
+    #[test]
+    fn empty_plain_message_hosts_forward_cpp_clear_operations() {
+        // FnMessage/FnPlayerMessage/FnPlrMessage pass an explicit empty
+        // C4String through GameMsg* to C4GameMessageList::New. New first
+        // removes conflicting non-multiple messages, then succeeds without
+        // adding a replacement (C4Script.cpp:2395-2462;
+        // C4GameMessage.cpp:290-305).
+        let (result, outcome) =
+            with_object_host_context(|| message(&[Value::String(String::new())]));
+        assert_eq!(result.expect("empty Message succeeds"), Value::Bool(true));
+        assert!(matches!(
+            outcome.messages.as_slice(),
+            [MessageCommand::Add(MessageSpec {
+                kind: MessageKind::Global,
+                text,
+                ..
+            })] if text.is_empty()
+        ));
+
+        let mut player = PlayerState::default();
+        player.id = 1;
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player.clone()],
+        );
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            player_message(&[Value::Int(1), Value::String(String::new())])
+        });
+        assert_eq!(
+            result.expect("empty PlayerMessage succeeds"),
+            Value::Bool(true)
+        );
+        assert!(matches!(
+            outcome.messages.as_slice(),
+            [MessageCommand::Add(MessageSpec {
+                kind: MessageKind::GlobalPlayer,
+                text,
+                player: Some(1),
+                ..
+            })] if text.is_empty()
+        ));
+
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            plr_message(&[Value::String(String::new()), Value::Int(1)])
+        });
+        assert_eq!(
+            result.expect("empty PlrMessage succeeds"),
+            Value::Bool(true)
+        );
+        assert!(matches!(
+            outcome.messages.as_slice(),
+            [MessageCommand::Add(MessageSpec {
+                kind: MessageKind::GlobalPlayer,
+                text,
+                player: Some(1),
+                ..
+            })] if text.is_empty()
+        ));
     }
 
     #[test]
