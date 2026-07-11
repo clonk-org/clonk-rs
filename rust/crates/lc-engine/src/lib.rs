@@ -21709,6 +21709,45 @@ impl Engine {
         // reads Action.t_attach (C4Script.cpp:5444).
         self.objects[idx].state.t_attach = self.objects[idx].frame_t_attach;
 
+        // DFA_DIG must stay attached to solid ground. C++ performs this
+        // independent CNAT_Bottom probe before assigning dig velocity and
+        // stops digging immediately when it fails (C4Object.cpp:4906-4911).
+        // Synthetic fixture worlds without a landscape keep their historical
+        // movement path; a real game always has GBack available here.
+        if matches!(procedure, ActionProcedure::Dig) && self.landscape.is_some() {
+            let solid_mask_indices = (0..self.objects.len()).collect::<Vec<_>>();
+            let solid_masks = self.solid_masks_for_movement(&solid_mask_indices);
+            let attachment = self.landscape.as_ref().map(|landscape| {
+                let object = &self.objects[idx];
+                let mut sample_position = object.state.position;
+                let mut record = object.state.shape_attach;
+                let contact_density = self
+                    .definitions
+                    .get(&definition_id)
+                    .map(Definition::contact_density)
+                    .unwrap_or(CONTACT_DENSITY_SOLID);
+                let attached = shape_attach(
+                    &object.state.vertices,
+                    &mut sample_position,
+                    CNAT_BOTTOM,
+                    landscape,
+                    &self.materials,
+                    &solid_masks,
+                    Some(object.id),
+                    contact_density,
+                    &mut record,
+                );
+                (attached, record)
+            });
+            if let Some((attached, record)) = attachment {
+                self.objects[idx].state.shape_attach = record;
+                if !attached {
+                    self.object_com_stop_dig(idx, &definition_id)?;
+                    return Ok(true);
+                }
+            }
+        }
+
         if matches!(procedure, ActionProcedure::Bridge) {
             // Action.Time++ precedes the procedure switch in C++
             // (C4Object.cpp:4755-4756), and DoBridge observes the incremented
@@ -39819,6 +39858,76 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.action.name, "Dig");
+    }
+
+    #[test]
+    fn dig_procedure_stops_before_moving_without_bottom_attachment() {
+        // DFA_DIG first calls Shape.Attach(..., CNAT_Bottom); failure runs
+        // ObjectComStopDig and returns before assigning dig velocity
+        // (src/C4Object.cpp:4906-4911; src/C4ObjectCom.cpp:776-784).
+        let mut definition =
+            Definition::from_script("Digger", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("walk"),
+                ),
+                (
+                    "Dig".to_string(),
+                    ActionSpec::default().with_procedure("dig").with_dig_free(6),
+                ),
+            ]),
+        );
+        definition.set_category(CATEGORY_OBJECT);
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        definition.set_contact_density(50);
+        definition.set_physical(PhysicalInfo {
+            dig: C4_MAX_PHYSICAL,
+            ..PhysicalInfo::default()
+        });
+
+        let library = lc_resources::MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            "#,
+        )
+        .expect("material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(32, 24, Some(earth)));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        let start = Vector2::new(12, 4);
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Digger")
+                    .with_position(start)
+                    .with_action(ActionState::new("Dig"))
+                    .with_command_direction(CommandDirection::UpLeft)
+                    .with_mobile(true),
+            )
+            .expect("digger spawns");
+        let initial_position = engine
+            .object_snapshot(id)
+            .expect("spawned digger is observable")
+            .position;
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("digger survives");
+        assert_eq!(object.action.name, "Walk");
+        assert_eq!(object.position, initial_position);
+        assert_eq!(object.velocity, Vector2::ZERO);
     }
 
     #[test]
