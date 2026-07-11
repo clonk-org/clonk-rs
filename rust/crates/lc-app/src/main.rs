@@ -13968,6 +13968,36 @@ mod tests {
         }
     }
 
+    fn advance_app_until(
+        app: &mut GameApp,
+        milestone: &str,
+        max_ticks: u32,
+        mut reached: impl FnMut(&GameApp) -> bool,
+    ) {
+        if reached(app) {
+            return;
+        }
+        for _ in 0..max_ticks {
+            app.update()
+                .unwrap_or_else(|error| panic!("{milestone}: {error}"));
+            if reached(app) {
+                return;
+            }
+        }
+        panic!(
+            "timed out after {max_ticks} app ticks waiting for {milestone} at frame {}",
+            app.engine.frame()
+        );
+    }
+
+    fn app_tutorial_message_contains(app: &GameApp, needle: &str) -> bool {
+        app.snapshot
+            .hud
+            .messages
+            .iter()
+            .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+    }
+
     #[test]
     fn overlay_text_helper_respects_custom_text() {
         assert!(overlay_text_needs_update("", "FRAME "));
@@ -17157,6 +17187,426 @@ mod tests {
                 .object_snapshot(clonk)
                 .is_some_and(|object| object.container.is_none()),
             "physical D/D route must exit CLNK from HUT3"
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn app_virtual_keyboard_builds_tutorial04_elevator_site_from_real_conkit() {
+        // Tutorial04 teaches the complete physical-key path into HUT2, through
+        // C4MN_Contents, and into CNKT's CXCN construction menu. Keep every
+        // state transition behind GameApp::handle_key so this covers C++ key
+        // mapping, auto-context close/Exit, and DigDouble synthesis as well as
+        // the engine route (Tutorial04.c4s/Script.c:40-126;
+        // C4Player.cpp:1490-1554; C4ObjectMenu.cpp:279-435).
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover repository install");
+        let audio_options = AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        };
+        let mut app = GameApp::new(
+            320,
+            200,
+            audio_options,
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Tutorial 4 app virtual player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+
+        let scenario = resolve_next_mission_scenario(
+            &app.scenario_catalog,
+            "Tutorial.c4f/Tutorial04.c4s",
+        )
+        .expect("Tutorial04 is present in the real scenario catalog");
+        let scenario_path = scenario.path.clone().expect("Tutorial04 path");
+        let scenario_data = Scenario::load_from_path_with_languages(
+            &scenario_path,
+            &InstallDefinitionResolver::new(Some(Arc::new(paths.clone()))),
+            &startup_language_sequence(Some(&paths)),
+        )
+        .expect("load real Tutorial04");
+        app.activate_loaded_scenario(scenario, scenario_data)
+            .expect("activate real Tutorial04");
+        assert!(
+            !app.mouse_control,
+            "Tutorial04 DisableMouse=1 must suppress player mouse control"
+        );
+        assert!(
+            !app.option_flags().mouse_shown,
+            "Tutorial04 DisableMouse=1 must remove the in-game mouse Options entry"
+        );
+
+        let clonk = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("Tutorial04 selected CLNK");
+        let initial = app.engine.snapshot();
+        let hut = initial
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "HUT2")
+            .expect("Tutorial04 HUT2")
+            .id;
+        let conkit = initial
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "CNKT")
+            .expect("Tutorial04 ready CNKT")
+            .id;
+        let context_identification =
+            serde_json::from_value(serde_json::json!({ "Int": 14 }))
+                .expect("context identification deserializes");
+        let contents_identification =
+            serde_json::from_value(serde_json::json!({ "Int": 18 }))
+                .expect("contents identification deserializes");
+        let construction_identification =
+            serde_json::from_value(serde_json::json!({ "C4Id": "CXCN" }))
+                .expect("construction identification deserializes");
+
+        advance_app_until(
+            &mut app,
+            "Tutorial04 ready base and Clonk",
+            180,
+            |app| {
+                app.engine
+                    .object_snapshot(hut)
+                    .is_some_and(|object| object.base == app.local_owner)
+                    && app.engine.object_snapshot(clonk).is_some_and(|object| {
+                        object.container.is_none() && object.action.name == "Walk"
+                    })
+            },
+        );
+        assert_eq!(
+            app.engine
+                .object_snapshot(hut)
+                .expect("ready HUT2")
+                .position,
+            Vector2::new(586, 245),
+            "seed-zero Tutorial04 must retain the HUT2 position used by its entrance lesson"
+        );
+        assert_eq!(
+            app.engine
+                .object_snapshot(conkit)
+                .expect("ready CNKT")
+                .container,
+            Some(hut),
+            "the real ready CNKT must begin inside HUT2"
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial04 enter-home-base prompt",
+            240,
+            |app| app_tutorial_message_contains(app, "Enter your home base"),
+        );
+
+        // HUT2's seed-zero entrance is [568,584) x [253,270). Walk to its
+        // center with physical Z, release it, then use physical S/Up so
+        // ObjectComUp chooses Enter before Jump (Hut2 DefCore Entrance;
+        // C4ObjectCom.cpp:335-350).
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("physical Z walks toward HUT2");
+        }
+        advance_app_until(
+            &mut app,
+            "CLNK aligned with HUT2 entrance",
+            30,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Walk"
+                        && (574..578).contains(&object.position.x)
+                        && (253..270).contains(&object.position.y)
+                })
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z at HUT2");
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S enters HUT2");
+        }
+        advance_app_until(&mut app, "CLNK entered HUT2", 50, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial04 Contents prompt",
+            240,
+            |app| app_tutorial_message_contains(app, "select 'Contents'"),
+        );
+        advance_app_until(&mut app, "HUT2 auto-context menu", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
+        {
+            let (_, menu) = app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .expect("HUT2 context menu");
+            assert_eq!(menu.selection, 0);
+            assert_eq!(
+                menu.items.first().map(|item| item.caption.as_str()),
+                Some("Contents")
+            );
+        }
+
+        // A is Throw/MenuEnter. The real context's first row opens Contents;
+        // ready-material insertion keeps the later-created CNKT before FLAG.
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::A)
+                .expect("physical A opens HUT2 Contents");
+        }
+        advance_app_until(&mut app, "HUT2 Contents menu", 20, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == contents_identification)
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial04 take-construction-kit prompt",
+            240,
+            |app| app_tutorial_message_contains(app, "Take the construction kit"),
+        );
+        {
+            let (_, menu) = app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .expect("HUT2 Contents remains open");
+            assert_eq!(menu.selection, 0);
+            assert_eq!(
+                menu.items.first().map(|item| item.item_id.as_str()),
+                Some("CNKT"),
+                "physical A must target the real first Contents row"
+            );
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::A)
+                .expect("physical A takes CNKT");
+        }
+        advance_app_until(&mut app, "CLNK carries CNKT", 60, |app| {
+            app.engine
+                .object_snapshot(conkit)
+                .is_some_and(|object| object.container == Some(clonk))
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial04 close-menu-and-exit prompt",
+            240,
+            |app| app_tutorial_message_contains(app, "close the menu and exit"),
+        );
+
+        // Physical D closes Contents. AutoContextMenu returns on the next
+        // player tick with the carried-CNKT Put row selected; physical S wraps
+        // that first row to Exit and A activates it through ordinary menu
+        // controls (C4Menu.cpp:433-480,1040-1069).
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("physical D closes Contents");
+        }
+        advance_app_until(&mut app, "HUT2 context restored", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
+        {
+            let (_, menu) = app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .expect("HUT2 context restored around carried CNKT");
+            assert_eq!(menu.selection, 0);
+            assert_eq!(
+                menu.items.first().map(|item| item.caption.as_str()),
+                Some("Put")
+            );
+            assert_eq!(
+                menu.items.last().map(|item| item.caption.as_str()),
+                Some("Exit")
+            );
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S wraps context selection to Exit");
+            keyboard
+                .tap(VirtualKeyCode::A)
+                .expect("physical A activates context Exit");
+        }
+        advance_app_until(&mut app, "CNKT-carrying CLNK exited HUT2", 60, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.container.is_none() && object.action.name == "Walk"
+            })
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial04 clear-area prompt",
+            240,
+            |app| app_tutorial_message_contains(app, "clear area to the left"),
+        );
+
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("physical Z walks to elevator site");
+        }
+        advance_app_until(&mut app, "CLNK reached elevator site", 120, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Walk" && (490..=510).contains(&object.position.x)
+            })
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z at elevator site");
+        }
+        advance_app_until(
+            &mut app,
+            "Tutorial04 double-Dig prompt",
+            240,
+            |app| app_tutorial_message_contains(app, "twice quickly to open the construction menu"),
+        );
+        assert!(
+            app.engine
+                .snapshot()
+                .objects
+                .iter()
+                .all(|object| object.definition_id != "ELEV"),
+            "Tutorial04 must not have an ELEV before CNKT activation"
+        );
+
+        // Two complete physical D edges inside C4DoubleClick's window become
+        // COM_Dig_D. CNKT::Activate opens CXCN and fills its one known ELEV
+        // row from GetPlrKnowledge without any menu or inventory mutation.
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("first physical D at elevator site");
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("second physical D at elevator site");
+        }
+        advance_app_until(&mut app, "CNKT CXCN menu", 20, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == construction_identification)
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial04 create-ELEV prompt",
+            240,
+            |app| app_tutorial_message_contains(app, "Create an elevator construction site"),
+        );
+        {
+            let (_, menu) = app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .expect("physical D/D opens CNKT construction menu");
+            assert_eq!(menu.identification, construction_identification);
+            assert_eq!(menu.symbol_id, "CXCN");
+            assert_eq!(menu.command_object, Some(conkit));
+            assert_eq!(menu.extra, lc_engine::ObjectMenuExtra::Components);
+            assert_eq!(menu.selection, 0);
+            assert_eq!(menu.items.len(), 1);
+            assert_eq!(menu.items[0].item_id, "ELEV");
+            assert_eq!(menu.items[0].caption, "Construction: Elevator");
+            assert_eq!(
+                menu.items[0].components,
+                vec![
+                    lc_engine::ObjectMenuComponent {
+                        definition_id: "WOOD".to_string(),
+                        count: 4,
+                    },
+                    lc_engine::ObjectMenuComponent {
+                        definition_id: "METL".to_string(),
+                        count: 2,
+                    },
+                ],
+                "the app-visible CXCN row must retain ELEV's C++ component order"
+            );
+        }
+        let mut rendered = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut rendered)
+            .expect("render Tutorial04 CXCN through the app");
+
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::A)
+                .expect("physical A creates ELEV construction");
+        }
+        advance_app_until(
+            &mut app,
+            "ELEV construction created and CNKT consumed",
+            30,
+            |app| {
+                let elevator_exists = app.engine.snapshot().objects.iter().any(|object| {
+                    object.definition_id == "ELEV" && object.status.is_active()
+                });
+                let conkit_removed = app
+                    .engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| !object.contents.contains(&conkit));
+                elevator_exists && conkit_removed
+            },
+        );
+        let elevator = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "ELEV" && object.status.is_active())
+            .expect("physical A creates active ELEV");
+        assert_eq!(elevator.owner, app.local_owner);
+        assert!((490..=510).contains(&elevator.position.x));
+        assert!(
+            (1..100_000).contains(&elevator.construction),
+            "CNKT must create an incomplete construction site"
+        );
+        assert!(
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| !object.contents.contains(&conkit)),
+            "CreateConstructionSite consumes the real CNKT"
+        );
+        assert!(
+            app.engine.cursor_object_menu(app.local_owner).is_none(),
+            "removing CNKT closes the menu it owns"
         );
         reset_cached_app_paths();
     }
