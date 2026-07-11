@@ -182,6 +182,11 @@ pub struct Scenario {
     description: Option<String>,
     ticks: Option<u32>,
     ground_height_hint: Option<i32>,
+    /// The ordered C4Game::InitMaterialTexture material chain retained from
+    /// legacy loading. Scenario-local definitions precede admitted external
+    /// groups and therefore win duplicate names (C4Game.cpp:901-977,
+    /// C4Material.cpp:263-299).
+    material_library: Option<lc_resources::MaterialLibrary>,
     definitions: Vec<ScenarioDefinition>,
     /// `[Game] ValueOverloads`: C4Game::InitValueOverloads applies these to
     /// the loaded definitions immediately before Objects.Load
@@ -511,6 +516,10 @@ impl Scenario {
 
         let script = load_legacy_scenario_script(group, languages)?;
         let mut classifier = build_map_pixel_classifier(group, resolver);
+        let material_library = classifier
+            .as_ref()
+            .and_then(MapPixelClassifier::material_library)
+            .cloned();
         let landscape = load_legacy_landscape(group, &manifest, classifier.as_mut())?;
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
@@ -529,6 +538,7 @@ impl Scenario {
             description: manifest.description,
             ticks: None,
             ground_height_hint: manifest.ground_height_hint,
+            material_library,
             definitions: collected,
             value_overloads: id_list_pairs(&manifest.core.game.realism.value_overloads),
             initial_spawns,
@@ -660,6 +670,9 @@ impl Scenario {
         // planet System.c4g Names.txt) stays in place.
         if self.standard_names.is_some() {
             engine.set_standard_names(self.standard_names.clone());
+        }
+        if let Some(material_library) = &self.material_library {
+            engine.configure_materials_from_library(material_library);
         }
         if let Some(landscape) = &self.landscape {
             engine.set_landscape(landscape.clone());
@@ -1317,6 +1330,7 @@ impl Scenario {
             description: manifest.description,
             ticks: manifest.ticks,
             ground_height_hint,
+            material_library: None,
             definitions,
             value_overloads: Vec::new(),
             initial_spawns: spawns,
@@ -3011,11 +3025,15 @@ fn basic_map_params(landscape: &LegacyLandscape) -> crate::map_creator::BasicMap
 /// and unknown materials are sky (MNone, density 0).
 pub(crate) struct MapPixelClassifier {
     state: RuntimeTexMapState,
+    material_library: Option<lc_resources::MaterialLibrary>,
 }
 
 impl MapPixelClassifier {
     pub(crate) fn from_runtime_state(state: RuntimeTexMapState) -> Self {
-        Self { state }
+        Self {
+            state,
+            material_library: None,
+        }
     }
 
     pub(crate) fn into_runtime_state(self) -> RuntimeTexMapState {
@@ -3042,6 +3060,7 @@ impl MapPixelClassifier {
                 texture_inventory: Vec::new(),
                 default_material_entries: Vec::new(),
             },
+            material_library: None,
         }
     }
 
@@ -3072,7 +3091,12 @@ impl MapPixelClassifier {
                 texture_inventory,
                 default_material_entries: Vec::new(),
             },
+            material_library: Some(library),
         }
+    }
+
+    fn material_library(&self) -> Option<&lc_resources::MaterialLibrary> {
+        self.material_library.as_ref()
     }
 
     fn runtime_material(material: &lc_resources::MaterialDefinition) -> RuntimeTexMapMaterial {
@@ -3326,6 +3350,7 @@ pub(crate) fn build_map_pixel_classifier(
             texture_inventory,
             default_material_entries: Vec::new(),
         },
+        material_library,
     };
 
     // Dynamic texmap entries (C4MaterialMap::CrossMapMaterials,
@@ -7365,6 +7390,7 @@ global func Step(state, frame, random)
             description: None,
             ticks: None,
             ground_height_hint: Some(220),
+            material_library: None,
             definitions: vec![ScenarioDefinition {
                 id: "Mover".into(),
                 name: Some("Mover".into()),
@@ -7470,6 +7496,7 @@ global func Step(state, frame, random)
             description: None,
             ticks: None,
             ground_height_hint: Some(220),
+            material_library: None,
             definitions: vec![ScenarioDefinition {
                 id: "Mover".into(),
                 name: Some("Mover".into()),
@@ -12068,6 +12095,108 @@ public func ActualizePhase(pClonk)
             "global Water.c4m supplies slot 3 density through OverloadMaterials"
         );
         assert!(landscape.is_ift_at(5, 5));
+    }
+
+    #[test]
+    fn scenario_local_material_reaction_overrides_installed_material_like_cpp() {
+        // Tutorial10's local FlyAshes.c4m adds a Convert/SemiSolid→Sky
+        // reaction so volcanic ash vanishes on DuroLava instead of sinking
+        // beneath it and isolating the pump's source endpoint. C++ loads the
+        // scenario material group before the installed group; the first
+        // definition of a duplicate material name wins (C4Game.cpp:901-977,
+        // C4Material.cpp:263-299).
+        let dir = tempdir().expect("tempdir");
+
+        let definition = dir.path().join("Defs.c4d/Good.c4d");
+        std::fs::create_dir_all(&definition).expect("definition dir");
+        std::fs::write(
+            definition.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write definition");
+
+        let scenario_dir = dir.path().join("Tutorial10.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Tutorial10 material override\n\n\
+             [Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapZoom=10\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[24, 59], &[24, 59]]),
+        )
+        .expect("write landscape");
+
+        let local_materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&local_materials).expect("local materials");
+        std::fs::write(
+            local_materials.join("TexMap.txt"),
+            "OverloadMaterials\nOverloadTextures\n24=DuroLava-Liquid\n59=FlyAshes-Smooth\n",
+        )
+        .expect("write local texmap");
+        std::fs::write(
+            local_materials.join("FlyAshes.c4m"),
+            "[Material]\nName=FlyAshes\nDensity=50\n\n\
+             [Reaction]\nType=Convert\nTargetSpec=SemiSolid\nExecMask=-1\nConvertMat=Sky\n",
+        )
+        .expect("write local FlyAshes override");
+
+        let installed_materials = dir.path().join("Material.c4g");
+        std::fs::create_dir_all(&installed_materials).expect("installed materials");
+        std::fs::write(
+            installed_materials.join("TexMap.txt"),
+            "# installed table\n",
+        )
+        .expect("write installed texmap");
+        std::fs::write(
+            installed_materials.join("FlyAshes.c4m"),
+            "[Material]\nName=FlyAshes\nDensity=50\n",
+        )
+        .expect("write installed FlyAshes");
+        std::fs::write(
+            installed_materials.join("DuroLava.c4m"),
+            "[Material]\nName=DuroLava\nDensity=25\n",
+        )
+        .expect("write installed DuroLava");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let installed_group = Group::open(&installed_materials).expect("installed group opens");
+        let installed_library = lc_resources::MaterialLibrary::from_group(&installed_group)
+            .expect("installed materials load");
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&installed_library);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let fly_ashes = engine
+            .materials()
+            .id_of("FlyAshes")
+            .expect("FlyAshes is loaded");
+        let duro_lava = engine
+            .materials()
+            .id_of("DuroLava")
+            .expect("DuroLava is loaded from the admitted installed group");
+        let reaction = engine
+            .materials()
+            .reaction(Some(fly_ashes), Some(duro_lava));
+        assert!(
+            reaction.user_defined,
+            "the local reaction overrides defaults"
+        );
+        assert_eq!(
+            reaction.kind,
+            crate::material::MaterialReactionKind::Convert {
+                target: None,
+                depth: None,
+            },
+            "Tutorial10 FlyAshes converts to Sky on semi-solid DuroLava"
+        );
     }
 
     #[test]
