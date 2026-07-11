@@ -13998,6 +13998,44 @@ mod tests {
             .any(|message| message.lines.iter().any(|line| line.contains(needle)))
     }
 
+    fn app_object_with_definition(app: &GameApp, definition: &str) -> Option<ObjectId> {
+        app.engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == definition)
+            .map(|object| object.id)
+    }
+
+    fn app_clonk_carries(app: &GameApp, clonk: ObjectId, definition: &str) -> bool {
+        app.engine.object_snapshot(clonk).is_some_and(|clonk| {
+            clonk.contents.iter().any(|item| {
+                app.engine
+                    .object_snapshot(*item)
+                    .is_some_and(|item| item.definition_id == definition)
+            })
+        })
+    }
+
+    fn app_cursor_inventory_contains(
+        app: &GameApp,
+        clonk: ObjectId,
+        definition: &str,
+    ) -> bool {
+        let mut overlays =
+            collect_player_overlays(&app.snapshot, Some(clonk), None, &app.bindings);
+        populate_crew_inventories(&app.engine, &app.snapshot, &mut overlays);
+        overlays
+            .iter()
+            .flat_map(|player| &player.crew)
+            .find(|crew| crew.object_id == clonk)
+            .is_some_and(|crew| {
+                crew.inventory
+                    .iter()
+                    .any(|item| item.definition_id == definition && item.picture.is_some())
+            })
+    }
+
     struct RealTutorialApp {
         app: GameApp,
         _env_guard: EnvGuard,
@@ -16717,6 +16755,366 @@ mod tests {
             keyboard.release(key).expect("unbound arrow release");
         }
         assert_eq!(keyboard.player_control(), before_arrows);
+    }
+
+    #[test]
+    fn app_virtual_keyboard_plays_tutorial01_through_real_gold_dig() {
+        // Drive Tutorial01 through the same physical keyboard-one boundary as
+        // C++: A/S/D/Z/X/C are Throw/Up/Dig/Left/Down/Right
+        // (C4Config.cpp:624-635). Script50..206 requires FLAG delivery through
+        // HUT2's real context menu, then a buffered DigSingle followed by live
+        // DownLeft/Left steering to GOLD (Tutorial01/Script.c:61-168;
+        // C4Player.cpp:1213-1229,1490-1554; C4Object.cpp:3645-3651,3743-3754).
+        let mut app = real_tutorial_app(1, "Tutorial 1 app virtual player");
+        let clonk = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("Tutorial01 selected CLNK");
+        let hut = app_object_with_definition(&app, "HUT2").expect("Tutorial01 HUT2");
+
+        advance_app_until(&mut app, "Tutorial01 CLNK lands in the valley", 180, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial01 creates FLAG and points left",
+            500,
+            |app| {
+                app_object_with_definition(app, "FLAG").is_some()
+                    && app_tutorial_message_contains(app, "hill to your left")
+            },
+        );
+        let flag = app_object_with_definition(&app, "FLAG").expect("Tutorial01 FLAG");
+
+        // Held Z supplies horizontal jump momentum. Each physical S tap is
+        // separated by twelve app ticks, beyond C4DoubleClick's ten-tick
+        // window, and its release must preserve the still-held Z bit.
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("physical Z toward FLAG");
+        }
+        for _ in 0..30 {
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("CLNK survives left-hill route");
+            if app_clonk_carries(&app, clonk, "FLAG") || clonk_now.position.x <= 25 {
+                break;
+            }
+            if clonk_now.action.name == "Walk" {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .tap(VirtualKeyCode::S)
+                    .expect("physical S jumps toward FLAG");
+                assert_ne!(
+                    keyboard.player_control().pressed_coms & (1 << lc_engine::COM_LEFT),
+                    0,
+                    "releasing S must preserve held Z/Left"
+                );
+            }
+            for _ in 0..12 {
+                app.update().expect("advance left-hill jump");
+            }
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z at FLAG");
+        }
+        if !app_clonk_carries(&app, clonk, "FLAG") {
+            advance_app_until(&mut app, "CLNK lands beside FLAG", 80, |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Walk" && object.position.x <= 40
+                })
+            });
+            {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .press(VirtualKeyCode::C)
+                    .expect("physical C collects FLAG");
+            }
+            advance_app_until(&mut app, "CLNK naturally collects FLAG", 40, |app| {
+                app_clonk_carries(app, clonk, "FLAG")
+            });
+            AppVirtualKeyboard::new(&mut app)
+                .release(VirtualKeyCode::C)
+                .expect("release physical C after FLAG pickup");
+        }
+        assert_eq!(
+            app.engine
+                .object_snapshot(flag)
+                .expect("collected FLAG")
+                .container,
+            Some(clonk)
+        );
+        assert!(
+            app_cursor_inventory_contains(&app, clonk, "FLAG"),
+            "the collected FLAG must reach the rendered cursor inventory"
+        );
+        let mut rendered = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut rendered)
+            .expect("render Tutorial01 with FLAG inventory");
+
+        advance_app_until(
+            &mut app,
+            "Tutorial01 points toward the cabin",
+            500,
+            |app| app_tutorial_message_contains(app, "cabin on the hill to your right"),
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::C)
+                .expect("physical C toward HUT2");
+        }
+        for _ in 0..90 {
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("CLNK survives cabin route");
+            if clonk_now.position.x >= 558 {
+                break;
+            }
+            if clonk_now.action.name == "Walk" {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .tap(VirtualKeyCode::S)
+                    .expect("physical S jumps toward HUT2");
+                assert_ne!(
+                    keyboard.player_control().pressed_coms & (1 << lc_engine::COM_RIGHT),
+                    0,
+                    "releasing S must preserve held C/Right"
+                );
+            }
+            for _ in 0..12 {
+                app.update().expect("advance cabin jump");
+            }
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C beside HUT2");
+        advance_app_until(&mut app, "CLNK lands beside HUT2", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("physical Z aligns with HUT2 entrance");
+        advance_app_until(&mut app, "CLNK aligns with HUT2 entrance", 20, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.position.x <= 570)
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z at HUT2 entrance");
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S enters HUT2");
+        }
+        advance_app_until(&mut app, "FLAG-carrying CLNK enters HUT2", 40, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+
+        // C++ inserts Put first while the contained CLNK carries FLAG
+        // (C4ObjectMenu.cpp:335-359). Physical A becomes MenuEnter rather than
+        // a world Throw while this cursor menu is active.
+        advance_app_until(&mut app, "HUT2 context Put menu", 20, |app| {
+            app.engine.cursor_object_menu(app.local_owner).is_some_and(
+                |(_, menu)| {
+                    menu.selection == 0
+                        && menu.items.first().is_some_and(|item| item.caption == "Put")
+                },
+            )
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A puts FLAG into HUT2");
+        advance_app_until(&mut app, "FLAG enters HUT2", 80, |app| {
+            app.engine
+                .object_snapshot(flag)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+        advance_app_until(&mut app, "FLAG makes HUT2 the player base", 80, |app| {
+            app.engine
+                .object_snapshot(hut)
+                .is_some_and(|object| object.base == app.local_owner)
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial01 Exit prompt and context row",
+            450,
+            |app| {
+                app_tutorial_message_contains(app, "select 'Exit'")
+                    && app.engine.cursor_object_menu(app.local_owner).is_some_and(
+                        |(_, menu)| menu.items.iter().any(|item| item.caption == "Exit"),
+                    )
+            },
+        );
+
+        // Script148 highlights physical X/Down plus A. Move down through the
+        // real context rows, including any Buy/Sell rows enabled by the base,
+        // rather than selecting Exit by index or mutating menu state.
+        let context_items = app
+            .engine
+            .cursor_object_menu(app.local_owner)
+            .expect("HUT2 context with Exit")
+            .1
+            .items
+            .len();
+        for _ in 0..=context_items {
+            let exit_selected = app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .and_then(|(_, menu)| usize::try_from(menu.selection).ok().map(|index| (menu, index)))
+                .and_then(|(menu, index)| menu.items.get(index))
+                .is_some_and(|item| item.caption == "Exit");
+            if exit_selected {
+                break;
+            }
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::X)
+                .expect("physical X navigates toward Exit");
+        }
+        assert!(
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .and_then(|(_, menu)| usize::try_from(menu.selection).ok().map(|index| (menu, index)))
+                .and_then(|(menu, index)| menu.items.get(index))
+                .is_some_and(|item| item.caption == "Exit"),
+            "physical X must select the real Exit row"
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A activates Exit");
+        advance_app_until(&mut app, "CLNK exits HUT2", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container.is_none())
+        });
+
+        advance_app_until(
+            &mut app,
+            "Tutorial01 creates GOLD and sends CLNK to the valley",
+            120,
+            |app| {
+                app_object_with_definition(app, "GOLD").is_some()
+                    && app_tutorial_message_contains(app, "back into the valley")
+            },
+        );
+        let gold = app_object_with_definition(&app, "GOLD").expect("Tutorial01 GOLD");
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("physical Z returns to the lesson valley");
+        advance_app_until(&mut app, "CLNK reaches the digging lesson area", 260, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                (150..250).contains(&object.position.x)
+                    && (250..350).contains(&object.position.y)
+            })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z in lesson valley");
+        advance_app_until(&mut app, "Tutorial01 enables digging", 160, |app| {
+            app_tutorial_message_contains(app, "start a digging process")
+                && app
+                    .engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.temporary_physical.is_none())
+        });
+
+        // D is buffered until C4DoubleClick (10) expires. Do not press X/Z
+        // early: C4Player::InCom would flush the pending DigSingle immediately
+        // on a different press (C4Player.cpp:1522-1536).
+        let dig_press_frame = app.engine.frame();
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D starts buffered DigSingle");
+        advance_app_until(&mut app, "CLNK starts real Dig action", 30, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Dig")
+        });
+        assert!(
+            app.engine.frame().saturating_sub(dig_press_frame) > 10,
+            "physical D must wait through C4DoubleClick before DigSingle"
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::X)
+                .expect("physical X steers Dig down");
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("physical Z adds leftward Dig steering");
+            let control = keyboard.player_control();
+            assert_ne!(control.pressed_coms & (1 << lc_engine::COM_DOWN), 0);
+            assert_ne!(control.pressed_coms & (1 << lc_engine::COM_LEFT), 0);
+            assert_eq!(
+                keyboard
+                    .engine()
+                    .object_snapshot(clonk)
+                    .expect("CLNK after X+Z")
+                    .command_direction,
+                CommandDirection::DownLeft
+            );
+        }
+        advance_app_until(&mut app, "diagonal Dig reaches GOLD depth", 140, |app| {
+            app_clonk_carries(app, clonk, "GOLD")
+                || app
+                    .engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.y >= 320)
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release physical X while Z remains held");
+            let control = keyboard.player_control();
+            assert_eq!(control.pressed_coms & (1 << lc_engine::COM_DOWN), 0);
+            assert_ne!(control.pressed_coms & (1 << lc_engine::COM_LEFT), 0);
+            let clonk_now = keyboard
+                .engine()
+                .object_snapshot(clonk)
+                .expect("CLNK after partial Dig release");
+            assert_eq!(clonk_now.action.name, "Dig");
+            assert_eq!(clonk_now.command_direction, CommandDirection::Left);
+        }
+        advance_app_until(&mut app, "leftward Dig naturally collects GOLD", 180, |app| {
+            app_clonk_carries(app, clonk, "GOLD")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z after GOLD pickup");
+        assert_eq!(
+            app.engine
+                .object_snapshot(gold)
+                .expect("collected GOLD")
+                .container,
+            Some(clonk)
+        );
+        advance_app_until(&mut app, "CLNK stops digging after GOLD pickup", 30, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        assert!(
+            app_cursor_inventory_contains(&app, clonk, "GOLD"),
+            "the collected GOLD must reach the rendered cursor inventory"
+        );
+        app.render(&mut rendered)
+            .expect("render Tutorial01 with GOLD inventory");
     }
 
     #[test]
