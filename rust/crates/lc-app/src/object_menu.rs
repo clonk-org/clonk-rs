@@ -284,6 +284,36 @@ pub(crate) fn definition_menu_picture(image: DefinitionPictureImage) -> ImageDat
     ImageData::new(width, height, pixels)
 }
 
+fn command_image_for_menu_symbol(
+    symbol: ObjectMenuSymbol,
+    picture: Option<ImageData>,
+    gfx: &IngameMenuGraphics,
+) -> CommandImage {
+    match symbol {
+        ObjectMenuSymbol::Definition => CommandImage::Picture(picture),
+        ObjectMenuSymbol::Put => CommandImage::Composite {
+            picture,
+            icon: CommandOverlayIcon::Hand(0),
+        },
+        ObjectMenuSymbol::Buy { owner } => CommandImage::BuyMenu {
+            owner_color: gfx
+                .owner_colors
+                .get(&owner)
+                .copied()
+                .unwrap_or_else(|| default_owner_color(owner)),
+        },
+        ObjectMenuSymbol::Sell { owner } => CommandImage::SellMenu {
+            owner_color: gfx
+                .owner_colors
+                .get(&owner)
+                .copied()
+                .unwrap_or_else(|| default_owner_color(owner)),
+        },
+        ObjectMenuSymbol::Info => CommandImage::InfoMenu { picture },
+        ObjectMenuSymbol::Exit => CommandImage::Exit,
+    }
+}
+
 pub(crate) fn engine_script_menu_layout(
     area: Rect,
     font: &HudFont<'_>,
@@ -536,29 +566,7 @@ fn render_engine_normal_menu(
             cell
         };
         let picture = item_icons.get(index).cloned().flatten();
-        let image = match item.symbol {
-            ObjectMenuSymbol::Definition => CommandImage::Picture(picture),
-            ObjectMenuSymbol::Put => CommandImage::Composite {
-                picture,
-                icon: CommandOverlayIcon::Hand(0),
-            },
-            ObjectMenuSymbol::Buy { owner } => CommandImage::BuyMenu {
-                owner_color: gfx
-                    .owner_colors
-                    .get(&owner)
-                    .copied()
-                    .unwrap_or_else(|| default_owner_color(owner)),
-            },
-            ObjectMenuSymbol::Sell { owner } => CommandImage::SellMenu {
-                owner_color: gfx
-                    .owner_colors
-                    .get(&owner)
-                    .copied()
-                    .unwrap_or_else(|| default_owner_color(owner)),
-            },
-            ObjectMenuSymbol::Info => CommandImage::InfoMenu { picture },
-            ObjectMenuSymbol::Exit => CommandImage::Exit,
-        };
+        let image = command_image_for_menu_symbol(item.symbol, picture, gfx);
         draw_command_image_cell(surface, &gfx.hud, symbol_cell, &image);
         if menu.style == 1 {
             font.draw(
