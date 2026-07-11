@@ -21580,7 +21580,12 @@ impl Engine {
             }
         }
         if movement_outcome.no_attach {
-            self.apply_no_attach_action(idx, action_library);
+            self.apply_no_attach_action(
+                idx,
+                definition_id,
+                action_library,
+                solid_mask_indices,
+            )?;
         }
         if movement_outcome.any_contact {
             self.invoke_movement_hit_callbacks(
@@ -23821,9 +23826,15 @@ impl Engine {
         Ok(true)
     }
 
-    fn apply_no_attach_action(&mut self, idx: usize, library: &ActionLibrary) {
+    fn apply_no_attach_action(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        library: &ActionLibrary,
+        solid_mask_indices: &[usize],
+    ) -> Result<(), EngineError> {
         if idx >= self.objects.len() {
-            return;
+            return Ok(());
         }
 
         let previous = self.objects[idx].state.action.clone();
@@ -23838,7 +23849,29 @@ impl Engine {
                 object.refresh_velocity_from_fixed();
             }
             object.state.mobile = true;
-            return;
+            return Ok(());
+        }
+
+        let procedure = library.procedure_for_action(&previous.name);
+        let command_direction = self.objects[idx].state.command_direction;
+        let direction = self.objects[idx].state.direction;
+        let scaling_upward = matches!(
+            command_direction,
+            CommandDirection::Up | CommandDirection::UpLeft | CommandDirection::UpRight
+        ) || (command_direction == CommandDirection::Left && direction == Direction::Left)
+            || (command_direction == CommandDirection::Right && direction == Direction::Right);
+        if matches!(procedure, ActionProcedure::Scale) && scaling_upward {
+            let corner_scaled = self.object_action_corner_scale(
+                idx,
+                definition_id,
+                ActionProcedure::Scale,
+                solid_mask_indices,
+            )?;
+            if corner_scaled {
+                // Scaling upward tries the corner transition before the generic
+                // Jump fallback (C4Object.cpp:4282-4289).
+                return Ok(());
+            }
         }
 
         // ObjectActionJump is `if (!SetActionByName("Jump")) return false;`
@@ -23846,7 +23879,7 @@ impl Engine {
         // current action untouched (the GoldRush coach stays in Turn even
         // while its attach probe finds no ground at the map edge).
         if !library.contains("Jump") {
-            return;
+            return Ok(());
         }
         let next_action = "Jump";
 
@@ -23886,6 +23919,7 @@ impl Engine {
                 object.record_action_event(previous, ActionTransitionKind::Forced);
             }
         }
+        Ok(())
     }
 
     fn apply_attach_procedure(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
@@ -60224,6 +60258,72 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             CommandDirection::Down,
             "failed corner probes must run Fish ContactTop before the free range-6 probe"
         );
+    }
+
+    #[test]
+    fn upward_scaler_corner_scales_when_attachment_is_lost() {
+        // C++ NoAttachAction tries ObjectActionCornerScale before its Jump
+        // fallback whenever DFA_SCALE is moving upward
+        // (src/C4Object.cpp:4282-4289). A successful corner probe changes to
+        // Walk and moves over the rim (src/C4ObjectCom.cpp:191-217).
+        let mut scaler = Definition::from_script("SCLR", "Scaler", "#strict\n")
+            .expect("script compiles");
+        scaler.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_LEFT)]);
+        scaler.set_contact_density(50);
+        scaler.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Scale".to_string(),
+                    ActionSpec::default().with_procedure("SCALE"),
+                ),
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+            ]),
+        );
+
+        let mut landscape = vehicle_grid_landscape(24, 24);
+        landscape.set_world_height(24);
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(landscape);
+        engine.register_definition(scaler).expect("scaler registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("SCLR")
+                    .with_position(Vector2::new(10, 10))
+                    .with_action(ActionState::new("Scale"))
+                    .with_direction(Direction::Left)
+                    .with_command_direction(CommandDirection::Up)
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("scaler spawns");
+        let idx = engine.find_object_index(id).expect("scaler exists");
+        let actions = engine
+            .definitions
+            .get("SCLR")
+            .expect("scaler definition exists")
+            .action_library()
+            .clone();
+        let definition_id = engine.objects[idx].definition_id.clone();
+        assert_eq!(
+            actions.procedure_for_action("Scale"),
+            ActionProcedure::Scale
+        );
+        engine
+            .apply_no_attach_action(idx, &definition_id, &actions, &[])
+            .expect("no-attach transition succeeds");
+
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.action.name, "Walk");
+        assert_eq!(object.state.position, Vector2::new(3, 3));
+        assert_eq!(object.state.velocity, Vector2::ZERO);
     }
 
     #[test]
