@@ -22565,6 +22565,10 @@ impl Engine {
                 &required_components,
             )
         {
+            // Target::Build returned false because the next construction
+            // fraction has no material: DFA_BUILD calls ObjectComStop before
+            // returning (C4Object.cpp:5033-5050).
+            let _ = self.object_action_stand(idx, definition_id)?;
             return Ok(false);
         }
 
@@ -40230,14 +40234,14 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut builder_definition = Definition::from_script("Builder", "Builder", script)?;
         let mut builder_actions = HashMap::new();
         builder_actions.insert(
-            "Idle".to_string(),
+            "Walk".to_string(),
             ActionSpec::default().with_procedure("walk"),
         );
         builder_actions.insert(
             "Build".to_string(),
             ActionSpec::default().with_procedure("build"),
         );
-        builder_definition.configure_actions(Some("Idle".to_string()), builder_actions);
+        builder_definition.configure_actions(Some("Walk".to_string()), builder_actions);
         builder_definition.set_category(DEFAULT_CATEGORY);
         builder_definition.set_mass(50);
 
@@ -40265,7 +40269,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let mut build_state = ActionState::new("Build");
         build_state.target = Some(structure_id);
-        engine
+        let builder_id = engine
             .spawn_object(
                 SpawnConfig::new("Builder")
                     .with_action(build_state)
@@ -40286,6 +40290,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(
             after, 0,
             "construction should not progress without components"
+        );
+        assert_eq!(
+            snapshot
+                .object(builder_id)
+                .and_then(|builder| builder.action_procedure.as_deref()),
+            Some("walk"),
+            "a material refusal must stop DFA_BUILD like ObjectComStop"
         );
         Ok(())
     }
