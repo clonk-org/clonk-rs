@@ -353,17 +353,17 @@ global func Step(state, frame, random) { return nil; }
         dispatcher.handle_event(&mut engine, 1, press)?;
         assert_eq!(
             engine.crew_cursor(1),
-            Some(first),
-            "no cursor: the scan starts at Crew.First (C4Player.cpp:1268-1270)"
+            Some(second),
+            "no cursor: the newest-first crew list starts at Crew.First (C4Player.cpp:1268-1270)"
         );
 
         dispatcher.handle_event(&mut engine, 1, press)?;
-        assert_eq!(engine.crew_cursor(1), Some(second));
+        assert_eq!(engine.crew_cursor(1), Some(first));
 
         dispatcher.handle_event(&mut engine, 1, press)?;
         assert_eq!(
             engine.crew_cursor(1),
-            Some(first),
+            Some(second),
             "cursor wraps to first crew"
         );
         Ok(())
@@ -411,7 +411,7 @@ global func Step(state, frame, random) { return nil; }
             vec![first, second],
             "double toggle selects all crew"
         );
-        assert_eq!(engine.crew_cursor(1), Some(first));
+        assert_eq!(engine.crew_cursor(1), Some(second));
         Ok(())
     }
 
@@ -434,7 +434,7 @@ global func Step(state, frame, random) { return nil; }
         let mut selected = engine.selected_crew(1);
         selected.sort_by_key(|id| id.as_u64());
         assert_eq!(selected, vec![first, second]);
-        assert_eq!(engine.crew_cursor(1), Some(first));
+        assert_eq!(engine.crew_cursor(1), Some(second));
         Ok(())
     }
 
