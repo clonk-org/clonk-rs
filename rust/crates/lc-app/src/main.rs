@@ -16723,6 +16723,172 @@ mod tests {
         reset_cached_app_paths();
     }
 
+    #[test]
+    fn app_virtual_keyboard_enters_tutorial03_base_and_exposes_context_menu() {
+        // Tutorial03 teaches the permanent building-menu sequence after the
+        // Clonk enters HUT3: C4MN_Context=14 exposes Contents/Buy/Sell/Info/Exit
+        // before the player selects Buy (Tutorial03.c4s/Script.c:106-145;
+        // C4Object.cpp:1919-1980,3034-3048; C4ObjectMenu.cpp:361-427). Drive
+        // C then S through GameApp's physical keyboard boundary so this also
+        // covers the real key map and ObjectComUp entrance path.
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover repository install");
+        let audio_options = AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        };
+        let mut app = GameApp::new(
+            320,
+            200,
+            audio_options,
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Tutorial 3 app virtual player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+
+        let scenario = resolve_next_mission_scenario(
+            &app.scenario_catalog,
+            "Tutorial.c4f/Tutorial03.c4s",
+        )
+        .expect("Tutorial03 is present in the real scenario catalog");
+        let scenario_path = scenario.path.clone().expect("Tutorial03 path");
+        let scenario_data = Scenario::load_from_path_with_languages(
+            &scenario_path,
+            &InstallDefinitionResolver::new(Some(Arc::new(paths.clone()))),
+            &startup_language_sequence(Some(&paths)),
+        )
+        .expect("load real Tutorial03");
+        app.activate_loaded_scenario(scenario, scenario_data)
+            .expect("activate real Tutorial03");
+
+        let clonk = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("Tutorial03 selected CLNK");
+        let hut = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "HUT3")
+            .expect("Tutorial03 HUT3")
+            .id;
+        for _ in 0..360 {
+            let ready = app.engine.object_snapshot(hut).is_some_and(|object| {
+                object.base == app.local_owner
+            }) && app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.container.is_none() && object.action.name == "Walk"
+            });
+            if ready {
+                break;
+            }
+            app.update().expect("advance Tutorial03 startup");
+        }
+        assert!(
+            app.engine.object_snapshot(hut).is_some_and(|object| {
+                object.base == app.local_owner
+            }),
+            "Tutorial03 ready HUT3 must become the local player's base"
+        );
+        assert!(
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.container.is_none() && object.action.name == "Walk"
+            }),
+            "Tutorial03 CLNK must exit the starting base through app frames"
+        );
+
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::C)
+                .expect("physical C walks right");
+        }
+        for _ in 0..40 {
+            let at_entrance = app
+                .engine
+                .object_snapshot(hut)
+                .zip(app.engine.object_snapshot(clonk))
+                .is_some_and(|(hut, clonk)| clonk.position.x >= hut.position.x + 2);
+            if at_entrance {
+                break;
+            }
+            app.update().expect("walk to HUT3 entrance");
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::C)
+                .expect("release physical C");
+            keyboard
+                .press(VirtualKeyCode::S)
+                .expect("physical S enters HUT3");
+            keyboard
+                .release(VirtualKeyCode::S)
+                .expect("release physical S");
+        }
+        for _ in 0..40 {
+            if app
+                .engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container == Some(hut))
+            {
+                break;
+            }
+            app.update().expect("advance HUT3 entrance command");
+        }
+        assert_eq!(
+            app.engine
+                .object_snapshot(clonk)
+                .expect("CLNK after physical S")
+                .container,
+            Some(hut),
+            "physical C/S route must enter HUT3 through GameApp"
+        );
+
+        for _ in 0..20 {
+            if app.engine.cursor_object_menu(app.local_owner).is_some() {
+                break;
+            }
+            app.update().expect("wait for HUT3 auto-context menu");
+        }
+        let (_, menu) = app
+            .engine
+            .cursor_object_menu(app.local_owner)
+            .expect("HUT3 exposes its app-visible auto-context menu");
+        let context_identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
+            .expect("integer menu identification deserializes");
+        assert_eq!(menu.identification, context_identification);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Contents", "Buy", "Sell", "Info", "Exit"]
+        );
+        let mut rendered = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut rendered)
+            .expect("render Tutorial03 context menu through the app");
+        reset_cached_app_paths();
+    }
+
     fn two_item_script_menu(cursor: ObjectId) -> lc_engine::ObjectMenuState {
         lc_engine::ObjectMenuState {
             caption: "Choose".to_string(),
