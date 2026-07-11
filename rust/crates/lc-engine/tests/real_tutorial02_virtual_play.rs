@@ -3,7 +3,7 @@ mod support;
 
 use std::error::Error;
 
-use lc_engine::{Engine, ObjectId, COM_DOWN, COM_LEFT, COM_THROW, COM_UP};
+use lc_engine::{Engine, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_THROW, COM_UP};
 use support::real_scenario::{join_local_player, load_tutorial};
 use support::virtual_player::VirtualPlayer;
 
@@ -266,5 +266,42 @@ fn tutorial02_virtual_player_flies_to_the_far_island_and_collects_loam(
             );
         }
     }
+
+    // Script40..Script42 advances only after FindObject sees the Clonk's
+    // center in (460,280,30,30), then GetMenu observes LMMS
+    // (Tutorial02/Script.c:129-149; C4Script.cpp:1418-1424).
+    player.tap(COM_DOWN)?;
+    player.wait_until(
+        "Tutorial02 tells the Clonk to move to the island's left edge",
+        120,
+        |engine| tutorial_message_contains(engine, "Now move to the very left edge"),
+    )?;
+    player.hold_until(
+        COM_LEFT,
+        "Clonk reaches Tutorial02's first bridge position",
+        120,
+        |engine| {
+            engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Walk" && (488..=490).contains(&object.position.x)
+            })
+        },
+    )?;
+    player.tap(COM_DOWN)?;
+    player.wait_until(
+        "Tutorial02 asks for a double Dig activation",
+        180,
+        |engine| tutorial_message_contains(engine, "Press the 'dig' key twice quickly"),
+    )?;
+    player.double_tap(COM_DIG)?;
+    player.wait_until("LOAM opens its real construction menu", 10, |engine| {
+        engine.cursor_object_menu(owner).is_some_and(|(_, menu)| {
+            menu.identification == lc_script::Value::C4Id("LMMS".into())
+        })
+    })?;
+    player.wait_until(
+        "Tutorial02 observes LMMS and asks for diagonal-left",
+        180,
+        |engine| tutorial_message_contains(engine, "Select the option 'diagonal left'"),
+    )?;
     Ok(())
 }

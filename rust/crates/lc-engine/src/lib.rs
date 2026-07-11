@@ -9507,6 +9507,7 @@ impl ScenarioScript {
     fn initialize(
         &mut self,
         snapshot: &SimulationSnapshot,
+        world: HostWorldContext,
         scoreboard: Rc<RefCell<ScoreboardState>>,
         materials: Rc<MaterialSet>,
         rng: LcgRng,
@@ -9537,6 +9538,7 @@ impl ScenarioScript {
             "Initialize",
             args,
             snapshot,
+            world,
             scoreboard,
             materials,
             rng,
@@ -9559,6 +9561,7 @@ impl ScenarioScript {
     fn step(
         &mut self,
         snapshot: &SimulationSnapshot,
+        world: HostWorldContext,
         scoreboard: Rc<RefCell<ScoreboardState>>,
         materials: Rc<MaterialSet>,
         rng: LcgRng,
@@ -9592,6 +9595,7 @@ impl ScenarioScript {
             "Step",
             args,
             snapshot,
+            world,
             scoreboard,
             materials,
             rng,
@@ -9626,6 +9630,7 @@ impl ScenarioScript {
         function: &str,
         args: Vec<Value>,
         snapshot: &SimulationSnapshot,
+        world: HostWorldContext,
         scoreboard: Rc<RefCell<ScoreboardState>>,
         materials: Rc<MaterialSet>,
         rng: LcgRng,
@@ -9656,7 +9661,7 @@ impl ScenarioScript {
         // C4Game::NewObj's ObjectEnumerationIndex only ever increments, so
         // the engine's persistent allocator is authoritative (the GoldRush
         // intro _TLK collided with a burned same-frame FXU1 id here).
-        let world = host_world_context_from_snapshot(snapshot)
+        let world = world
             .with_scoreboard(scoreboard)
             .with_materials(Some(materials))
             .with_definition_metadata(definition_metadata)
@@ -13821,6 +13826,7 @@ impl Engine {
             return Ok(Vec::new());
         };
         let snapshot = self.snapshot();
+        let world = self.host_world_context();
         // The `random` Initialize argument is the command-DSL fixture
         // convention — real content (c4_args) burns no synced draw
         // (C++ passes no such argument).
@@ -13844,6 +13850,7 @@ impl Engine {
         };
         let (batch, audio_state, new_rng, script_error) = script.initialize(
             &snapshot,
+            world,
             scoreboard,
             materials,
             rng_state,
@@ -13940,6 +13947,7 @@ impl Engine {
             return Ok(());
         }
         let snapshot = self.snapshot();
+        let world = self.host_world_context();
         let c4_args = self
             .scenario_script
             .as_ref()
@@ -13977,6 +13985,7 @@ impl Engine {
             function,
             args,
             &snapshot,
+            world,
             scoreboard,
             materials,
             rng_state,
@@ -16551,6 +16560,7 @@ impl Engine {
             .unwrap_or(false);
         if fixture_scenario_step {
             let snapshot = self.snapshot();
+            let world = self.host_world_context();
             let random = self.next_random_i32();
             let rng_state = self.rng.clone();
             let environment = self.environment;
@@ -16571,6 +16581,7 @@ impl Engine {
                     .expect("scenario script must be present");
                 script.step(
                     &snapshot,
+                    world,
                     scoreboard,
                     materials,
                     rng_state,
@@ -42724,6 +42735,108 @@ func Trigger() {
         assert_eq!(
             menu.symbol_id, "WIPF",
             "idMenuID changes identity but not the title-bar symbol"
+        );
+    }
+
+    #[test]
+    fn cross_object_get_menu_reads_the_targets_live_menu() {
+        // AB_CALL gives an engine function the target as cthr->Obj, so
+        // `other->GetMenu()` reads other->Menu, not the caller's menu
+        // (C4AulExec.cpp:1216-1305; C4Script.cpp:1418-1424).
+        let target_script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        "#;
+        let caller_script = r#"
+        func Probe(other) { return other->GetMenu(); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("TRGT", "Target", target_script)
+                    .expect("target compiles"),
+            )
+            .expect("target registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TRGT"))
+            .expect("target spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        engine.tick().expect("tick succeeds");
+
+        let target_index = engine.find_object_index(target).expect("target exists");
+        engine
+            .call_object_function(target_index, "OpenMenu", Vec::new())
+            .expect("menu opens");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Probe",
+                    vec![object_reference_value(target)],
+                )
+                .expect("cross-object GetMenu succeeds"),
+            Value::C4Id("WIPF".into())
+        );
+    }
+
+    #[test]
+    fn scenario_callback_get_menu_reads_the_live_crew_menu() {
+        // Game.Script's AB_CALL passes the live destination object to
+        // FnGetMenu; runtime-only C4Object::Menu must not disappear behind
+        // a serialized snapshot (C4AulExec.cpp:1228-1297;
+        // C4Script.cpp:1412-1417).
+        let clonk_script = r#"
+        func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+        "#;
+        let mut clonk = Definition::from_script("CLNK", "Clonk", clonk_script)
+            .expect("clonk compiles");
+        clonk.set_crew_member(true);
+        let mut engine = Engine::with_seed(7);
+        engine.register_definition(clonk).expect("clonk registers");
+        engine
+            .register_player(PlayerConfig::new(0, "Player"))
+            .expect("player registers");
+        let clonk = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(0)
+                    .with_crew_member(true),
+            )
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+        let clonk_index = engine.find_object_index(clonk).expect("clonk exists");
+        engine
+            .call_object_function(clonk_index, "OpenMenu", Vec::new())
+            .expect("menu opens");
+        engine
+            .install_scenario_script_with_convention(
+                "Scenario",
+                r#"
+                func Probe() {
+                    if (GetHiRank(0)->GetMenu() == WIPF) SetWealth(0, 77);
+                }
+                "#,
+                true,
+            )
+            .expect("scenario installs");
+
+        engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect("Probe succeeds");
+        assert_eq!(
+            engine
+                .players()
+                .find(|player| player.id() == 0)
+                .map(Player::wealth),
+            Some(77)
         );
     }
 
