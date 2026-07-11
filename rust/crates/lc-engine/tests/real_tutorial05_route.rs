@@ -1,43 +1,20 @@
-use std::env;
-use std::path::PathBuf;
+#[allow(dead_code)]
+mod support;
 
-use lc_engine::scenario::LegacyDefinitionResolver;
-use lc_engine::{Engine, JoinPlayerConfig, Scenario, ScenarioError, COM_CURSOR_RIGHT};
-use lc_resources::Group;
+use std::error::Error;
 
-struct ContentResolver {
-    root: PathBuf,
-}
-
-impl LegacyDefinitionResolver for ContentResolver {
-    fn resolve_definition_groups(
-        &self,
-        _scenario: &Group,
-        identifier: &str,
-    ) -> Result<Vec<Group>, ScenarioError> {
-        Group::open(self.root.join(identifier.replace('\\', "/")))
-            .map(|group| vec![group])
-            .map_err(ScenarioError::Resources)
-    }
-}
+use lc_engine::{
+    Direction, Engine, JoinPlayerConfig, ObjectId, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG,
+    COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
+};
+use support::real_scenario::load_tutorial;
+use support::virtual_player::VirtualPlayer;
 
 fn load_tutorial05() -> (Engine, i32) {
-    let content = env::var_os("LC_CONTENT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../content"));
-    let path = content.join("Tutorial.c4f/Tutorial05.c4s");
-    let resolver = ContentResolver {
-        root: content.clone(),
-    };
-    let scenario = Scenario::load_from_path_with(&path, &resolver)
-        .unwrap_or_else(|error| panic!("Tutorial05 loads: {error}"));
-    let mut engine = Engine::with_seed(0);
-    scenario
-        .apply(&mut engine)
-        .unwrap_or_else(|error| panic!("Tutorial05 applies: {error}"));
-    let joined = engine
+    let mut engine = load_tutorial(5, 0);
+    let owner = engine
         .join_player(JoinPlayerConfig {
-            name: "Tutorial 5 route".to_string(),
+            name: "Tutorial 5 virtual player".to_owned(),
             player_info_id: 0,
             score: 0,
             total_playing_time: 0,
@@ -50,8 +27,51 @@ fn load_tutorial05() -> (Engine, i32) {
             auto_context_menu: false,
             startup_player_count: 1,
         })
-        .unwrap_or_else(|error| panic!("Tutorial05 player joins: {error}"));
-    (engine, joined.number)
+        .expect("local Tutorial05 virtual player joins")
+        .number;
+    (engine, owner)
+}
+
+fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
+    engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .find(|object| object.definition_id == definition)
+        .map(|object| object.id)
+}
+
+fn object_with_definition_near_x(
+    engine: &Engine,
+    definition: &str,
+    expected_x: i32,
+) -> Option<ObjectId> {
+    engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| object.definition_id == definition)
+        .min_by_key(|object| (object.position.x - expected_x).abs())
+        .map(|object| object.id)
+}
+
+fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
+    engine.object_snapshot(clonk).is_some_and(|clonk| {
+        clonk.contents.iter().any(|item| {
+            engine
+                .object_snapshot(*item)
+                .is_some_and(|item| item.definition_id == definition)
+        })
+    })
+}
+
+fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
+    engine
+        .snapshot()
+        .hud
+        .messages
+        .iter()
+        .any(|message| message.lines.iter().any(|line| line.contains(needle)))
 }
 
 #[test]
@@ -132,4 +152,1242 @@ fn tutorial05_cpp_crew_order_starts_at_constructor_then_cycles_to_valley() {
         (200..300).contains(&valley.position.x) && valley.position.y >= 350,
         "one CursorRight must select the valley Clonk, got {valley:?}"
     );
+}
+
+#[test]
+fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), Box<dyn Error>> {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let (mut engine, owner) = load_tutorial05();
+    let constructor = engine
+        .crew_cursor(owner)
+        .expect("Tutorial05 starts on its constructor CLNK");
+    let elevator = object_with_definition(&engine, "ELEV").expect("Tutorial05 creates ELEV");
+    let hut = object_with_definition(&engine, "HUT3").expect("Tutorial05 creates HUT3");
+    let wood = object_with_definition_near_x(&engine, "WOOD", 280)
+        .expect("Tutorial05 creates the valley WOOD");
+    let metal = object_with_definition_near_x(&engine, "METL", 285)
+        .expect("Tutorial05 creates the valley METL");
+    let mut player = VirtualPlayer::new(&mut engine, owner);
+
+    player.wait_until(
+        "Tutorial05 teaches selection after ELEV stalls at eighty percent",
+        800,
+        |engine| {
+            tutorial_message_contains(engine, "'select right'")
+                && engine
+                    .object_snapshot(elevator)
+                    .is_some_and(|object| object.construction == 80_000)
+        },
+    )?;
+
+    // C4Player::CursorRight follows the stMain crew order frozen by the
+    // checkpoint above, selecting Tutorial05's valley_clnk without assigning
+    // cursor state (C4Player.cpp:1261-1275; Tutorial05/Script.c:34-40,67-79).
+    player.tap(COM_CURSOR_RIGHT)?;
+    let valley = player
+        .engine()
+        .crew_cursor(owner)
+        .expect("CursorRight selects the valley CLNK");
+    player.assert_milestone("CursorRight selects Tutorial05's valley CLNK", |engine| {
+        valley != constructor
+            && engine.object_snapshot(valley).is_some_and(|object| {
+                (200..300).contains(&object.position.x) && object.position.y >= 350
+            })
+    })?;
+
+    player.wait_until(
+        "Tutorial05 asks the valley CLNK to collect material",
+        240,
+        |engine| tutorial_message_contains(engine, "collect either the wood or the metal"),
+    )?;
+    player.hold_until(
+        COM_RIGHT,
+        "the valley CLNK naturally collects WOOD",
+        160,
+        |engine| clonk_carries(engine, valley, "WOOD"),
+    )?;
+    player.wait_until("Tutorial05 points back to the valley CATA", 240, |engine| {
+        tutorial_message_contains(engine, "stand in front of the catapult")
+    })?;
+    let valley_cata = object_with_definition_near_x(player.engine(), "CATA", 240)
+        .expect("Tutorial05 creates its valley CATA");
+    player.hold_until(
+        COM_LEFT,
+        "the WOOD-carrying valley CLNK returns to CATA",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(valley)
+                .zip(engine.object_snapshot(valley_cata))
+                .is_some_and(|(clonk, cata)| {
+                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 12
+                })
+        },
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("the valley CLNK grabs the real CATA", 80, |engine| {
+        engine.object_snapshot(valley).is_some_and(|object| {
+            object.action.name == "Push" && object.action.target == Some(valley_cata)
+        })
+    })?;
+
+    player.wait_until(
+        "Tutorial05 asks the valley CLNK to load CATA",
+        300,
+        |engine| tutorial_message_contains(engine, "Press 'throw' to load the catapult"),
+    )?;
+    player.tap(COM_THROW)?;
+    player.wait_until(
+        "WOOD enters the valley CATA through a real Throw",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(wood)
+                .is_some_and(|object| object.container == Some(valley_cata))
+        },
+    )?;
+    player.wait_until(
+        "Tutorial05 asks the valley CLNK to tension CATA",
+        300,
+        |engine| tutorial_message_contains(engine, "fully tensioned"),
+    )?;
+
+    // Classic CATA::ControlDig calls AimDown once per physical press. Leaving
+    // the ten-frame double-click window between presses supplies the six
+    // configurations which CATA::ControlConf records as full tension
+    // (Objects.c4d/Vehicles.c4d/Catapult.c4d/Script.c:134-147;
+    // planet/System.c4g/JumpAndRun.c:29-50,67-76).
+    for _ in 0..6 {
+        player.tap(COM_DIG)?;
+        player.ticks(12)?;
+    }
+    player.assert_milestone(
+        "the valley CATA reaches its full six-phase tension",
+        |engine| {
+            engine
+                .object_snapshot(valley_cata)
+                .is_some_and(|object| object.action.name == "Ready" && object.action.phase == 6)
+        },
+    )?;
+    player.tap(COM_THROW)?;
+    player.wait_until(
+        "the real valley CATA flings WOOD to the right hill",
+        400,
+        |engine| {
+            engine.object_snapshot(wood).is_some_and(|object| {
+                object.container.is_none()
+                    && (460..640).contains(&object.position.x)
+                    && (150..290).contains(&object.position.y)
+            })
+        },
+    )?;
+    player.wait_until("Tutorial05 asks for the right-hill CLNK", 300, |engine| {
+        tutorial_message_contains(engine, "switch to the clonk on the right hill")
+    })?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    let catapult_clonk = player
+        .engine()
+        .crew_cursor(owner)
+        .expect("second CursorRight selects the right-hill CLNK");
+    player.assert_milestone(
+        "second CursorRight selects Tutorial05's right-hill CLNK",
+        |engine| {
+            catapult_clonk != constructor
+                && catapult_clonk != valley
+                && engine
+                    .object_snapshot(catapult_clonk)
+                    .is_some_and(|object| object.position.x >= 450 && object.position.y < 350)
+        },
+    )?;
+    player.wait_until(
+        "the flung WOOD descends into the right-hill collection corridor",
+        120,
+        |engine| {
+            engine.object_snapshot(wood).is_some_and(|object| {
+                object.container.is_none()
+                    && (460..640).contains(&object.position.x)
+                    && object.position.y >= 215
+            })
+        },
+    )?;
+    let wood_x = player
+        .engine()
+        .object_snapshot(wood)
+        .expect("flung WOOD survives")
+        .position
+        .x;
+    let catapult_clonk_x = player
+        .engine()
+        .object_snapshot(catapult_clonk)
+        .expect("right-hill CLNK survives")
+        .position
+        .x;
+    let collect_direction = if wood_x < catapult_clonk_x {
+        COM_LEFT
+    } else {
+        COM_RIGHT
+    };
+    player.hold_until(
+        collect_direction,
+        "the right-hill CLNK naturally collects the flung WOOD",
+        200,
+        |engine| clonk_carries(engine, catapult_clonk, "WOOD"),
+    )?;
+
+    player.wait_until("Tutorial05 points at the right-hill CATA", 300, |engine| {
+        tutorial_message_contains(engine, "grab the other catapult")
+    })?;
+    let hill_cata = object_with_definition_near_x(player.engine(), "CATA", 540)
+        .expect("Tutorial05 creates its right-hill CATA");
+    let hill_cata_x = player
+        .engine()
+        .object_snapshot(hill_cata)
+        .expect("right-hill CATA survives")
+        .position
+        .x;
+    let catapult_clonk_x = player
+        .engine()
+        .object_snapshot(catapult_clonk)
+        .expect("right-hill CLNK survives")
+        .position
+        .x;
+    let reach_hill_cata = if hill_cata_x < catapult_clonk_x {
+        COM_LEFT
+    } else {
+        COM_RIGHT
+    };
+    player.hold_until(
+        reach_hill_cata,
+        "the WOOD-carrying right-hill CLNK reaches CATA",
+        180,
+        |engine| {
+            engine
+                .object_snapshot(catapult_clonk)
+                .zip(engine.object_snapshot(hill_cata))
+                .is_some_and(|(clonk, cata)| {
+                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 12
+                })
+        },
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("the right-hill CLNK grabs its real CATA", 80, |engine| {
+        engine
+            .object_snapshot(catapult_clonk)
+            .is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(hill_cata)
+            })
+    })?;
+    player.wait_until(
+        "Tutorial05 evaluates the right-hill CATA direction",
+        300,
+        |engine| {
+            tutorial_message_contains(engine, "Turn the catapult around")
+                || tutorial_message_contains(engine, "load the catapult")
+        },
+    )?;
+    if player
+        .engine()
+        .object_snapshot(hill_cata)
+        .is_some_and(|object| object.direction != Direction::Left)
+    {
+        player.hold_until(
+            COM_LEFT,
+            "pushing left turns the right-hill CATA toward the cabin",
+            40,
+            |engine| {
+                engine
+                    .object_snapshot(hill_cata)
+                    .is_some_and(|object| object.direction == Direction::Left)
+            },
+        )?;
+    }
+    player.wait_until(
+        "Tutorial05 asks the right-hill CLNK to load CATA",
+        300,
+        |engine| tutorial_message_contains(engine, "load the catapult"),
+    )?;
+    player.tap(COM_THROW)?;
+    player.wait_until("WOOD enters the right-hill CATA", 80, |engine| {
+        engine
+            .object_snapshot(wood)
+            .is_some_and(|object| object.container == Some(hill_cata))
+    })?;
+    player.wait_until(
+        "Tutorial05 asks for the shot toward the cabin",
+        300,
+        |engine| tutorial_message_contains(engine, "Fling the material"),
+    )?;
+    for _ in 0..6 {
+        player.tap(COM_DIG)?;
+        player.ticks(12)?;
+    }
+    player.assert_milestone("the right-hill CATA reaches full tension", |engine| {
+        engine
+            .object_snapshot(hill_cata)
+            .is_some_and(|object| object.action.name == "Ready" && object.action.phase == 6)
+    })?;
+    player.tap(COM_THROW)?;
+    player.wait_until(
+        "the right-hill CATA flings WOOD to the cabin hill",
+        400,
+        |engine| {
+            engine.object_snapshot(wood).is_some_and(|object| {
+                object.container.is_none()
+                    && (0..220).contains(&object.position.x)
+                    && (0..140).contains(&object.position.y)
+            })
+        },
+    )?;
+    player.wait_until("Tutorial05 asks for the constructor CLNK", 300, |engine| {
+        tutorial_message_contains(engine, "switch back to the clonk near the cabin")
+    })?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone(
+        "third CursorRight wraps to Tutorial05's constructor CLNK",
+        |engine| engine.crew_cursor(owner) == Some(constructor),
+    )?;
+    player.wait_until(
+        "the flung WOOD descends into the cabin-hill collection corridor",
+        120,
+        |engine| {
+            engine.object_snapshot(wood).is_some_and(|object| {
+                object.container.is_none()
+                    && (0..220).contains(&object.position.x)
+                    && object.position.y >= 75
+            })
+        },
+    )?;
+    let wood_x = player
+        .engine()
+        .object_snapshot(wood)
+        .expect("twice-flung WOOD survives")
+        .position
+        .x;
+    let constructor_x = player
+        .engine()
+        .object_snapshot(constructor)
+        .expect("constructor CLNK survives")
+        .position
+        .x;
+    let collect_direction = if wood_x < constructor_x {
+        COM_LEFT
+    } else {
+        COM_RIGHT
+    };
+    player.hold_until(
+        collect_direction,
+        "the constructor CLNK naturally collects the twice-flung WOOD",
+        180,
+        |engine| clonk_carries(engine, constructor, "WOOD"),
+    )?;
+    player.wait_until(
+        "Tutorial05 asks the constructor to continue ELEV",
+        300,
+        |engine| tutorial_message_contains(engine, "continue work on the elevator"),
+    )?;
+    let elevator_x = player
+        .engine()
+        .object_snapshot(elevator)
+        .expect("ELEV construction survives")
+        .position
+        .x;
+    let constructor_x = player
+        .engine()
+        .object_snapshot(constructor)
+        .expect("constructor CLNK survives")
+        .position
+        .x;
+    let reach_elevator = if elevator_x < constructor_x {
+        COM_LEFT
+    } else {
+        COM_RIGHT
+    };
+    player.hold_until(
+        reach_elevator,
+        "the WOOD-carrying constructor reaches ELEV",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(constructor)
+                .zip(engine.object_snapshot(elevator))
+                .is_some_and(|(clonk, elevator)| {
+                    clonk.action.name == "Walk"
+                        && (clonk.position.x - elevator.position.x).abs() <= 10
+                })
+        },
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("ELEV consumes WOOD and stalls for METL", 600, |engine| {
+        engine.object_snapshot(elevator).is_some_and(|object| {
+            object.construction == 80_000
+                && object.components.get("WOOD") == Some(&4)
+                && engine.object_snapshot(wood).is_none()
+        })
+    })?;
+
+    player.wait_until(
+        "Tutorial05 asks for the remaining material relay",
+        300,
+        |engine| tutorial_message_contains(engine, "transport the remaining material"),
+    )?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone(
+        "CursorRight returns to Tutorial05's valley CLNK",
+        |engine| engine.crew_cursor(owner) == Some(valley),
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("the valley CLNK releases CATA for the METL", 80, |engine| {
+        engine
+            .object_snapshot(valley)
+            .is_some_and(|object| object.action.name == "Walk")
+    })?;
+    let metal_x = player
+        .engine()
+        .object_snapshot(metal)
+        .expect("valley METL survives")
+        .position
+        .x;
+    let valley_x = player
+        .engine()
+        .object_snapshot(valley)
+        .expect("valley CLNK survives")
+        .position
+        .x;
+    let collect_direction = if metal_x < valley_x {
+        COM_LEFT
+    } else {
+        COM_RIGHT
+    };
+    player.hold_until(
+        collect_direction,
+        "the valley CLNK naturally collects METL",
+        180,
+        |engine| clonk_carries(engine, valley, "METL"),
+    )?;
+    let valley_cata_x = player
+        .engine()
+        .object_snapshot(valley_cata)
+        .expect("valley CATA survives")
+        .position
+        .x;
+    let valley_x = player
+        .engine()
+        .object_snapshot(valley)
+        .expect("valley CLNK survives")
+        .position
+        .x;
+    let reach_valley_cata = if valley_cata_x < valley_x {
+        COM_LEFT
+    } else {
+        COM_RIGHT
+    };
+    player.hold_until(
+        reach_valley_cata,
+        "the METL-carrying valley CLNK returns to CATA",
+        180,
+        |engine| {
+            engine
+                .object_snapshot(valley)
+                .zip(engine.object_snapshot(valley_cata))
+                .is_some_and(|(clonk, cata)| {
+                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 12
+                })
+        },
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("the valley CLNK re-grabs CATA with METL", 80, |engine| {
+        engine.object_snapshot(valley).is_some_and(|object| {
+            object.action.name == "Push" && object.action.target == Some(valley_cata)
+        })
+    })?;
+    if player
+        .engine()
+        .object_snapshot(valley_cata)
+        .is_some_and(|object| object.direction != Direction::Right)
+    {
+        player.hold_until(
+            COM_RIGHT,
+            "pushing right turns the valley CATA toward the right hill for METL",
+            40,
+            |engine| {
+                engine
+                    .object_snapshot(valley_cata)
+                    .is_some_and(|object| object.direction == Direction::Right)
+            },
+        )?;
+    }
+    player.wait_until(
+        "the valley CATA resets after its WOOD shot",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(valley_cata)
+                .is_some_and(|object| object.action.name == "Ready")
+        },
+    )?;
+    player.tap(COM_THROW)?;
+    player.wait_until("METL enters the valley CATA", 80, |engine| {
+        engine
+            .object_snapshot(metal)
+            .is_some_and(|object| object.container == Some(valley_cata))
+    })?;
+    for _ in 0..6 {
+        if player
+            .engine()
+            .object_snapshot(valley_cata)
+            .is_some_and(|object| object.action.phase == 6)
+        {
+            break;
+        }
+        player.tap(COM_DIG)?;
+        player.ticks(12)?;
+    }
+    player.assert_milestone("the valley CATA retains full tension for METL", |engine| {
+        engine
+            .object_snapshot(valley_cata)
+            .is_some_and(|object| object.action.phase == 6)
+    })?;
+    player.tap(COM_THROW)?;
+    player.wait_until(
+        "the valley CATA flings METL to the right hill",
+        400,
+        |engine| {
+            engine.object_snapshot(metal).is_some_and(|object| {
+                object.container.is_none()
+                    && (460..640).contains(&object.position.x)
+                    && (150..290).contains(&object.position.y)
+            })
+        },
+    )?;
+
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone(
+        "CursorRight selects the right-hill CLNK for METL",
+        |engine| engine.crew_cursor(owner) == Some(catapult_clonk),
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("the right-hill CLNK releases CATA for METL", 80, |engine| {
+        engine
+            .object_snapshot(catapult_clonk)
+            .is_some_and(|object| object.action.name == "Walk")
+    })?;
+    // C++ collection is based on the carryable crossing the crew member's
+    // collection rectangle, independent of the object's Mobile flag
+    // (C4GameObjects.cpp:155-196). Start moving under the descending METL
+    // instead of waiting for a physics-internal rest flag.
+    player.wait_until(
+        "the flung METL descends into the right-hill collection corridor",
+        120,
+        |engine| {
+            engine.object_snapshot(metal).is_some_and(|object| {
+                object.container.is_none()
+                    && (460..640).contains(&object.position.x)
+                    && object.position.y >= 215
+            })
+        },
+    )?;
+    let metal_x = player
+        .engine()
+        .object_snapshot(metal)
+        .expect("flung METL survives")
+        .position
+        .x;
+    let catapult_clonk_x = player
+        .engine()
+        .object_snapshot(catapult_clonk)
+        .expect("right-hill CLNK survives")
+        .position
+        .x;
+    let collect_direction = if metal_x < catapult_clonk_x {
+        COM_LEFT
+    } else {
+        COM_RIGHT
+    };
+    player.hold_until(
+        collect_direction,
+        "the right-hill CLNK naturally collects flung METL",
+        180,
+        |engine| clonk_carries(engine, catapult_clonk, "METL"),
+    )?;
+    let hill_cata_x = player
+        .engine()
+        .object_snapshot(hill_cata)
+        .expect("right-hill CATA survives")
+        .position
+        .x;
+    let catapult_clonk_x = player
+        .engine()
+        .object_snapshot(catapult_clonk)
+        .expect("right-hill CLNK survives")
+        .position
+        .x;
+    let reach_hill_cata = if hill_cata_x < catapult_clonk_x {
+        COM_LEFT
+    } else {
+        COM_RIGHT
+    };
+    player.hold_until(
+        reach_hill_cata,
+        "the METL-carrying right-hill CLNK returns to CATA",
+        180,
+        |engine| {
+            engine
+                .object_snapshot(catapult_clonk)
+                .zip(engine.object_snapshot(hill_cata))
+                .is_some_and(|(clonk, cata)| {
+                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 12
+                })
+        },
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until(
+        "the right-hill CLNK re-grabs CATA with METL",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| {
+                    object.action.name == "Push" && object.action.target == Some(hill_cata)
+                })
+        },
+    )?;
+    if player
+        .engine()
+        .object_snapshot(hill_cata)
+        .is_some_and(|object| object.direction != Direction::Left)
+    {
+        player.hold_until(
+            COM_LEFT,
+            "pushing left turns the right-hill CATA toward the cabin for METL",
+            40,
+            |engine| {
+                engine
+                    .object_snapshot(hill_cata)
+                    .is_some_and(|object| object.direction == Direction::Left)
+            },
+        )?;
+    }
+    player.wait_until(
+        "the right-hill CATA resets after its WOOD shot",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(hill_cata)
+                .is_some_and(|object| object.action.name == "Ready")
+        },
+    )?;
+    player.tap(COM_THROW)?;
+    player.wait_until("METL enters the right-hill CATA", 80, |engine| {
+        engine
+            .object_snapshot(metal)
+            .is_some_and(|object| object.container == Some(hill_cata))
+    })?;
+    for _ in 0..6 {
+        if player
+            .engine()
+            .object_snapshot(hill_cata)
+            .is_some_and(|object| object.action.phase == 6)
+        {
+            break;
+        }
+        player.tap(COM_DIG)?;
+        player.ticks(12)?;
+    }
+    player.assert_milestone(
+        "the right-hill CATA retains full tension for METL",
+        |engine| {
+            engine
+                .object_snapshot(hill_cata)
+                .is_some_and(|object| object.action.phase == 6)
+        },
+    )?;
+    player.tap(COM_THROW)?;
+    player.wait_until(
+        "the right-hill CATA flings METL to the cabin hill",
+        400,
+        |engine| {
+            engine.object_snapshot(metal).is_some_and(|object| {
+                object.container.is_none()
+                    && (0..220).contains(&object.position.x)
+                    && (0..140).contains(&object.position.y)
+            })
+        },
+    )?;
+
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone(
+        "CursorRight returns to the constructor for METL",
+        |engine| engine.crew_cursor(owner) == Some(constructor),
+    )?;
+    // As on the right hill, move to collect once the carryable reaches the
+    // crew's vertical collection corridor; METL can keep its Mobile bit
+    // while resting against the landscape.
+    player.wait_until(
+        "the twice-flung METL descends into the cabin-hill collection corridor",
+        120,
+        |engine| {
+            engine.object_snapshot(metal).is_some_and(|object| {
+                object.container.is_none()
+                    && (0..220).contains(&object.position.x)
+                    && object.position.y >= 75
+            })
+        },
+    )?;
+    // Take over from Script1's retained Build command and walk through the
+    // delivered component. A regular direct movement clears commands, and
+    // collection is driven by the carryable crossing the crew rectangle
+    // (C4Object.cpp:3381-3383; C4GameObjects.cpp:155-196).
+    let metal_x = player
+        .engine()
+        .object_snapshot(metal)
+        .expect("twice-flung METL survives")
+        .position
+        .x;
+    let constructor_x = player
+        .engine()
+        .object_snapshot(constructor)
+        .expect("constructor CLNK survives")
+        .position
+        .x;
+    let collect_direction = if metal_x < constructor_x {
+        COM_LEFT
+    } else {
+        COM_RIGHT
+    };
+    player.hold_until(
+        collect_direction,
+        "the constructor naturally collects the twice-flung METL",
+        240,
+        |engine| clonk_carries(engine, constructor, "METL"),
+    )?;
+    let elevator_x = player
+        .engine()
+        .object_snapshot(elevator)
+        .expect("ELEV construction survives")
+        .position
+        .x;
+    let constructor_x = player
+        .engine()
+        .object_snapshot(constructor)
+        .expect("constructor CLNK survives")
+        .position
+        .x;
+    let reach_elevator = if elevator_x < constructor_x {
+        COM_LEFT
+    } else {
+        COM_RIGHT
+    };
+    player.hold_until(
+        reach_elevator,
+        "the METL-carrying constructor reaches ELEV",
+        180,
+        |engine| {
+            engine
+                .object_snapshot(constructor)
+                .zip(engine.object_snapshot(elevator))
+                .is_some_and(|(clonk, elevator)| {
+                    clonk.action.name == "Walk"
+                        && (clonk.position.x - elevator.position.x).abs() <= 10
+                })
+        },
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until(
+        "METL completes the real ELEV and creates ELEC",
+        720,
+        |engine| {
+            engine
+                .object_snapshot(elevator)
+                .is_some_and(|object| object.construction == 100_000)
+                && object_with_definition(engine, "ELEC").is_some()
+        },
+    )?;
+    let elevator_case =
+        object_with_definition(player.engine(), "ELEC").expect("completed ELEV creates ELEC");
+    player.wait_until(
+        "Tutorial05 asks the constructor to grab ELEC",
+        300,
+        |engine| tutorial_message_contains(engine, "Grab the elevator case"),
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("the constructor grabs the real ELEC", 80, |engine| {
+        engine.object_snapshot(constructor).is_some_and(|object| {
+            object.action.name == "Push" && object.action.target == Some(elevator_case)
+        })
+    })?;
+    player.wait_until(
+        "Tutorial05 asks the constructor to drill the shaft",
+        300,
+        |engine| tutorial_message_contains(engine, "start shaft drilling"),
+    )?;
+
+    // Classic ELEC exposes drilling on ControlDigDouble. Keep the second
+    // physical press held: releasing it calls ControlDigReleased/Halt before
+    // the scenario timer can observe Drill (Case.c4d/Script.c:346-359,
+    // 612-631; Tutorial05/Script.c:265-286).
+    player.tap(COM_DIG)?;
+    player.press(COM_DIG)?;
+    player.wait_until("ELEC enters its real Drill action", 80, |engine| {
+        engine
+            .object_snapshot(elevator_case)
+            .is_some_and(|object| object.action.name == "Drill")
+    })?;
+    player.assert_milestone(
+        "the constructor is pushing ELEC as drilling starts",
+        |engine| {
+            engine.object_snapshot(constructor).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(elevator_case)
+            })
+        },
+    )?;
+    player.ticks(1)?;
+    // Script162 observes ELEC itself, not the constructor's transient Grab
+    // command state (Tutorial05/Script.c:280-286). The case's Drilling
+    // StartCall keeps Drill while the nearby Push object exists
+    // (Objects.c4d/Structures.c4d/Elevator.c4d/Case.c4d/Script.c:256-269).
+    player.assert_milestone(
+        "ELEC remains in Drill for the scenario callback",
+        |engine| {
+            engine
+                .object_snapshot(elevator_case)
+                .is_some_and(|object| object.action.name == "Drill")
+        },
+    )?;
+    player.wait_until(
+        "Tutorial05 asks to gather every CLNK in the valley",
+        600,
+        |engine| tutorial_message_contains(engine, "gather all clonks"),
+    )?;
+    player.release(COM_DIG)?;
+
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone(
+        "two CursorRight controls select the right-hill CLNK",
+        |engine| engine.crew_cursor(owner) == Some(catapult_clonk),
+    )?;
+    player.hold_until(
+        COM_LEFT,
+        "the right-hill CLNK descends into the valley",
+        500,
+        |engine| {
+            engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| object.position.y >= 350 && object.action.name == "Walk")
+        },
+    )?;
+    player.wait_until(
+        "all three CLNKs stand at the valley bottom",
+        600,
+        |engine| {
+            [constructor, valley, catapult_clonk]
+                .into_iter()
+                .all(|clonk| {
+                    engine.object_snapshot(clonk).is_some_and(|object| {
+                        object.position.y >= 350 && object.action.name == "Walk"
+                    })
+                })
+        },
+    )?;
+    player.wait_until(
+        "Tutorial05 asks for double toggle-selection",
+        300,
+        |engine| tutorial_message_contains(engine, "toggle selection"),
+    )?;
+
+    // Script210 asks the player to gather the crew before SelectAll. Move the
+    // two valley-side Clonks over the drilled shaft lip individually; doing
+    // this after SelectAll would make their Follow commands compete for the
+    // narrow platform (Tutorial05/Script.c:303-313).
+    player.hold_until(
+        COM_LEFT,
+        "the right-hill CLNK reaches the drilled shaft lip",
+        180,
+        |engine| {
+            engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| object.position.x <= 220 && object.action.name == "Walk")
+        },
+    )?;
+    player.press(COM_LEFT)?;
+    player.tap(COM_UP)?;
+    player.wait_until(
+        "the right-hill CLNK jumps across the shaft lip",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| object.position.x <= 174)
+        },
+    )?;
+    player.release(COM_LEFT)?;
+    // Classic release keeps the current ComDir; Down is the explicit stop
+    // control (C4Object.cpp:3406-3556).
+    player.tap(COM_DOWN)?;
+    player.wait_until("the right-hill CLNK reaches ELEC", 160, |engine| {
+        engine
+            .object_snapshot(catapult_clonk)
+            .zip(engine.object_snapshot(elevator_case))
+            .is_some_and(|(clonk, case)| {
+                (clonk.position.x - case.position.x).abs() <= 18
+                    && (clonk.position.y - case.position.y).abs() <= 22
+            })
+    })?;
+    if let Some(clonk) = player.engine().object_snapshot(catapult_clonk) {
+        if clonk.action.name != "Walk" {
+            player.hold_until(
+                COM_DOWN,
+                "the right-hill CLNK scales down onto ELEC",
+                160,
+                |engine| {
+                    engine
+                        .object_snapshot(catapult_clonk)
+                        .zip(engine.object_snapshot(elevator_case))
+                        .is_some_and(|(clonk, case)| {
+                            clonk.action.name == "Walk"
+                                && (clonk.position.x - case.position.x).abs() <= 18
+                                && (clonk.position.y - case.position.y).abs() <= 22
+                        })
+                },
+            )?;
+        }
+    }
+
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone(
+        "two CursorRight controls select the valley CLNK",
+        |engine| engine.crew_cursor(owner) == Some(valley),
+    )?;
+    player.hold_until(
+        COM_LEFT,
+        "the valley CLNK reaches the drilled shaft lip",
+        240,
+        |engine| {
+            engine
+                .object_snapshot(valley)
+                .is_some_and(|object| object.position.x <= 220 && object.action.name == "Walk")
+        },
+    )?;
+    player.press(COM_LEFT)?;
+    player.tap(COM_UP)?;
+    player.wait_until("the valley CLNK jumps across the shaft lip", 80, |engine| {
+        engine
+            .object_snapshot(valley)
+            .is_some_and(|object| object.position.x <= 174)
+    })?;
+    player.release(COM_LEFT)?;
+    player.tap(COM_DOWN)?;
+    player.wait_until("the valley CLNK reaches ELEC", 160, |engine| {
+        engine
+            .object_snapshot(valley)
+            .zip(engine.object_snapshot(elevator_case))
+            .is_some_and(|(clonk, case)| {
+                (clonk.position.x - case.position.x).abs() <= 18
+                    && (clonk.position.y - case.position.y).abs() <= 22
+            })
+    })?;
+    if let Some(clonk) = player.engine().object_snapshot(valley) {
+        if clonk.action.name != "Walk" {
+            player.hold_until(
+                COM_DOWN,
+                "the valley CLNK scales down onto ELEC",
+                160,
+                |engine| {
+                    engine
+                        .object_snapshot(valley)
+                        .zip(engine.object_snapshot(elevator_case))
+                        .is_some_and(|(clonk, case)| {
+                            clonk.action.name == "Walk"
+                                && (clonk.position.x - case.position.x).abs() <= 18
+                                && (clonk.position.y - case.position.y).abs() <= 22
+                        })
+                },
+            )?;
+        }
+    }
+
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("the valley CLNK grabs ELEC for the ascent", 120, |engine| {
+        engine.object_snapshot(valley).is_some_and(|object| {
+            object.action.name == "Push" && object.action.target == Some(elevator_case)
+        })
+    })?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone(
+        "CursorRight selects the boarded right-hill CLNK",
+        |engine| engine.crew_cursor(owner) == Some(catapult_clonk),
+    )?;
+    player.hold_until(
+        COM_RIGHT,
+        "the right-hill CLNK centers on ELEC before grabbing",
+        40,
+        |engine| {
+            engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| object.position.x >= 161 && object.action.name == "Walk")
+        },
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until(
+        "the right-hill CLNK grabs ELEC for the ascent",
+        120,
+        |engine| {
+            engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| {
+                    object.action.name == "Push" && object.action.target == Some(elevator_case)
+                })
+        },
+    )?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone("CursorRight returns to the constructor", |engine| {
+        engine.crew_cursor(owner) == Some(constructor)
+    })?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("the constructor grabs ELEC for the ascent", 120, |engine| {
+        engine.object_snapshot(constructor).is_some_and(|object| {
+            object.action.name == "Push" && object.action.target == Some(elevator_case)
+        })
+    })?;
+
+    player.double_tap(COM_CURSOR_TOGGLE)?;
+    player.assert_milestone(
+        "double toggle-selection selects all Tutorial05 CLNKs",
+        |engine| {
+            [constructor, valley, catapult_clonk]
+                .into_iter()
+                .all(|clonk| {
+                    engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.selected)
+                })
+        },
+    )?;
+    player.wait_until(
+        "Tutorial05 asks all CLNKs to return to HUT3",
+        300,
+        |engine| {
+            tutorial_message_contains(engine, "move all clonks back into the home base")
+                && engine.object_snapshot(hut).is_some()
+        },
+    )?;
+
+    player.hold_until(
+        COM_UP,
+        "ELEC carries the selected crew to the cabin hill",
+        600,
+        |engine| {
+            engine
+                .object_snapshot(elevator_case)
+                .is_some_and(|object| object.position.y <= 105)
+        },
+    )?;
+    player.wait_until(
+        "all selected CLNKs arrive at the shaft top",
+        240,
+        |engine| {
+            [constructor, valley, catapult_clonk]
+                .into_iter()
+                .all(|clonk| {
+                    engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.position.y <= 130)
+                })
+        },
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("the constructor releases ELEC at the top", 80, |engine| {
+        engine
+            .object_snapshot(constructor)
+            .is_some_and(|object| object.action.name == "Walk")
+    })?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone("CursorRight selects the valley CLNK at the top", |engine| {
+        engine.crew_cursor(owner) == Some(valley)
+    })?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until("the valley CLNK releases ELEC at the top", 80, |engine| {
+        engine
+            .object_snapshot(valley)
+            .is_some_and(|object| object.action.name == "Walk")
+    })?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone(
+        "CursorRight selects the right-hill CLNK at the top",
+        |engine| engine.crew_cursor(owner) == Some(catapult_clonk),
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until(
+        "the right-hill CLNK releases ELEC at the top",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        },
+    )?;
+    player.press(COM_LEFT)?;
+    player.tap(COM_UP)?;
+    player.wait_until(
+        "the right-hill CLNK jumps over the shaft-top lip",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| object.position.x <= 145)
+        },
+    )?;
+    player.release(COM_LEFT)?;
+    player.wait_until(
+        "the right-hill CLNK lands on the cabin plateau",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| {
+                    object.action.name == "Walk"
+                        && object.position.x < 155
+                        && object.position.y <= 115
+                })
+        },
+    )?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone(
+        "CursorRight returns to the constructor at the top",
+        |engine| engine.crew_cursor(owner) == Some(constructor),
+    )?;
+    player.press(COM_LEFT)?;
+    player.tap(COM_UP)?;
+    player.wait_until(
+        "the constructor jumps over the shaft-top lip",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(constructor)
+                .is_some_and(|object| object.position.x <= 145)
+        },
+    )?;
+    player.release(COM_LEFT)?;
+    player.wait_until(
+        "the constructor lands on the cabin plateau",
+        160,
+        |engine| {
+            engine.object_snapshot(constructor).is_some_and(|object| {
+                object.action.name == "Walk" && object.position.x < 155 && object.position.y <= 115
+            })
+        },
+    )?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    player.assert_milestone(
+        "CursorRight selects the valley CLNK for the top lip",
+        |engine| engine.crew_cursor(owner) == Some(valley),
+    )?;
+    player.hold_until(
+        COM_RIGHT,
+        "the valley CLNK takes a run-up on ELEC",
+        40,
+        |engine| {
+            engine
+                .object_snapshot(valley)
+                .is_some_and(|object| object.position.x >= 169 && object.action.name == "Walk")
+        },
+    )?;
+    player.press(COM_LEFT)?;
+    player.tap(COM_UP)?;
+    player.wait_until(
+        "the valley CLNK jumps over the shaft-top lip",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(valley)
+                .is_some_and(|object| object.position.x <= 145)
+        },
+    )?;
+    player.release(COM_LEFT)?;
+    player.wait_until(
+        "the valley CLNK lands on the cabin plateau",
+        160,
+        |engine| {
+            engine.object_snapshot(valley).is_some_and(|object| {
+                object.action.name == "Walk" && object.position.x < 155 && object.position.y <= 115
+            })
+        },
+    )?;
+    player.double_tap(COM_CURSOR_TOGGLE)?;
+    player.assert_milestone(
+        "all Tutorial05 CLNKs are reselected on the plateau",
+        |engine| {
+            engine.crew_cursor(owner) == Some(constructor)
+                && [constructor, valley, catapult_clonk]
+                    .into_iter()
+                    .all(|clonk| {
+                        engine
+                            .object_snapshot(clonk)
+                            .is_some_and(|object| object.selected)
+                    })
+        },
+    )?;
+
+    let hut_position = player
+        .engine()
+        .object_snapshot(hut)
+        .expect("Tutorial05 HUT3 survives")
+        .position;
+    player.hold_until(
+        COM_LEFT,
+        "the selected crew follows the constructor to HUT3",
+        360,
+        |engine| {
+            engine
+                .object_snapshot(constructor)
+                .is_some_and(|object| object.position.x <= hut_position.x + 19)
+        },
+    )?;
+    player.hold_until(
+        COM_DOWN,
+        "the constructor descends from the HUT3 wall",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(constructor)
+                .is_some_and(|object| object.action.name == "Walk")
+        },
+    )?;
+    player.hold_until(
+        COM_RIGHT,
+        "the constructor walks into the HUT3 entrance",
+        80,
+        |engine| {
+            engine.object_snapshot(constructor).is_some_and(|object| {
+                object.action.name == "Walk"
+                    && (hut_position.x + 2..=hut_position.x + 19).contains(&object.position.x)
+            })
+        },
+    )?;
+    player.tap(COM_UP)?;
+    player.wait_until("all three selected CLNKs enter HUT3", 360, |engine| {
+        [constructor, valley, catapult_clonk]
+            .into_iter()
+            .all(|clonk| {
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.container == Some(hut))
+            })
+    })?;
+    player.wait_until(
+        "Tutorial05 fulfills SCRG and reaches GameOver",
+        600,
+        |engine| engine.snapshot().game_over,
+    )?;
+    player.assert_milestone("Tutorial05 records its fulfilled SCRG goal", |engine| {
+        engine
+            .snapshot()
+            .round_results
+            .fulfilled_goals
+            .iter()
+            .any(|goal| goal == "SCRG")
+    })?;
+
+    Ok(())
 }
