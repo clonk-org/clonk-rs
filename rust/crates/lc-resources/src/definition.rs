@@ -240,6 +240,12 @@ pub struct DefCore {
     pub category: i32,
     pub crew_member: bool,
     pub value: i32,
+    /// `Rebuy` (C4Def.cpp:359): sold objects may introduce their ID into
+    /// the player's home-base stock when nonzero.
+    pub rebuyable: bool,
+    /// `BaseAutoSell` (C4Def.cpp:457): bases automatically sell this object
+    /// when BASEFUNC_AutoSellContents is active. GOLD defaults to true.
+    pub base_auto_sell: bool,
     pub mass: i32,
     pub picture: Option<PictureRect>,
     pub color_by_owner: bool,
@@ -580,6 +586,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut crew_member = false;
     let mut can_be_base = false;
     let mut object_value: i32 = 0;
+    let mut rebuyable = false;
+    let mut base_auto_sell: Option<bool> = None;
     let mut object_mass: i32 = 0;
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
@@ -691,6 +699,12 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "value" => {
                 object_value = parse_i32(value).unwrap_or(0);
+            }
+            "rebuy" => {
+                rebuyable = parse_bool(value);
+            }
+            "baseautosell" => {
+                base_auto_sell = Some(parse_bool(value));
             }
             "mass" => {
                 object_mass = parse_i32(value).unwrap_or(0).max(0);
@@ -945,12 +959,16 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         })
         .collect();
 
+    let base_auto_sell = base_auto_sell.unwrap_or_else(|| id.eq_ignore_ascii_case("GOLD"));
+
     Ok(DefCore {
         id,
         name,
         category,
         crew_member,
         value: object_value,
+        rebuyable,
+        base_auto_sell,
         mass: object_mass,
         picture,
         color_by_owner,
@@ -2828,6 +2846,26 @@ Attach=1
         let parsed = parse_def_core(b"[DefCore]\nid=CLNK\n").expect("defcore parsed");
 
         assert!(!parsed.auto_context_menu);
+    }
+
+    #[test]
+    fn parse_def_core_base_sale_flags_like_cpp() {
+        // C4Def::CompileFunc reads Rebuy with default 0 and BaseAutoSell
+        // with a GOLD-specific default of 1 (src/C4Def.cpp:359,457).
+        let explicit = parse_def_core(
+            b"[DefCore]\nid=ORE1\nRebuy=1\nBaseAutoSell=1\n",
+        )
+        .expect("defcore parsed");
+        assert!(explicit.rebuyable);
+        assert!(explicit.base_auto_sell);
+
+        let gold = parse_def_core(b"[DefCore]\nid=GOLD\n").expect("defcore parsed");
+        assert!(!gold.rebuyable);
+        assert!(gold.base_auto_sell);
+
+        let ordinary = parse_def_core(b"[DefCore]\nid=ROCK\n").expect("defcore parsed");
+        assert!(!ordinary.rebuyable);
+        assert!(!ordinary.base_auto_sell);
     }
 
     #[test]

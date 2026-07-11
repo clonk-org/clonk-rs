@@ -6083,6 +6083,12 @@ pub struct Definition {
     blit_mode: u32,
     ocf_base: u32,
     value: i32,
+    /// DefCore `Rebuy` (C4Def.cpp:359): permits sold objects to introduce
+    /// their definition into home-base stock.
+    rebuyable: bool,
+    /// DefCore `BaseAutoSell` (C4Def.cpp:457): sold automatically by a base
+    /// while BASEFUNC_AutoSellContents is active.
+    base_auto_sell: bool,
     mass: i32,
     picture: Option<DefinitionPicture>,
     picture_image: Option<DefinitionPictureImage>,
@@ -6270,6 +6276,7 @@ impl Definition {
         let has_construction = script.has_function("Construction");
         let has_initialize = script.has_function("Initialize");
         let has_step = script.has_function("Step");
+        let base_auto_sell = id.eq_ignore_ascii_case("GOLD");
         // The engine is single-threaded; Arc is shared ownership for host
         // contexts, not cross-thread transport (the script engine holds the
         // Rc-based GlobalNamed table).
@@ -6295,6 +6302,8 @@ impl Definition {
             blit_mode: 0,
             ocf_base: OCF_NORMAL,
             value: 0,
+            rebuyable: false,
+            base_auto_sell,
             mass: 0,
             picture: None,
             picture_image: None,
@@ -6442,6 +6451,8 @@ impl Definition {
         definition.set_category(resource.core.category);
         definition.set_blit_mode(resource.core.blit_mode);
         definition.set_value(resource.core.value);
+        definition.set_rebuyable(resource.core.rebuyable);
+        definition.set_base_auto_sell(resource.core.base_auto_sell);
         definition.set_mass(resource.core.mass);
         definition.set_picture(resource.core.picture.map(DefinitionPicture::from));
         definition.set_solid_mask(resource.core.solid_mask.map(DefinitionTargetRect::from));
@@ -6907,6 +6918,22 @@ impl Definition {
 
     pub fn set_value(&mut self, value: i32) {
         self.value = value.max(0);
+    }
+
+    pub fn rebuyable(&self) -> bool {
+        self.rebuyable
+    }
+
+    pub fn set_rebuyable(&mut self, rebuyable: bool) {
+        self.rebuyable = rebuyable;
+    }
+
+    pub fn base_auto_sell(&self) -> bool {
+        self.base_auto_sell
+    }
+
+    pub fn set_base_auto_sell(&mut self, base_auto_sell: bool) {
+        self.base_auto_sell = base_auto_sell;
     }
 
     pub fn mass(&self) -> i32 {
@@ -10182,6 +10209,7 @@ pub struct Engine {
     structures_need_energy: bool,
     base_buy_enabled: bool,
     base_sell_enabled: bool,
+    base_auto_sell_enabled: bool,
     landscape_insert_thrust: bool,
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
@@ -11873,6 +11901,7 @@ impl Engine {
             structures_need_energy: false,
             base_buy_enabled: true,
             base_sell_enabled: true,
+            base_auto_sell_enabled: true,
             landscape_insert_thrust: false,
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
@@ -11931,6 +11960,10 @@ impl Engine {
 
     pub fn set_base_sell_enabled(&mut self, enabled: bool) {
         self.base_sell_enabled = enabled;
+    }
+
+    pub fn set_base_auto_sell_enabled(&mut self, enabled: bool) {
+        self.base_auto_sell_enabled = enabled;
     }
 
     pub fn set_landscape_insert_thrust(&mut self, enabled: bool) {
@@ -25794,10 +25827,191 @@ impl Engine {
         }
     }
 
+    /// `C4Object::AutoSellContents` + `C4Player::Sell2Home` for the base's
+    /// direct contents and their first-level contents (C4Object.cpp:970-995;
+    /// C4Player.cpp:865-897).
+    fn auto_sell_base_contents(
+        &mut self,
+        base_index: usize,
+        base_owner: i32,
+    ) -> Result<(), EngineError> {
+        let contents = self.objects[base_index].state.contents.clone();
+        for outer_id in contents {
+            let nested = self
+                .find_object_index(outer_id)
+                .map(|index| self.objects[index].state.contents.clone())
+                .unwrap_or_default();
+            for object_id in nested {
+                if self.object_is_base_auto_sell(object_id) {
+                    self.sell_object_to_home(object_id, base_owner)?;
+                }
+            }
+            if self.object_is_base_auto_sell(outer_id) {
+                self.sell_object_to_home(outer_id, base_owner)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn object_is_base_auto_sell(&self, object_id: ObjectId) -> bool {
+        self.find_object_index(object_id).is_some_and(|index| {
+            let object = &self.objects[index];
+            object.state.status.is_active()
+                && !object.destroyed
+                && object.state.ocf & ocf::CREW_MEMBER == 0
+                && self
+                    .definitions
+                    .get(&object.definition_id)
+                    .is_some_and(Definition::base_auto_sell)
+        })
+    }
+
+    fn sell_object_to_home(
+        &mut self,
+        object_id: ObjectId,
+        base_owner: i32,
+    ) -> Result<(), EngineError> {
+        if self
+            .players
+            .get(&base_owner)
+            .is_none_or(|player| player.status() == PlayerStatus::Eliminated)
+        {
+            return Ok(());
+        }
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        if !self.objects[index].state.status.is_active()
+            || self.objects[index].destroyed
+            || self.objects[index].state.ocf & ocf::CREW_MEMBER != 0
+        {
+            return Ok(());
+        }
+
+        // AutoSellContents explicitly exits each candidate before handing it
+        // to Sell2Home (C4Object.cpp:984-994). Thus CalcValue receives nil as
+        // pInBase, and nested contents are ejected to the world below.
+        self.apply_object_update(object_id, ObjectUpdate::new().clear_container())?;
+
+        // Sell2Home recursively sells contents before their container
+        // (C4Player.cpp:869-875).
+        let nested = self
+            .find_object_index(object_id)
+            .map(|index| self.objects[index].state.contents.clone())
+            .unwrap_or_default();
+        for nested_id in nested {
+            self.sell_object_to_home(nested_id, base_owner)?;
+        }
+
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        let definition_id = self.objects[index].definition_id.clone();
+        let construction = self.objects[index].state.construction;
+        let (static_value, has_calc_value, has_calc_def_value, has_sell_to, has_sale) = self
+            .definitions
+            .get(&definition_id)
+            .map(|definition| {
+                (
+                    definition.value(),
+                    definition.has_function("CalcValue"),
+                    definition.has_function("CalcDefValue"),
+                    definition.has_function("SellTo"),
+                    definition.has_function("Sale"),
+                )
+            })
+            .unwrap_or_default();
+
+        // C4Object::GetValue: CalcValue wins over the definition value;
+        // CalcDefValue is the definition-level fallback. Then Con scales the
+        // result (C4Object.cpp:2118-2144; C4Def.cpp:839-856).
+        let raw_value = if has_calc_value {
+            tolerate_script_error(self.call_object_function(
+                index,
+                "CalcValue",
+                vec![Value::Nil, Value::Int(base_owner)],
+            ))?
+            .and_then(|value| value.as_c4_int())
+            .unwrap_or(0)
+        } else if has_calc_def_value {
+            tolerate_script_error(self.call_object_function(
+                index,
+                "CalcDefValue",
+                vec![Value::Nil, Value::Int(base_owner)],
+            ))?
+            .and_then(|value| value.as_c4_int())
+            .unwrap_or(0)
+        } else {
+            static_value
+        };
+        let value = saturating_i64_to_i32(
+            i64::from(raw_value) * i64::from(construction) / i64::from(FULL_CON),
+        );
+        if value != 0 {
+            self.adjust_player_wealth(base_owner, value)?;
+        }
+
+        // SellTo may remap the home-base stock ID after the wealth
+        // transaction (C4Player.cpp:880-887).
+        let stock_definition_id = if has_sell_to {
+            tolerate_script_error(self.call_object_function(
+                index,
+                "SellTo",
+                vec![Value::Int(base_owner)],
+            ))?
+            .and_then(|value| match value {
+                Value::C4Id(id) if !id.is_empty() => Some(id),
+                _ => None,
+            })
+        } else {
+            Some(definition_id)
+        };
+
+        // IncreaseIDCount's addNewID argument is exactly Rebuyable. A
+        // non-rebuyable definition may still increment an existing stock
+        // entry (C4Player.cpp:885-891; C4IDList.cpp:121-138).
+        if let Some(stock_definition_id) = stock_definition_id {
+            let rebuyable = self
+                .definitions
+                .get(&stock_definition_id)
+                .is_some_and(Definition::rebuyable);
+            let stocked = self.players.get(&base_owner).is_some_and(|player| {
+                player
+                    .home_base_material()
+                    .contains_key(&stock_definition_id)
+            });
+            if rebuyable || stocked {
+                self.adjust_player_home_base_material(base_owner, stock_definition_id, 1)?;
+            }
+        }
+
+        // Sale sees both the wealth and home-base material updates. C++ then
+        // AssignRemoval(true), even when Sale itself mutates the object
+        // (C4Player.cpp:892-897).
+        if has_sale {
+            if let Some(index) = self.find_object_index(object_id) {
+                let _ = tolerate_script_error(self.call_object_function(
+                    index,
+                    "Sale",
+                    vec![Value::Int(base_owner)],
+                ))?;
+            }
+        }
+
+        if self.find_object_index(object_id).is_some() {
+            self.apply_object_update(
+                object_id,
+                ObjectUpdate::new()
+                    .with_status(ObjectStatus::Deleted)
+                    .with_alive(false),
+            )?;
+        }
+        Ok(())
+    }
+
     /// `C4Object::ExecBase` (C4Object.cpp:1000-1031): the Tick10 new-base
-    /// assignment by contained flag and the Tick35 lost-flag clear. The
-    /// BASEFUNC_AutoSellContents arm (:1028) and the Tick35 structure
-    /// snow-dig (:1034-1043) stay unported (see PORT_STATUS).
+    /// assignment by contained flag and the Tick35 auto-sale/lost-flag pass.
+    /// The Tick35 structure snow-dig (:1034-1043) stays unported.
     fn exec_object_base(&mut self, idx: usize, frame: u64) -> Result<(), EngineError> {
         // New base assignment by flag, no old base removal (:1005-1018).
         if frame % 10 == 0 {
@@ -25867,6 +26081,9 @@ impl Engine {
             };
             let base = self.objects[idx].state.base;
             if self.players.contains_key(&base) {
+                if self.base_auto_sell_enabled {
+                    self.auto_sell_base_contents(idx, base)?;
+                }
                 // Lost flag? Game.FindObject(C4ID_Flag, ..., "FlyBase", this)
                 // (:1027-1030).
                 let self_id = self.objects[idx].id;
@@ -26591,6 +26808,8 @@ impl Engine {
         definition.set_category(core.category);
         definition.set_blit_mode(core.blit_mode);
         definition.set_value(core.value);
+        definition.set_rebuyable(core.rebuyable);
+        definition.set_base_auto_sell(core.base_auto_sell);
         definition.set_mass(core.mass);
         definition.set_picture(core.picture.map(DefinitionPicture::from));
         definition.set_solid_mask(core.solid_mask.map(DefinitionTargetRect::from));
@@ -64907,6 +65126,133 @@ protected func FlyBaseStart()
             Some(None),
             "lost flag closes every contained menu (C4Object.cpp:1029; C4ObjectList.cpp:705-710)"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn exec_base_auto_sells_nested_gold_like_cpp() -> Result<(), EngineError> {
+        // C4Object::ExecBase calls AutoSellContents on Tick35 when the
+        // BASEFUNC_AutoSellContents bit is active. It walks each base
+        // occupant's contents, exits BaseAutoSell items, and passes them to
+        // C4Player::Sell2Home (src/C4Object.cpp:970-995,1021-1029;
+        // src/C4Player.cpp:865-897).
+        let mut engine = Engine::new();
+        let (hut, _flag) = base_fixture(&mut engine)?;
+
+        let mut crew = Definition::from_script("CLNK", "Clonk", BASIC_OBJECT_SCRIPT)?;
+        crew.set_crew_member(true);
+        engine.register_definition(crew)?;
+
+        let mut gold = Definition::from_script("GOLD", "Gold", BASIC_OBJECT_SCRIPT)?;
+        gold.set_value(5);
+        gold.set_base_auto_sell(true);
+        gold.set_rebuyable(false);
+        engine.register_definition(gold)?;
+
+        let crew = engine.spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_owner(1)
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_container(hut),
+        )?;
+        let gold = engine.spawn_object(SpawnConfig::new("GOLD").with_container(crew))?;
+
+        for _ in 0..36 {
+            engine.tick()?;
+        }
+
+        assert_eq!(engine.player(1).expect("player exists").wealth(), 5);
+        assert!(
+            engine.object_snapshot(gold).is_none(),
+            "Sell2Home removes the sold GOLD"
+        );
+        assert!(
+            !engine
+                .player(1)
+                .expect("player exists")
+                .home_base_material()
+                .contains_key("GOLD"),
+            "Rebuy=0 does not introduce a missing home-base stock entry"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn auto_sell_uses_calc_value_sell_to_and_sale_like_cpp() -> Result<(), EngineError> {
+        // Sell2Home gets the value first, then lets SellTo remap the stock ID,
+        // updates stock, invokes Sale(player), and finally removes the sold
+        // object (src/C4Player.cpp:876-897). AutoSellContents exits it before
+        // this transaction, so CalcValue receives nil for pInBase
+        // (src/C4Object.cpp:984-987; C4Object.cpp:2118-2144).
+        let mut engine = Engine::new();
+        let (hut, _flag) = base_fixture(&mut engine)?;
+
+        let mut crew = Definition::from_script("CLNK", "Clonk", BASIC_OBJECT_SCRIPT)?;
+        crew.set_crew_member(true);
+        engine.register_definition(crew)?;
+
+        let mut remapped = Definition::from_script("RMAP", "Remapped", BASIC_OBJECT_SCRIPT)?;
+        remapped.set_rebuyable(true);
+        engine.register_definition(remapped)?;
+        engine.register_definition(Definition::from_script(
+            "SALE",
+            "Sale marker",
+            BASIC_OBJECT_SCRIPT,
+        )?)?;
+
+        let mut sold = Definition::from_script(
+            "AUTO",
+            "Auto-sold",
+            r#"#strict
+protected func CalcValue(object pInBase, int player)
+{
+  if (pInBase) return(99);
+  return(7);
+}
+protected func SellTo(int player) { return(RMAP); }
+protected func Sale(int player)
+{
+  if (GetWealth(player) == 7)
+    if (GetHomebaseMaterial(player, RMAP) == 1)
+      CreateObject(SALE, 0, 0, player);
+  return(1);
+}
+"#,
+        )?;
+        sold.set_value(50);
+        sold.set_base_auto_sell(true);
+        engine.register_definition(sold)?;
+
+        let crew = engine.spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_owner(1)
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_container(hut),
+        )?;
+        let sold = engine.spawn_object(SpawnConfig::new("AUTO").with_container(crew))?;
+
+        for _ in 0..36 {
+            engine.tick()?;
+        }
+
+        let player = engine.player(1).expect("player exists");
+        assert_eq!(player.wealth(), 7, "CalcValue overrides static Value=50");
+        assert_eq!(
+            player.home_base_material().get("RMAP"),
+            Some(&1),
+            "SellTo remaps stock before Sale observes it"
+        );
+        assert!(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .any(|object| object.definition_id == "SALE" && object.owner == 1),
+            "Sale(player) runs after wealth and stock update"
+        );
+        assert!(engine.object_snapshot(sold).is_none());
         Ok(())
     }
 

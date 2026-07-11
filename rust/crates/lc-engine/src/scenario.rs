@@ -201,6 +201,7 @@ pub struct Scenario {
     structures_need_energy: bool,
     base_buy_enabled: bool,
     base_sell_enabled: bool,
+    base_auto_sell_enabled: bool,
     landscape_insert_thrust: bool,
     /// `[Head] ForcedAutoContextMenu`: `None` keeps the player-file
     /// preference; `Some` forces automatic context menus for all players
@@ -543,6 +544,9 @@ impl Scenario {
             structures_need_energy: manifest.core.game.realism.structures_need_energy,
             base_buy_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_BUY) != 0,
             base_sell_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_SELL) != 0,
+            base_auto_sell_enabled: (manifest.core.game.realism.base_functionality
+                & BASEFUNC_AUTO_SELL_CONTENTS)
+                != 0,
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
             forced_auto_context_menu: (manifest.core.head.forced_auto_context_menu >= 0)
                 .then_some(manifest.core.head.forced_auto_context_menu != 0),
@@ -695,6 +699,7 @@ impl Scenario {
         engine.set_structures_need_energy(self.structures_need_energy);
         engine.set_base_buy_enabled(self.base_buy_enabled);
         engine.set_base_sell_enabled(self.base_sell_enabled);
+        engine.set_base_auto_sell_enabled(self.base_auto_sell_enabled);
         engine.set_landscape_insert_thrust(self.landscape_insert_thrust);
 
         for step in &self.definition_load_steps {
@@ -1327,6 +1332,7 @@ impl Scenario {
             structures_need_energy: false,
             base_buy_enabled: false,
             base_sell_enabled: false,
+            base_auto_sell_enabled: false,
             landscape_insert_thrust: false,
             forced_auto_context_menu: None,
             forced_control_style: None,
@@ -7410,6 +7416,7 @@ global func Step(state, frame, random)
             structures_need_energy: false,
             base_buy_enabled: true,
             base_sell_enabled: true,
+            base_auto_sell_enabled: true,
             landscape_insert_thrust: false,
             forced_auto_context_menu: None,
             forced_control_style: None,
@@ -7514,6 +7521,7 @@ global func Step(state, frame, random)
             structures_need_energy: false,
             base_buy_enabled: true,
             base_sell_enabled: true,
+            base_auto_sell_enabled: true,
             landscape_insert_thrust: false,
             forced_auto_context_menu: None,
             forced_control_style: None,
