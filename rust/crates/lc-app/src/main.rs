@@ -13893,6 +13893,46 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
+    /// Headless physical-key driver for app integration tests.
+    ///
+    /// This deliberately enters at the same `GameApp::handle_key` boundary
+    /// as `WindowEvent::KeyboardInput` (main.rs:1691-1705). Going through
+    /// `dispatch_control_event_for_owner`, `InputDispatcher`, or
+    /// `Engine::player_in_com` would skip the configured keyboard mapping and
+    /// C4Game::LocalControlKeyUp's classic/AutoStopControl release gate.
+    struct AppVirtualKeyboard<'app> {
+        app: &'app mut GameApp,
+    }
+
+    impl<'app> AppVirtualKeyboard<'app> {
+        fn new(app: &'app mut GameApp) -> Self {
+            Self { app }
+        }
+
+        fn press(&mut self, key: VirtualKeyCode) -> Result<(), EngineError> {
+            self.app.handle_key(key, ElementState::Pressed)
+        }
+
+        fn release(&mut self, key: VirtualKeyCode) -> Result<(), EngineError> {
+            self.app.handle_key(key, ElementState::Released)
+        }
+
+        fn engine(&self) -> &Engine {
+            &self.app.engine
+        }
+
+        fn player_control(&self) -> lc_engine::PlayerControlState {
+            self.app
+                .engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == self.app.local_owner)
+                .expect("virtual keyboard has a local player")
+                .control
+        }
+    }
+
     #[test]
     fn overlay_text_helper_respects_custom_text() {
         assert!(overlay_text_needs_update("", "FRAME "));
@@ -14120,15 +14160,15 @@ mod tests {
             .crew_cursor(app.local_owner)
             .expect("crew cursor");
         app.mode = AppMode::Running;
-        for (binding, held_direction) in [
-            (ControlBindingId::Right, CommandDirection::Right),
-            (ControlBindingId::Left, CommandDirection::Left),
+        let mut keyboard = AppVirtualKeyboard::new(&mut app);
+        for (key, held_direction) in [
+            (VirtualKeyCode::C, CommandDirection::Right),
+            (VirtualKeyCode::Z, CommandDirection::Left),
         ] {
-            let key = app.bindings.key_for(binding).expect("movement key binding");
-            app.handle_key(key, ElementState::Pressed)
-                .expect("press movement key");
+            keyboard.press(key).expect("press movement key");
             assert_eq!(
-                app.engine
+                keyboard
+                    .engine()
                     .object_snapshot(cursor)
                     .expect("cursor after press")
                     .command_direction,
@@ -14136,10 +14176,10 @@ mod tests {
                 "pressed horizontal key must steer"
             );
 
-            app.handle_key(key, ElementState::Released)
-                .expect("release movement key");
+            keyboard.release(key).expect("release movement key");
             assert_eq!(
-                app.engine
+                keyboard
+                    .engine()
                     .object_snapshot(cursor)
                     .expect("cursor after release")
                     .command_direction,
@@ -14151,15 +14191,7 @@ mod tests {
                 "C4Game::LocalControlKeyUp only synchronizes releases in AutoStopControl mode"
             );
             assert_eq!(
-                app.engine
-                    .snapshot()
-                    .players
-                    .iter()
-                    .find(|player| player.id == app.local_owner)
-                    .expect("joined player after release")
-                    .control
-                    .pressed_coms
-                    == 0,
+                keyboard.player_control().pressed_coms == 0,
                 auto_stop,
                 "classic key-up is not synchronized, so C4Player::PressedComs remains held"
             );
@@ -16493,6 +16525,48 @@ mod tests {
             .expect("start sandbox scenario");
         wait_for_running(&mut app);
         app
+    }
+
+    #[test]
+    fn app_virtual_keyboard_routes_cpp_player_one_keys_without_arrow_aliases() {
+        // C++ keyboard set one maps movement to S/Z/X/C and does not alias
+        // the arrow keys (C4Config.cpp:624-635). Exercise those physical
+        // keys through GameApp rather than injecting logical ControlEvents.
+        let mut app = new_running_sandbox_app();
+        let mut keyboard = AppVirtualKeyboard::new(&mut app);
+        let auto_stop = keyboard.player_control().control_style;
+
+        for (key, com) in [
+            (VirtualKeyCode::S, lc_engine::COM_UP),
+            (VirtualKeyCode::Z, lc_engine::COM_LEFT),
+            (VirtualKeyCode::X, lc_engine::COM_DOWN),
+            (VirtualKeyCode::C, lc_engine::COM_RIGHT),
+        ] {
+            keyboard.press(key).expect("physical key press");
+            assert_ne!(
+                keyboard.player_control().pressed_coms & (1 << com),
+                0,
+                "{key:?} must reach the matching C4Player::InCom bit"
+            );
+            keyboard.release(key).expect("physical key release");
+            assert_eq!(
+                keyboard.player_control().pressed_coms & (1 << com) == 0,
+                auto_stop,
+                "{key:?} release must follow the local player's control style"
+            );
+        }
+
+        let before_arrows = keyboard.player_control();
+        for key in [
+            VirtualKeyCode::Up,
+            VirtualKeyCode::Left,
+            VirtualKeyCode::Down,
+            VirtualKeyCode::Right,
+        ] {
+            keyboard.press(key).expect("unbound arrow press");
+            keyboard.release(key).expect("unbound arrow release");
+        }
+        assert_eq!(keyboard.player_control(), before_arrows);
     }
 
     fn two_item_script_menu(cursor: ObjectId) -> lc_engine::ObjectMenuState {
