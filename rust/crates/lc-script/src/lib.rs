@@ -17,7 +17,8 @@ pub use crate::engine::{
     GlobalVariables, MethodReferenceDispatch, Script,
 };
 pub use crate::vm::{
-    caller_var_slots, value_cell, CallerVarSlots, LocalCells, ValueCell, ValueReference,
+    caller_var_slots, value_cell, CallerVarSlots, HostCallArg, LocalCells, ValueCell,
+    ValueReference,
 };
 pub use crate::error::{ParseError, RuntimeError, ScriptError};
 pub use crate::value::{c4_hash_combine, cnv_fn, C4VType, CnvFn, Value};

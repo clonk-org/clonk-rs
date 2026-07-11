@@ -7,7 +7,7 @@ use crate::ast::{
     VarDecl,
 };
 use crate::debugger::DebuggerHooks;
-use crate::engine::HostFunction;
+use crate::engine::{HostFunction, HostReferenceFunction};
 use crate::error::RuntimeError;
 use crate::value::{Literal, Value};
 
@@ -436,6 +436,7 @@ fn write_path(
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum CallArg {
     Value(Value),
     Reference(LValueRef),
@@ -446,6 +447,33 @@ impl CallArg {
         match self {
             CallArg::Value(value) => Ok(value.clone()),
             CallArg::Reference(reference) => reference.read(),
+        }
+    }
+}
+
+/// Opaque argument supplied to a reference-aware native host function.
+///
+/// A parameter declared reference-aware still arrives here when the script
+/// expression is not an lvalue; in that case it remains readable but
+/// [`HostCallArg::is_reference`] is false and [`HostCallArg::write`] returns
+/// `Ok(false)`. This models nullable native `C4Value *` parameters without
+/// exposing the VM's lvalue representation.
+#[derive(Clone)]
+pub struct HostCallArg(CallArg);
+
+impl HostCallArg {
+    pub fn read(&self) -> Result<Value, RuntimeError> {
+        self.0.read()
+    }
+
+    pub fn is_reference(&self) -> bool {
+        matches!(self.0, CallArg::Reference(_))
+    }
+
+    pub fn write(&self, value: Value) -> Result<bool, RuntimeError> {
+        match &self.0 {
+            CallArg::Value(_) => Ok(false),
+            CallArg::Reference(reference) => reference.write(value).map(|()| true),
         }
     }
 }
@@ -474,6 +502,7 @@ impl ReturnValue {
 pub struct Vm<'a> {
     functions: &'a HashMap<String, Function>,
     host_functions: &'a HashMap<String, HostFunction>,
+    host_reference_functions: Option<&'a HashMap<String, HostReferenceFunction>>,
     var_decls: &'a [VarDecl], // Script-level variable declarations
     debugger: Option<DebuggerHooks>,
     /// Engine-registered script constants (`RegisterGlobalConstant`,
@@ -516,6 +545,7 @@ impl<'a> Vm<'a> {
         Self {
             functions,
             host_functions,
+            host_reference_functions: None,
             var_decls,
             debugger,
             constants: None,
@@ -528,6 +558,14 @@ impl<'a> Vm<'a> {
             globals_consts: None,
             local_cell_hook: None,
         }
+    }
+
+    pub(crate) fn with_host_reference_functions(
+        mut self,
+        functions: &'a HashMap<String, HostReferenceFunction>,
+    ) -> Self {
+        self.host_reference_functions = Some(functions);
+        self
     }
 
     /// Set the `this` object context for this call session. Nested plain calls
@@ -855,6 +893,11 @@ impl<'a> Vm<'a> {
                 return self.invoke_host_function(name, function, &values);
             }
 
+            if let Some(function) = self.host_reference_function(name) {
+                let _guard = CallerSlotsGuard::enter(caller_slots);
+                return self.invoke_host_reference_function(name, function, &args);
+            }
+
             Err(RuntimeError::new(format!("unknown function '{name}'")))
         })
     }
@@ -916,6 +959,13 @@ impl<'a> Vm<'a> {
                 let _guard = CallerSlotsGuard::enter(caller_slots);
                 return self
                     .invoke_host_function(name, function, &values)
+                    .map(ReturnValue::Value);
+            }
+
+            if let Some(function) = self.host_reference_function(name) {
+                let _guard = CallerSlotsGuard::enter(caller_slots);
+                return self
+                    .invoke_host_reference_function(name, function, &args)
                     .map(ReturnValue::Value);
             }
 
@@ -1002,6 +1052,15 @@ impl<'a> Vm<'a> {
         args.iter().map(CallArg::read).collect()
     }
 
+    fn host_reference_function(&self, name: &str) -> Option<&HostReferenceFunction> {
+        self.host_reference_functions
+            .and_then(|functions| functions.get(name))
+    }
+
+    fn has_host_function(&self, name: &str) -> bool {
+        self.host_functions.contains_key(name) || self.host_reference_function(name).is_some()
+    }
+
     fn invoke_host_function(
         &self,
         name: &str,
@@ -1023,6 +1082,37 @@ impl<'a> Vm<'a> {
             }
         }
 
+        Ok(result)
+    }
+
+    fn invoke_host_reference_function(
+        &self,
+        name: &str,
+        function: &HostReferenceFunction,
+        args: &[CallArg],
+    ) -> Result<Value, RuntimeError> {
+        let args = args
+            .iter()
+            .cloned()
+            .map(HostCallArg)
+            .collect::<Vec<_>>();
+        let debug_args = args
+            .iter()
+            .map(HostCallArg::read)
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(debugger) = &self.debugger {
+            if let Some(callback) = debugger.on_call() {
+                callback(name, &debug_args);
+            }
+        }
+
+        let result = function.call(&args)?;
+
+        if let Some(debugger) = &self.debugger {
+            if let Some(callback) = debugger.on_return() {
+                callback(name, &result);
+            }
+        }
         Ok(result)
     }
 
@@ -1354,7 +1444,7 @@ impl<'a> Vm<'a> {
                         if (name == "Var" || name == "Local")
                             && (args.is_empty() || args.len() == 1)
                             && !self.functions.contains_key(name)
-                            && !self.host_functions.contains_key(name)
+                            && !self.has_host_function(name)
                         {
                             let index = Box::new(
                                 args.first()
@@ -1374,7 +1464,7 @@ impl<'a> Vm<'a> {
                         if name == "Local"
                             && args.len() == 2
                             && !self.functions.contains_key(name)
-                            && !self.host_functions.contains_key(name)
+                            && !self.has_host_function(name)
                         {
                             let index =
                                 self.evaluate_slot_index("Local()", &args[0], env, depth)?;
@@ -1394,7 +1484,7 @@ impl<'a> Vm<'a> {
                         if name == "SetLocal"
                             && (1..=3).contains(&args.len())
                             && !self.functions.contains_key(name)
-                            && !self.host_functions.contains_key(name)
+                            && !self.has_host_function(name)
                         {
                             let index_expr = Box::new(
                                 args.first()
@@ -1447,7 +1537,7 @@ impl<'a> Vm<'a> {
                             && !self
                                 .global_functions
                                 .is_some_and(|functions| functions.contains_key(name))
-                            && !self.host_functions.contains_key(name)
+                            && !self.has_host_function(name)
                         {
                             let cell = self.evaluate_global_slot(args, env, depth + 1)?;
                             let value = cell.borrow().clone();
@@ -1460,7 +1550,7 @@ impl<'a> Vm<'a> {
                             && !self
                                 .global_functions
                                 .is_some_and(|functions| functions.contains_key(name))
-                            && !self.host_functions.contains_key(name)
+                            && !self.has_host_function(name)
                         {
                             let value = self
                                 .evaluate_named_global(args, env, depth + 1)?
@@ -1481,7 +1571,7 @@ impl<'a> Vm<'a> {
                         if name == "eval"
                             && args.len() <= 1
                             && !self.functions.contains_key(name)
-                            && !self.host_functions.contains_key(name)
+                            && !self.has_host_function(name)
                         {
                             let code = match args
                                 .first()
@@ -1519,7 +1609,7 @@ impl<'a> Vm<'a> {
                         if name == "Par"
                             && args.len() <= 1
                             && !self.functions.contains_key(name)
-                            && !self.host_functions.contains_key(name)
+                            && !self.has_host_function(name)
                         {
                             let index = args
                                 .first()
@@ -1550,16 +1640,23 @@ impl<'a> Vm<'a> {
                             // `_inherited` spelling yields nil when there is
                             // none (C4AulParse.cpp:2775-2798).
                             let Some(target) = env.inherited_target.clone() else {
+                                let inherited_name = env.function_name.clone();
                                 // Script functions overload same-name ENGINE
                                 // functions: inherited() chains to the host
                                 // fn (C4Aul OwnerOverloaded includes engine
                                 // funcs — GoldRush AI.c4d's global
                                 // GetOwner/Hostile overrides rely on it).
                                 if let Some(host) =
-                                    self.host_functions.get(&env.function_name)
+                                    self.host_functions.get(&inherited_name)
                                 {
                                     let mut evaluated_args =
-                                        self.build_call_args(None, args, env, depth + 1)?;
+                                        self.build_call_args(
+                                            Some(&inherited_name),
+                                            None,
+                                            args,
+                                            env,
+                                            depth + 1,
+                                        )?;
                                     if *forward_rest {
                                         Self::append_forwarded_args(&mut evaluated_args, env);
                                     }
@@ -1575,6 +1672,27 @@ impl<'a> Vm<'a> {
                                             &values,
                                         );
                                 }
+                                if let Some(host) =
+                                    self.host_reference_function(&inherited_name)
+                                {
+                                    let mut evaluated_args = self.build_call_args(
+                                        Some(&inherited_name),
+                                        None,
+                                        args,
+                                        env,
+                                        depth + 1,
+                                    )?;
+                                    if *forward_rest {
+                                        Self::append_forwarded_args(&mut evaluated_args, env);
+                                    }
+                                    let _guard =
+                                        CallerSlotsGuard::enter(Some(env.var_slots.clone()));
+                                    return self.invoke_host_reference_function(
+                                        &inherited_name,
+                                        host,
+                                        &evaluated_args,
+                                    );
+                                }
                                 return if name == "_inherited" {
                                     Ok(Value::Nil)
                                 } else {
@@ -1585,7 +1703,13 @@ impl<'a> Vm<'a> {
                                 };
                             };
                             let mut evaluated_args =
-                                self.build_call_args(Some(&target), args, env, depth + 1)?;
+                                self.build_call_args(
+                                    Some(&target.name),
+                                    Some(&target),
+                                    args,
+                                    env,
+                                    depth + 1,
+                                )?;
                             if *forward_rest {
                                 Self::append_forwarded_args(&mut evaluated_args, env);
                             }
@@ -1612,7 +1736,7 @@ impl<'a> Vm<'a> {
                                     .global_functions
                                     .map(|functions| functions.contains_key(name))
                                     .unwrap_or(false)
-                                && !self.host_functions.contains_key(name)
+                                && !self.has_host_function(name)
                             {
                                 if let Some(value) = self
                                     .constants
@@ -1643,7 +1767,7 @@ impl<'a> Vm<'a> {
                                 self.functions.get(name)
                             };
                             let mut evaluated_args =
-                                self.build_call_args(function, args, env, depth + 1)?;
+                                self.build_call_args(Some(name), function, args, env, depth + 1)?;
                             if *forward_rest {
                                 Self::append_forwarded_args(&mut evaluated_args, env);
                             }
@@ -2133,7 +2257,7 @@ impl<'a> Vm<'a> {
             && name == "Local"
             && args.len() == 1
             && !self.functions.contains_key(name)
-            && !self.host_functions.contains_key(name)
+            && !self.has_host_function(name)
         {
             let index = self.evaluate_slot_index("Local()", &args[0], env, depth)?;
             if index < 0 {
@@ -2151,7 +2275,8 @@ impl<'a> Vm<'a> {
                 if self.method_dispatch.is_some() && target != self.this_value =>
             {
                 let function = self.functions.get(name);
-                let mut evaluated_args = self.build_call_args(function, args, env, depth + 1)?;
+                let mut evaluated_args =
+                    self.build_call_args(Some(name), function, args, env, depth + 1)?;
                 if forward_rest {
                     Self::append_forwarded_args(&mut evaluated_args, env);
                 }
@@ -2200,7 +2325,7 @@ impl<'a> Vm<'a> {
         let function = self.functions.get(name);
         if failsafe
             && function.is_none()
-            && !self.host_functions.contains_key(name)
+            && !self.has_host_function(name)
             && !self
                 .global_functions
                 .map(|functions| functions.contains_key(name))
@@ -2209,10 +2334,11 @@ impl<'a> Vm<'a> {
             // ->~ on a missing function: the parameters still evaluate (they
             // are on the stack before AB_CALLFS pops them, C4AulExec.cpp:
             // 1262-1267), the result is nil.
-            let _ = self.build_call_args(function, args, env, depth + 1)?;
+            let _ = self.build_call_args(Some(name), function, args, env, depth + 1)?;
             return Ok(Value::Nil);
         }
-        let mut evaluated_args = self.build_call_args(function, args, env, depth + 1)?;
+        let mut evaluated_args =
+            self.build_call_args(Some(name), function, args, env, depth + 1)?;
         if forward_rest {
             Self::append_forwarded_args(&mut evaluated_args, env);
         }
@@ -2227,6 +2353,7 @@ impl<'a> Vm<'a> {
 
     fn build_call_args(
         &self,
+        name: Option<&str>,
         function: Option<&Function>,
         args: &[Expr],
         env: &mut Environment,
@@ -2234,10 +2361,19 @@ impl<'a> Vm<'a> {
     ) -> Result<Vec<CallArg>, RuntimeError> {
         let mut evaluated_args = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
-            let wants_reference = function
+            let script_wants_reference = function
                 .and_then(|function| function.params.get(index))
                 .is_some_and(|param| param.is_reference);
-            if wants_reference && Self::expr_can_be_lvalue(arg) {
+            let host_wants_reference = function.is_none()
+                && name
+                    .and_then(|name| self.host_reference_function(name))
+                    .is_some_and(|function| function.wants_reference(index));
+            let can_be_reference = if host_wants_reference {
+                self.expr_can_be_host_reference(arg)
+            } else {
+                Self::expr_can_be_lvalue(arg)
+            };
+            if (script_wants_reference || host_wants_reference) && can_be_reference {
                 evaluated_args.push(CallArg::Reference(self.expr_to_lvalue(arg, env, depth)?));
             } else {
                 evaluated_args.push(CallArg::Value(self.evaluate(arg, env, depth)?));
@@ -2269,6 +2405,37 @@ impl<'a> Vm<'a> {
             expr,
             Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) | Expr::Call { .. }
         )
+    }
+
+    /// Native reference parameters receive a null pointer for rvalue call
+    /// results. Unlike script `&` parameters, we can decide that before
+    /// evaluation for ordinary named functions and avoid executing a
+    /// value-returning call once through `invoke_reference` and then again as
+    /// a value (FnSimFlight's C4Value* parameters, C4Script.cpp:5309-5312).
+    fn expr_can_be_host_reference(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) => true,
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Variable(name) => {
+                    matches!(
+                        name.as_str(),
+                        "Local" | "LocalN" | "Var" | "EffectVar" | "Global" | "GlobalN"
+                    ) || self
+                        .functions
+                        .get(name)
+                        .or_else(|| {
+                            self.global_functions
+                                .and_then(|functions| functions.get(name))
+                        })
+                        .is_some_and(|function| function.returns_reference)
+                }
+                // Cross-object reference-return metadata is resolved by the
+                // method-reference dispatcher at runtime.
+                Expr::Property(_, _) => true,
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     fn assign_target(
@@ -2514,7 +2681,7 @@ impl<'a> Vm<'a> {
                     && !self
                         .global_functions
                         .is_some_and(|functions| functions.contains_key(name))
-                    && !self.host_functions.contains_key(name) =>
+                    && !self.has_host_function(name) =>
             {
                 Ok(LValueRef::Cell(self.evaluate_global_slot(
                     args,
@@ -2528,7 +2695,7 @@ impl<'a> Vm<'a> {
                     && !self
                         .global_functions
                         .is_some_and(|functions| functions.contains_key(name))
-                    && !self.host_functions.contains_key(name) =>
+                    && !self.has_host_function(name) =>
             {
                 self.evaluate_named_global(args, env, depth + 1)?
                     .map(LValueRef::Cell)
@@ -2562,7 +2729,8 @@ impl<'a> Vm<'a> {
             }
             AssignmentTarget::FunctionCall { name, args } => {
                 let function = self.functions.get(name);
-                let args = self.build_call_args(function, args, env, depth + 1)?;
+                let args =
+                    self.build_call_args(Some(name), function, args, env, depth + 1)?;
                 self.invoke_reference(
                     name,
                     args,
@@ -2627,7 +2795,8 @@ impl<'a> Vm<'a> {
                 }
 
                 let function = self.functions.get(method);
-                let evaluated_args = self.build_call_args(function, args, env, depth + 1)?;
+                let evaluated_args =
+                    self.build_call_args(Some(method), function, args, env, depth + 1)?;
                 match &target {
                     Value::Object(_) | Value::C4Id(_)
                         if self.method_reference_dispatch.is_some()

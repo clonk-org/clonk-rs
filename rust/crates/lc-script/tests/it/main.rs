@@ -27,6 +27,7 @@ mod test_empty_arguments;
 mod test_exponentiation;
 mod test_fbrg_script;
 mod test_frcs_hex;
+mod test_host_reference_functions;
 mod test_increment_decrement_lvalues;
 mod test_increment_nil;
 mod test_inherited;

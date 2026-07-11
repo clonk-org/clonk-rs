@@ -6,9 +6,44 @@ use crate::debugger::DebuggerHooks;
 use crate::error::{ParseError, RuntimeError, ScriptError};
 use crate::parser::Parser;
 use crate::value::Value;
-use crate::vm::{ValueReference, Vm};
+use crate::vm::{HostCallArg, ValueReference, Vm};
 
 pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync>;
+
+type HostReferenceCallback =
+    Arc<dyn Fn(&[HostCallArg]) -> Result<Value, RuntimeError> + Send + Sync>;
+
+/// One native function whose selected parameters retain C4Value references.
+/// Ordinary [`HostFunction`] registrations remain value-only.
+#[derive(Clone)]
+pub(crate) struct HostReferenceFunction {
+    callback: HostReferenceCallback,
+    reference_parameters: Vec<usize>,
+}
+
+impl HostReferenceFunction {
+    fn new<F, I>(reference_parameters: I, callback: F) -> Self
+    where
+        F: Fn(&[HostCallArg]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
+        I: IntoIterator<Item = usize>,
+    {
+        let mut reference_parameters = reference_parameters.into_iter().collect::<Vec<_>>();
+        reference_parameters.sort_unstable();
+        reference_parameters.dedup();
+        Self {
+            callback: Arc::new(callback),
+            reference_parameters,
+        }
+    }
+
+    pub(crate) fn wants_reference(&self, index: usize) -> bool {
+        self.reference_parameters.binary_search(&index).is_ok()
+    }
+
+    pub(crate) fn call(&self, args: &[HostCallArg]) -> Result<Value, RuntimeError> {
+        (self.callback)(args)
+    }
+}
 
 /// Cross-object `func &` dispatch. Kept separate from [`HostFunction`] so an
 /// lvalue call result is never flattened to a copied [`Value`].
@@ -178,6 +213,7 @@ impl Script {
 pub struct Engine {
     functions: HashMap<String, Function>,
     host_functions: HashMap<String, HostFunction>,
+    host_reference_functions: HashMap<String, HostReferenceFunction>,
     debugger_hooks: Option<DebuggerHooks>,
     var_decls: Vec<VarDecl>, // Script-level variable declarations (local variables)
     /// Engine script constants (RegisterGlobalConstant, C4Script.cpp:6581),
@@ -215,6 +251,7 @@ impl Engine {
         Self {
             functions: HashMap::new(),
             host_functions: HashMap::new(),
+            host_reference_functions: HashMap::new(),
             debugger_hooks: None,
             var_decls: Vec::new(),
             constants: HashMap::new(),
@@ -377,20 +414,55 @@ impl Engine {
     where
         F: Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
     {
-        self.host_functions.insert(name.into(), Arc::new(func));
+        let name = name.into();
+        self.host_reference_functions.remove(&name);
+        self.host_functions.insert(name, Arc::new(func));
+    }
+
+    /// Register a native function whose listed zero-based parameters receive
+    /// live script lvalues when the call expression supplies one. A declared
+    /// reference parameter passed a non-lvalue remains a readable value
+    /// argument with [`HostCallArg::is_reference`] false, matching C4Aul's
+    /// nullable `C4Value *` native parameters.
+    pub fn register_host_reference_function<F, I>(
+        &mut self,
+        name: impl Into<String>,
+        reference_parameters: I,
+        func: F,
+    ) where
+        F: Fn(&[HostCallArg]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
+        I: IntoIterator<Item = usize>,
+    {
+        let name = name.into();
+        self.host_functions.remove(&name);
+        self.host_reference_functions.insert(
+            name,
+            HostReferenceFunction::new(reference_parameters, func),
+        );
     }
 
     pub fn host_function_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.host_functions.keys().cloned().collect();
+        let mut names: Vec<String> = self
+            .host_functions
+            .keys()
+            .chain(self.host_reference_functions.keys())
+            .cloned()
+            .collect();
         names.sort();
+        names.dedup();
         names
     }
 
     pub fn clear_host_functions(&mut self) {
         self.host_functions.clear();
+        self.host_reference_functions.clear();
     }
 
+    /// Remove either native-host registration kind under `name`. The return
+    /// value remains the ordinary value-host callback for API compatibility;
+    /// removing a reference-aware registration succeeds with `None`.
     pub fn remove_host_function(&mut self, name: &str) -> Option<HostFunction> {
+        self.host_reference_functions.remove(name);
         self.host_functions.remove(name)
     }
 
@@ -453,6 +525,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_reference_functions(&self.host_reference_functions)
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -481,6 +554,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_reference_functions(&self.host_reference_functions)
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -514,6 +588,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_reference_functions(&self.host_reference_functions)
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -545,6 +620,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_reference_functions(&self.host_reference_functions)
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -573,6 +649,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_reference_functions(&self.host_reference_functions)
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -599,6 +676,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_reference_functions(&self.host_reference_functions)
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -629,6 +707,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_reference_functions(&self.host_reference_functions)
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -660,6 +739,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_reference_functions(&self.host_reference_functions)
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -709,7 +789,7 @@ impl Engine {
     }
 
     pub fn has_host_function(&self, name: &str) -> bool {
-        self.host_functions.contains_key(name)
+        self.host_functions.contains_key(name) || self.host_reference_functions.contains_key(name)
     }
 
     pub fn call_effect_callback(
