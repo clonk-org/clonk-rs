@@ -7,7 +7,7 @@ use lc_engine::{
 use lc_frontend::{
     default_owner_color,
     hud::{draw_command_image_cell, HudFont},
-    CommandImage, GuiPoint,
+    CommandImage, CommandOverlayIcon, GuiPoint,
 };
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, Rect, Surface, TextFont};
@@ -511,6 +511,10 @@ fn render_engine_normal_menu(
         let picture = item_icons.get(index).cloned().flatten();
         let image = match item.symbol {
             ObjectMenuSymbol::Definition => CommandImage::Picture(picture),
+            ObjectMenuSymbol::Put => CommandImage::Composite {
+                picture,
+                icon: CommandOverlayIcon::Hand(0),
+            },
             ObjectMenuSymbol::Buy { owner } => CommandImage::BuyMenu {
                 owner_color: gfx
                     .owner_colors
@@ -2099,9 +2103,10 @@ mod tests {
 
     #[test]
     fn engine_context_menu_draws_cpp_composite_symbols_and_exit_close_icon() {
-        // C4ObjectMenu::RefillInternal uses a definition picture for
-        // Contents, DrawMenuSymbol for Buy/Sell, target+OKCancel(0,1) for
-        // Info and fctExit for Exit (src/C4ObjectMenu.cpp:361-427;
+        // C4ObjectMenu::RefillInternal composes carried picture+Hand(0) for
+        // Put, a definition picture for Contents, DrawMenuSymbol for
+        // Buy/Sell, target+OKCancel(0,1) for Info and fctExit for Exit
+        // (src/C4ObjectMenu.cpp:335-427;
         // src/C4Menu.cpp:43-70). AutoContextMenu's close command contains
         // "Exit", so the command strip also draws fctExit (:874-880).
         fn solid(width: u32, height: u32, rgba: [u8; 4]) -> ImageData {
@@ -2150,6 +2155,7 @@ mod tests {
             .expect("context identification deserializes");
         menu.selection = -1;
         menu.items = vec![
+            make_item("Put", "HUT3", lc_engine::ObjectMenuSymbol::Put),
             make_item(
                 "Contents",
                 "HUT3",
@@ -2176,6 +2182,7 @@ mod tests {
         let magenta = Color::opaque(220, 20, 220);
         let orange = Color::opaque(240, 120, 20);
         let cyan = Color::opaque(20, 220, 220);
+        let purple = Color::opaque(160, 20, 220);
         let mut arrow = vec![0_u8; 16 * 8 * 4];
         for y in 0..8 {
             for x in 0..16 {
@@ -2200,6 +2207,11 @@ mod tests {
                 wealth: Some(solid(8, 8, [green.r, green.g, green.b, green.a])),
                 arrow: Some(ImageData::new(16, 8, arrow)),
                 exit: Some(solid(8, 8, [cyan.r, cyan.g, cyan.b, cyan.a])),
+                hand: Some(solid(
+                    8,
+                    8,
+                    [purple.r, purple.g, purple.b, purple.a],
+                )),
                 control: Some(control.clone()),
                 ..lc_frontend::HudGraphics::default()
             },
@@ -2210,6 +2222,7 @@ mod tests {
         };
         let picture = solid(8, 8, [gray.r, gray.g, gray.b, gray.a]);
         let item_icons = vec![
+            Some(picture.clone()),
             Some(picture.clone()),
             None,
             None,
@@ -2236,17 +2249,20 @@ mod tests {
         );
 
         let row = |index| layout.item_rect(index).expect("context row is visible");
-        assert!(contains_color(&surface, row(0), gray));
+        for color in [gray, purple] {
+            assert!(contains_color(&surface, row(0), color), "missing Put {color:?}");
+        }
+        assert!(contains_color(&surface, row(1), gray));
         for color in [red, green, yellow] {
-            assert!(contains_color(&surface, row(1), color), "missing Buy {color:?}");
+            assert!(contains_color(&surface, row(2), color), "missing Buy {color:?}");
         }
         for color in [red, green, magenta] {
-            assert!(contains_color(&surface, row(2), color), "missing Sell {color:?}");
+            assert!(contains_color(&surface, row(3), color), "missing Sell {color:?}");
         }
         for color in [gray, orange] {
-            assert!(contains_color(&surface, row(3), color), "missing Info {color:?}");
+            assert!(contains_color(&surface, row(4), color), "missing Info {color:?}");
         }
-        assert!(contains_color(&surface, row(4), cyan));
+        assert!(contains_color(&surface, row(5), cyan));
         let command_strip = Rect::new(
             layout.bounds.x,
             layout.bounds.y + layout.bounds.height as i32 - CLASSIC_COMMAND_HEIGHT,

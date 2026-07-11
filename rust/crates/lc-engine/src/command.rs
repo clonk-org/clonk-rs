@@ -1612,10 +1612,10 @@ mod tests {
     }
 
     #[test]
-    fn put_transfers_item_into_target_container() {
-        let actor_id = ObjectId::new(600);
-        let item_id = ObjectId::new(601);
-        let container_id = ObjectId::new(602);
+    fn put_transfers_item_into_nearby_target_container() {
+        let actor_id = ObjectId::new(590);
+        let item_id = ObjectId::new(591);
+        let container_id = ObjectId::new(592);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.position = Vector2::new(50, 50);
@@ -1628,6 +1628,54 @@ mod tests {
         let mut target_container = snapshot_with_id(container_id.as_u64());
         target_container.position = Vector2::new(54, 48);
         target_container.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor);
+        objects.insert(item.id, item);
+        objects.insert(target_container.id, target_container.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 0);
+        let mut state = PutState::from_request(
+            &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.is_empty());
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+                assert_eq!(*object_id, item_id);
+                assert_eq!(update.container, Some(Some(container_id)));
+                assert_eq!(update.position, Some(target_container.position));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn put_inside_target_container_ignores_center_distance() {
+        let actor_id = ObjectId::new(600);
+        let item_id = ObjectId::new(601);
+        let container_id = ObjectId::new(602);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(50, 50);
+        actor.container = Some(container_id);
+        actor.contents = vec![item_id];
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+        item.position = actor.position;
+
+        let mut target_container = snapshot_with_id(container_id.as_u64());
+        target_container.position = Vector2::new(54, 80);
+        target_container.collectible = false;
+        target_container.alive = false;
 
         let mut objects = HashMap::new();
         objects.insert(actor.id, actor.clone());
@@ -1659,7 +1707,7 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
@@ -1670,6 +1718,19 @@ mod tests {
             }
             other => panic!("unexpected event: {:?}", other),
         }
+
+        objects
+            .get_mut(&item_id)
+            .expect("item present")
+            .container = Some(container_id);
+        objects
+            .get_mut(&actor_id)
+            .expect("actor present")
+            .contents
+            .clear();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
+        assert_eq!(state.step(&ctx).status, CommandStatus::Completed);
     }
 
     #[test]
@@ -6249,7 +6310,7 @@ mod tests {
         };
 
         let result = stack.step(&ctx).expect("put evaluates");
-        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
@@ -6265,7 +6326,21 @@ mod tests {
             other => panic!("unexpected put event: {:?}", other),
         }
 
-        assert_eq!(stack.len(), 0, "completed command should be removed");
+        assert_eq!(stack.len(), 1, "Put finishes on the following execute");
+        objects
+            .get_mut(&item_id)
+            .expect("item present")
+            .container = Some(container_id);
+        objects
+            .get_mut(&actor_id)
+            .expect("actor present")
+            .contents
+            .clear();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
+        let result = stack.step(&ctx).expect("Put observes transferred item");
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(stack.len(), 0);
     }
 
     #[test]
@@ -10375,6 +10450,8 @@ struct PutState {
     container: ObjectId,
     requested_item: Option<ObjectId>,
     definition_id: Option<DefinitionId>,
+    #[serde(default)]
+    remaining_count: i32,
     update_interval: u32,
     last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
@@ -10390,6 +10467,7 @@ impl PutState {
             container,
             requested_item: request.target2,
             definition_id: command_data_to_definition_id(&request.data),
+            remaining_count: request.tx.unwrap_or(0),
             update_interval: request.update_interval.max(1),
             last_evaluated: None,
             last_move_order: None,
@@ -10469,7 +10547,7 @@ impl PutState {
         let update = self.update_to_stop(ctx);
 
         let container_snapshot = match ctx.resolve(self.container) {
-            Some(snapshot) if snapshot.is_active() => snapshot,
+            Some(snapshot) if snapshot.is_status_active() => snapshot,
             _ => return CommandStepResult::failed(update),
         };
 
@@ -10479,6 +10557,11 @@ impl PutState {
         };
 
         if item_snapshot.container == Some(self.container) {
+            if self.remaining_count > 1 {
+                self.requested_item = None;
+                self.remaining_count -= 1;
+                return CommandStepResult::running(update);
+            }
             return CommandStepResult::completed(update);
         }
 
@@ -10533,21 +10616,26 @@ impl PutState {
             self.ungrab_requested = false;
         }
 
-        const PUT_RANGE_HORIZONTAL: i32 = 12;
-        const PUT_RANGE_VERTICAL: i32 = 18;
-        let dx = container_snapshot.position.x - ctx.position.x;
-        let dy = container_snapshot.position.y - ctx.position.y;
-        if dx.abs() > PUT_RANGE_HORIZONTAL || dy.abs() > PUT_RANGE_VERTICAL {
-            if self.should_issue_move(ctx.frame) {
-                let mut result = CommandStepResult::running(update.clone());
-                let request = CommandRequest::new(CommandId::MoveTo)
-                    .with_target(Some(self.container))
-                    .with_update_interval(15)
-                    .with_mode(CommandMode::Sub);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
+        // A Clonk already inside the target puts directly even when the
+        // object centers exceed the outdoor range gate
+        // (C4Command.cpp:1439-1447).
+        if ctx.object.container != Some(self.container) {
+            const PUT_RANGE_HORIZONTAL: i32 = 12;
+            const PUT_RANGE_VERTICAL: i32 = 18;
+            let dx = container_snapshot.position.x - ctx.position.x;
+            let dy = container_snapshot.position.y - ctx.position.y;
+            if dx.abs() > PUT_RANGE_HORIZONTAL || dy.abs() > PUT_RANGE_VERTICAL {
+                if self.should_issue_move(ctx.frame) {
+                    let mut result = CommandStepResult::running(update.clone());
+                    let request = CommandRequest::new(CommandId::MoveTo)
+                        .with_target(Some(self.container))
+                        .with_update_interval(15)
+                        .with_mode(CommandMode::Sub);
+                    result.operations.push(CommandOperation::PushFront(request));
+                    return result;
+                }
+                return CommandStepResult::running(update);
             }
-            return CommandStepResult::running(update);
         }
 
         let mut item_update = ObjectUpdate::new();
@@ -10555,7 +10643,7 @@ impl PutState {
         item_update.position = Some(container_snapshot.position);
         item_update.velocity = Some(Vector2::ZERO);
 
-        CommandStepResult::completed(update).with_events(vec![CommandEvent::ApplyObjectUpdate {
+        CommandStepResult::running(update).with_events(vec![CommandEvent::ApplyObjectUpdate {
             object_id: item_id,
             update: item_update,
         }])
@@ -12955,8 +13043,9 @@ impl CommandState {
     /// whose C++ counterpart rewrites Target/Tx/Ty after Set do so —
     /// MoveTo's InitEvaluation absorption/adjust (C4Command.cpp:
     /// 1634-1643), Acquire's 500/250 range defaults (:1666-1670) and
-    /// Construct's found-site write (:1757-1766). Put's Ty reminder
-    /// flag (:1384) is unmodeled.
+    /// Construct's found-site write (:1757-1766), plus Put's resolved
+    /// Target2 and remaining Tx count (:1384-1418). Put's Ty reminder flag
+    /// is unmodeled.
     fn apply_live_overrides(&self, view: &mut CommandView) {
         match self {
             CommandState::MoveTo(state) => {
@@ -12975,6 +13064,10 @@ impl CommandState {
                     view.tx = Some(site.x);
                     view.ty = Some(site.y);
                 }
+            }
+            CommandState::Put(state) => {
+                view.tx = (state.remaining_count != 0).then_some(state.remaining_count);
+                view.target2 = state.requested_item;
             }
             _ => {}
         }

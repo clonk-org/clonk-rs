@@ -330,6 +330,11 @@ impl Engine {
         const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
         let crew_id = self.objects[crew_index].id;
         let crew_owner = self.objects[crew_index].state.owner;
+        let crew_contents = self.objects[crew_index].state.contents.clone();
+        let first_carried_definition = crew_contents
+            .first()
+            .and_then(|object_id| self.find_object_index(*object_id))
+            .map(|index| self.objects[index].definition_id.clone());
         let base = &self.objects[base_index];
         let base_id = base.id;
         let base_definition = base.definition_id.clone();
@@ -353,6 +358,34 @@ impl Engine {
         };
 
         if base_is_container && self.objects[crew_index].state.container == Some(base_id) {
+            if let Some(first_carried_definition) = first_carried_definition {
+                let command2 = if crew_contents.len() > 1
+                    || self.selected_crew(crew_owner).len() > 1
+                {
+                    format!(
+                        "PlayerObjectCommand({}, \"Put\", Object({}), 1000, 0) && ExecuteCommand()",
+                        crew_owner,
+                        base_id.as_u64()
+                    )
+                } else {
+                    String::new()
+                };
+                items.push(crate::ObjectMenuItem {
+                    caption: "Put".to_string(),
+                    info_caption: String::new(),
+                    command: format!(
+                        "PlayerObjectCommand({}, \"Put\", Object({}), 0, 0) && ExecuteCommand()",
+                        crew_owner,
+                        base_id.as_u64()
+                    ),
+                    command2,
+                    count: C4MN_ITEM_NO_COUNT,
+                    item_id: first_carried_definition,
+                    symbol: crate::ObjectMenuSymbol::Put,
+                    selectable: true,
+                    value: None,
+                });
+            }
             items.push(item(
                 "Contents",
                 format!(
@@ -1023,10 +1056,18 @@ impl Engine {
         let object_id = self.objects[index].id;
         match com {
             COM_MENU_ENTER => {
-                self.menu_user_enter(object_id, false)?;
+                if !self.enter_internal_context_put(index, &menu, false)?
+                    && !self.enter_internal_context_exit(index, &menu)?
+                {
+                    self.menu_user_enter(object_id, false)?;
+                }
             }
             COM_MENU_ENTER_ALL => {
-                self.menu_user_enter(object_id, true)?;
+                if !self.enter_internal_context_put(index, &menu, true)?
+                    && !self.enter_internal_context_exit(index, &menu)?
+                {
+                    self.menu_user_enter(object_id, true)?;
+                }
             }
             COM_MENU_CLOSE => {
                 let auto_context_exit = !menu.user_menu
@@ -1090,6 +1131,110 @@ impl Engine {
             _ => {}
         }
         Ok(true)
+    }
+
+    /// Execute the engine-owned C4MN_Context Put row without routing its
+    /// `PlayerObjectCommand` text through the script host-function table.
+    /// C++ applies Put to every selected crew member, clamps the requested
+    /// count to each inventory, and then synchronously executes the command
+    /// object once (C4ObjectMenu.cpp:335-359; C4Player.cpp:1408-1423).
+    fn enter_internal_context_put(
+        &mut self,
+        index: usize,
+        menu: &crate::ObjectMenuState,
+        right: bool,
+    ) -> Result<bool, EngineError> {
+        if menu.user_menu || !menu.permanent || menu.identification != Value::Int(14) {
+            return Ok(false);
+        }
+        let Some(item) = usize::try_from(menu.selection)
+            .ok()
+            .and_then(|selection| menu.items.get(selection))
+        else {
+            return Ok(false);
+        };
+        if item.caption != "Put" {
+            return Ok(false);
+        }
+        let object_id = self.objects[index].id;
+        let owner = self.objects[index].state.owner;
+        let Some(container) = self.objects[index].state.container else {
+            return Ok(false);
+        };
+        let put_all = right && !item.command2.is_empty();
+        self.player_context_put(owner, container, put_all)?;
+        self.execute_object_command_now(object_id)?;
+        Ok(true)
+    }
+
+    /// C4MN_Context's Exit row issues the player-wide Exit order, then
+    /// executes it synchronously on the menu command object
+    /// (C4ObjectMenu.cpp:426-433; C4ObjectCom.cpp:1013-1040).
+    fn enter_internal_context_exit(
+        &mut self,
+        index: usize,
+        menu: &crate::ObjectMenuState,
+    ) -> Result<bool, EngineError> {
+        if menu.user_menu || !menu.permanent || menu.identification != Value::Int(14) {
+            return Ok(false);
+        }
+        let is_exit = usize::try_from(menu.selection)
+            .ok()
+            .and_then(|selection| menu.items.get(selection))
+            .is_some_and(|item| item.symbol == crate::ObjectMenuSymbol::Exit);
+        if !is_exit {
+            return Ok(false);
+        }
+        let object_id = self.objects[index].id;
+        let owner = self.objects[index].state.owner;
+        self.player_object_command(owner, CommandId::Exit, None, 0, 0)?;
+        self.execute_object_command_now(object_id)?;
+        Ok(true)
+    }
+
+    fn player_context_put(
+        &mut self,
+        owner: i32,
+        container: ObjectId,
+        put_all: bool,
+    ) -> Result<(), EngineError> {
+        let cursor = self.crew_cursor(owner);
+        let mut crew = self.selected_crew(owner);
+        if let Some(cursor) = cursor.filter(|cursor| !crew.contains(cursor)) {
+            crew.push(cursor);
+        }
+        for crew_id in crew {
+            if crew_id == container {
+                continue;
+            }
+            let Some(index) = self.find_object_index(crew_id) else {
+                continue;
+            };
+            if !self.objects[index].state.status.is_active() {
+                continue;
+            }
+            let mut contents = self.objects[index].state.contents.clone();
+            if !put_all {
+                contents.truncate(1);
+            }
+            if contents.is_empty() {
+                continue;
+            }
+            let count = if put_all {
+                i32::try_from(contents.len()).unwrap_or(i32::MAX)
+            } else {
+                0
+            };
+            self.object_command_to_obj(
+                index,
+                CommandId::Put,
+                Some(container),
+                count,
+                0,
+                false,
+            )?;
+        }
+        Ok(())
     }
 
     /// `C4Menu::MoveSelection` (C4Menu.cpp:535-555): advance in fixed
@@ -3702,6 +3847,178 @@ protected func ControlCommand(szCommand) { return(1); }
                 .collect::<Vec<_>>(),
             vec!["Contents", "Buy", "Sell", "Exit"]
         );
+    }
+
+    #[test]
+    fn auto_context_put_row_deposits_the_first_carried_object() {
+        // C4MN_Context starts with Put when the command object is carrying
+        // something inside a container (C4ObjectMenu.cpp:335-359). Because
+        // it is the first selected row, Throw enters it and immediately
+        // executes the Put command on the contained Clonk.
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT2", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        hut.set_auto_context_menu(true);
+        engine.register_definition(hut).expect("register hut");
+        engine
+            .register_definition(
+                Definition::from_script("FLAG", "Flag", "#strict\n")
+                    .expect("flag compiles"),
+            )
+            .expect("register flag");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine.player_mut(1).expect("player").control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT2"))
+            .expect("spawn hut");
+        let flag = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(crew))
+            .expect("spawn carried flag");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+
+        engine.execute_player_controls().expect("player execute");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("context menu opens");
+        assert_eq!(menu.selection, 0);
+        assert_eq!(menu.items.first().map(|item| item.caption.as_str()), Some("Put"));
+        assert_eq!(menu.items[0].symbol, crate::ObjectMenuSymbol::Put);
+        assert_eq!(
+            menu.items[0].command,
+            format!(
+                "PlayerObjectCommand(1, \"Put\", Object({}), 0, 0) && ExecuteCommand()",
+                hut.as_u64()
+            )
+        );
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("enter selected Put row");
+
+        assert_eq!(
+            engine.object_snapshot(flag).expect("flag snapshot").container,
+            Some(hut),
+            "the selected Put row deposits the carried flag"
+        );
+
+        let second_flag = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(crew))
+            .expect("spawn second carried flag");
+        let third_flag = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(crew))
+            .expect("spawn third carried flag");
+        engine
+            .tick()
+            .expect("complete primary Put and reopen context menu");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("context menu reopens");
+        assert_eq!(
+            menu.items[0].command2,
+            format!(
+                "PlayerObjectCommand(1, \"Put\", Object({}), 1000, 0) && ExecuteCommand()",
+                hut.as_u64()
+            )
+        );
+
+        engine
+            .player_in_com(1, COM_SPECIAL2, 0)
+            .expect("enter Put-all command");
+        let command = engine
+            .object_snapshot(crew)
+            .expect("crew snapshot")
+            .command_stack
+            .command_views()
+            .into_iter()
+            .next()
+            .expect("Put-all remains active after its first transfer");
+        assert_eq!(command.name, "Put");
+        assert_eq!(command.tx, Some(2));
+        let resolved_item = command
+            .target2
+            .expect("C++ Put resolves its live Target2 on execute");
+        assert!(
+            [second_flag, third_flag].contains(&resolved_item),
+            "Put-all resolves one of the carried flags"
+        );
+        engine.tick().expect("advance Put count");
+        engine.tick().expect("put the remaining carried object");
+        engine.tick().expect("complete Put-all command");
+
+        for flag in [second_flag, third_flag] {
+            assert_eq!(
+                engine.object_snapshot(flag).expect("flag snapshot").container,
+                Some(hut),
+                "Put-all deposits every carried object"
+            );
+        }
+        assert!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew snapshot")
+                .command_stack
+                .is_empty(),
+            "Put-all finishes after observing the final item in the target"
+        );
+    }
+
+    #[test]
+    fn selecting_auto_context_exit_row_exits_the_building() {
+        // C4MN_Context's Exit row runs PlayerObjectCommand("Exit") and
+        // ExecuteCommand on the menu object (C4ObjectMenu.cpp:426-433).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        hut.set_auto_context_menu(true);
+        engine.register_definition(hut).expect("register hut");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine.player_mut(1).expect("player").control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+        engine.execute_player_controls().expect("open context menu");
+
+        for _ in 0..3 {
+            engine.player_in_com(1, COM_RIGHT, 0).expect("navigate");
+        }
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("context menu remains open");
+        assert_eq!(menu.items[menu.selection as usize].caption, "Exit");
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("enter Exit row");
+
+        assert_eq!(
+            engine.object_snapshot(crew).expect("crew survives").container,
+            None,
+            "the selected Exit row executes the real Exit command"
+        );
+        assert_eq!(engine.debug_object_menu(crew.as_u64()), Some(None));
     }
 
     #[test]

@@ -1995,6 +1995,9 @@ pub enum ObjectMenuSymbol {
     /// C4Menu.cpp:119-128).
     #[default]
     Definition,
+    /// First carried definition picture plus `fctHand` phase 0
+    /// (`C4ObjectMenu.cpp:347-355`).
+    Put,
     /// `DrawMenuSymbol(C4MN_Buy, ...)` (C4Menu.cpp:61-65).
     Buy { owner: i32 },
     /// `DrawMenuSymbol(C4MN_Sell, ...)` (C4Menu.cpp:66-70).
