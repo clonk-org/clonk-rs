@@ -123,7 +123,8 @@ pub struct ContextMenuEntry {
 use command::{
     definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
     CommandDefinitionSnapshot, CommandEvent, CommandId, CommandObjectSnapshot, CommandOperation,
-    CommandPlayerSnapshot, CommandRuntimeContext, CommandStack, CommandStepResult,
+    CommandMode, CommandPlayerSnapshot, CommandRequest, CommandRuntimeContext, CommandStack,
+    CommandStepResult,
 };
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
@@ -21646,7 +21647,12 @@ impl Engine {
 
         let mut push_handled = false;
         if matches!(procedure, ActionProcedure::Push) {
-            if !self.apply_push_procedure(idx, command_direction, movement_profile, &definition_id)
+            if !self.apply_push_procedure(
+                idx,
+                command_direction,
+                movement_profile,
+                &definition_id,
+            )?
             {
                 return Ok(false);
             }
@@ -24356,7 +24362,7 @@ impl Engine {
         target_idx: usize,
         command_direction: CommandDirection,
         definition_id: &DefinitionId,
-    ) -> bool {
+    ) -> Result<bool, EngineError> {
         let physical = self.object_physical(idx);
         let limit = math::val_by_physical(280, physical.walk);
         // ComDir → target speed and straightening (C4Object.cpp:5049-5057).
@@ -24376,8 +24382,8 @@ impl Engine {
             math::val_by_physical(250, physical.push),
             straighten,
         ) {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            self.stop_action_delay_command(idx, definition_id)?;
+            return Ok(false);
         }
         // Got-hold check (C4Object.cpp:5066-5080).
         let own_width = self.objects[idx]
@@ -24398,11 +24404,11 @@ impl Engine {
         if !(-push_range..=sawdt - 1 + push_range).contains(&(position.x - sax))
             || !(-push_range..=sahgt - 1 + push_range).contains(&(position.y - say))
         {
+            self.stop_action_delay_command(idx, definition_id)?;
             // Grab lost: GrabLost script call on the target
             // (C4Object.cpp:4251-4254).
-            self.reset_action_to_default(idx, definition_id, true);
             let _ = self.call_object_function(target_idx, "GrabLost", Vec::new());
-            return false;
+            return Ok(false);
         }
         // Vertical follow (C4Object.cpp:5083).
         if position.y - push_distance > say + sahgt && txdir != C4Fixed::ZERO {
@@ -24436,7 +24442,24 @@ impl Engine {
         object.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut object.fixed_velocity);
         object.refresh_velocity_from_fixed();
-        true
+        Ok(true)
+    }
+
+    /// `StopActionDelayCommand` (C4Object.cpp:4677-4681): every failed
+    /// DFA_PUSH first runs ObjectComStop (Idle, then stand in Walk) and adds
+    /// a silent 50-frame Wait to the top of the command stack.
+    fn stop_action_delay_command(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+    ) -> Result<(), EngineError> {
+        self.force_action_with_calls(idx, definition_id, "Idle")?;
+        self.object_action_stand(idx, definition_id)?;
+        let wait = CommandRequest::new(CommandId::Wait)
+            .with_update_interval(50)
+            .with_mode(CommandMode::SilentSub);
+        let _ = self.objects[idx].commands.push_front(wait);
+        Ok(())
     }
 
     fn apply_push_procedure(
@@ -24445,30 +24468,30 @@ impl Engine {
         command_direction: CommandDirection,
         movement_profile: MovementProfile,
         definition_id: &DefinitionId,
-    ) -> bool {
+    ) -> Result<bool, EngineError> {
         let Some(target_id) = self.objects[idx].state.action.target else {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            self.stop_action_delay_command(idx, definition_id)?;
+            return Ok(false);
         };
         let Some(target_idx) = self.find_object_index(target_id) else {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            self.stop_action_delay_command(idx, definition_id)?;
+            return Ok(false);
         };
         if target_idx == idx {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            self.stop_action_delay_command(idx, definition_id)?;
+            return Ok(false);
         }
         let target_removed = {
             let target = &self.objects[target_idx];
             target.destroyed || matches!(target.state.status, ObjectStatus::Deleted)
         };
         if target_removed {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            self.stop_action_delay_command(idx, definition_id)?;
+            return Ok(false);
         }
         if self.objects[target_idx].state.container == Some(self.objects[idx].id) {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            self.stop_action_delay_command(idx, definition_id)?;
+            return Ok(false);
         }
 
         if self.object_physical(idx).walk != 0 {
@@ -24526,7 +24549,7 @@ impl Engine {
             );
         }
 
-        true
+        Ok(true)
     }
 
     fn update_pull_pair(
@@ -40265,6 +40288,51 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(object.action.name, "Idle");
         assert_eq!(object.velocity, Vector2::ZERO);
         assert_eq!(object.command_direction, CommandDirection::Stop);
+    }
+
+    #[test]
+    fn failed_push_stands_in_walk_and_adds_cpp_delay_command() {
+        // Every DFA_PUSH failure calls StopActionDelayCommand: ObjectComStop
+        // stands the Clonk in Walk, then a 50-frame Wait is added to the top
+        // of its command stack (C4Object.cpp:4677-4681,5060-5094).
+        let mut definition = Definition::from_script("Pusher", "Pusher", "").unwrap();
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("walk"),
+                ),
+                (
+                    "Push".to_string(),
+                    ActionSpec::default().with_procedure("push"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Pusher")
+                    .with_action(ActionState::new("Push"))
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("pusher spawns");
+
+        engine.tick().expect("failed Push executes");
+
+        let object = engine.object_snapshot(id).expect("pusher survives");
+        assert_eq!(object.action.name, "Walk");
+        assert_eq!(object.command_direction, CommandDirection::Stop);
+        let index = engine.find_object_index(id).expect("pusher exists");
+        assert_eq!(
+            engine.objects[index].commands.snapshot().command_names(),
+            vec!["Wait".to_string()]
+        );
     }
 
     #[test]
