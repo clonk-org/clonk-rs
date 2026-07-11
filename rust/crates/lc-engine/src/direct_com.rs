@@ -422,6 +422,50 @@ impl Engine {
                 ));
             }
         }
+        // AddContextFunctions(target): effective `Context*` functions with a
+        // description block are evaluated on the target and inserted before
+        // Info/Exit (C4ObjectMenu.cpp:398-399,670-682). The menu command runs
+        // on the crew and ProtectedCall dispatches back to the target.
+        let context_functions = self
+            .definitions
+            .get(&base_definition)
+            .map(|definition| definition.script_context_functions())
+            .unwrap_or_default();
+        for context in context_functions {
+            let image = context.image.as_deref().unwrap_or("NONE");
+            let enabled = match context.condition.as_deref() {
+                Some(condition) => {
+                    let value = self.call_object_function(
+                        base_index,
+                        condition,
+                        vec![
+                            compat::object_reference_value(crew_id),
+                            Value::C4Id(image.to_owned()),
+                        ],
+                    )?;
+                    compat::value_raw_truthy(&value)
+                }
+                None => true,
+            };
+            if !enabled {
+                continue;
+            }
+            items.push(crate::ObjectMenuItem {
+                caption: context.label,
+                info_caption: context.description.unwrap_or_default(),
+                command: format!(
+                    "ProtectedCall(Object({}),\"{}\",this)",
+                    base_id.as_u64(),
+                    context.function
+                ),
+                command2: String::new(),
+                count: C4MN_ITEM_NO_COUNT,
+                item_id: image.to_owned(),
+                symbol: crate::ObjectMenuSymbol::Definition,
+                selectable: true,
+                value: None,
+            });
+        }
         if self
             .definitions
             .get(&base_definition)
@@ -4157,6 +4201,79 @@ protected func ControlCommand(szCommand) { return(1); }
                 .map(|item| item.caption.as_str())
                 .collect::<Vec<_>>(),
             vec!["Contents", "Buy", "Sell", "Exit"]
+        );
+    }
+
+    #[test]
+    fn contained_context_runs_script_declared_context_function() {
+        // C4MN_Context inserts target `Context*` functions between the base
+        // rows and Info/Exit. Their leading description block supplies the
+        // caption/image/condition, and Enter executes ProtectedCall on the
+        // target (C4ObjectMenu.cpp:398-399,670-682;
+        // C4AulParse.cpp:309-380). This is WRKS::ContextConstruction's real
+        // Tutorial07 path, reduced to one deterministic menu callback.
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut workshop = Definition::from_script(
+            "WRKS",
+            "Workshop",
+            r#"
+#strict 2
+public func ContextConstruction(caller) {
+    [Production|Image=CXCN|Condition=IsBuilt|Desc=Build a vehicle.]
+    return CreateMenu(CXCN, caller, this(), 1, "No knowledge");
+}
+protected func IsBuilt() { return GetCon() >= 100; }
+"#,
+        )
+        .expect("workshop compiles");
+        workshop.set_category(crate::CATEGORY_STRUCTURE);
+        workshop.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        workshop.set_auto_context_menu(true);
+        engine
+            .register_definition(workshop)
+            .expect("register workshop");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine.player_mut(1).expect("player").control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let workshop = engine
+            .spawn_object(SpawnConfig::new("WRKS"))
+            .expect("spawn workshop");
+        engine
+            .apply_object_update(
+                crew,
+                crate::ObjectUpdate::new().with_container(workshop),
+            )
+            .expect("enter workshop");
+
+        engine.execute_player_controls().expect("open context menu");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("context menu opens");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Contents", "Production", "Exit"]
+        );
+        engine
+            .player_in_com(1, COM_RIGHT, 0)
+            .expect("select Production");
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("execute ContextConstruction");
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("production menu opens")
+                .identification,
+            Value::C4Id("CXCN".to_owned())
         );
     }
 

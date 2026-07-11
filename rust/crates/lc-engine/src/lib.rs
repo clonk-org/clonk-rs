@@ -120,6 +120,15 @@ pub struct ContextMenuEntry {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScriptContextFunction {
+    pub function: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub image: Option<String>,
+    pub condition: Option<String>,
+}
+
 use command::{
     definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
     CommandDefinitionSnapshot, CommandEvent, CommandId, CommandObjectSnapshot, CommandOperation,
@@ -6057,9 +6066,9 @@ pub struct Definition {
     /// `Arc` to host functions so nested script calls (Find_Func, GameCall)
     /// can execute another definition's functions mid-VM-call.
     script: Arc<ScriptEngine>,
-    /// The raw Script.c text — read-only presentation support for the
-    /// C4ScriptHost::GetControlDesc `[..|Image=..]` descriptors, which the
-    /// lc-script parser does not retain (C4AulParse.cpp:301-375).
+    /// The raw Script.c text — read-only presentation support and declaration
+    /// ordering for C4ScriptHost `[..|Image=..]` descriptors
+    /// (C4AulParse.cpp:301-380).
     script_source: String,
     includes: Vec<String>,
     /// `#appendto` targets of this definition's script
@@ -6378,6 +6387,69 @@ impl Definition {
 
     pub fn description(&self) -> Option<&str> {
         self.description.as_deref()
+    }
+
+    /// Effective target `Context*` functions with their C4Aul description
+    /// metadata. C++ enumerates the linked script list from `FuncL` backward
+    /// and parses caption/Image/Condition/Desc from the raw description
+    /// segments (C4Aul.cpp:357-379; C4AulParse.cpp:309-380).
+    pub(crate) fn script_context_functions(&self) -> Vec<ScriptContextFunction> {
+        let mut functions = self
+            .script
+            .functions()
+            .values()
+            .filter(|function| function.name.starts_with("Context"))
+            .filter_map(|function| {
+                function.description.as_deref().map(|raw| {
+                    let mut segments = raw.split('|');
+                    let label = segments.next().unwrap_or_default().trim().to_owned();
+                    let mut image = None;
+                    let mut condition = None;
+                    let mut description = None;
+                    for segment in segments {
+                        let Some((key, value)) = segment.split_once('=') else {
+                            continue;
+                        };
+                        let value = value.trim();
+                        match key.trim() {
+                            "Image" => {
+                                image = Some(
+                                    value
+                                        .split_once(':')
+                                        .map_or(value, |(identifier, _)| identifier)
+                                        .to_owned(),
+                                );
+                            }
+                            "Condition" => condition = Some(value.to_owned()),
+                            "Desc" => description = (!value.is_empty()).then(|| value.to_owned()),
+                            _ => {}
+                        }
+                    }
+                    let declaration_position = self
+                        .script_source
+                        .find(&format!("func {}", function.name));
+                    (
+                        declaration_position,
+                        ScriptContextFunction {
+                            function: function.name.clone(),
+                            label,
+                            description,
+                            image,
+                            condition,
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        functions.sort_by(|(left_position, left), (right_position, right)| {
+            right_position
+                .cmp(left_position)
+                .then_with(|| left.function.cmp(&right.function))
+        });
+        functions
+            .into_iter()
+            .map(|(_, function)| function)
+            .collect()
     }
 
     pub fn set_description(&mut self, description: Option<String>) {
