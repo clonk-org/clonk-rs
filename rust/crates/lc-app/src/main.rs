@@ -13932,6 +13932,11 @@ mod tests {
             self.app.handle_key(key, ElementState::Released)
         }
 
+        fn tap(&mut self, key: VirtualKeyCode) -> Result<(), EngineError> {
+            self.press(key)?;
+            self.release(key)
+        }
+
         fn engine(&self) -> &Engine {
             &self.app.engine
         }
@@ -16898,6 +16903,10 @@ mod tests {
             .expect("HUT3 exposes its app-visible auto-context menu");
         let context_identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
             .expect("integer menu identification deserializes");
+        let buy_identification = serde_json::from_value(serde_json::json!({ "Int": 4 }))
+            .expect("buy menu identification deserializes");
+        let contents_identification = serde_json::from_value(serde_json::json!({ "Int": 18 }))
+            .expect("contents menu identification deserializes");
         assert_eq!(menu.identification, context_identification);
         assert_eq!(
             menu.caption, "Cabin",
@@ -16937,9 +16946,7 @@ mod tests {
             let buy_menu_open = app
                 .engine
                 .cursor_object_menu(app.local_owner)
-                .is_some_and(|(_, menu)| menu.identification == serde_json::from_value(
-                    serde_json::json!({ "Int": 4 }),
-                ).expect("buy identification deserializes"));
+                .is_some_and(|(_, menu)| menu.identification == buy_identification);
             if buy_menu_open {
                 break;
             }
@@ -16949,11 +16956,7 @@ mod tests {
             .engine
             .cursor_object_menu(app.local_owner)
             .expect("physical X/A opens Tutorial03 Buy menu");
-        assert_eq!(
-            buy_menu.identification,
-            serde_json::from_value(serde_json::json!({ "Int": 4 }))
-                .expect("buy identification deserializes")
-        );
+        assert_eq!(buy_menu.identification, buy_identification);
         assert_eq!(
             buy_menu.title_symbol,
             lc_engine::ObjectMenuSymbol::Buy {
@@ -16980,6 +16983,161 @@ mod tests {
         );
         app.render(&mut rendered)
             .expect("render Tutorial03 Buy menu through the app");
+
+        // Buy the selected LORY with physical A/Throw. C++ leaves the
+        // permanent Buy menu open and refills its C4IDList row at count zero
+        // after C4Player::Buy consumes wealth and creates the object inside
+        // the base (C4Command.cpp:2005-2035; C4ObjectMenu.cpp:124-129,207-237).
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard.tap(VirtualKeyCode::A).expect("buy selected LORY");
+        }
+        for _ in 0..20 {
+            let bought = app.engine.snapshot().objects.into_iter().any(|object| {
+                object.definition_id == "LORY" && object.container == Some(hut)
+            });
+            if bought
+                && app
+                    .engine
+                    .player(app.local_owner)
+                    .is_some_and(|player| player.wealth() == 5)
+            {
+                break;
+            }
+            app.update().expect("advance physical LORY purchase");
+        }
+        let lorry = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "LORY")
+            .expect("physical A buys Tutorial03 LORY")
+            .id;
+        assert_eq!(
+            app.engine
+                .object_snapshot(lorry)
+                .expect("bought LORY")
+                .container,
+            Some(hut)
+        );
+        let player = app.engine.player(app.local_owner).expect("local player");
+        assert_eq!(player.wealth(), 5);
+        assert_eq!(player.home_base_material().get("LORY"), Some(&0));
+        let (_, buy_menu) = app
+            .engine
+            .cursor_object_menu(app.local_owner)
+            .expect("permanent Buy menu remains after purchase");
+        assert_eq!(buy_menu.identification, buy_identification);
+        assert_eq!(buy_menu.items[0].count, 0);
+
+        // D closes Buy back to auto-context; A activates its first Contents
+        // row, then A activates LORY out of HUT3. These remain ordinary
+        // physical controls translated by C4Player::InCom while a menu is
+        // active (C4Player.cpp:1502-1513; C4ObjectMenu.cpp:279-326).
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard.tap(VirtualKeyCode::D).expect("close Buy menu");
+        }
+        for _ in 0..20 {
+            if app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+            {
+                break;
+            }
+            app.update().expect("restore context after Buy");
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard.tap(VirtualKeyCode::A).expect("open Contents");
+        }
+        for _ in 0..20 {
+            if app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == contents_identification)
+            {
+                break;
+            }
+            app.update().expect("open HUT3 Contents");
+        }
+        let (_, contents_menu) = app
+            .engine
+            .cursor_object_menu(app.local_owner)
+            .expect("physical D/A opens Contents menu");
+        assert_eq!(
+            contents_menu
+                .items
+                .iter()
+                .map(|item| (item.caption.as_str(), item.item_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("Activate Lorry", "LORY")]
+        );
+        app.render(&mut rendered)
+            .expect("render Tutorial03 Contents menu through the app");
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard.tap(VirtualKeyCode::A).expect("activate LORY");
+        }
+        for _ in 0..40 {
+            if app
+                .engine
+                .object_snapshot(lorry)
+                .is_some_and(|object| object.container.is_none())
+            {
+                break;
+            }
+            app.update().expect("exit LORY from HUT3");
+        }
+        assert!(
+            app.engine
+                .object_snapshot(lorry)
+                .is_some_and(|object| object.container.is_none()),
+            "Contents activation must exit LORY from HUT3"
+        );
+
+        // Close Contents, then close the restored context menu. Its C++ close
+        // command is Exit, so the tutorial-taught two physical D presses exit
+        // the building without menu-selection shortcuts (C4Object.cpp:
+        // 2044-2062; C4Menu.cpp:317-331; Tutorial03.c4s/Script.c:191-200).
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard.tap(VirtualKeyCode::D).expect("close Contents");
+        }
+        for _ in 0..20 {
+            if app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+            {
+                break;
+            }
+            app.update().expect("restore context after Contents");
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("close context through Exit command");
+        }
+        for _ in 0..40 {
+            if app
+                .engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container.is_none())
+            {
+                break;
+            }
+            app.update().expect("exit CLNK from HUT3");
+        }
+        assert!(
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container.is_none()),
+            "physical D/D route must exit CLNK from HUT3"
+        );
         reset_cached_app_paths();
     }
 
