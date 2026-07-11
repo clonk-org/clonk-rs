@@ -639,13 +639,11 @@ impl Player {
     }
 
     #[doc(hidden)]
-
     pub fn game_join_time(&self) -> i32 {
         self.game_join_time
     }
 
     #[doc(hidden)]
-
     pub fn set_game_join_time(&mut self, game_time: i32) {
         self.game_join_time = game_time;
     }

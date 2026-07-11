@@ -212,13 +212,11 @@ impl SectorMap {
     }
 
     #[doc(hidden)]
-
     pub fn area(&self, rect: DefinitionRect) -> SectorArea {
         SectorArea::new(self, Rect::from(rect))
     }
 
     #[doc(hidden)]
-
     pub fn object_ids(&self, key: SectorKey) -> &[ObjectId] {
         &self.sector(key).objects
     }
@@ -254,7 +252,6 @@ impl SectorMap {
     }
 
     #[doc(hidden)]
-
     pub fn shape_ids(&self, key: SectorKey) -> &[ObjectId] {
         &self.sector(key).object_shapes
     }

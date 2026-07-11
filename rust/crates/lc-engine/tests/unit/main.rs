@@ -1,6 +1,28 @@
-// lc-engine's former inline unit tests (lib.rs `mod tests`), moved out so
-// engine edits no longer recompile a second ~100k-line lib-test unit. The
-// glob re-export lets the module body keep its original `use super::*;`.
+// These tests were written under lc-engine's crate-level lint config (lib.rs
+// top); mirror it here so the byte-identical code lints the same as it did
+// inline, rather than surfacing style lints the move would otherwise expose.
+#![allow(dead_code, unreachable_patterns, unused_variables)]
+#![allow(
+    clippy::doc_lazy_continuation,
+    clippy::field_reassign_with_default,
+    clippy::if_same_then_else,
+    clippy::large_enum_variant,
+    clippy::manual_clamp,
+    clippy::match_like_matches_macro,
+    clippy::needless_range_loop,
+    clippy::question_mark,
+    clippy::should_implement_trait,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::vec_init_then_push
+)]
+
+// lc-engine's former inline unit tests (lib.rs `mod tests`). Kept in their own
+// test binary (not folded into tests/it) so a test-only edit here recompiles
+// just this leaf crate — measured ~10s -> ~2s versus editing the inline module,
+// which dirtied lib.rs and cascaded through every downstream crate. The glob
+// re-export lets the module body keep its original `use super::*;`; the
+// submodule `pub use`s below cover items the glob (root-only) doesn't reach.
 #[allow(unused_imports)]
 pub use lc_engine::*;
 #[allow(unused_imports)]

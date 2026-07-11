@@ -844,7 +844,6 @@ impl Landscape {
     }
 
     #[doc(hidden)]
-
     pub fn with_default_material(
         width: u32,
         surface: Vec<i32>,
