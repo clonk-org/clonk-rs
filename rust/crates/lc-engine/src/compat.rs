@@ -4638,6 +4638,9 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "FireTop" => Value::Int(metadata.fire.fire_top),
             "Value" => Value::Int(metadata.value),
             "Mass" => Value::Int(metadata.mass),
+            // C4Def::CompileFunc's line bitfields (C4Def.cpp:333-351).
+            "Line" => Value::Int(metadata.line),
+            "LineConnect" => Value::Int(metadata.line_connect as i32),
             // The blast-chain entries System.c4g reads through the GetXVal
             // wrappers (GetDefGrab/GetDefHorizontalFix/GetDefContainBlast,
             // BlastObjectsShockwaveCheck + DoExplosion).
@@ -27961,6 +27964,57 @@ mod tests {
             error.message().contains("expected object"),
             "unexpected error: {}",
             error.message()
+        );
+    }
+
+    #[test]
+    fn get_def_core_val_reflects_line_type_and_connection_bits() {
+        // GetDefCoreVal reflects the named C4Def compiler entries
+        // (C4Script.cpp:4170-4180). Line and LineConnect are compiled as
+        // bitfields in C4Def::CompileFunc (C4Def.cpp:333-351); LNKT reads
+        // both to choose and finish real lines (Linekit.c4d/Script.c:61-96,
+        // 108-173).
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            HashMap::from([(
+                DefinitionId::from("PWRL"),
+                DefinitionMetadata {
+                    line: 1,
+                    line_connect: crate::LINE_CONNECT_POWER_INPUT
+                        | crate::LINE_CONNECT_POWER_OUTPUT,
+                    ..DefinitionMetadata::default()
+                },
+            )]),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            Ok::<Value, RuntimeError>(Value::Array(vec![
+                get_def_core_val(&[
+                    Value::String("Line".into()),
+                    Value::String("DefCore".into()),
+                    Value::C4Id("PWRL".into()),
+                ])?,
+                get_def_core_val(&[
+                    Value::String("LineConnect".into()),
+                    Value::String("DefCore".into()),
+                    Value::C4Id("PWRL".into()),
+                ])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("GetDefCoreVal succeeds"),
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(
+                    (crate::LINE_CONNECT_POWER_INPUT | crate::LINE_CONNECT_POWER_OUTPUT) as i32
+                )
+            ])
         );
     }
 

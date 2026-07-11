@@ -803,17 +803,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 no_breath = parse_bool(value);
             }
             "line" => {
-                line_type = match value.trim() {
-                    "C4D_LinePower" => 1,
-                    "C4D_LineSource" => 2,
-                    "C4D_LineDrain" => 3,
-                    "C4D_LineLightning" => 4,
-                    "C4D_LineVolcano" => 5,
-                    "C4D_LineRope" => 6,
-                    "C4D_LineColored" => 7,
-                    "C4D_LineVertex" => 8,
-                    other => parse_i32(other).unwrap_or(0),
-                };
+                line_type = parse_line_type(value);
             }
             "lineintersect" => {
                 line_intersect = parse_i32(value).unwrap_or(0);
@@ -1070,6 +1060,25 @@ fn parse_components(value: &str) -> Vec<DefComponent> {
 
 fn normalize_line_connect_token(token: &str) -> String {
     token.trim().replace([' ', '_'], "").to_ascii_lowercase()
+}
+
+/// `mkBitfieldAdapt(Line, LineTypes)` (C4Def.cpp:319-333): named values
+/// separated by `|` are ORed. In particular, legacy DPIP spells the drain
+/// value as `C4D_LinePower|C4D_LineSource` (1 | 2 = 3).
+fn parse_line_type(value: &str) -> i32 {
+    value.split(['|', ',', ';']).fold(0, |line, token| {
+        line | match token.trim() {
+            "C4D_LinePower" => 1,
+            "C4D_LineSource" => 2,
+            "C4D_LineDrain" => 3,
+            "C4D_LineLightning" => 4,
+            "C4D_LineVolcano" => 5,
+            "C4D_LineRope" => 6,
+            "C4D_LineColored" => 7,
+            "C4D_LineVertex" => 8,
+            other => parse_i32(other).unwrap_or(0),
+        }
+    })
 }
 
 fn parse_line_connect(value: &str) -> Result<u32, DefinitionError> {
@@ -2280,6 +2289,19 @@ mod tests {
 
         let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("default parses");
         assert_eq!(defaulted.blit_mode, 0);
+    }
+
+    #[test]
+    fn line_compiles_named_tokens_as_a_bitfield() {
+        // C4Def::CompileFunc passes Line through mkBitfieldAdapt with the
+        // C4D_Line_* table (C4Def.cpp:319-333). DrainPipe.c4d encodes the
+        // drain value 3 as Power(1)|Source(2), not the Drain alias.
+        let parsed = parse_def_core(
+            b"[DefCore]\nid=DPIP\nLine=C4D_LinePower|C4D_LineSource\n",
+        )
+        .expect("drain-pipe DefCore parses");
+
+        assert_eq!(parsed.line, 3);
     }
 
     #[test]
