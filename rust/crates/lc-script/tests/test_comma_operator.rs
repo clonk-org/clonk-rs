@@ -1,5 +1,50 @@
 // Test for comma operator support
 
+use lc_script::{Engine, Value};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
+#[test]
+fn legacy_adjacent_return_parentheses_returns_first_and_evaluates_the_rest() {
+    let side_effects = Arc::new(AtomicUsize::new(0));
+    let observed_side_effects = Arc::clone(&side_effects);
+    let mut engine = Engine::new();
+    engine.register_host_function("SideEffect", move |_| {
+        observed_side_effects.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Int(42))
+    });
+    engine
+        .load_script("#strict\nfunc Probe() { return(0, SideEffect()); }")
+        .expect("legacy adjacent return syntax compiles");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("Probe executes"),
+        Value::Int(0),
+        "pre-#strict-2 return(first, unused...) returns its first value"
+    );
+    assert_eq!(
+        side_effects.load(Ordering::SeqCst),
+        1,
+        "legacy unused return parameters still execute for side effects"
+    );
+}
+
+#[test]
+fn strict2_adjacent_return_parentheses_uses_the_normal_comma_operator() {
+    let mut engine = Engine::new();
+    engine
+        .load_script("#strict 2\nfunc Probe() { return(0, 42); }")
+        .expect("strict-2 comma expression compiles");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("Probe executes"),
+        Value::Int(42),
+        "#strict 2 has no legacy multi-parameter return hack"
+    );
+}
+
 #[test]
 fn mgsm_line_24_pattern() {
     // Exact pattern from MGSM line 24

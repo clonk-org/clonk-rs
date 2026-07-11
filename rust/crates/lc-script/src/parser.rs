@@ -553,8 +553,11 @@ impl<'a> Parser<'a> {
             false
         };
 
-        // Only intercept return(...) forms with NO space between return and (
-        if lparen_immediately_follows {
+        // Before #strict 2, C4Aul has a compatibility-only multi-parameter
+        // `return(first, unused, ...)` form when `(` immediately follows the
+        // keyword. All parameters execute, but the first one is returned
+        // (C4AulParse.cpp Parse_Statement's multi_params_hack).
+        if lparen_immediately_follows && self.strict_level < 2 {
             self.consume()?; // consume '('
 
             // Handle: return(); (empty parentheses)
@@ -564,37 +567,28 @@ impl<'a> Parser<'a> {
                 return Ok(Stmt::Return(None));
             }
 
-            // Parse first expression to check for comma operator
-            let first_expr = self.parse_expression()?;
-
-            // Check if this is comma-separated expressions: return(expr1, expr2, ...);
-            if self.check_symbol(Symbol::Comma)? {
-                // Definitely comma syntax - parse all comma-separated expressions
-                let mut exprs = vec![first_expr];
-
-                while self.consume_if_symbol(Symbol::Comma)?.is_some() {
-                    exprs.push(self.parse_expression()?);
-                }
-
-                self.expect_symbol(Symbol::RParen, "expected ')' after expression")?;
-                self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
-
-                // Multiple expressions: desugar to block with expr statements + return
-                // This preserves side effects of all expressions and returns the last one
-                let mut stmts = Vec::new();
-                let last_expr = exprs.pop().unwrap();
-                for expr in exprs {
-                    stmts.push(Stmt::Expr(expr));
-                }
-                stmts.push(Stmt::Return(Some(last_expr)));
-                return Ok(Stmt::Block(stmts));
+            // Parse assignments here rather than parse_expression(): at this
+            // level commas delimit the legacy parameters instead of becoming
+            // the normal comma operator.
+            let mut exprs = vec![self.parse_assignment()?];
+            while self.consume_if_symbol(Symbol::Comma)?.is_some() {
+                exprs.push(self.parse_assignment()?);
             }
-
-            // No comma - it's return(single_expr);
-            // Consume ) and ; and return the single expression
             self.expect_symbol(Symbol::RParen, "expected ')' after expression")?;
             self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
-            return Ok(Stmt::Return(Some(first_expr)));
+
+            let value = if exprs.len() == 1 {
+                exprs.pop().unwrap()
+            } else {
+                // Array elements evaluate left-to-right. Selecting element
+                // zero preserves every unused parameter's side effects while
+                // yielding the first value, matching the old C4Aul bytecode.
+                Expr::Index(
+                    Box::new(Expr::Array(exprs)),
+                    Box::new(Expr::Literal(Literal::Int(0))),
+                )
+            };
+            return Ok(Stmt::Return(Some(value)));
         }
 
         // Handle: return (); (with space between return and ())
