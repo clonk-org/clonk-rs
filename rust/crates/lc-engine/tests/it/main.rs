@@ -3,7 +3,6 @@
 // one link instead of one per file. nextest still runs every #[test]
 // separately (process-per-test), so isolation and parallelism are unchanged.
 mod support;
-mod unit;
 
 mod action_attach;
 mod action_build;

@@ -8471,6 +8471,9 @@ impl Default for CommandStack {
 }
 
 impl CommandStack {
+    // `mod command` is only `#[doc(hidden)] pub` as a test seam, so this `new`
+    // is not real public API and needs no `Default`.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             entries: VecDeque::new(),
