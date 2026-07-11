@@ -4,8 +4,8 @@ mod support;
 use std::error::Error;
 
 use lc_engine::{
-    Engine, JoinPlayerConfig, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_SPECIAL2,
-    COM_THROW, COM_UP,
+    CommandDirection, Direction, Engine, JoinPlayerConfig, ObjectId, COM_DIG, COM_DOWN, COM_LEFT,
+    COM_RIGHT, COM_SPECIAL2, COM_THROW, COM_UP,
 };
 use support::real_scenario::load_tutorial;
 use support::virtual_player::VirtualPlayer;
@@ -309,28 +309,102 @@ fn return_from_hut_and_collect_one_gold(
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Walk")
     })?;
-    player.hold_until(
-        COM_LEFT,
-        "the empty Clonk collects one more GOLD chunk",
-        220,
-        |engine| clonk_contents_count(engine, clonk, "GOLD") == 1,
-    )?;
-    if player
-        .engine()
-        .object_snapshot(clonk)
-        .is_some_and(|object| object.action.name == "Hangle")
-    {
-        player.tap(COM_DOWN)?;
-        player.wait_until(
-            "the next GOLD trip drops to the tunnel floor",
-            60,
-            |engine| {
-                engine
+    for attempt in 1..=4 {
+        if clonk_contents_count(player.engine(), clonk, "GOLD") == 1 {
+            break;
+        }
+        if player
+            .engine()
+            .object_snapshot(clonk)
+            .is_some_and(|object| !object.contents.is_empty())
+        {
+            // Blast debris is collectible too, and this Clonk has one
+            // inventory slot. Drop incidental ROCK before approaching GOLD.
+            let start_x = player
+                .engine()
+                .object_snapshot(clonk)
+                .expect("the Clonk survives its incidental ROCK pickup")
+                .position
+                .x;
+            player.tap(COM_THROW)?;
+            player.wait_until(
+                "the empty Clonk drops incidental blast debris",
+                30,
+                |engine| {
+                    engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.contents.is_empty())
+                },
+            )?;
+            player.hold_until(
+                COM_RIGHT,
+                "the Clonk moves away from thrown blast debris",
+                60,
+                |engine| {
+                    clonk_contents_count(engine, clonk, "GOLD") == 1
+                        || engine
+                            .object_snapshot(clonk)
+                            .is_some_and(|object| object.position.x >= start_x + 12)
+                },
+            )?;
+            if clonk_contents_count(player.engine(), clonk, "GOLD") == 1 {
+                break;
+            }
+        }
+        player
+            .hold_until(
+                COM_LEFT,
+                format!("the empty Clonk advances toward GOLD on attempt {attempt}"),
+                220,
+                |engine| {
+                    clonk_contents_count(engine, clonk, "GOLD") == 1
+                        || engine
+                            .object_snapshot(clonk)
+                            .is_some_and(|object| {
+                                object.action.name == "Hangle" || !object.contents.is_empty()
+                            })
+                },
+            )
+            .map_err(|error| {
+                let snapshot = player.engine().snapshot();
+                let contents = player
+                    .engine()
                     .object_snapshot(clonk)
-                    .is_some_and(|object| object.action.name == "Walk")
-            },
-        )?;
+                    .map(|clonk| {
+                        clonk
+                            .contents
+                            .iter()
+                            .filter_map(|item| player.engine().object_snapshot(*item))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let gold = snapshot
+                    .objects
+                    .into_iter()
+                    .filter(|object| object.definition_id == "GOLD")
+                    .collect::<Vec<_>>();
+                format!("{error}; contents={contents:?}; gold={gold:?}")
+            })?;
+        if player
+            .engine()
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.action.name == "Hangle")
+        {
+            player.tap(COM_DOWN)?;
+            player.wait_until(
+                "the next GOLD trip drops to the tunnel floor",
+                60,
+                |engine| {
+                    engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.action.name == "Walk")
+                },
+            )?;
+        }
     }
+    player.assert_milestone("the empty Clonk collects one more GOLD chunk", |engine| {
+        clonk_contents_count(engine, clonk, "GOLD") == 1
+    })?;
     Ok(())
 }
 
@@ -579,20 +653,60 @@ fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 && clonk_carries(engine, clonk, "TFLN")
         },
     )?;
-    player.hold_until(
-        COM_LEFT,
-        "the TFLN-carrying Clonk returns to ELEC",
-        120,
-        |engine| {
-            engine
-                .object_snapshot(clonk)
-                .zip(engine.object_snapshot(elevator_case))
-                .is_some_and(|(clonk, elevator_case)| {
-                    clonk.action.name == "Walk"
-                        && (clonk.position.x - elevator_case.position.x).abs() <= 5
-                })
-        },
-    )?;
+    let (clonk_x, elevator_x) = player
+        .engine()
+        .object_snapshot(clonk)
+        .zip(player.engine().object_snapshot(elevator_case))
+        .map(|(clonk, elevator)| (clonk.position.x, elevator.position.x))
+        .expect("the Clonk and ELEC survive the surface return");
+    if clonk_x < elevator_x - 5 {
+        player.hold_until(
+            COM_RIGHT,
+            "the Clonk aligns with ELEC from the left",
+            120,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .zip(engine.object_snapshot(elevator_case))
+                    .is_some_and(|(clonk, elevator)| {
+                        (clonk.position.x - elevator.position.x).abs() <= 5
+                    })
+            },
+        )?;
+    } else if clonk_x > elevator_x + 5 {
+        player.hold_until(
+            COM_LEFT,
+            "the Clonk aligns with ELEC from the right",
+            120,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .zip(engine.object_snapshot(elevator_case))
+                    .is_some_and(|(clonk, elevator)| {
+                        (clonk.position.x - elevator.position.x).abs() <= 5
+                    })
+            },
+        )?;
+    }
+    if let Some(clonk_now) = player.engine().object_snapshot(clonk) {
+        if clonk_now.action.name.starts_with("Scale") {
+            let away = if clonk_now.direction == Direction::Left {
+                COM_RIGHT
+            } else {
+                COM_LEFT
+            };
+            player.tap(away)?;
+        }
+    }
+    player.wait_until("the TFLN-carrying Clonk settles beside ELEC", 120, |engine| {
+        engine
+            .object_snapshot(clonk)
+            .zip(engine.object_snapshot(elevator_case))
+            .is_some_and(|(clonk, elevator)| {
+                clonk.action.name == "Walk"
+                    && (clonk.position.x - elevator.position.x).abs() <= 5
+            })
+    })?;
     player.tap(COM_DOWN)?;
     player.wait_until("the TFLN-carrying Clonk grabs ELEC", 60, |engine| {
         engine.object_snapshot(clonk).is_some_and(|object| {
@@ -641,20 +755,36 @@ fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.ticks(12)?;
     player.release(COM_DOWN)?;
     player.press(COM_DOWN)?;
-    let tunnel = player.wait_until(
-        "the real dig tunnel reaches Tutorial04's gold vein",
-        240,
-        |engine| {
-            tutorial_message_contains(engine, "struck solid gold")
-                || engine.object_snapshot(clonk).is_some_and(|object| {
-                    (357..437).contains(&object.position.x)
-                        && (348..428).contains(&object.position.y)
-                })
-        },
-    );
+    for _ in 0..240 {
+        let reached = tutorial_message_contains(player.engine(), "struck solid gold")
+            || player.engine().object_snapshot(clonk).is_some_and(|object| {
+                (357..437).contains(&object.position.x)
+                    && (348..428).contains(&object.position.y)
+            });
+        if reached {
+            break;
+        }
+        if player
+            .engine()
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.command_direction == CommandDirection::Left)
+        {
+            // Bottom contact redirects DownLeft to Left. A player's fresh
+            // Down edge rotates the active dig back toward the vein.
+            player.release(COM_DOWN)?;
+            player.press(COM_DOWN)?;
+        }
+        player.ticks(1)?;
+    }
     player.release(COM_DOWN)?;
     player.release(COM_LEFT)?;
-    tunnel?;
+    player.assert_milestone("the real dig tunnel reaches Tutorial04's gold vein", |engine| {
+        tutorial_message_contains(engine, "struck solid gold")
+            || engine.object_snapshot(clonk).is_some_and(|object| {
+                (357..437).contains(&object.position.x)
+                    && (348..428).contains(&object.position.y)
+            })
+    })?;
     player.wait_until(
         "Tutorial04 asks the Clonk to blast the gold vein",
         120,
@@ -1017,7 +1147,7 @@ fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 |engine| {
                     engine
                         .object_snapshot(clonk)
-                        .is_some_and(|object| object.position.x <= next_face_x)
+                        .is_some_and(|object| object.position.x <= next_face_x + 5)
                 },
             )?;
             player.wait_until(
