@@ -18206,16 +18206,16 @@ fn set_velocity_component(
             ))
         })?;
 
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
 
         // C++ SetXDir/SetYDir set ONLY xdir/ydir = itofix(value, prec)
         // (default precision 10, C4Script.cpp:697-732) — the other
@@ -35454,6 +35454,58 @@ func Missing() { return ComponentAll(nil, WOOD); }
         assert_eq!(fixed_y.val(), 65536);
         assert!(update.fixed_velocity.is_none());
         assert!(update.fixed_velocity_x.is_none());
+    }
+
+    #[test]
+    fn set_y_dir_targets_a_foreign_object_like_cpp() {
+        // FnSetYDir writes the explicit pObj's ydir (C4Script.cpp:718-732).
+        // DRCK relies on this to stop its PIPH without changing the
+        // derrick callback's own velocity (Derrick.c4d/Script.c:92-99).
+        let target_id = ObjectId::new(2);
+        let target = HostWorldObject::new(
+            target_id,
+            "PIPH",
+            ObjectStatus::Normal,
+            "Drill",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::new(2, 7),
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            Vec::new(),
+        )));
+        let world = HostWorldContext::from_objects(vec![target]).with_definition_metadata(Rc::new(
+            HashMap::from([(DefinitionId::from("PIPH"), DefinitionMetadata::default())]),
+        ));
+
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            set_y_dir(&[Value::Int(0), object_reference_value(target_id)])
+        });
+
+        assert_eq!(result.expect("SetYDir succeeds"), Value::Bool(true));
+        let update = outcome
+            .other_objects
+            .iter()
+            .find(|outcome| outcome.object_id == target_id)
+            .and_then(|outcome| outcome.update.as_ref())
+            .expect("foreign ydir update recorded");
+        assert_eq!(update.fixed_velocity_y, Some(C4Fixed::ZERO));
+        assert!(update.fixed_velocity_x.is_none(), "foreign xdir is untouched");
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
     }
 
     #[test]
