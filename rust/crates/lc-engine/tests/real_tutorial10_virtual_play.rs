@@ -548,5 +548,89 @@ fn tutorial10_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.wait_until("Tutorial10 exposes the crystal", 5_000, |engine| {
         tutorial_message_contains(engine, "crystal is exposed")
     })?;
+
+    let crystal = object_with_definition(player.engine(), "CRYS")
+        .expect("Tutorial10 keeps its objective crystal until the player sells it");
+    player.hold_until(
+        COM_RIGHT,
+        "the Clonk swims beside CRYS without collecting the source LNKT",
+        420,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| (771..=775).contains(&object.position.x))
+        },
+    )?;
+    player.hold_until(
+        COM_DOWN,
+        "the Clonk dives through DuroLava and collects CRYS",
+        240,
+        |engine| clonk_carries(engine, clonk, "CRYS"),
+    )?;
+    player.assert_milestone("Tutorial10's CRYS is in the Clonk inventory", |engine| {
+        engine
+            .object_snapshot(crystal)
+            .is_some_and(|object| object.container == Some(clonk))
+    })?;
+
+    enter_hut(&mut player, clonk, hut)?;
+    player.wait_until("HUT3 opens context for the carried CRYS", 60, |engine| {
+        object_menu_identification(engine, owner) == Some(lc_script::Value::Int(14))
+    })?;
+    player.menu_navigate_to_caption("Put")?;
+    player.menu_enter()?;
+    player.wait_until("context Put transfers CRYS into HUT3", 60, |engine| {
+        engine
+            .object_snapshot(crystal)
+            .is_some_and(|object| object.container == Some(hut))
+    })?;
+    player.wait_until("HUT3 restores context after putting CRYS", 30, |engine| {
+        object_menu_identification(engine, owner) == Some(lc_script::Value::Int(14))
+    })?;
+    player.menu_navigate_to_caption("Sell")?;
+    player.menu_enter()?;
+    player.wait_until("HUT3 opens its real Sell menu", 30, |engine| {
+        object_menu_identification(engine, owner) == Some(lc_script::Value::Int(5))
+    })?;
+    let crystal_index = player
+        .engine()
+        .cursor_object_menu(owner)
+        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "CRYS"))
+        .expect("HUT3 offers the deposited CRYS for sale");
+    player.menu_navigate_to_index(crystal_index)?;
+    player.menu_enter()?;
+    player.wait_until(
+        "selling CRYS removes Tutorial10's objective",
+        60,
+        |engine| engine.object_snapshot(crystal).is_none(),
+    )?;
+
+    player.wait_until(
+        "Tutorial10 fulfills SCRG and reaches GameOver",
+        600,
+        |engine| engine.snapshot().game_over,
+    )?;
+    player.assert_milestone("Tutorial10 records its fulfilled SCRG goal", |engine| {
+        engine
+            .snapshot()
+            .round_results
+            .fulfilled_goals
+            .iter()
+            .any(|goal| goal == "SCRG")
+    })?;
+    assert!(
+        player.engine().object_snapshot(crystal).is_none(),
+        "Tutorial10 must sell CRYS before SCRG can be fulfilled"
+    );
+    assert_eq!(
+        player.engine().next_mission().path,
+        r"Tutorial.c4f\Tutorial10.c4s",
+        "the final tutorial offers a repeat rather than a nonexistent next tutorial"
+    );
+    assert_eq!(player.engine().next_mission().text, "&Repeat this round");
+    assert_eq!(
+        player.engine().next_mission().description,
+        "Restart this scenario."
+    );
     Ok(())
 }
