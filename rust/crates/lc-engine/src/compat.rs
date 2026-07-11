@@ -25107,6 +25107,14 @@ impl EffectHostContext {
                     id,
                     definition_id: object.definition_id.clone(),
                     position,
+                    // Host-world script snapshots do not yet expose fix_x/fix_y;
+                    // keep the command view coherent with their pixel position.
+                    fixed_position: FixedVec2::from_ints(position.x, position.y),
+                    fixed_velocity: scope
+                        .map(ObjectScopeContext::fixed_velocity)
+                        .unwrap_or_else(|| {
+                            FixedVec2::from_ints(object.velocity.x, object.velocity.y)
+                        }),
                     status: scope.map(ObjectScopeContext::status).unwrap_or(object.status),
                     destroyed: scope.is_some_and(|scope| scope.destroy),
                     category: scope

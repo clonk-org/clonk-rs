@@ -16665,6 +16665,8 @@ impl Engine {
             id: object.id,
             definition_id: object.definition_id.clone(),
             position: object.state.position,
+            fixed_position: object.fixed_position,
+            fixed_velocity: object.fixed_velocity,
             contact: {
                 let landscape = self.landscape.as_ref();
                 object.state.vertices.iter().fold(0u32, |bits, vertex| {
@@ -16904,6 +16906,8 @@ impl Engine {
                     id: object.id,
                     definition_id: object.definition_id.clone(),
                     position: object.state.position,
+                    fixed_position: object.fixed_position,
+                    fixed_velocity: object.fixed_velocity,
                     // t_contact equivalent: live vertex probe (CNAT bits);
                     // shape top from the current (con-scaled) rect
                     // (C4Command JumpControl, C4Command.cpp:1857-1920).
@@ -18001,6 +18005,8 @@ impl Engine {
                     id: object_id,
                     definition_id: self.objects[idx].definition_id.clone(),
                     position: self.objects[idx].state.position,
+                    fixed_position: self.objects[idx].fixed_position,
+                    fixed_velocity: self.objects[idx].fixed_velocity,
                     contact: {
                         let landscape = self.landscape.as_ref();
                         self.objects[idx]

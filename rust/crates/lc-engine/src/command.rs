@@ -30,6 +30,10 @@ pub struct CommandObjectSnapshot {
     pub id: ObjectId,
     pub definition_id: DefinitionId,
     pub position: Vector2,
+    /// Authoritative C4Object fix_x/fix_y used by fixed-point command paths.
+    pub fixed_position: FixedVec2,
+    /// Authoritative C4Object xdir/ydir used by momentum-aware steering.
+    pub fixed_velocity: FixedVec2,
     pub status: ObjectStatus,
     pub destroyed: bool,
     pub category: i32,
@@ -269,6 +273,8 @@ mod tests {
             id: ObjectId::new(id),
             definition_id: format!("DEF{id}"),
             position: Vector2::ZERO,
+            fixed_position: FixedVec2::ZERO,
+            fixed_velocity: FixedVec2::ZERO,
             status: ObjectStatus::Normal,
             destroyed: false,
             category: 0,
