@@ -3,10 +3,12 @@ use std::collections::{HashMap, HashSet};
 use crate::{DefinitionRect, ObjectId, Vector2};
 
 pub(crate) const SECTOR_WIDTH: i32 = 50;
-pub(crate) const SECTOR_HEIGHT: i32 = 50;
+#[doc(hidden)]
+pub const SECTOR_HEIGHT: i32 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum SectorKey {
+#[doc(hidden)]
+pub enum SectorKey {
     Inside { x: i32, y: i32 },
     Outside,
 }
@@ -45,7 +47,8 @@ struct SectorMembership {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SectorMap {
+#[doc(hidden)]
+pub struct SectorMap {
     px_width: i32,
     px_height: i32,
     width: i32,
@@ -208,11 +211,15 @@ impl SectorMap {
         }
     }
 
-    pub(crate) fn area(&self, rect: DefinitionRect) -> SectorArea {
+    #[doc(hidden)]
+
+    pub fn area(&self, rect: DefinitionRect) -> SectorArea {
         SectorArea::new(self, Rect::from(rect))
     }
 
-    pub(crate) fn object_ids(&self, key: SectorKey) -> &[ObjectId] {
+    #[doc(hidden)]
+
+    pub fn object_ids(&self, key: SectorKey) -> &[ObjectId] {
         &self.sector(key).objects
     }
 
@@ -246,7 +253,9 @@ impl SectorMap {
             .collect()
     }
 
-    pub(crate) fn shape_ids(&self, key: SectorKey) -> &[ObjectId] {
+    #[doc(hidden)]
+
+    pub fn shape_ids(&self, key: SectorKey) -> &[ObjectId] {
         &self.sector(key).object_shapes
     }
 
@@ -263,7 +272,8 @@ impl SectorMap {
 
     /// Same C++ enumeration order as `object_ids_in_area`, over the
     /// per-sector shape lists (`FirstObjectShapes`/`NextObjectShapes`).
-    pub(crate) fn shape_ids_in_area(&self, area: &SectorArea) -> Vec<ObjectId> {
+    #[doc(hidden)]
+    pub fn shape_ids_in_area(&self, area: &SectorArea) -> Vec<ObjectId> {
         let mut seen = HashSet::new();
         let mut ids = Vec::new();
         for key in area.iter() {
@@ -278,7 +288,8 @@ impl SectorMap {
 
     /// `C4LSectors::getShapeSum` (C4Sector.cpp:197-203): the sum of the
     /// per-sector shape-list object counts — part of the sync-check digest.
-    pub(crate) fn shape_sum(&self) -> usize {
+    #[doc(hidden)]
+    pub fn shape_sum(&self) -> usize {
         self.sectors
             .iter()
             .map(|sector| sector.object_shapes.len())
@@ -359,7 +370,8 @@ impl SectorMap {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SectorArea {
+#[doc(hidden)]
+pub struct SectorArea {
     first: Option<SectorKey>,
     x_limit: i32,
     y_limit: i32,

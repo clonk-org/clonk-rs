@@ -219,7 +219,8 @@ const PHYS_TEMPORARY: i32 = 2;
 const PHYS_STACK_TEMPORARY: i32 = 3;
 
 #[derive(Debug, Clone)]
-pub(crate) enum PlayerCommand {
+#[doc(hidden)]
+pub enum PlayerCommand {
     AdjustHomeBaseMaterial {
         player_id: i32,
         definition_id: DefinitionId,
@@ -282,10 +283,11 @@ pub(crate) enum PlayerCommand {
 /// One `C4ObjResort` queued by FnSetObjectOrder. C++ defers these until
 /// `C4GameObjects::ExecuteResorts` and executes the newest request first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ObjectOrderCommand {
-    pub(crate) relative_to: ObjectId,
-    pub(crate) object: ObjectId,
-    pub(crate) after: bool,
+#[doc(hidden)]
+pub struct ObjectOrderCommand {
+    #[doc(hidden)] pub relative_to: ObjectId,
+    #[doc(hidden)] pub object: ObjectId,
+    #[doc(hidden)] pub after: bool,
 }
 
 impl HostWorldObject {
@@ -576,7 +578,8 @@ impl HostWorldObject {
 
 // Not `derive(Debug)`: `ScriptEngine` (in `definition_scripts`) has no Debug.
 #[derive(Clone)]
-pub(crate) struct HostWorldContext {
+#[doc(hidden)]
+pub struct HostWorldContext {
     objects: Rc<HashMap<ObjectId, HostWorldObject>>,
     order: Rc<Vec<ObjectId>>,
     /// `Game.Objects` from First -> Next. The engine's `exec_list` is this
@@ -1529,7 +1532,7 @@ fn ensure_single_flag(flags: u32, mask: u32, error: &str) -> Result<(), RuntimeE
     Ok(())
 }
 
-pub(crate) fn object_reference_value(id: ObjectId) -> Value {
+pub fn object_reference_value(id: ObjectId) -> Value {
     Value::Object(id.as_u64())
 }
 
@@ -7641,7 +7644,8 @@ const DEFAULT_NEXT_MISSION_TEXT: &str = "&Next scenario";
 const DEFAULT_NEXT_MISSION_DESCRIPTION: &str = "Continue with the next scenario.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum NextMissionCommand {
+#[doc(hidden)]
+pub enum NextMissionCommand {
     Set {
         path: String,
         text: String,
@@ -8404,7 +8408,8 @@ impl<'a> HostObjectContext<'a> {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct PhysicsDelta {
+#[doc(hidden)]
+pub struct PhysicsDelta {
     pub gravity: Option<i32>,
 }
 
@@ -8497,7 +8502,8 @@ pub(crate) fn enter_physics_context(settings: PhysicsSettings) -> PhysicsContext
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct EnvironmentDelta {
+#[doc(hidden)]
+pub struct EnvironmentDelta {
     pub wind: Option<i32>,
     pub temperature: Option<i32>,
     pub climate: Option<i32>,
@@ -8746,7 +8752,8 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum LandscapeOperation {
+#[doc(hidden)]
+pub enum LandscapeOperation {
     DigCircle {
         center: Vector2,
         radius: i32,
@@ -8847,7 +8854,7 @@ pub(crate) enum LandscapeOperation {
 /// scope in first-call order; the engine applies them after the outer
 /// object's update.
 #[derive(Debug, Clone)]
-pub(crate) struct NestedObjectOutcome {
+pub struct NestedObjectOutcome {
     pub object_id: ObjectId,
     pub effects: Vec<EffectCommand>,
     pub update: Option<ObjectUpdate>,
@@ -8857,7 +8864,8 @@ pub(crate) struct NestedObjectOutcome {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct EffectContextOutcome {
+#[doc(hidden)]
+pub struct EffectContextOutcome {
     pub object: Vec<EffectCommand>,
     pub global: Vec<EffectCommand>,
     pub object_update: Option<ObjectUpdate>,
@@ -24062,13 +24070,15 @@ struct AudioInstance {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct AudioRegistry {
+#[doc(hidden)]
+pub struct AudioRegistry {
     looping: HashMap<AudioInstanceKey, AudioInstance>,
     events: Vec<AudioCommand>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AudioOutcome {
+#[doc(hidden)]
+pub struct AudioOutcome {
     pub state: AudioRegistry,
     pub events: Vec<AudioCommand>,
 }

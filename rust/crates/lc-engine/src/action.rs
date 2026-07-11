@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::{math::C4Fixed, ObjectId};
 
-pub(crate) const DEFAULT_ACTION_NAME: &str = "Idle";
+pub const DEFAULT_ACTION_NAME: &str = "Idle";
 
 /// Configuration for how an action should advance and transition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -251,7 +251,7 @@ pub struct Player {
     /// (C4Player.cpp:717-732; C4PlayerList::PositionTaken). -1 when unset.
     position_index: i32,
     /// Direct-com input state (C4Player.h:118-121).
-    pub(crate) control: PlayerControlState,
+    #[doc(hidden)] pub control: PlayerControlState,
     /// C4Player::ExtraData named slots (Fn[Set/Get]PlrExtraData).
     pub(crate) extra_data: Vec<(String, lc_script::Value)>,
 }
@@ -638,11 +638,15 @@ impl Player {
         self.total_playing_time
     }
 
-    pub(crate) fn game_join_time(&self) -> i32 {
+    #[doc(hidden)]
+
+    pub fn game_join_time(&self) -> i32 {
         self.game_join_time
     }
 
-    pub(crate) fn set_game_join_time(&mut self, game_time: i32) {
+    #[doc(hidden)]
+
+    pub fn set_game_join_time(&mut self, game_time: i32) {
         self.game_join_time = game_time;
     }
 

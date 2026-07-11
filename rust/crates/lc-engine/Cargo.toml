@@ -21,9 +21,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"], optional = true }
 
 [dev-dependencies]
+# The moved lib.rs unit tests (tests/it/unit.rs) name these directly.
+lc-script = { path = "../lc-script" }
+lc-resources = { path = "../lc-resources" }
 # Bench-only: skip criterion's default plotters/rayon subtrees (HTML plot
 # reports); plain reports keep the numbers.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+serde_json = "1"
 tempfile = "3"
 proptest = "1"
 tracing-subscriber = { version = "0.3", features = ["registry"] }
