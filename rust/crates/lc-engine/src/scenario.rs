@@ -208,6 +208,9 @@ pub struct Scenario {
     base_sell_enabled: bool,
     base_auto_sell_enabled: bool,
     landscape_insert_thrust: bool,
+    /// `[Head] DisableMouse`: prevents every joined player from receiving
+    /// mouse control (`C4Player::InitControl`, C4Player.cpp:1907-1912).
+    disable_mouse: bool,
     /// `[Head] ForcedAutoContextMenu`: `None` keeps the player-file
     /// preference; `Some` forces automatic context menus for all players
     /// (C4Player::ApplyForcedControl, C4Player.cpp:2369-2375).
@@ -558,6 +561,7 @@ impl Scenario {
                 & BASEFUNC_AUTO_SELL_CONTENTS)
                 != 0,
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
+            disable_mouse: manifest.core.head.disable_mouse,
             forced_auto_context_menu: (manifest.core.head.forced_auto_context_menu >= 0)
                 .then_some(manifest.core.head.forced_auto_context_menu != 0),
             forced_control_style: (manifest.core.head.forced_control_style >= 0)
@@ -626,6 +630,11 @@ impl Scenario {
     /// joining players should retain their player-file preference.
     pub fn forced_control_style(&self) -> Option<bool> {
         self.forced_control_style
+    }
+
+    /// Whether `[Head] DisableMouse` prevents player mouse control.
+    pub fn disables_mouse(&self) -> bool {
+        self.disable_mouse
     }
 
     /// The scenario-wide `ForcedAutoContextMenu` override, or `None` when
@@ -1348,6 +1357,7 @@ impl Scenario {
             base_sell_enabled: false,
             base_auto_sell_enabled: false,
             landscape_insert_thrust: false,
+            disable_mouse: false,
             forced_auto_context_menu: None,
             forced_control_style: None,
             definition_load_steps,
@@ -7444,6 +7454,7 @@ global func Step(state, frame, random)
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
             landscape_insert_thrust: false,
+            disable_mouse: false,
             forced_auto_context_menu: None,
             forced_control_style: None,
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
@@ -7550,6 +7561,7 @@ global func Step(state, frame, random)
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
             landscape_insert_thrust: false,
+            disable_mouse: false,
             forced_auto_context_menu: None,
             forced_control_style: None,
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
@@ -10466,7 +10478,7 @@ public func ActualizePhase(pClonk)
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=Legacy Test\nForcedAutoStopControl=1\nForcedAutoContextMenu=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Foo=2\nPosition=120,160\n",
+            "[Head]\nTitle=Legacy Test\nDisableMouse=1\nForcedAutoStopControl=1\nForcedAutoContextMenu=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Foo=2\nPosition=120,160\n",
         )
         .expect("write legacy scenario core");
         std::fs::write(
@@ -10493,6 +10505,10 @@ public func ActualizePhase(pClonk)
         // ForcedAutoContextMenu uses the same scenario-over-preference
         // precedence (C4Player.cpp:2369-2375).
         assert_eq!(scenario.forced_auto_context_menu(), Some(true));
+        assert!(
+            scenario.disables_mouse(),
+            "C4SHead::DisableMouse must survive loading for C4Player::InitControl (C4Player.cpp:1907-1912)"
+        );
 
         let mut engine = Engine::with_seed(0);
         let created = scenario
