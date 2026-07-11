@@ -183,6 +183,10 @@ pub struct Scenario {
     ticks: Option<u32>,
     ground_height_hint: Option<i32>,
     definitions: Vec<ScenarioDefinition>,
+    /// `[Game] ValueOverloads`: C4Game::InitValueOverloads applies these to
+    /// the loaded definitions immediately before Objects.Load
+    /// (C4Game.cpp:2704-2713,3997-4004).
+    value_overloads: Vec<(String, i32)>,
     initial_spawns: Vec<ScenarioSpawn>,
     landscape: Option<Landscape>,
     physics: Option<PhysicsSettings>,
@@ -525,6 +529,7 @@ impl Scenario {
             ticks: None,
             ground_height_hint: manifest.ground_height_hint,
             definitions: collected,
+            value_overloads: id_list_pairs(&manifest.core.game.realism.value_overloads),
             initial_spawns,
             landscape,
             physics,
@@ -779,7 +784,13 @@ impl Scenario {
             }));
             compiled.set_movement_profile(definition.movement);
             compiled.set_category(definition.category);
-            compiled.set_value(definition.value);
+            compiled.set_value(
+                self.value_overloads
+                    .iter()
+                    .find(|(id, _)| id.eq_ignore_ascii_case(&definition.id))
+                    .map(|(_, value)| *value)
+                    .unwrap_or(definition.value),
+            );
             compiled.set_mass(definition.mass);
             compiled.set_picture(definition.picture);
             let picture_image = definition.picture_image.as_ref().map(|image| {
@@ -1302,6 +1313,7 @@ impl Scenario {
             ticks: manifest.ticks,
             ground_height_hint,
             definitions,
+            value_overloads: Vec::new(),
             initial_spawns: spawns,
             landscape,
             physics,
@@ -7376,6 +7388,7 @@ global func Step(state, frame, random)
                 shape: None,
                 core: None,
             }],
+            value_overloads: Vec::new(),
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
                 container_handle: None,
@@ -7479,6 +7492,7 @@ global func Step(state, frame, random)
                 shape: None,
                 core: None,
             }],
+            value_overloads: Vec::new(),
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
                 container_handle: None,
@@ -10344,6 +10358,52 @@ public func ActualizePhase(pClonk)
             1,
             "the scenario still runs without its script"
         );
+    }
+
+    #[test]
+    fn legacy_value_overloads_replace_definition_value_before_objects_load_like_cpp() {
+        // C4Game::InitGame invokes InitValueOverloads immediately before
+        // Objects.Load (C4Game.cpp:2704-2713); InitValueOverloads assigns the
+        // configured count to C4Def::Value (C4Game.cpp:3997-4004).
+        let dir = tempdir().expect("tempdir");
+        let fish = dir.path().join("Defs.c4d/Fish.c4d");
+        std::fs::create_dir_all(&fish).expect("definition dir");
+        std::fs::write(
+            fish.join("DefCore.txt"),
+            "[DefCore]\nid=FISH\nName=Fish\nCategory=0\nValue=10\n",
+        )
+        .expect("write defcore");
+        std::fs::write(fish.join("Script.c"), "// fish\n").expect("write definition script");
+
+        let scenario_dir = dir.path().join("ValueOverload.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Value overload\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Game]\nValueOverloads=FISH=20\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=FISH\nNumber=1\nStatus=1\nCategory=0\nX=10\nY=20\n",
+        )
+        .expect("write objects");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        assert_eq!(scenario.value_overloads, vec![("FISH".to_string(), 20)]);
+        let mut engine = Engine::with_seed(0);
+        let created = scenario.apply(&mut engine).expect("scenario applies");
+
+        assert_eq!(
+            created.len(),
+            1,
+            "the loaded object is created after overloads"
+        );
+        assert_eq!(engine.definition_value("FISH"), Some(20));
     }
 
     #[test]
