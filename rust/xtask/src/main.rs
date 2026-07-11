@@ -973,19 +973,22 @@ fn build_ffi_crate(krate: &FfiCrate, profile: BuildProfile, paths: &WorkspacePat
         "building FFI artifacts"
     );
 
+    // The libs are plain rlibs in the manifest so the TDD loop never pays the
+    // staticlib archive/cdylib link; emit those crate types only here.
     let mut cmd = Command::new("cargo");
-    cmd.arg("build");
+    cmd.arg("rustc");
     profile.apply(&mut cmd);
     cmd.arg("-p").arg(krate.name);
     if let Some(feature) = krate.feature {
         cmd.arg("--features").arg(feature);
     }
+    cmd.arg("--crate-type").arg("staticlib,cdylib");
     let status = cmd
         .current_dir(&paths.workspace_dir)
         .status()
         .with_context(|| format!("failed to invoke cargo for crate `{}`", krate.name))?;
     if !status.success() {
-        bail!("cargo build failed for crate `{}`", krate.name);
+        bail!("cargo rustc failed for crate `{}`", krate.name);
     }
 
     let output_dir = paths.cargo_output_dir(profile);
