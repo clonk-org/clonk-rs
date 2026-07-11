@@ -6846,6 +6846,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetObjectBlitMode", set_object_blit_mode);
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("InsertMaterial", insert_material);
+    script.register_host_function("ExtractLiquid", extract_liquid);
     script.register_host_function("ExtractMaterialAmount", extract_material_amount);
     script.register_host_function("IncinerateLandscape", incinerate_landscape);
     script.register_host_function("Incinerate", incinerate);
@@ -8693,6 +8694,9 @@ pub(crate) enum LandscapeOperation {
         position: Vector2,
         velocity: Vector2,
     },
+    /// FnExtractLiquid -> Landscape::ExtractMaterial after a GBackLiquid
+    /// guard (C4Script.cpp:2194-2199).
+    ExtractLiquid { position: Vector2 },
     /// FnCastPXS samples its synced velocities during the script call, then
     /// the engine fold inserts them into the real C4PXSSystem in call order.
     CastPxs {
@@ -22526,6 +22530,38 @@ fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnExtractLiquid (C4Script.cpp:2194-2199): caller-relative coordinates,
+/// MNone for a non-liquid pixel, otherwise the material number returned by
+/// C4Landscape::ExtractMaterial. The read determines the synchronous script
+/// result; the matching real mutation is folded immediately after the call.
+fn extract_liquid(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "ExtractLiquid", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ExtractLiquid", "y")?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = match borrow.as_mut() {
+            Some(context) => context,
+            None => return Ok(Value::Int(MATERIAL_NONE)),
+        };
+        let mut position = Vector2::new(x, y);
+        if let Some(object) = context.object_context() {
+            let base = object.current_position;
+            position = Vector2::new(base.x + x, base.y + y);
+        }
+        let Some(landscape) = context.world.landscape_ref() else {
+            return Ok(Value::Int(MATERIAL_NONE));
+        };
+        if !landscape.is_liquid_at(position.x, position.y) {
+            return Ok(Value::Int(MATERIAL_NONE));
+        }
+        let Some(material) = landscape.material_at(position.x, position.y) else {
+            return Ok(Value::Int(MATERIAL_NONE));
+        };
+        context.register_landscape_operation(LandscapeOperation::ExtractLiquid { position });
+        Ok(Value::Int(material.index() as i32))
+    })
+}
+
 /// FnExtractMaterialAmount (C4Script.cpp:2264-2273): extract up to
 /// `amount` pixels while `GBackMat(x,y) == mat`, each through
 /// ExtractMaterial (FindMatTop + clear). The count is computed by an
@@ -27179,6 +27215,7 @@ mod tests {
         "ExecuteCommand",
         "Exit",
         "Extinguish",
+        "ExtractLiquid",
         "ExtractMaterialAmount",
         "FindBase",
         "FindConstructionSite",
@@ -29796,6 +29833,83 @@ func Trigger(object pOther)
         });
         let value = result.expect("GBackLiquid succeeds");
         assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn extract_liquid_is_object_relative_and_stages_one_extraction() {
+        // FnExtractLiquid offsets by cthr->Obj, rejects non-liquid pixels,
+        // then returns Landscape.ExtractMaterial's material number
+        // (C4Script.cpp:2194-2199).
+        let library =
+            lc_resources::MaterialLibrary::parse("[Material Water]\nName=Water\nDensity=25\n")
+                .expect("water material builds");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let mut landscape = Landscape::flat(16, 20);
+        landscape.set_liquid_column(
+            5,
+            vec![LiquidSegment {
+                top: 10,
+                bottom: 14,
+                material: Some(water),
+            }],
+        );
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            2,
+            false,
+        )
+        .with_materials(Some(Rc::new(materials)));
+        let object = HostObjectContext::new(
+            ObjectId::new(1),
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::new(4, 8),
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+        let mut script = lc_script::Engine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 2\nfunc Probe() { return [ExtractLiquid(1, 3), ExtractLiquid(2, 3)]; }",
+            )
+            .expect("ExtractLiquid probe compiles");
+
+        let (result, outcome) =
+            with_effect_context(Some(object), &[], world, 2, || script.call("Probe", &[]));
+        assert_eq!(
+            result.expect("ExtractLiquid succeeds"),
+            Value::Array(vec![
+                Value::Int(water.index() as i32),
+                Value::Int(MATERIAL_NONE),
+            ])
+        );
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::ExtractLiquid { position } => {
+                assert_eq!(*position, Vector2::new(5, 11));
+            }
+            other => panic!("unexpected landscape operation: {other:?}"),
+        }
     }
 
     #[test]

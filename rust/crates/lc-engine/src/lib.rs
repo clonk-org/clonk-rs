@@ -29326,6 +29326,13 @@ impl Engine {
                         }
                     }
                 }
+                LandscapeOperation::ExtractLiquid { position } => {
+                    // FnExtractLiquid already performed its synchronous
+                    // GBackLiquid/material query in the host call. Fold the
+                    // corresponding real C4Landscape::ExtractMaterial now
+                    // (C4Script.cpp:2194-2199).
+                    let _ = self.extract_material(position.x, position.y);
+                }
                 LandscapeOperation::InsertMaterial {
                     material,
                     position,
@@ -34545,6 +34552,40 @@ mod tests {
             "blast operation should emit earth particles"
         );
         Ok(())
+    }
+
+    #[test]
+    fn apply_landscape_operations_extracts_one_liquid_pixel() {
+        // FnExtractLiquid's deferred half is the real
+        // C4Landscape::ExtractMaterial mutation (C4Script.cpp:2194-2199;
+        // C4Landscape.cpp:1130-1156).
+        let library = MaterialLibrary::parse("[Material Water]\nName=Water\nDensity=25\n")
+            .expect("water material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let mut landscape = Landscape::flat(12, 20);
+        landscape.set_liquid_column(
+            5,
+            vec![LiquidSegment {
+                top: 10,
+                bottom: 14,
+                material: Some(water),
+            }],
+        );
+        let mut engine = Engine::with_seed(1);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        assert!(engine.debug_landscape_is_liquid(5, 11));
+
+        engine.apply_landscape_operations(vec![LandscapeOperation::ExtractLiquid {
+            position: Vector2::new(5, 11),
+        }]);
+
+        assert!(!engine.debug_landscape_is_liquid(5, 11));
+        assert!(
+            engine.debug_landscape_is_liquid(5, 10),
+            "ExtractLiquid removes one pixel rather than the whole column"
+        );
     }
 
     #[test]
