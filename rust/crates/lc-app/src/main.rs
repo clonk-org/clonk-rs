@@ -13998,6 +13998,91 @@ mod tests {
             .any(|message| message.lines.iter().any(|line| line.contains(needle)))
     }
 
+    struct RealTutorialApp {
+        app: GameApp,
+        _env_guard: EnvGuard,
+        _user_data: tempfile::TempDir,
+    }
+
+    impl std::ops::Deref for RealTutorialApp {
+        type Target = GameApp;
+
+        fn deref(&self) -> &Self::Target {
+            &self.app
+        }
+    }
+
+    impl std::ops::DerefMut for RealTutorialApp {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.app
+        }
+    }
+
+    impl Drop for RealTutorialApp {
+        fn drop(&mut self) {
+            reset_cached_app_paths();
+        }
+    }
+
+    fn real_tutorial_app(tutorial: u8, player_name: &str) -> RealTutorialApp {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated user data");
+        let env_guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover repository install");
+        let audio_options = AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        };
+        let mut app = GameApp::new(
+            320,
+            200,
+            audio_options,
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: player_name.to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+
+        let scenario_key = format!("Tutorial.c4f/Tutorial{tutorial:02}.c4s");
+        let scenario = resolve_next_mission_scenario(&app.scenario_catalog, &scenario_key)
+            .unwrap_or_else(|| {
+                panic!("Tutorial{tutorial:02} is present in the real scenario catalog")
+            });
+        let scenario_path = scenario
+            .path
+            .clone()
+            .unwrap_or_else(|| panic!("Tutorial{tutorial:02} path"));
+        let scenario_data = Scenario::load_from_path_with_languages(
+            &scenario_path,
+            &InstallDefinitionResolver::new(Some(Arc::new(paths.clone()))),
+            &startup_language_sequence(Some(&paths)),
+        )
+        .unwrap_or_else(|error| panic!("load real Tutorial{tutorial:02}: {error}"));
+        app.activate_loaded_scenario(scenario, scenario_data)
+            .unwrap_or_else(|error| panic!("activate real Tutorial{tutorial:02}: {error}"));
+
+        RealTutorialApp {
+            app,
+            _env_guard: env_guard,
+            _user_data: user_data,
+        }
+    }
+
     #[test]
     fn overlay_text_helper_respects_custom_text() {
         assert!(overlay_text_needs_update("", "FRAME "));
@@ -16640,53 +16725,7 @@ mod tests {
         // While the Clonk pushes BALN, C++ routes Up to the target and keeps
         // DFA_PUSH attached to its moving solid mask (C4Player.cpp:1522-1536;
         // C4Object.cpp:3520-3537,5058-5114; C4SolidMask.cpp:276-305).
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("repository root");
-        let user_data = tempdir().expect("isolated user data");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(repository)),
-            ("LC_USER_DATA_DIR", Some(user_data.path())),
-        ]);
-        let paths = AppPaths::discover().expect("discover repository install");
-        let audio_options = AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        };
-        let mut app = GameApp::new(
-            320,
-            200,
-            audio_options,
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Tutorial 2 virtual player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
-        .expect("initialise app");
-        wait_for_menu(&mut app);
-
-        let scenario = resolve_next_mission_scenario(
-            &app.scenario_catalog,
-            "Tutorial.c4f/Tutorial02.c4s",
-        )
-        .expect("Tutorial02 is present in the real scenario catalog");
-        let scenario_path = scenario.path.clone().expect("Tutorial02 path");
-        let scenario_data = Scenario::load_from_path_with_languages(
-            &scenario_path,
-            &InstallDefinitionResolver::new(Some(Arc::new(paths.clone()))),
-            &startup_language_sequence(Some(&paths)),
-        )
-        .expect("load real Tutorial02");
-        app.activate_loaded_scenario(scenario, scenario_data)
-            .expect("activate real Tutorial02");
+        let mut app = real_tutorial_app(2, "Tutorial 2 virtual player");
 
         let clonk = app
             .engine
@@ -16785,7 +16824,6 @@ mod tests {
                 < balloon_before.position.y,
             "physical S must lift BALN"
         );
-        reset_cached_app_paths();
     }
 
     #[test]
@@ -16796,53 +16834,7 @@ mod tests {
         // C4Object.cpp:1919-1980,3034-3048; C4ObjectMenu.cpp:361-427). Drive
         // C then S through GameApp's physical keyboard boundary so this also
         // covers the real key map and ObjectComUp entrance path.
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("repository root");
-        let user_data = tempdir().expect("isolated user data");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(repository)),
-            ("LC_USER_DATA_DIR", Some(user_data.path())),
-        ]);
-        let paths = AppPaths::discover().expect("discover repository install");
-        let audio_options = AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        };
-        let mut app = GameApp::new(
-            320,
-            200,
-            audio_options,
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Tutorial 3 app virtual player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
-        .expect("initialise app");
-        wait_for_menu(&mut app);
-
-        let scenario = resolve_next_mission_scenario(
-            &app.scenario_catalog,
-            "Tutorial.c4f/Tutorial03.c4s",
-        )
-        .expect("Tutorial03 is present in the real scenario catalog");
-        let scenario_path = scenario.path.clone().expect("Tutorial03 path");
-        let scenario_data = Scenario::load_from_path_with_languages(
-            &scenario_path,
-            &InstallDefinitionResolver::new(Some(Arc::new(paths.clone()))),
-            &startup_language_sequence(Some(&paths)),
-        )
-        .expect("load real Tutorial03");
-        app.activate_loaded_scenario(scenario, scenario_data)
-            .expect("activate real Tutorial03");
+        let mut app = real_tutorial_app(3, "Tutorial 3 app virtual player");
         assert!(
             !app.mouse_control,
             "Tutorial03 DisableMouse=1 must suppress player mouse control and the menu close X like C++ (C4Player.cpp:1907-1912; C4Menu.cpp:1270-1276)"
@@ -17188,7 +17180,6 @@ mod tests {
                 .is_some_and(|object| object.container.is_none()),
             "physical D/D route must exit CLNK from HUT3"
         );
-        reset_cached_app_paths();
     }
 
     #[test]
@@ -17199,53 +17190,7 @@ mod tests {
         // mapping, auto-context close/Exit, and DigDouble synthesis as well as
         // the engine route (Tutorial04.c4s/Script.c:40-126;
         // C4Player.cpp:1490-1554; C4ObjectMenu.cpp:279-435).
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("repository root");
-        let user_data = tempdir().expect("isolated user data");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(repository)),
-            ("LC_USER_DATA_DIR", Some(user_data.path())),
-        ]);
-        let paths = AppPaths::discover().expect("discover repository install");
-        let audio_options = AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        };
-        let mut app = GameApp::new(
-            320,
-            200,
-            audio_options,
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Tutorial 4 app virtual player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
-        .expect("initialise app");
-        wait_for_menu(&mut app);
-
-        let scenario = resolve_next_mission_scenario(
-            &app.scenario_catalog,
-            "Tutorial.c4f/Tutorial04.c4s",
-        )
-        .expect("Tutorial04 is present in the real scenario catalog");
-        let scenario_path = scenario.path.clone().expect("Tutorial04 path");
-        let scenario_data = Scenario::load_from_path_with_languages(
-            &scenario_path,
-            &InstallDefinitionResolver::new(Some(Arc::new(paths.clone()))),
-            &startup_language_sequence(Some(&paths)),
-        )
-        .expect("load real Tutorial04");
-        app.activate_loaded_scenario(scenario, scenario_data)
-            .expect("activate real Tutorial04");
+        let mut app = real_tutorial_app(4, "Tutorial 4 app virtual player");
         assert!(
             !app.mouse_control,
             "Tutorial04 DisableMouse=1 must suppress player mouse control"
@@ -17608,7 +17553,6 @@ mod tests {
             app.engine.cursor_object_menu(app.local_owner).is_none(),
             "removing CNKT closes the menu it owns"
         );
-        reset_cached_app_paths();
     }
 
     fn two_item_script_menu(cursor: ObjectId) -> lc_engine::ObjectMenuState {
