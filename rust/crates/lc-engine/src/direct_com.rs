@@ -2022,6 +2022,19 @@ impl Engine {
     ) -> Result<(), EngineError> {
         const CATEGORY_TRADE_LIVING: i32 = 1 << 16;
         let crew_id = self.objects[crew_index].id;
+        let (previous_selection, selected_definition) = self.objects[crew_index]
+            .state
+            .menu
+            .as_ref()
+            .filter(|menu| menu.identification == Value::Int(5))
+            .map(|menu| {
+                let selected_definition = usize::try_from(menu.selection)
+                    .ok()
+                    .and_then(|selection| menu.items.get(selection))
+                    .map(|item| item.item_id.clone());
+                (Some(menu.selection), selected_definition)
+            })
+            .unwrap_or((None, None));
         let base_id = self.objects[base_index].id;
         let base_owner = self.objects[base_index].state.owner;
         let base_definition = self.objects[base_index].definition_id.clone();
@@ -2088,7 +2101,23 @@ impl Engine {
             });
         }
 
-        let selection = i32::from(!items.is_empty()) - 1;
+        // ClearItems(false) leaves C++'s numeric selection in place while
+        // checkIDSelection restores the selected C4ID after refill. If that
+        // C4ID vanished, AdjustSelection keeps the old slot when valid and
+        // otherwise walks backward to the final row (C4ObjectMenu.cpp:
+        // 147-164,238-275; C4Menu.cpp:975-1017).
+        let selection = if items.is_empty() {
+            -1
+        } else {
+            selected_definition
+                .as_ref()
+                .and_then(|selected| items.iter().position(|item| &item.item_id == selected))
+                .and_then(|selection| i32::try_from(selection).ok())
+                .unwrap_or_else(|| {
+                    let last = i32::try_from(items.len() - 1).unwrap_or(i32::MAX);
+                    previous_selection.unwrap_or(0).clamp(0, last)
+                })
+        };
         let base_name = self
             .definitions
             .get(&base_definition)
@@ -4921,6 +4950,100 @@ protected func IsBuilt() { return GetCon() >= 100; }
                 .collect::<Vec<_>>(),
             vec![("FLAG", 1), ("LORY", 1)]
         );
+    }
+
+    #[test]
+    fn sell_refill_preserves_the_selected_definition_and_numeric_fallback() {
+        // C4ObjectMenu's C4MN_Sell refill remembers the selected C4ID. If
+        // that definition remains, checkIDSelection restores its row; if it
+        // disappears, C4Menu::AdjustSelection keeps the old numeric slot
+        // when that slot is still valid (C4ObjectMenu.cpp:147-164,238-275;
+        // C4Menu.cpp:943-973,993-1017).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        hut.set_auto_context_menu(true);
+        engine.register_definition(hut).expect("register hut");
+        for (id, name, category, value) in [
+            ("FLAG", "Flag", crate::CATEGORY_OBJECT, 100),
+            ("LORY", "Lorry", crate::CATEGORY_VEHICLE, 20),
+            ("BARL", "Barrel", crate::CATEGORY_STRUCTURE, 5),
+        ] {
+            let mut definition =
+                Definition::from_script(id, name, "#strict\n").expect("item compiles");
+            definition.set_category(category);
+            definition.set_value(value);
+            engine
+                .register_definition(definition)
+                .expect("register item");
+        }
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine.player_mut(1).expect("player").control.auto_context_menu = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.category = crate::CATEGORY_LIVING;
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(hut))
+            .expect("spawn flag");
+        engine
+            .spawn_object(SpawnConfig::new("LORY").with_container(hut))
+            .expect("spawn first lorry");
+        engine
+            .spawn_object(SpawnConfig::new("LORY").with_container(hut))
+            .expect("spawn second lorry");
+        engine
+            .spawn_object(SpawnConfig::new("BARL").with_container(hut))
+            .expect("spawn barrel");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+        engine.execute_player_controls().expect("player execute");
+
+        engine.player_in_com(1, COM_RIGHT, 0).expect("select Buy");
+        engine.player_in_com(1, COM_RIGHT, 0).expect("select Sell");
+        engine.player_in_com(1, COM_THROW, 0).expect("enter Sell");
+        engine
+            .player_in_com(1, COM_RIGHT, 0)
+            .expect("select the non-first LORY group");
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("sell one lorry");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("sell menu remains open");
+        assert_eq!(menu.selection, 1);
+        assert_eq!(menu.items[1].item_id, "LORY");
+        assert_eq!(menu.items[1].count, 1);
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("sell the last lorry");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("sell menu remains open");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["FLAG", "BARL"]
+        );
+        assert_eq!(menu.selection, 1);
+        assert_eq!(menu.items[1].item_id, "BARL");
     }
 
     #[test]
