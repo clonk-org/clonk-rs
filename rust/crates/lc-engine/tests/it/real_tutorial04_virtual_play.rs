@@ -536,6 +536,18 @@ fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Build")
     })?;
+    player.wait_until(
+        "Tutorial04 clears the permanent construction instruction",
+        // Script131's wait(10) resumes ScriptGo after 10*10 frames
+        // (Tutorial.c:33-37; C4ScriptHost.cpp:222-231).
+        120,
+        |engine| {
+            engine
+                .object_snapshot(elevator)
+                .is_some_and(|object| object.construction < 100_000)
+                && !tutorial_message_contains(engine, "press 'down' to start working")
+        },
+    )?;
     player.wait_until("ELEV finishes and creates ELEC", 720, |engine| {
         object_with_definition(engine, "ELEC").is_some()
             && engine

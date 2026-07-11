@@ -7456,8 +7456,8 @@ fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let message = match &args[0] {
-        Value::String(text) if !text.is_empty() => text.clone(),
-        Value::String(_) | Value::Nil => return Ok(Value::Bool(false)),
+        Value::String(text) => text.clone(),
+        Value::Nil => return Ok(Value::Bool(false)),
         other => {
             return Err(RuntimeError::new(format!(
                 "CustomMessage: expected string for message, got {}",
@@ -27262,6 +27262,7 @@ impl ObjectScopeContext {
 mod tests {
     use super::*;
     use crate::command::{CommandId, CommandOperation};
+    use crate::message::{FLAG_BOTTOM, FLAG_LEFT, FLAG_WIDTH_REL, FLAG_X_REL};
     use crate::ocf;
     use crate::ActionSpec;
     use crate::AudioCommand;
@@ -28479,6 +28480,40 @@ func Trigger(object pOther)
             MessageCommand::Add(spec) => {
                 assert_eq!(spec.decoration.as_deref(), Some("DECO"));
                 assert_eq!(spec.portrait.as_deref(), Some("Portrait:SCLK::"));
+            }
+        }
+    }
+
+    #[test]
+    fn custom_message_empty_string_registers_clear_command_like_cpp() {
+        // FnCustomMessage forwards a non-null empty C4String to
+        // C4GameMessageList::New, which performs a clear-only operation and
+        // returns true (C4Script.cpp:5995-6039; C4GameMessage.cpp:290-305).
+        let args = [
+            Value::String(String::new()),
+            Value::Nil,
+            Value::Int(0),
+            Value::Int(10),
+            Value::Int(-30),
+            Value::Int(0x00ff_ffff),
+            Value::Nil,
+            Value::Nil,
+            Value::Int((FLAG_BOTTOM | FLAG_LEFT | FLAG_X_REL | FLAG_WIDTH_REL) as i32),
+            Value::Int(35),
+        ];
+        let (result, outcome) = with_object_host_context(|| custom_message(&args));
+
+        assert_eq!(result.expect("empty CustomMessage succeeds"), Value::Bool(true));
+        assert_eq!(outcome.messages.len(), 1);
+        match &outcome.messages[0] {
+            MessageCommand::Add(spec) => {
+                assert!(spec.text.is_empty());
+                assert_eq!(spec.kind, MessageKind::GlobalPlayer);
+                assert_eq!(spec.player, Some(0));
+                assert_eq!(
+                    spec.flags,
+                    FLAG_BOTTOM | FLAG_LEFT | FLAG_X_REL | FLAG_WIDTH_REL
+                );
             }
         }
     }

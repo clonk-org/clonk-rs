@@ -143,29 +143,24 @@ impl MessageManager {
     }
 
     pub fn add_message(&mut self, spec: MessageSpec) {
-        if spec.text.trim().is_empty() {
-            return;
-        }
+        let mut text = if (spec.flags & FLAG_DROP_SPEECH) != 0 {
+            spec.text.split('$').next().unwrap_or("").to_string()
+        } else {
+            spec.text.clone()
+        };
 
         if !spec.allows_multiple() {
             self.remove_conflicting(&spec);
         }
 
-        let mut text = spec.text.clone();
+        if text.is_empty() {
+            return;
+        }
+
         let mut permanent = false;
         if let Some(stripped) = text.strip_prefix('@') {
             permanent = true;
             text = stripped.to_string();
-        }
-
-        let text = if (spec.flags & FLAG_DROP_SPEECH) != 0 {
-            text.split('$').next().unwrap_or("").to_string()
-        } else {
-            text
-        };
-
-        if text.trim().is_empty() {
-            return;
         }
 
         let lines: Vec<String> = text
@@ -290,5 +285,39 @@ impl MessageManager {
             .map(|message| message.id.wrapping_add(1))
             .max()
             .unwrap_or(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tutorial_message(text: &str) -> MessageSpec {
+        MessageSpec {
+            kind: MessageKind::GlobalPlayer,
+            text: text.to_string(),
+            target: None,
+            player: Some(0),
+            offset: Vector2::new(10, -30),
+            color: 0xffff_ffff,
+            flags: FLAG_BOTTOM | FLAG_LEFT | FLAG_X_REL | FLAG_WIDTH_REL,
+            width: Some(35),
+            decoration: Some("DECO".to_string()),
+            portrait: Some("Portrait:SCLK::0000ff::1".to_string()),
+        }
+    }
+
+    #[test]
+    fn empty_non_multiple_message_clears_conflicting_permanent_message() {
+        // C4GameMessageList::New removes same-player/same-position messages
+        // before treating empty text as a successful clear-only operation
+        // (C4GameMessage.cpp:290-305).
+        let mut messages = MessageManager::new();
+        messages.add_message(tutorial_message("@Build the elevator."));
+        assert_eq!(messages.snapshot().len(), 1);
+
+        messages.add_message(tutorial_message(""));
+
+        assert!(messages.snapshot().is_empty());
     }
 }
