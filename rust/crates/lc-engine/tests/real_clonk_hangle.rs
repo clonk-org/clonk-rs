@@ -547,21 +547,35 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
             )
             .expect("keep CLNK in Script160's lesson area");
         engine.tick().expect("Script160 frame");
-        if engine
-            .object_snapshot(clonk)
-            .is_some_and(|object| object.temporary_physical.is_none())
+        let script160_message = engine.snapshot().hud.messages.iter().any(|message| {
+            message
+                .lines
+                .iter()
+                .any(|line| line.contains("Use this key to start a digging process"))
+        });
+        if script160_message
+            && engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.temporary_physical.is_none())
         {
             break;
         }
     }
     let script160_clonk = engine.object_snapshot(clonk).expect("CLNK at Script160");
     assert!(
-        script160_clonk.temporary_physical.is_none(),
-        "Script160 ResetPhysical unlocks digging; frame={}, position={:?}, container={:?}, show_control={}",
+        script160_clonk.temporary_physical.is_none()
+            && engine.snapshot().hud.messages.iter().any(|message| {
+                message
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("Use this key to start a digging process"))
+            }),
+        "Script160 must teach and unlock digging; frame={}, position={:?}, container={:?}, show_control={}, messages={:?}",
         engine.snapshot().frame,
         script160_clonk.position,
         script160_clonk.container,
         engine.snapshot().players[0].show_control,
+        engine.snapshot().hud.messages,
     );
     let gold = engine
         .snapshot()
@@ -647,6 +661,35 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         collected_gold,
     );
 
+    // Script200 must observe GOLD while it is still carried. The natural
+    // route spends many frames climbing back to HUT2; this bounded test
+    // teleports only after Script206's message proves the same Tick10 script
+    // observation happened (Tutorial01 Script.c:151-169).
+    for _ in 0..250 {
+        if engine.snapshot().hud.messages.iter().any(|message| {
+            message
+                .lines
+                .iter()
+                .any(|line| line.contains("Wonderful!"))
+        }) {
+            break;
+        }
+        engine.tick().expect("Script200 GOLD observation frame");
+    }
+    assert!(
+        engine.snapshot().hud.messages.iter().any(|message| {
+            message
+                .lines
+                .iter()
+                .any(|line| line.contains("Wonderful!"))
+        }),
+        "Script200 must observe carried GOLD before the bounded route enters HUT2; frame={}, messages={:?}, clonk={:?}, gold={:?}",
+        engine.frame(),
+        engine.snapshot().hud.messages,
+        engine.object_snapshot(clonk),
+        engine.object_snapshot(gold),
+    );
+
     // Tutorial01 Script210/215 asks the player to carry GOLD into HUT2,
     // then fulfills SCRG and selects Tutorial02 (Script.c:171-182). The
     // normal Up control must take C4ObjectCom's entrance path before Jump
@@ -661,6 +704,19 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
                 .with_command_direction(CommandDirection::Stop),
         )
         .expect("place the gold-carrying CLNK at HUT2's entrance");
+
+    // C4Game::Ticks only raises TimeGo; the external Sec1Timer consumes it
+    // (C4Game.cpp:1755-1759,1899-1913). Let seven deterministic seconds
+    // pass at Tick35 cadence while Script215 waits for the player to enter
+    // (C4Game.cpp:1908; Tutorial01 Script.c:176-181).
+    for _ in 0..7 {
+        for _ in 0..35 {
+            engine.tick().expect("pre-completion clock frame");
+        }
+        engine.sec1_timer();
+    }
+    assert_eq!(engine.game_time(), 7);
+
     engine
         .player_in_com(joined.number, COM_UP, 0)
         .expect("normal player Up control at HUT2");
@@ -690,30 +746,27 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         "Tutorial01 carries GOLD inside the entering CLNK rather than dropping it into HUT2"
     );
 
-    // C4Game::Ticks only raises TimeGo; the external Sec1Timer consumes it
-    // (C4Game.cpp:1755-1759,1899-1913). Pulse exactly seven deterministic
-    // seconds while Script%d advances on its Tick10 cadence
-    // (C4ScriptHost.cpp:222-230).
-    let mut elapsed_seconds = 0;
+    // Script215 runs on the scenario host's Tick10 cadence after the Clonk
+    // enters (C4ScriptHost.cpp:222-230).
     let mut reached_tutorial02 = false;
-    for _ in 0..450 {
+    for _ in 0..20 {
         engine.tick().expect("Script215 approach frame");
-        if elapsed_seconds < 7 {
-            engine.sec1_timer();
-            elapsed_seconds += 1;
-        }
         if engine.next_mission().path == r"Tutorial.c4f\Tutorial02.c4s" {
             reached_tutorial02 = true;
             break;
         }
     }
+    let script215_snapshot = engine.snapshot();
     assert!(
         reached_tutorial02,
-        "Script215 must fulfill SCRG and select Tutorial02; frame={}, next_mission={:?}",
+        "Script215 must fulfill SCRG and select Tutorial02; frame={}, next_mission={:?}, show_control={}, messages={:?}, clonk={:?}, gold={:?}",
         engine.frame(),
         engine.next_mission(),
+        script215_snapshot.players[0].show_control,
+        script215_snapshot.hud.messages,
+        engine.object_snapshot(clonk),
+        engine.object_snapshot(gold),
     );
-    assert_eq!(engine.game_time(), 7);
 
     // SCRG's GOAL controller checks fulfillment every 250 frames, changes
     // to the 30-frame Wait4End action, then calls GameOver
