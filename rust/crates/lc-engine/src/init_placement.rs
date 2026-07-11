@@ -611,9 +611,9 @@ impl Engine {
                 self.init_create_object(id, 50, 50, 0);
             }
         }
-        // InitRules immediately calls UpdateRules. The latter derives the
-        // construction-material flag from the actual surviving CNMT object,
-        // not from the obsolete Scenario.txt realism field
+        // InitRules immediately calls UpdateRules. It derives these flags
+        // from the actual surviving CNMT/ENRG objects, including explicit
+        // Rules= entries when the obsolete realism fields are disabled
         // (C4Game.cpp:4016-4025,4038-4044).
         if self.objects.iter().any(|object| {
             object.definition_id == "CNMT"
@@ -621,6 +621,13 @@ impl Engine {
                 && object.state.status.is_active()
         }) {
             self.set_construction_needs_material(true);
+        }
+        if self.objects.iter().any(|object| {
+            object.definition_id == "ENRG"
+                && !object.destroyed
+                && object.state.status.is_active()
+        }) {
+            self.set_structures_need_energy(true);
         }
 
         // InitGoals (C4Game.cpp:4010-4018).
@@ -694,6 +701,26 @@ protected func Initialize()
         assert_eq!(object.position, Vector2::new(20, 47));
         assert_eq!(object.local_vars["completion_y"], Value::Int(47));
         assert_eq!(object.local_vars["callback_order"], Value::Int(123));
+    }
+
+    #[test]
+    fn explicit_rule_objects_enable_cpp_engine_rule_flags() {
+        let mut engine = Engine::with_seed(0);
+        for id in ["CNMT", "ENRG"] {
+            engine
+                .register_definition(Definition::from_script(id, id, "").unwrap())
+                .unwrap();
+        }
+        engine.set_construction_needs_material(false);
+        engine.set_structures_need_energy(false);
+
+        engine.run_legacy_init_placements(&LegacyInitPlacement {
+            rules: vec![("CNMT".to_string(), 1), ("ENRG".to_string(), 1)],
+            ..LegacyInitPlacement::default()
+        });
+
+        assert!(engine.construction_needs_material);
+        assert!(engine.structures_need_energy());
     }
 
     #[test]
