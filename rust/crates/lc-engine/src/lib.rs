@@ -2030,15 +2030,34 @@ impl ObjectMenuSymbol {
 pub enum ObjectMenuExtra {
     #[default]
     None,
+    /// `C4MN_Extra_Components`: show the selected item's cached build
+    /// requirements (`C4Menu.cpp:895-898`).
+    Components,
     /// `C4MN_Extra_Value`: show the selected item's value beside the
     /// wealth symbol (`C4Menu.cpp:843-907`).
     Value,
+    MagicValue,
+    Info,
+    ComponentsMagic,
+    LiveMagicValue,
+    ComponentsLiveMagic,
+    /// A nonstandard numeric value still reserves C++'s lower strip even
+    /// though `C4Menu::DrawElement` has no matching draw case.
+    Unknown(i32),
 }
 
 impl ObjectMenuExtra {
     fn is_none(&self) -> bool {
         *self == Self::None
     }
+}
+
+/// One cached `C4MenuItem::Components` entry. C++ resolves this when the
+/// item is constructed, preserving C4IDList order for the footer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectMenuComponent {
+    pub definition_id: String,
+    pub count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2058,6 +2077,10 @@ pub struct ObjectMenuItem {
     /// picture. The default preserves existing script-created menu state.
     #[serde(default, skip_serializing_if = "ObjectMenuSymbol::is_definition")]
     pub symbol: ObjectMenuSymbol,
+    /// Cached component requirements for `C4MN_Extra_Components` and its
+    /// magic variants (`C4MenuItem`, C4Menu.h:91; C4Menu.cpp:92-97).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<ObjectMenuComponent>,
     pub selectable: bool,
     /// Some(value) iff C4MN_Add_PassValue was set (C4Script.cpp:1549-1554).
     pub value: Option<i32>,
@@ -13817,6 +13840,16 @@ impl Engine {
             self.definitions
                 .iter()
                 .map(|(id, definition)| (id.clone(), definition.script_arc()))
+                .collect(),
+        )
+        .with_definition_descriptions(
+            self.definitions
+                .iter()
+                .filter_map(|(id, definition)| {
+                    definition
+                        .description()
+                        .map(|description| (id.clone(), description.to_string()))
+                })
                 .collect(),
         )
         .with_scenario_script(

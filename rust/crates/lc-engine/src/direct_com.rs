@@ -353,6 +353,7 @@ impl Engine {
             count: C4MN_ITEM_NO_COUNT,
             item_id,
             symbol,
+            components: Vec::new(),
             selectable: true,
             value: None,
         };
@@ -382,6 +383,7 @@ impl Engine {
                     count: C4MN_ITEM_NO_COUNT,
                     item_id: first_carried_definition,
                     symbol: crate::ObjectMenuSymbol::Put,
+                    components: Vec::new(),
                     selectable: true,
                     value: None,
                 });
@@ -462,6 +464,7 @@ impl Engine {
                 count: C4MN_ITEM_NO_COUNT,
                 item_id: image.to_owned(),
                 symbol: crate::ObjectMenuSymbol::Definition,
+                components: Vec::new(),
                 selectable: true,
                 value: None,
             });
@@ -551,6 +554,7 @@ impl Engine {
             count: C4MN_ITEM_NO_COUNT,
             item_id: definition_id.clone(),
             symbol: crate::ObjectMenuSymbol::default(),
+            components: Vec::new(),
             selectable: false,
             value: None,
         };
@@ -1973,6 +1977,7 @@ impl Engine {
                     count,
                     item_id: definition_id,
                     symbol: crate::ObjectMenuSymbol::default(),
+                    components: Vec::new(),
                     selectable: true,
                     value: Some(definition.value()),
                 })
@@ -2074,6 +2079,7 @@ impl Engine {
                 count,
                 item_id: definition_id,
                 symbol: crate::ObjectMenuSymbol::default(),
+                components: Vec::new(),
                 selectable: true,
                 value: Some(definition.value()),
             });
@@ -2199,6 +2205,7 @@ impl Engine {
                 count,
                 item_id: definition_id,
                 symbol: crate::ObjectMenuSymbol::default(),
+                components: Vec::new(),
                 selectable: true,
                 value: None,
             });

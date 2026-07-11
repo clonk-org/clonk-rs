@@ -585,6 +585,9 @@ pub(crate) struct HostWorldContext {
     master_order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
     definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
+    /// Localized `C4Def::GetDesc` text, kept separate from simulation
+    /// metadata so presentation lookup does not enlarge every fixture.
+    definition_descriptions: Rc<HashMap<DefinitionId, String>>,
     /// Runtime `Game.Defs` order after C4DefList::SortByID. Definition-indexing
     /// APIs must never observe the nondeterministic order of `definitions`.
     definition_order: Rc<Vec<DefinitionId>>,
@@ -658,6 +661,7 @@ impl Default for HostWorldContext {
             master_order: Rc::new(Vec::new()),
             landscape: None,
             definitions: Rc::new(HashMap::new()),
+            definition_descriptions: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors: RefCell::new(None),
             transfer_zones: Rc::new(Vec::new()),
@@ -829,6 +833,7 @@ impl HostWorldContext {
             order,
             landscape: landscape.map(Rc::new),
             definitions,
+            definition_descriptions: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors,
             transfer_zones: Rc::new(transfer_zones),
@@ -859,6 +864,14 @@ impl HostWorldContext {
 
     pub(crate) fn with_sky_adjustment(mut self, adjustment: SkyAdjustment) -> Self {
         self.sky_adjustment = adjustment;
+        self
+    }
+
+    pub(crate) fn with_definition_descriptions(
+        mut self,
+        descriptions: HashMap<DefinitionId, String>,
+    ) -> Self {
+        self.definition_descriptions = Rc::new(descriptions);
         self
     }
 
@@ -1064,6 +1077,10 @@ impl HostWorldContext {
 
     pub(crate) fn definition_metadata(&self, id: &str) -> Option<&DefinitionMetadata> {
         self.definitions.get(id)
+    }
+
+    pub(crate) fn definition_description(&self, id: &str) -> Option<&str> {
+        self.definition_descriptions.get(id).map(String::as_str)
     }
 
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
@@ -3828,6 +3845,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         count,
         item_id: c4id_text_of(&item_id),
         symbol: crate::ObjectMenuSymbol::default(),
+        components: Vec::new(),
         selectable,
         value: own_value,
     });
