@@ -1,4 +1,3 @@
-mod support;
 
 use lc_engine::{
     Definition, Engine, ObjectId, PlayerConfig, SpawnConfig, COM_DIG, COM_DOWN, COM_RIGHT,
@@ -6,7 +5,7 @@ use lc_engine::{
 };
 use lc_script::Value;
 use std::error::Error;
-use support::virtual_player::{VirtualPlayer, VirtualPlayerError};
+use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
 
 const CONTROL_PROBE_SCRIPT: &str = r#"
 #strict 2

@@ -315,7 +315,7 @@ fn debugger_hooks_capture_call_and_return() {
     assert_eq!(return_entries, vec!["AddOne -> 42".to_string()]);
 }
 
-const CANONICAL_SCENARIO: &str = include_str!("../src/fixtures/canonical/basic.aul");
+const CANONICAL_SCENARIO: &str = include_str!("../../src/fixtures/canonical/basic.aul");
 
 #[test]
 fn canonical_scenario_parity_harness() {

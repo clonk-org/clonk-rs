@@ -3,9 +3,6 @@ name = "lc-engine"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-crate-type = ["rlib", "staticlib", "cdylib"]
-
 [features]
 default = []
 ffi = ["dep:tracing-subscriber"]
@@ -23,7 +20,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"], optional = true }
 
 [dev-dependencies]
-criterion = "0.5"
+# Bench-only: skip criterion's default plotters/rayon subtrees (HTML plot
+# reports); plain reports keep the numbers.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3"
 proptest = "1"
 tracing-subscriber = { version = "0.3", features = ["registry"] }

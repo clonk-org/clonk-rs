@@ -1,7 +1,6 @@
 #[allow(dead_code)]
-mod support;
 
-use support::real_scenario::load_tutorial;
+use crate::support::real_scenario::load_tutorial;
 
 #[test]
 fn tutorial_harness_boots_the_installed_cpp_global_script_layer() {

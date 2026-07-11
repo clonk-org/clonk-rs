@@ -3,9 +3,6 @@ name = "lc-script"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-crate-type = ["rlib", "staticlib", "cdylib"]
-
 [features]
 default = []
 ffi = []
@@ -18,7 +15,7 @@ serde = { version = "1.0", features = ["derive"] }
 stacker = "0.1"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]
 name = "script_execution"

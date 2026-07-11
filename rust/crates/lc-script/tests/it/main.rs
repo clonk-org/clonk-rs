@@ -1,0 +1,59 @@
+// One integration-test binary for the whole crate: each former tests/*.rs
+// file is a module here, so an engine edit costs one test-crate compile and
+// one link instead of one per file. nextest still runs every #[test]
+// separately (process-per-test), so isolation and parallelism are unchanged.
+
+mod integration_tests;
+mod test_any_type;
+mod test_appendto;
+mod test_assignment_in_if;
+mod test_assignment_in_unary;
+mod test_braceless_if_assignment;
+mod test_braceless_if_spacing;
+mod test_c4id_scope_resolution;
+mod test_call_depth;
+mod test_call_with_ref_args;
+mod test_caller_var_slots;
+mod test_comma_operator;
+mod test_complete_warp;
+mod test_concat_operator;
+mod test_context_annotation;
+mod test_cowb_issue;
+mod test_division_by_zero;
+mod test_elev_full;
+mod test_elev_issue;
+mod test_ellipsis_and_par;
+mod test_empty_arguments;
+mod test_exponentiation;
+mod test_fbrg_script;
+mod test_frcs_hex;
+mod test_increment_decrement_lvalues;
+mod test_increment_nil;
+mod test_inherited;
+mod test_int_coercion;
+mod test_keyword_parameter_names;
+mod test_keyword_var_names;
+mod test_localn_cross_object;
+mod test_localn_named_locals;
+mod test_localn_two_args;
+mod test_lock_issue;
+mod test_logical_operand_return;
+mod test_method_dispatch;
+mod test_method_slot_assignment;
+mod test_multi_var_decl;
+mod test_nil_coalescing;
+mod test_old_style_functions;
+mod test_param_type_annotation;
+mod test_reference_parameters;
+mod test_reference_return_functions;
+mod test_return_with_space;
+mod test_script_constants;
+mod test_statics;
+mod test_strict_equality;
+mod test_swt_issue;
+mod test_this_context;
+mod test_truthiness;
+mod test_var_hoisting;
+mod test_var_local_slots;
+mod test_var_shadows_static;
+mod test_warp_script;
