@@ -1,20 +1,15 @@
 # Rust Port Status
 
-C++ (`../src/`) and `content/` are read-only parity oracles. Completed slices
-are in `git log -- rust/ parity/`.
+C++ (`../src/`) and `content/` are read-only parity oracles; commits are the
+record of completed slices.
 
-## Current
+## Focus
 
-Tutorials 01–10 complete their real victory flows through player controls and
-live menus. The app physically completes Tutorials 01–03 through their real
-inventories, menus, vehicles, digging/building, goals, and GameOver flows. App
-tests also cover Tutorial 04 from HUT2 through CNKT to an ELEV site. S/Z/X/C
-mapping, unbound arrows, jumping, and classic/AutoStop release behavior are
-pinned.
-
-Next: close tutorial presentation/UI parity, then resume Goldrush at its pinned
-first mismatch: frame 3327, object #1451, Decay/DoCon Y synchronization; RNG is
-still aligned.
+Tutorial virtual-play passes 01–03, 05–06, and 08–10. Tutorial 04 is blocked
+while scaling beside ELEC; 07 is blocked while grabbing ELEC with GOLD. App
+routes complete 01–03 and reach Tutorial 04's ELEV construction. Finish all
+tutorial behavior and presentation before resuming Goldrush at its pinned
+frame-3327 Decay/DoCon mismatch.
 
 ## Gates
 
@@ -31,25 +26,22 @@ cargo xtask parity verify
 Behavior changes also require the relevant scenario sweep/audit and rebuilt
 live comparison.
 
-## Remaining parity
+## Open
 
-- Tutorial presentation: C++-exact menus, HUD, evaluation screens, rendering,
-  audio, and startup/options interaction.
-- Simulation: landscape/material/RNG order, liquids, masks, fire/effects,
-  movement/collision/attachment, pathfinding, vehicles, lines, digging,
-  OCF/sectors/find order, containers, crew/base state, and callback timing.
-- Script/state/network/resources: strict C4Value/save semantics, effect/menu
-  ordering, synchronized controls/protocols, renderer/particles, audio,
+- Tutorial/UI: C++-exact menus, HUD, evaluation, rendering, audio, and
+  startup/options interaction.
+- Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
+  movement/collision/attachment, vehicles, lines, containers, and callback
+  order.
+- Systems: strict C4Value/save semantics, synchronized controls/networking,
   configuration/localization, and group I/O.
 
-Comparator caveats: presentation RNG is opt-in; message/render fields compare
-only when both bridges expose them; same-seed landscape is 99.66% byte-equal
-because C++ bakes MCVehic masks while Rust overlays them.
+Comparator caveats: presentation RNG is opt-in; fields compare only when both
+bridges expose them; same-seed landscape is 99.66% byte-equal because C++ bakes
+MCVehic masks while Rust overlays them.
 
 ## Preserve
 
-Keep fixed-point state separate from integer projections except at C++ sync
-points. Preserve shared LCG state/count, reverse execution, IDs and all
-definition/category/sector/content/C4ID ordering, newest-first contents,
-callback/effect timing, movement/attachment rules, script include order, save
-state, authoritative landscape masks, scenario-init RNG, and crew/find ties.
+Preserve fixed-point sync boundaries, shared RNG state/count, reverse
+execution, IDs and list ordering, callback/effect timing, movement rules,
+script include order, save state, masks, scenario-init RNG, and crew/find ties.
