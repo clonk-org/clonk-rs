@@ -165,6 +165,22 @@ fn wait_until_reports_elapsed_ticks_and_a_labeled_timeout() -> Result<(), Box<dy
     let error = player
         .wait_until("impossible milestone", 2, |_| false)
         .expect_err("an unmet milestone must time out");
+    let diagnostics = match &error {
+        VirtualPlayerError::Timeout { diagnostics, .. } => diagnostics,
+        other => panic!("expected timeout diagnostics, got {other:?}"),
+    };
+    assert!(diagnostics.contains("recent=[frame=3"));
+    assert!(diagnostics.contains("frame=5"));
+    assert!(diagnostics.contains("cursor=1:CLNK"));
+    assert!(diagnostics.contains("pos=(0,0)"));
+    assert!(diagnostics.contains("action=Idle"));
+    assert!(diagnostics.contains("comdir=0"));
+    assert!(diagnostics.contains("container=-"));
+    assert!(diagnostics.contains("contents=[]"));
+    assert!(diagnostics.contains("menu=closed"));
+    assert!(diagnostics.contains("hud={owner=1"));
+    assert!(diagnostics.contains("global-effects=[]"));
+    assert!(error.to_string().contains(diagnostics));
     assert!(matches!(
         error,
         VirtualPlayerError::Timeout {

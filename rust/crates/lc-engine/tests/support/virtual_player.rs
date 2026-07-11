@@ -1,9 +1,13 @@
 use lc_engine::{
-    Engine, EngineError, ObjectMenuState, COM_CURSOR_TOGGLE, COM_DIG, COM_DOWN, COM_LEFT,
+    Engine, EngineError, ObjectId, ObjectMenuState, COM_CURSOR_TOGGLE, COM_DIG, COM_DOWN, COM_LEFT,
     COM_RELEASE_OFFSET, COM_RIGHT, COM_THROW, COM_UP,
 };
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
+
+const RECENT_STATE_LIMIT: usize = 6;
+const RECENT_ID_LIMIT: usize = 8;
 
 /// Headless input driver for parity tests.
 ///
@@ -31,6 +35,7 @@ pub enum VirtualPlayerError {
         milestone: String,
         max_ticks: u32,
         frame: u64,
+        diagnostics: String,
     },
     MenuClosed {
         owner: i32,
@@ -73,9 +78,11 @@ impl fmt::Display for VirtualPlayerError {
                 milestone,
                 max_ticks,
                 frame,
+                diagnostics,
             } => write!(
                 formatter,
-                "timed out after {max_ticks} ticks waiting for `{milestone}` at frame {frame}"
+                "timed out after {max_ticks} ticks waiting for `{milestone}` at frame {frame}; \
+                 {diagnostics}"
             ),
             Self::MenuClosed { owner, frame } => {
                 write!(
@@ -194,8 +201,11 @@ impl<'engine> VirtualPlayer<'engine> {
         if reached(self.engine) {
             return Ok(0);
         }
+        let mut recent = VecDeque::with_capacity(RECENT_STATE_LIMIT);
+        self.remember_observable_state(&mut recent);
         for elapsed in 1..=max_ticks {
             self.engine.tick()?;
+            self.remember_observable_state(&mut recent);
             if reached(self.engine) {
                 return Ok(elapsed);
             }
@@ -204,6 +214,7 @@ impl<'engine> VirtualPlayer<'engine> {
             milestone,
             max_ticks,
             frame: self.engine.frame(),
+            diagnostics: self.timeout_diagnostics(recent),
         })
     }
 
@@ -317,4 +328,141 @@ impl<'engine> VirtualPlayer<'engine> {
             Err(VirtualPlayerError::InvalidControl { control })
         }
     }
+
+    fn remember_observable_state(&self, recent: &mut VecDeque<String>) {
+        if recent.len() == RECENT_STATE_LIMIT {
+            recent.pop_front();
+        }
+        recent.push_back(self.observable_state());
+    }
+
+    fn observable_state(&self) -> String {
+        let frame = self.engine.frame();
+        let menu = self.menu_diagnostics();
+        self.engine
+            .crew_cursor(self.owner)
+            .and_then(|cursor| {
+                self.engine.object_snapshot(cursor).map(|object| {
+                    let container = object
+                        .container
+                        .map_or_else(|| "-".to_owned(), |id| id.to_string());
+                    let target = object
+                        .action
+                        .target
+                        .map_or_else(|| "-".to_owned(), |id| id.to_string());
+                    format!(
+                        "frame={frame} cursor={}:{} pos=({},{}) vel=({},{}) \
+                         action={}:{}@{} target={} comdir={} container={} contents={} menu={}",
+                        object.id,
+                        object.definition_id,
+                        object.position.x,
+                        object.position.y,
+                        object.velocity.x,
+                        object.velocity.y,
+                        object.action.name,
+                        object.action.phase,
+                        object.action.time,
+                        target,
+                        object.command_direction.to_script_value(),
+                        container,
+                        compact_ids(&object.contents),
+                        menu,
+                    )
+                })
+            })
+            .unwrap_or_else(|| format!("frame={frame} cursor=none menu={menu}"))
+    }
+
+    fn menu_diagnostics(&self) -> String {
+        self.engine
+            .cursor_object_menu(self.owner)
+            .map(|(object, menu)| {
+                let selected = usize::try_from(menu.selection)
+                    .ok()
+                    .and_then(|index| menu.items.get(index))
+                    .map(|item| format!("{:?}", item.caption))
+                    .unwrap_or_else(|| "-".to_owned());
+                format!(
+                    "open@{} caption={:?} selection={}/{} selected={}",
+                    object,
+                    menu.caption,
+                    menu.selection,
+                    menu.items.len(),
+                    selected,
+                )
+            })
+            .unwrap_or_else(|| "closed".to_owned())
+    }
+
+    fn timeout_diagnostics(&self, recent: VecDeque<String>) -> String {
+        let snapshot = self.engine.snapshot();
+        let hud = snapshot
+            .hud
+            .players
+            .iter()
+            .find(|player| player.owner == self.owner)
+            .map(|player| {
+                let focus = player
+                    .focus
+                    .map_or_else(|| "-".to_owned(), |id| id.to_string());
+                format!(
+                    "owner={} focus={} crew={} wealth={} score={} eliminated={} messages={} \
+                     scoreboard={}x{}/show={}",
+                    player.owner,
+                    focus,
+                    compact_ids(&player.crew),
+                    player.wealth,
+                    player.score,
+                    player.eliminated,
+                    snapshot.hud.messages.len(),
+                    snapshot.hud.scoreboard.row_count(),
+                    snapshot.hud.scoreboard.column_count(),
+                    snapshot.hud.scoreboard.show_count(),
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "owner={} missing messages={} scoreboard={}x{}/show={}",
+                    self.owner,
+                    snapshot.hud.messages.len(),
+                    snapshot.hud.scoreboard.row_count(),
+                    snapshot.hud.scoreboard.column_count(),
+                    snapshot.hud.scoreboard.show_count(),
+                )
+            });
+        let effects = snapshot
+            .global_effects
+            .iter()
+            .take(RECENT_ID_LIMIT)
+            .map(|effect| {
+                format!(
+                    "{:?}#{}(timer={},interval={},priority={})",
+                    effect.name, effect.number, effect.timer, effect.interval, effect.priority,
+                )
+            })
+            .collect::<Vec<_>>();
+        let omitted_effects = snapshot.global_effects.len().saturating_sub(effects.len());
+        let effect_suffix = (omitted_effects != 0)
+            .then(|| format!(",...+{omitted_effects}"))
+            .unwrap_or_default();
+        format!(
+            "recent=[{}]; hud={{{hud}}}; global-effects=[{}{}]",
+            recent.into_iter().collect::<Vec<_>>().join(" | "),
+            effects.join(","),
+            effect_suffix,
+        )
+    }
+}
+
+fn compact_ids(ids: &[ObjectId]) -> String {
+    let shown = ids
+        .iter()
+        .take(RECENT_ID_LIMIT)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let omitted = ids.len().saturating_sub(shown.len());
+    let suffix = (omitted != 0)
+        .then(|| format!(",...+{omitted}"))
+        .unwrap_or_default();
+    format!("[{}{}]", shown.join(","), suffix)
 }
