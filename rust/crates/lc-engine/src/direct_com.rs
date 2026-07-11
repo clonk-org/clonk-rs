@@ -4004,6 +4004,9 @@ protected func ControlCommand(szCommand) { return(1); }
             .expect("spawn hut");
         let hut_index = engine.find_object_index(hut).expect("hut exists");
         engine.objects[hut_index].state.base = 1;
+        // The context Exit row is immediate only while the door is open;
+        // otherwise C++ first asks ActivateEntrance (C4Command.cpp:624-665).
+        engine.objects[hut_index].state.entrance_status = true;
         engine
             .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
             .expect("enter hut");
@@ -4154,6 +4157,11 @@ protected func ControlCommand(szCommand) { return(1); }
             .expect("spawn hut");
         let hut_index = engine.find_object_index(hut).expect("hut exists");
         engine.objects[hut_index].state.base = 1;
+        // This assertion exercises C4CMD_Exit's open-door branch. C4Object
+        // initializes EntranceStatus to false; HUT3's DOOR script opens it
+        // before an object can leave (C4Object.cpp:116;
+        // C4Command.cpp:624-650).
+        engine.objects[hut_index].state.entrance_status = true;
         let lorry = engine
             .spawn_object(SpawnConfig::new("LORY").with_container(hut))
             .expect("spawn contained lorry");
@@ -4404,6 +4412,10 @@ protected func ControlCommand(szCommand) { return(1); }
             .expect("spawn hut");
         let hut_index = engine.find_object_index(hut).expect("hut exists");
         engine.objects[hut_index].state.base = 1;
+        // Model the already-open HUT3 door. With EntranceStatus=false C++
+        // asks ActivateEntrance and leaves Exit pending instead
+        // (C4Command.cpp:624-665).
+        engine.objects[hut_index].state.entrance_status = true;
         engine
             .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
             .expect("enter hut");
