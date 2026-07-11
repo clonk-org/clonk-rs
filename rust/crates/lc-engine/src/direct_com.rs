@@ -1967,7 +1967,7 @@ impl Engine {
                 );
                 Some(crate::ObjectMenuItem {
                     caption: format!("Buy {}", definition.name()),
-                    info_caption: String::new(),
+                    info_caption: definition.description().unwrap_or_default().to_string(),
                     command,
                     command2,
                     count,
@@ -2068,7 +2068,7 @@ impl Engine {
             );
             items.push(crate::ObjectMenuItem {
                 caption: format!("Sell {}", definition.name()),
-                info_caption: String::new(),
+                info_caption: definition.description().unwrap_or_default().to_string(),
                 command,
                 command2,
                 count,
@@ -2167,11 +2167,14 @@ impl Engine {
             let carryable = item.state.ocf & ocf::CARRYABLE != 0;
             let get = carryable || !has_entrance;
             let command_name = if get { "Get" } else { "Activate" };
-            let item_name = self
-                .definitions
-                .get(&definition_id)
+            let item_definition = self.definitions.get(&definition_id);
+            let item_name = item_definition
                 .map(|definition| definition.name())
                 .unwrap_or(definition_id.as_str());
+            let info_caption = item_definition
+                .and_then(|definition| definition.description())
+                .unwrap_or_default()
+                .to_string();
             let command = format!(
                 "SetCommand(this, \"{}\", Object({})) && ExecuteCommand()",
                 command_name,
@@ -2190,7 +2193,7 @@ impl Engine {
                 .unwrap_or_default();
             items.push(crate::ObjectMenuItem {
                 caption: format!("{} {}", command_name, item_name),
-                info_caption: String::new(),
+                info_caption,
                 command,
                 command2,
                 count,
@@ -4128,6 +4131,7 @@ protected func ControlCommand(szCommand) { return(1); }
         let mut lorry =
             Definition::from_script("LORY", "Lorry", "#strict\n").expect("lorry compiles");
         lorry.set_value(25);
+        lorry.set_description(Some("Carries cargo.".to_string()));
         engine.register_definition(lorry).expect("register lorry");
         engine
             .set_player_home_base_material(1, HashMap::from([("LORY".to_string(), 1)]))
@@ -4159,6 +4163,7 @@ protected func ControlCommand(szCommand) { return(1); }
         assert_eq!(item.count, 1);
         assert_eq!(item.item_id, "LORY");
         assert_eq!(item.value, Some(25));
+        assert_eq!(item.info_caption, "Carries cargo.");
         assert_eq!(
             item.command,
             format!(
@@ -4638,6 +4643,7 @@ protected func IsBuilt() { return GetCon() >= 100; }
         let mut lorry =
             Definition::from_script("LORY", "Lorry", "#strict\n").expect("lorry compiles");
         lorry.set_category(crate::CATEGORY_VEHICLE);
+        lorry.set_description(Some("Carries cargo.".to_string()));
         engine.register_definition(lorry).expect("register lorry");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
@@ -4683,6 +4689,7 @@ protected func IsBuilt() { return GetCon() >= 100; }
                 .collect::<Vec<_>>()
         );
         assert_eq!(menu.items[0].item_id, "LORY");
+        assert_eq!(menu.items[0].info_caption, "Carries cargo.");
         assert!(
             menu.items[0]
                 .command
@@ -4798,11 +4805,13 @@ protected func IsBuilt() { return GetCon() >= 100; }
             Definition::from_script("FLAG", "Flag", "#strict\n").expect("flag compiles");
         flag.set_category(crate::CATEGORY_OBJECT);
         flag.set_value(100);
+        flag.set_description(Some("Marks a base.".to_string()));
         engine.register_definition(flag).expect("register flag");
         let mut lorry =
             Definition::from_script("LORY", "Lorry", "#strict\n").expect("lorry compiles");
         lorry.set_category(crate::CATEGORY_VEHICLE);
         lorry.set_value(20);
+        lorry.set_description(Some("Carries cargo.".to_string()));
         engine.register_definition(lorry).expect("register lorry");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
@@ -4856,6 +4865,13 @@ protected func IsBuilt() { return GetCon() >= 100; }
                 .map(|item| (item.item_id.as_str(), item.count, item.value))
                 .collect::<Vec<_>>(),
             vec![("FLAG", 2, Some(100)), ("LORY", 1, Some(20))]
+        );
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.info_caption.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Marks a base.", "Carries cargo."]
         );
         assert!(menu.items[0].command.contains(&format!(
             "Object({})",

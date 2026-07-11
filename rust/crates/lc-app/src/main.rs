@@ -16981,6 +16981,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("Buy Lorry", 1, Some(20))]
         );
+        assert_eq!(
+            buy_menu.items[0].info_caption,
+            "Useful to transport large amounts of material. Holds up to 50 items.",
+            "C4ObjectMenu::Refill passes each Buy definition's localized description to C4MenuItem (C4ObjectMenu.cpp:219-233)"
+        );
         app.render(&mut rendered)
             .expect("render Tutorial03 Buy menu through the app");
 
