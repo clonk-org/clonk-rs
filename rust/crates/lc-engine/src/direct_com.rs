@@ -2490,8 +2490,7 @@ impl Engine {
     }
 
     /// `ObjectComDigDouble` (C4ObjectCom.cpp:531-571) — "activation":
-    /// contents Activate, chop, then the own Activate call. Linekit line
-    /// construction (:542-547, 560-567) is unported (see PORT_STATUS).
+    /// contents Activate, linekit construction, chop, then own Activate.
     fn object_com_dig_double(&mut self, index: usize) -> Result<(), EngineError> {
         let owner = self.objects[index].state.owner;
         let self_id = self.objects[index].id;
@@ -2503,6 +2502,17 @@ impl Engine {
                 if compat::value_raw_truthy(&value) {
                     return Ok(());
                 }
+            }
+            // LNKT's script may decline activation; C++ then performs its
+            // engine-side ObjectComLineConstruction fallback (:542-547).
+            if self
+                .find_object_index(contents_id)
+                .is_some_and(|contents_index| {
+                    self.objects[contents_index].definition_id == "LNKT"
+                })
+                && self.object_com_line_construction(index, contents_id)?
+            {
+                return Ok(());
             }
         }
         // Chop (:549-558).
@@ -2522,6 +2532,148 @@ impl Engine {
         let self_ref = compat::object_reference_value(self_id);
         self.contained_call(index, "Activate", &[self_ref])?;
         Ok(())
+    }
+
+    /// Carried-LNKT half of `ObjectComLineConstruction`
+    /// (C4ObjectCom.cpp:429-528): finish a live line attached to the kit,
+    /// or choose and create a new line at the full-con structure under the
+    /// Clonk. The no-kit line-pickup half (:392-427) remains separate work.
+    fn object_com_line_construction(
+        &mut self,
+        clonk_index: usize,
+        linekit_id: ObjectId,
+    ) -> Result<bool, EngineError> {
+        let Some(linekit_index) = self.find_object_index(linekit_id) else {
+            return Ok(false);
+        };
+        if self.objects[linekit_index].definition_id != "LNKT"
+            || self.objects[linekit_index].destroyed
+        {
+            return Ok(false);
+        }
+
+        let clonk_id = self.objects[clonk_index].id;
+        let position = self.objects[clonk_index].state.position;
+        let active_line = self.objects.iter().position(|object| {
+            !object.destroyed
+                && object.state.status.is_active()
+                && object.state.action.name == "Connect"
+                && (object.state.action.target == Some(linekit_id)
+                    || object.state.action.target2 == Some(linekit_id))
+        });
+
+        let Some((structure_index, structure_id, structure_ocf)) =
+            self.at_object(position, ocf::LINE_CONSTRUCT, Some(clonk_id))
+        else {
+            return Ok(false);
+        };
+        if structure_ocf & ocf::LINE_CONSTRUCT == 0 {
+            return Ok(false);
+        }
+
+        if let Some(line_index) = active_line {
+            let first = self.objects[line_index].state.action.target;
+            let second = self.objects[line_index].state.action.target2;
+            if first == Some(structure_id) || second == Some(structure_id) {
+                let _ = self.objects[line_index].mark_destroyed();
+                self.update_sector_for_index(line_index);
+                self.note_objects_changed();
+                return Ok(true);
+            }
+
+            let line_type = self
+                .definitions
+                .get(&self.objects[line_index].definition_id)
+                .map(|definition| definition.line())
+                .unwrap_or_default();
+            let line_connect = self
+                .definitions
+                .get(&self.objects[structure_index].definition_id)
+                .map(|definition| definition.line_connect())
+                .unwrap_or_default();
+            let connect_ok = match line_type {
+                1 => {
+                    line_connect
+                        & (crate::LINE_CONNECT_POWER_INPUT | crate::LINE_CONNECT_POWER_OUTPUT)
+                        != 0
+                }
+                2 => line_connect & crate::LINE_CONNECT_LIQUID_OUTPUT != 0,
+                3 => line_connect & crate::LINE_CONNECT_LIQUID_INPUT != 0,
+                _ => false,
+            };
+            if !connect_ok {
+                return Ok(false);
+            }
+
+            if first == Some(linekit_id) {
+                self.objects[line_index].state.action.target = Some(structure_id);
+            }
+            if second == Some(linekit_id) {
+                self.objects[line_index].state.action.target2 = Some(structure_id);
+            }
+            self.objects[clonk_index]
+                .state
+                .contents
+                .retain(|&id| id != linekit_id);
+            self.objects[linekit_index].state.container = None;
+            let _ = self.objects[linekit_index].mark_destroyed();
+            self.update_sector_for_index(linekit_index);
+            self.note_objects_changed();
+            return Ok(true);
+        }
+
+        let line_connect = self
+            .definitions
+            .get(&self.objects[structure_index].definition_id)
+            .map(|definition| definition.line_connect())
+            .unwrap_or_default();
+        let has_connected_line = |engine: &Self, definition_id: &str| {
+            engine.objects.iter().any(|object| {
+                !object.destroyed
+                    && object.definition_id == definition_id
+                    && object.state.action.name == "Connect"
+                    && object.state.action.target == Some(structure_id)
+            })
+        };
+        let line_definition = if line_connect & crate::LINE_CONNECT_LIQUID_PUMP != 0
+            && !has_connected_line(self, "SPIP")
+        {
+            Some("SPIP")
+        } else if line_connect & crate::LINE_CONNECT_LIQUID_OUTPUT != 0
+            && !has_connected_line(self, "DPIP")
+        {
+            Some("DPIP")
+        } else if line_connect & crate::LINE_CONNECT_POWER_OUTPUT != 0 {
+            Some("PWRL")
+        } else {
+            None
+        };
+        let Some(line_definition) = line_definition else {
+            return Ok(false);
+        };
+        if !self.definitions.contains_key(line_definition) {
+            return Ok(false);
+        }
+
+        let owner = self.objects[clonk_index].state.owner;
+        let line_position = self.objects[structure_index].state.position;
+        let line_id = self.spawn_object_with_initial_lifecycle(
+            crate::SpawnConfig::new(line_definition)
+                .with_position(line_position)
+                .with_owner(owner),
+            Some(structure_id),
+        )?;
+        let Some(line_index) = line_id.and_then(|id| self.find_object_index(id)) else {
+            return Ok(false);
+        };
+        let line = &mut self.objects[line_index];
+        line.state.action.name = "Connect".to_owned();
+        line.state.action.phase = 0;
+        line.state.action.ticks = 0;
+        line.state.action.time = 0;
+        line.state.action.target = Some(structure_id);
+        line.state.action.target2 = Some(linekit_id);
+        Ok(true)
     }
 
     /// `ObjectComDownDouble` (C4ObjectCom.cpp:573-589): build or grab what
@@ -3375,6 +3527,156 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
             snapshot.damage, 1,
             "the contents object's Activate ran (C4ObjectCom.cpp:537-539)"
         );
+    }
+
+    #[test]
+    fn dig_double_with_linekit_starts_and_connects_power_line() {
+        // When LNKT's script Activate does not consume DigDouble, C++ falls
+        // through to ObjectComLineConstruction: a full-con structure under
+        // the Clonk with C4D_Power_Output starts PWRL from that structure to
+        // the carried kit (C4ObjectCom.cpp:542-547,487-528).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+
+        let linekit = Definition::from_script("LNKT", "Linekit", "#strict\n")
+            .expect("linekit compiles");
+        engine
+            .register_definition(linekit)
+            .expect("linekit registers");
+
+        let mut generator =
+            Definition::from_script("POWR", "Generator", "#strict\n").expect("generator compiles");
+        generator.set_shape_rect(Some(crate::DefinitionRect::new(-20, -20, 40, 40)));
+        generator.set_line_connect(crate::LINE_CONNECT_POWER_OUTPUT);
+        engine
+            .register_definition(generator)
+            .expect("generator registers");
+        let mut consumer =
+            Definition::from_script("CONS", "Consumer", "#strict\n").expect("consumer compiles");
+        consumer.set_shape_rect(Some(crate::DefinitionRect::new(-20, -20, 40, 40)));
+        consumer.set_line_connect(crate::LINE_CONNECT_POWER_INPUT);
+        engine
+            .register_definition(consumer)
+            .expect("consumer registers");
+
+        let mut line = Definition::from_script("PWRL", "Power line", "#strict\n")
+            .expect("line compiles");
+        line.set_line(1);
+        line.set_shape_vertices(vec![
+            crate::ObjectVertex {
+                x: 0,
+                y: 0,
+                cnat: 0,
+                friction: 0,
+            },
+            crate::ObjectVertex {
+                x: 0,
+                y: 0,
+                cnat: 0,
+                friction: 0,
+            },
+        ]);
+        line.configure_actions(
+            Some("Connect".to_owned()),
+            HashMap::from([(
+                "Connect".to_owned(),
+                ActionSpec::default().with_procedure("connect"),
+            )]),
+        );
+        engine.register_definition(line).expect("line registers");
+
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let generator = engine
+            .spawn_object(
+                // NewObject's initial DoCon keeps the supplied bottom at
+                // y=120, yielding a full-con centre at y=100.
+                SpawnConfig::new("POWR").with_position(Vector2::new(100, 120)),
+            )
+            .expect("generator spawns");
+        let consumer = engine
+            .spawn_object(
+                SpawnConfig::new("CONS").with_position(Vector2::new(200, 120)),
+            )
+            .expect("consumer spawns");
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_position(Vector2::new(100, 100))
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("crew spawns");
+        engine.select_crew(1, vec![crew]).expect("select");
+        engine.set_crew_cursor(1, Some(crew)).expect("cursor");
+        let kit = engine
+            .spawn_object(
+                SpawnConfig::new("LNKT")
+                    .with_owner(1)
+                    .with_container(crew),
+            )
+            .expect("kit spawns");
+        let generator_index = engine
+            .find_object_index(generator)
+            .expect("generator remains live");
+        assert_ne!(
+            engine.object_ocf_at_index(generator_index) & ocf::LINE_CONSTRUCT,
+            0,
+            "full-con power output advertises OCF_LineConstruct"
+        );
+        assert!(
+            engine
+                .at_object(Vector2::new(100, 100), ocf::LINE_CONSTRUCT, Some(crew))
+                .is_some(),
+            "the generator is under the Clonk's line-construction point"
+        );
+
+        engine.player_in_com(1, COM_DIG, 0).expect("first press");
+        engine.player_in_com(1, COM_DIG, 0).expect("second press");
+
+        let power_line = engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "PWRL")
+            .expect("DigDouble creates PWRL");
+        assert_eq!(power_line.action.name, "Connect");
+        assert_eq!(power_line.action.target, Some(generator));
+        assert_eq!(power_line.action.target2, Some(kit));
+
+        // At the other endpoint, the same real DigDouble accepts PWRL on a
+        // C4D_Power_Input structure, swaps the kit endpoint, exits the kit,
+        // and removes it (C4ObjectCom.cpp:429-484).
+        engine
+            .player_in_com(1, COM_DIG + COM_RELEASE_OFFSET, 0)
+            .expect("release first double");
+        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+        engine.objects[crew_index].set_position(Vector2::new(200, 100));
+        engine.update_sector_for_index(crew_index);
+        engine.player_in_com(1, COM_DIG, 0).expect("third press");
+        engine
+            .player_in_com(1, COM_DIG + COM_RELEASE_OFFSET, 0)
+            .expect("third release");
+        engine.player_in_com(1, COM_DIG, 0).expect("fourth press");
+
+        let connected = engine
+            .object_snapshot(power_line.id)
+            .expect("power line remains live after connection");
+        assert_eq!(connected.action.target, Some(generator));
+        assert_eq!(connected.action.target2, Some(consumer));
+        assert!(
+            engine
+                .find_object_index(kit)
+                .is_none_or(|index| engine.objects[index].destroyed),
+            "the connected LNKT is removed"
+        );
+        assert!(!engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .contents
+            .contains(&kit));
     }
 
     #[test]
