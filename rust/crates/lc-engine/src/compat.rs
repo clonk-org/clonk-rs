@@ -3417,6 +3417,7 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         style,
         permanent,
         extra: crate::ObjectMenuExtra::default(),
+        extra_data: 0,
         selection: -1,
         user_menu: true,
         command_object,

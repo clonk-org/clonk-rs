@@ -2118,6 +2118,9 @@ pub struct ObjectMenuState {
     /// Optional lower-strip payload selected by `C4Menu::SetExtra`.
     #[serde(default, skip_serializing_if = "ObjectMenuExtra::is_none")]
     pub extra: ObjectMenuExtra,
+    /// `C4Menu::ExtraData`, used by the magic-value footer variants.
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub extra_data: i32,
     /// C4Menu::Selection (-1 = none, C4Menu.cpp:284).
     pub selection: i32,
     /// C4ObjectMenu::UserMenu — script menus always pass fUserMenu=true
@@ -65658,6 +65661,7 @@ protected func FlyBaseStart()
                     style: 1,
                     permanent: true,
                     extra: ObjectMenuExtra::default(),
+                    extra_data: 0,
                     selection: -1,
                     user_menu: false,
                     command_object: Some(occupant),

@@ -17156,6 +17156,7 @@ mod tests {
             style: 0,
             permanent: false,
             extra: lc_engine::ObjectMenuExtra::default(),
+            extra_data: 0,
             selection: 0,
             user_menu: true,
             command_object: Some(cursor),
