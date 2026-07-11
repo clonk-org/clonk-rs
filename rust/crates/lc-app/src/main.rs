@@ -17239,11 +17239,13 @@ mod tests {
     }
 
     #[test]
-    fn app_virtual_keyboard_keeps_tutorial02_clonk_on_rising_balloon() {
+    fn app_virtual_keyboard_flies_tutorial02_and_starts_first_loam_bridge() {
         // The real window path maps keyboard-set-one X/X to Grab and S to Up.
-        // While the Clonk pushes BALN, C++ routes Up to the target and keeps
-        // DFA_PUSH attached to its moving solid mask (C4Player.cpp:1522-1536;
-        // C4Object.cpp:3520-3537,5058-5114; C4SolidMask.cpp:276-305).
+        // While the Clonk pushes BALN, Jump'n'Run ControlUpdate follows held
+        // S/X state and keeps DFA_PUSH attached to its moving solid mask; X/X
+        // then falls through to UnGrab before physical D/D, Z and A activate
+        // the first LOAM bridge (C4Object.cpp:3321-3338,3682-3724,5058-5114;
+        // Tutorial02.c4s/Script.c:58-149).
         let mut app = real_tutorial_app(2, "Tutorial 2 virtual player");
 
         let clonk = app
@@ -17258,6 +17260,9 @@ mod tests {
             .find(|object| object.definition_id == "BALN")
             .expect("Tutorial02 BALN")
             .id;
+        let loam_menu_identification =
+            serde_json::from_value(serde_json::json!({ "C4Id": "LMMS" }))
+                .expect("LOAM menu identification deserializes");
 
         for _ in 0..160 {
             let clonk_ready = app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -17342,6 +17347,360 @@ mod tests {
                 .y
                 < balloon_before.position.y,
             "physical S must lift BALN"
+        );
+
+        // The engine-only Tutorial02 replay deliberately joins a classic
+        // player. This app fixture is the fresh-player Jump'n'Run default, so
+        // release S (rather than a delayed X Single) supplies Stop through
+        // BALN::ControlUpdate (C4Object.cpp:3327-3337;
+        // Balloon.c4d/Script.c:60-78).
+        for lift_frame in 61..=100 {
+            if app
+                .engine
+                .object_snapshot(balloon)
+                .is_some_and(|object| object.position.y <= 275)
+            {
+                break;
+            }
+            app.update().expect("advance BALN to flight corridor");
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("CLNK during remaining lift");
+            let balloon_now = app
+                .engine
+                .object_snapshot(balloon)
+                .expect("BALN during remaining lift");
+            assert_eq!(
+                (clonk_now.action.name.as_str(), clonk_now.action.target),
+                ("Push", Some(balloon)),
+                "DFA_PUSH must retain BALN on app lift frame {lift_frame}"
+            );
+            assert!(
+                (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1,
+                "CLNK must remain on BALN's platform on app lift frame {lift_frame}"
+            );
+        }
+        assert!(
+            app.engine
+                .object_snapshot(balloon)
+                .is_some_and(|object| object.position.y <= 275),
+            "held physical S must reach Tutorial02's flight corridor"
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            assert!(
+                keyboard.player_control().control_style,
+                "the isolated fresh player must use Jump'n'Run/AutoStop control"
+            );
+            keyboard
+                .release(VirtualKeyCode::S)
+                .expect("release physical S in flight corridor");
+            assert_eq!(
+                keyboard
+                    .engine()
+                    .object_snapshot(balloon)
+                    .expect("BALN after S release")
+                    .command_direction,
+                CommandDirection::Stop,
+                "Jump'n'Run S release must stop vertical BALN control"
+            );
+        }
+
+        // Stop intentionally retains BALN's wind-driven drift. Coast east
+        // while continuously pinning the Push target and platform delta.
+        for coast_frame in 1..=600 {
+            if app
+                .engine
+                .object_snapshot(balloon)
+                .is_some_and(|object| object.position.x >= 520)
+            {
+                break;
+            }
+            app.update().expect("coast BALN toward far island");
+            let clonk_now = app.engine.object_snapshot(clonk).expect("CLNK while coasting");
+            let balloon_now = app
+                .engine
+                .object_snapshot(balloon)
+                .expect("BALN while coasting");
+            assert_eq!(
+                (clonk_now.action.name.as_str(), clonk_now.action.target),
+                ("Push", Some(balloon)),
+                "DFA_PUSH must retain BALN on coast frame {coast_frame}"
+            );
+            assert!(
+                (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1,
+                "CLNK must remain on BALN's platform on coast frame {coast_frame}"
+            );
+        }
+        assert!(
+            app.engine
+                .object_snapshot(balloon)
+                .is_some_and(|object| object.position.x >= 520),
+            "stopped BALN must coast to the far-island longitude"
+        );
+
+        // In Jump'n'Run control, held physical X supplies Down immediately;
+        // releasing X restores Stop. This intentionally does not use the
+        // classic route's delayed DownSingle toggle.
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::X)
+                .expect("hold physical X to descend");
+            assert_eq!(
+                keyboard
+                    .engine()
+                    .object_snapshot(balloon)
+                    .expect("BALN after X press")
+                    .command_direction,
+                CommandDirection::Down
+            );
+        }
+        for descent_frame in 1..=240 {
+            let in_gate = app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push"
+                    && object.action.target == Some(balloon)
+                    && (450..710).contains(&object.position.x)
+                    && (250..320).contains(&object.position.y)
+            });
+            if in_gate {
+                break;
+            }
+            app.update().expect("descend BALN toward far island");
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("CLNK while descending");
+            let balloon_now = app
+                .engine
+                .object_snapshot(balloon)
+                .expect("BALN while descending");
+            assert_eq!(
+                (clonk_now.action.name.as_str(), clonk_now.action.target),
+                ("Push", Some(balloon)),
+                "DFA_PUSH must retain BALN on descent frame {descent_frame}"
+            );
+            assert!(
+                (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1,
+                "CLNK must remain on BALN's platform on descent frame {descent_frame}"
+            );
+        }
+        assert!(
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push"
+                    && object.action.target == Some(balloon)
+                    && (450..710).contains(&object.position.x)
+                    && (250..320).contains(&object.position.y)
+            }),
+            "held physical X must reach Tutorial02 Script3's far-island gate"
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release physical X at far island");
+            assert_eq!(
+                keyboard
+                    .engine()
+                    .object_snapshot(balloon)
+                    .expect("BALN after X release")
+                    .command_direction,
+                CommandDirection::Stop
+            );
+        }
+
+        // Release does not clear C4Player::LastCom. Eleven app updates let the
+        // prior X press leave C4DoubleClick's window before the instructed X/X;
+        // otherwise the first new X could become the stale press's Double.
+        for _ in 0..11 {
+            app.update().expect("wait out descent X double-click buffer");
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("CLNK while awaiting release prompt");
+            let balloon_now = app
+                .engine
+                .object_snapshot(balloon)
+                .expect("BALN while awaiting release prompt");
+            assert_eq!(
+                (clonk_now.action.name.as_str(), clonk_now.action.target),
+                ("Push", Some(balloon))
+            );
+            assert!(
+                (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1
+            );
+        }
+        advance_app_until(&mut app, "Tutorial02 balloon-release prompt", 30, |app| {
+            app_tutorial_message_contains(app, "Let go of the balloon")
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X of ungrab double");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X of ungrab double");
+        }
+        advance_app_until(&mut app, "CLNK lands on the far island", 100, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Walk"
+                    && (450..710).contains(&object.position.x)
+                    && (270..320).contains(&object.position.y)
+            })
+        });
+        // The Jump'n'Run descent can land between the real material objects
+        // instead of contacting one immediately like the classic route. Let
+        // Script20 expose the actual next instruction, while still accepting
+        // either natural FLAG/LOAM contact if the drift produced one.
+        advance_app_until(
+            &mut app,
+            "Tutorial02 post-flight collectible prompt or contact",
+            450,
+            |app| {
+                app_clonk_carries(app, clonk, "FLAG")
+                    || app_clonk_carries(app, clonk, "LOAM")
+                    || app_tutorial_message_contains(app, "Please drop the flag for now")
+                    || app_tutorial_message_contains(app, "Pick up one of the loam chunks")
+            },
+        );
+
+        // Contact may deterministically choose FLAG or one of four LOAM
+        // objects. Script30 requires a real world Throw when FLAG wins; face
+        // the island center with one Z frame, then use physical A.
+        if app_clonk_carries(&app, clonk, "FLAG") {
+            advance_app_until(&mut app, "Tutorial02 temporary FLAG prompt", 450, |app| {
+                app_tutorial_message_contains(app, "Please drop the flag for now")
+            });
+            AppVirtualKeyboard::new(&mut app)
+                .press(VirtualKeyCode::Z)
+                .expect("physical Z faces island center");
+            app.update().expect("face left before throwing FLAG");
+            {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .release(VirtualKeyCode::Z)
+                    .expect("release physical Z before FLAG throw");
+                assert_eq!(
+                    keyboard
+                        .engine()
+                        .object_snapshot(clonk)
+                        .expect("CLNK before FLAG throw")
+                        .direction,
+                    Direction::Left
+                );
+                keyboard
+                    .tap(VirtualKeyCode::A)
+                    .expect("physical world-A throws temporary FLAG");
+            }
+            advance_app_until(&mut app, "FLAG leaves CLNK inventory", 30, |app| {
+                !app_clonk_carries(app, clonk, "FLAG")
+            });
+        }
+
+        if !app_clonk_carries(&app, clonk, "LOAM") {
+            advance_app_until(
+                &mut app,
+                "Tutorial02 LOAM pickup prompt or contact",
+                450,
+                |app| {
+                    app_tutorial_message_contains(app, "Pick up one of the loam chunks")
+                        || app_clonk_carries(app, clonk, "LOAM")
+                },
+            );
+            if !app_clonk_carries(&app, clonk, "LOAM") {
+                AppVirtualKeyboard::new(&mut app)
+                    .press(VirtualKeyCode::Z)
+                    .expect("physical Z walks toward LOAM");
+                advance_app_until(&mut app, "CLNK naturally collects LOAM", 180, |app| {
+                    app_clonk_carries(app, clonk, "LOAM")
+                });
+                AppVirtualKeyboard::new(&mut app)
+                    .release(VirtualKeyCode::Z)
+                    .expect("release physical Z after LOAM pickup");
+            }
+        }
+        assert!(app_clonk_carries(&app, clonk, "LOAM"));
+        assert!(
+            app_cursor_inventory_contains(&app, clonk, "LOAM"),
+            "the collected LOAM must reach the cursor inventory presentation"
+        );
+
+        // Script40..42 moves the player to the left bridge position, observes
+        // LMMS, and asks for its Diagonal left row. AutoStop Z release already
+        // stops the CLNK, so no classic-only Down stop is injected here.
+        advance_app_until(&mut app, "Tutorial02 move-left prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Now move to the very left edge")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("physical Z walks to first bridge position");
+        advance_app_until(&mut app, "Tutorial02 first bridge position", 120, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Walk" && (488..=490).contains(&object.position.x)
+            })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z at first bridge position");
+        advance_app_until(&mut app, "Tutorial02 double-Dig prompt", 180, |app| {
+            app_tutorial_message_contains(app, "Press the 'dig' key twice quickly")
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("first physical D for LOAM activation");
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("second physical D for LOAM activation");
+        }
+        advance_app_until(&mut app, "LOAM opens LMMS", 10, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == loam_menu_identification)
+        });
+        advance_app_until(&mut app, "Tutorial02 Diagonal left prompt", 180, |app| {
+            app_tutorial_message_contains(app, "Select the option 'diagonal left'")
+        });
+        let mut rendered = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut rendered)
+            .expect("render Tutorial02 LOAM construction menu");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::Z)
+            .expect("physical Z selects Diagonal left");
+        let selected = app
+            .engine
+            .cursor_object_menu(app.local_owner)
+            .and_then(|(_, menu)| {
+                usize::try_from(menu.selection)
+                    .ok()
+                    .map(|index| (menu, index))
+            })
+            .and_then(|(menu, index)| menu.items.get(index))
+            .map(|item| item.caption.as_str());
+        assert_eq!(selected, Some("Diagonal left"));
+        let bridge_start = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("CLNK before first LOAM bridge")
+            .position;
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A starts Diagonal left bridge");
+        advance_app_until(&mut app, "CLNK starts first LOAM Bridge", 10, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Bridge")
+        });
+        assert_eq!(
+            app.engine
+                .object_snapshot(clonk)
+                .expect("CLNK at first LOAM Bridge start")
+                .position,
+            bridge_start,
+            "physical menu inputs must start Bridge without positioning the CLNK"
         );
     }
 
