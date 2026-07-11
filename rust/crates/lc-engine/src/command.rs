@@ -370,8 +370,7 @@ mod tests {
         // Target right and below: dx = 60, dy = 40.
         let request = CommandRequest::new(CommandId::MoveTo)
             .with_tx(Some(160))
-            .with_ty(Some(140))
-            .with_update_interval(1);
+            .with_ty(Some(140));
 
         // Odd frame (iTick2 == 1): horizontal arm -> COMD_Right.
         let ctx = move_to_ctx_at_frame(&swimmer, &objects, &players, &definitions, 1);
@@ -630,8 +629,7 @@ mod tests {
         // one pixel off the walker's center — no vertical steer.
         let request = CommandRequest::new(CommandId::MoveTo)
             .with_tx(Some(100))
-            .with_ty(Some(50))
-            .with_update_interval(1);
+            .with_ty(Some(50));
         let mut state = MoveToState::from_request(&request); // unevaluated
         let first = state.step(&ctx);
         assert_eq!(first.status, CommandStatus::Running);
@@ -678,9 +676,7 @@ mod tests {
         let players = HashMap::new();
         let definitions = HashMap::new();
 
-        let request = CommandRequest::new(CommandId::MoveTo)
-            .with_target(Some(target_id))
-            .with_update_interval(1);
+        let request = CommandRequest::new(CommandId::MoveTo).with_target(Some(target_id));
         let mut state = MoveToState::from_request(&request); // unevaluated
         let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
         let _ = state.step(&ctx); // evaluation frame
@@ -701,6 +697,44 @@ mod tests {
             Some(CommandDirection::Left),
             "Tx/Ty were absorbed once — no live following (C4Command.cpp:1637)"
         );
+    }
+
+    #[test]
+    fn move_to_update_interval_is_cpp_lifetime_not_step_throttle() {
+        // C4Command::Execute decrements UpdateInterval as a lifetime, but
+        // still executes MoveTo on every non-expiring frame
+        // (C4Command.cpp:1545-1555).
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(200))
+            .with_ty(Some(100))
+            .with_update_interval(4);
+        let mut state = MoveToState::from_request(&request);
+
+        let mut walker = walking_jumper(Vector2::new(100, 100));
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 0);
+        assert_eq!(state.step(&ctx).status, CommandStatus::Running);
+
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let result = state.step(&ctx);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Right)
+        );
+
+        walker.position = Vector2::new(210, 100);
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
+        let result = state.step(&ctx);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Left),
+            "MoveTo executes again on the next frame"
+        );
+
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 3);
+        assert_eq!(state.step(&ctx).status, CommandStatus::Completed);
     }
 
     // C4Command::MoveTo pushing (C4Command.cpp:257-265): without the
@@ -734,8 +768,7 @@ mod tests {
         let mut state = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(200))
-                .with_ty(Some(100))
-                .with_update_interval(1),
+                .with_ty(Some(100)),
         );
         let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
         let result = state.step(&ctx);
@@ -785,8 +818,7 @@ mod tests {
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(95))
                 .with_ty(Some(160))
-                .with_data(CommandData::Integer(2))
-                .with_update_interval(1),
+                .with_data(CommandData::Integer(2)),
         );
         let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
         let result = state.step(&ctx);
@@ -804,8 +836,7 @@ mod tests {
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(200))
                 .with_ty(Some(100))
-                .with_data(CommandData::Integer(2))
-                .with_update_interval(1),
+                .with_data(CommandData::Integer(2)),
         );
         let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
         let result = state.step(&ctx);
@@ -1082,8 +1113,7 @@ mod tests {
         stack
             .push_front(
                 CommandRequest::new(CommandId::MoveTo)
-                    .with_target(Some(target_id))
-                    .with_update_interval(1),
+                    .with_target(Some(target_id)),
             )
             .expect("push");
 
@@ -7029,18 +7059,24 @@ mod tests {
     }
 
     #[test]
-    fn chop_sets_action_when_in_range() {
+    fn chop_sets_action_on_a_nonliving_tree_at_point_like_cpp() {
+        // C4Command::Chop checks Target->At(cObj->x,cObj->y), plus the
+        // horizontal 4..9 range, before starting ObjectComChop. The real
+        // TRE2 shape reaches 28px vertically and trees are nonliving
+        // objects (C4Command.cpp:778-812).
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
         let mut builder = snapshot_with_id(builder_id.as_u64());
-        builder.position = Vector2::new(6, 0);
+        builder.position = Vector2::new(6, 14);
         builder.command_direction = CommandDirection::Right;
         let builder_definition = builder.definition_id.clone();
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(0, 0);
+        target.shape = DefinitionRect::new(-20, -28, 40, 56);
         target.ocf = ocf::CHOP | ocf::AVAILABLE;
+        target.alive = false;
 
         let mut objects = HashMap::new();
         objects.insert(builder.id, builder);
@@ -8206,7 +8242,6 @@ struct MoveToState {
     #[serde(default)]
     evaluated: bool,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     tolerance: i32,
     last_direction: CommandDirection,
     arrived_frames: u32,
@@ -8223,8 +8258,7 @@ impl MoveToState {
                 _ => 0,
             },
             evaluated: false,
-            update_interval: request.update_interval.max(1),
-            last_evaluated: None,
+            update_interval: request.update_interval,
             tolerance: 5,
             last_direction: CommandDirection::Stop,
             arrived_frames: 0,
@@ -8266,10 +8300,13 @@ impl MoveToState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
+        // C4Command::Execute treats UpdateInterval as the command's
+        // remaining lifetime, not as an evaluation throttle
+        // (C4Command.cpp:1545-1555).
+        if self.update_interval > 0 {
+            self.update_interval -= 1;
+            if self.update_interval == 0 {
+                return CommandStepResult::completed(None);
             }
         }
 
@@ -8280,8 +8317,6 @@ impl MoveToState {
             self.init_evaluation(ctx);
             return CommandStepResult::running(None);
         }
-        self.last_evaluated = Some(ctx.frame);
-
         let target = match self.resolve_target_position(ctx) {
             Some(position) => position,
             None => {
@@ -9415,7 +9450,7 @@ impl ChopState {
             }
         };
 
-        if !target_snapshot.is_active() {
+        if !target_snapshot.is_status_active() {
             return CommandStepResult::failed(self.update_to_stop(ctx));
         }
 
@@ -9454,17 +9489,15 @@ impl ChopState {
         }
 
         let dx = target_snapshot.position.x - ctx.position.x;
-        let dy = target_snapshot.position.y - ctx.position.y;
 
         const MIN_HORIZONTAL_RANGE: i32 = 4;
         const MAX_HORIZONTAL_RANGE: i32 = 9;
-        const MAX_VERTICAL_OFFSET: i32 = 12;
 
         let at_target = ctx.object.container.is_none()
             && target_snapshot.container.is_none()
+            && target_snapshot.at_point(ctx.position.x, ctx.position.y)
             && dx.abs() >= MIN_HORIZONTAL_RANGE
-            && dx.abs() <= MAX_HORIZONTAL_RANGE
-            && dy.abs() <= MAX_VERTICAL_OFFSET;
+            && dx.abs() <= MAX_HORIZONTAL_RANGE;
 
         if at_target {
             let action_name = self

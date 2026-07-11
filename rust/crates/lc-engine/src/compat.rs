@@ -1197,6 +1197,7 @@ fn host_vertex_bounds_rect(position: Vector2, vertices: &[ObjectVertex]) -> Opti
 trait WorldAccessor {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject>;
     fn object_ids(&self) -> Vec<ObjectId>;
+    fn master_object_ids(&self) -> Vec<ObjectId>;
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect;
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
     fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
@@ -1220,6 +1221,10 @@ impl WorldAccessor for HostWorldContext {
 
     fn object_ids(&self) -> Vec<ObjectId> {
         self.object_ids().to_vec()
+    }
+
+    fn master_object_ids(&self) -> Vec<ObjectId> {
+        HostWorldContext::master_object_ids(self).to_vec()
     }
 
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
@@ -1272,6 +1277,12 @@ impl WorldAccessor for FuncFindView {
 
     fn object_ids(&self) -> Vec<ObjectId> {
         let mut ids = self.world.object_ids().to_vec();
+        ids.extend(self.pending_order.iter().copied());
+        ids
+    }
+
+    fn master_object_ids(&self) -> Vec<ObjectId> {
+        let mut ids = self.world.master_object_ids().to_vec();
         ids.extend(self.pending_order.iter().copied());
         ids
     }
@@ -1389,6 +1400,10 @@ impl WorldAccessor for EffectHostContext {
 
     fn object_ids(&self) -> Vec<ObjectId> {
         self.world_object_ids()
+    }
+
+    fn master_object_ids(&self) -> Vec<ObjectId> {
+        EffectHostContext::master_object_ids(self)
     }
 
     fn script_function_known(&self, name: &str) -> bool {
@@ -17022,7 +17037,7 @@ fn find_object_owner(args: &[Value]) -> Result<Value, RuntimeError> {
 /// match wins; sectors are never consulted (unlike the criteria form).
 fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let mut skip_until = params.find_next;
-    for object_id in world.object_ids() {
+    for object_id in world.master_object_ids() {
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
@@ -38512,7 +38527,8 @@ public func SeedFull()
                 find_world_object(12, "ROCK", 10, 10, 1), // sector (0,0)
             ],
             HashMap::new(),
-        );
+        )
+        .with_master_order([ObjectId::new(12), ObjectId::new(11)]);
         let args = vec![
             Value::Nil,      // id
             Value::Int(0),   // x
@@ -38523,7 +38539,7 @@ public func SeedFull()
         let (result, _) = with_object_host_context_with_world(world, || find_object(&args));
         assert_eq!(
             object_id_from_value(&result.expect("FindObject succeeds")),
-            Some(ObjectId::new(11)),
+            Some(ObjectId::new(12)),
             "first MASTER-order match wins, not the sector-walk first"
         );
     }

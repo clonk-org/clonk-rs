@@ -22547,11 +22547,11 @@ impl Engine {
         definition_id: &DefinitionId,
     ) -> Result<bool, EngineError> {
         let Some(target_id) = self.objects[idx].state.action.target else {
-            self.reset_action_to_default(idx, definition_id, false);
+            let _ = self.object_action_stand(idx, definition_id)?;
             return Ok(false);
         };
         let Some(target_idx) = self.find_object_index(target_id) else {
-            self.reset_action_to_default(idx, definition_id, false);
+            let _ = self.object_action_stand(idx, definition_id)?;
             return Ok(false);
         };
         let target_can_be_chopped = {
@@ -22563,7 +22563,7 @@ impl Engine {
                 && target.state.ocf & crate::ocf::CHOP != 0
         };
         if !target_can_be_chopped {
-            self.reset_action_to_default(idx, definition_id, false);
+            let _ = self.object_action_stand(idx, definition_id)?;
             return Ok(false);
         }
 
@@ -22575,11 +22575,11 @@ impl Engine {
         // Damage callbacks may remove or otherwise invalidate the target;
         // C++ rechecks Action.Target immediately after Chop returns.
         let Some(target_id) = self.objects[idx].state.action.target else {
-            self.reset_action_to_default(idx, definition_id, false);
+            let _ = self.object_action_stand(idx, definition_id)?;
             return Ok(false);
         };
         let Some(target_idx) = self.find_object_index(target_id) else {
-            self.reset_action_to_default(idx, definition_id, false);
+            let _ = self.object_action_stand(idx, definition_id)?;
             return Ok(false);
         };
         let chopper_position = self.objects[idx].state.position;
@@ -22592,7 +22592,7 @@ impl Engine {
                 .object_shape_rect(target)
                 .contains_point(chopper_position.x, chopper_position.y);
         if !target_is_at_chopper {
-            self.reset_action_to_default(idx, definition_id, false);
+            let _ = self.object_action_stand(idx, definition_id)?;
             return Ok(false);
         }
 
@@ -26554,6 +26554,7 @@ impl Engine {
         definition.set_timer(core.timer);
         definition.set_timer_call(core.timer_call.clone());
         definition.set_line_connect(core.line_connect);
+        definition.set_chopable(core.chopable);
     }
 
     /// Idle crew infos per (player, definition id) — the GetIdle pool
@@ -46556,6 +46557,43 @@ protected func Activity() { SetActionTargets(); return(1); }
     }
 
     #[test]
+    fn chop_procedure_stands_in_walk_when_target_stops_being_choppable() {
+        // DFA_CHOP calls ObjectActionStand when Target->Chop/At no longer
+        // succeeds, so a Clonk resumes Walk rather than the action library's
+        // generic Idle default (C4Object.cpp:5202-5221;
+        // C4ObjectCom.cpp:41-46).
+        let script = "#strict\nfunc Initialize() { return; }";
+        let mut chopper = Definition::from_script("CLNK", "Clonk", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "Chop".to_string(),
+            ActionSpec::default().with_procedure("chop"),
+        );
+        chopper.configure_actions(Some("Idle".to_string()), actions);
+
+        let target = Definition::from_script("TREE", "Tree", script).unwrap();
+        let mut engine = Engine::with_seed(21);
+        engine.register_definition(chopper).unwrap();
+        engine.register_definition(target).unwrap();
+        let target = engine
+            .spawn_object(SpawnConfig::new("TREE").with_loaded(true))
+            .unwrap();
+        let mut action = ActionState::new("Chop");
+        action.target = Some(target);
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK").with_action(action))
+            .unwrap();
+
+        let snapshot = engine.tick().unwrap();
+        assert_eq!(snapshot.object(clonk).unwrap().action.name, "Walk");
+    }
+
+    #[test]
     fn wind_force_respects_variation_and_period() {
         // The old sinusoidal per-frame wind model was an invention; the C++
         // wind is mutable state (C4Weather::Wind) advanced by the tick gates
@@ -58441,6 +58479,42 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         let definition = Definition::from_resource(&resource)?;
 
         assert!(definition.auto_context_menu());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_resource_core_retains_chop_ocf_like_cpp() -> Result<(), EngineError> {
+        // Legacy scenario loading compiles Script.c first and then applies
+        // the parsed DefCore wholesale. `Chop=1` must survive that second
+        // path so UpdateOCF exposes OCF_Chop for a standing StaticBack tree
+        // (C4Def.cpp:378; C4Object.cpp:705-710).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Tree2.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=TRE2\nName=Tree2\nCategory=C4D_StaticBack\nWidth=40\nHeight=56\nOffset=-20,-28\nChop=1\n",
+        )
+        .expect("write defcore");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let mut definition =
+            Definition::from_script("TRE2", "Tree2", "").expect("compile legacy script");
+
+        Engine::apply_resource_core(&mut definition, &resource.core);
+
+        let mut engine = Engine::with_seed(4);
+        engine.register_definition(definition)?;
+        let tree = engine.spawn_object(
+            SpawnConfig::new("TRE2")
+                .with_category(CATEGORY_STATIC_BACK)
+                .with_position(Vector2::new(40, 60)),
+        )?;
+        assert_ne!(
+            engine.object_snapshot(tree).expect("tree exists").ocf & ocf::CHOP,
+            0,
+            "the legacy scenario Definition path must retain DefCore Chop=1"
+        );
         Ok(())
     }
 
