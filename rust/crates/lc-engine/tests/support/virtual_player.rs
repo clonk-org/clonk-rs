@@ -165,6 +165,23 @@ impl<'engine> VirtualPlayer<'engine> {
         Ok(())
     }
 
+    /// Hold a physical control while ticking toward a milestone, then emit
+    /// its matching release even when the milestone times out. This is the
+    /// headless equivalent of walking/flying until a visible landmark; both
+    /// edges still pass through C4Player::InCom (src/C4Player.cpp:1490-1554).
+    pub fn hold_until(
+        &mut self,
+        control: u8,
+        milestone: impl Into<String>,
+        max_ticks: u32,
+        reached: impl FnMut(&Engine) -> bool,
+    ) -> Result<u32, VirtualPlayerError> {
+        self.press(control)?;
+        let outcome = self.wait_until(milestone, max_ticks, reached);
+        let release = self.release(control);
+        outcome.and_then(|elapsed| release.map(|()| elapsed))
+    }
+
     /// Tick until a read-only milestone is true, checking before the first
     /// tick and after each subsequent tick.
     pub fn wait_until(

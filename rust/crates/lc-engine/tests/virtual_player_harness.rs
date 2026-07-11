@@ -151,7 +151,7 @@ fn menu_helpers_use_real_player_navigation_and_enter_controls() -> Result<(), Bo
 
 #[test]
 fn wait_until_reports_elapsed_ticks_and_a_labeled_timeout() -> Result<(), Box<dyn Error>> {
-    let (mut engine, _) = fixture()?;
+    let (mut engine, crew) = fixture()?;
     let mut player = VirtualPlayer::new(&mut engine, 1);
     let target_frame = player.engine().frame() + 3;
 
@@ -173,5 +173,15 @@ fn wait_until_reports_elapsed_ticks_and_a_labeled_timeout() -> Result<(), Box<dy
             ..
         } if milestone == "impossible milestone"
     ));
+
+    let error = player
+        .hold_until(COM_RIGHT, "unreachable while walking", 2, |_| false)
+        .expect_err("an unmet held-control milestone must time out");
+    assert!(matches!(error, VirtualPlayerError::Timeout { .. }));
+    assert_eq!(
+        local(player.engine(), crew, "right_release"),
+        Some(Value::Int(1)),
+        "hold_until releases the physical key after a timeout"
+    );
     Ok(())
 }
