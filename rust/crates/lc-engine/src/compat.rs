@@ -17596,16 +17596,16 @@ fn set_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetComDir requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
 
         object.set_command_direction(command_direction);
         Ok(Value::Bool(true))
@@ -33939,6 +33939,60 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 .map(CommandDirection::to_script_value),
             Some(200)
         );
+    }
+
+    #[test]
+    fn set_com_dir_targets_a_foreign_object_like_cpp() {
+        // FnSetComDir defaults a nil pObj to cthr->Obj, but an explicit pObj
+        // receives Action.ComDir directly (C4Script.cpp:792-796). Tutorial
+        // machinery such as a derrick therefore controls another object.
+        let target_id = ObjectId::new(2);
+        let target = HostWorldObject::new(
+            target_id,
+            "CLNK",
+            ObjectStatus::Normal,
+            "Walk",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            Vec::new(),
+        )));
+        let world = HostWorldContext::from_objects(vec![target]).with_definition_metadata(Rc::new(
+            HashMap::from([(DefinitionId::from("CLNK"), DefinitionMetadata::default())]),
+        ));
+
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            set_com_dir(&[
+                Value::Int(CommandDirection::Down.to_script_value()),
+                object_reference_value(target_id),
+            ])
+        });
+
+        assert_eq!(result.expect("SetComDir succeeds"), Value::Bool(true));
+        let update = outcome
+            .other_objects
+            .iter()
+            .find(|outcome| outcome.object_id == target_id)
+            .and_then(|outcome| outcome.update.as_ref())
+            .expect("foreign command-direction update recorded");
+        assert_eq!(update.command_direction, Some(CommandDirection::Down));
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
     }
 
     #[test]
