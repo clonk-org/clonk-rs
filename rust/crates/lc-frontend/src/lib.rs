@@ -1026,16 +1026,23 @@ impl GraphicsSystem {
         let lighting = Self::lighting_factor(environment.settings.time_of_day);
 
         self.draw_sky(snapshot.sky.as_ref(), environment, events, lighting);
-        self.draw_ground(
+        let textured_landscape = self.draw_ground(
             environment.ambient_temperature,
             snapshot.landscape.as_ref(),
             lighting,
         );
-        self.draw_liquids(
-            environment.ambient_temperature,
-            snapshot.landscape.as_ref(),
-            lighting,
-        );
+        // C4Landscape::Draw presents the material-colored Surface32 once and
+        // supplies a separate alpha-only liquid-animation mask to
+        // BlitLandscape (C4Landscape.cpp:261-270,2599-2616). The scalar
+        // repaint below predates the raster renderer and remains only for
+        // column-only fixture worlds that have no Surface8 equivalent.
+        if !textured_landscape {
+            self.draw_liquids(
+                environment.ambient_temperature,
+                snapshot.landscape.as_ref(),
+                lighting,
+            );
+        }
         self.draw_objects(&snapshot.objects, lighting, owner_colors);
         self.draw_precipitation(
             environment.precipitation,
@@ -1830,9 +1837,9 @@ impl GraphicsSystem {
         ambient_temperature: i32,
         landscape: Option<&Landscape>,
         lighting: f32,
-    ) {
+    ) -> bool {
         if self.draw_ground_textured(landscape) {
-            return;
+            return true;
         }
         let ground_color = Self::apply_lighting(
             Self::ground_color_for_temperature(ambient_temperature),
@@ -1858,6 +1865,7 @@ impl GraphicsSystem {
                 let _ = self.surface.set_pixel(screen_x, y as u32, ground_color);
             }
         }
+        false
     }
 
     fn draw_liquids(
@@ -4272,8 +4280,8 @@ fn rect_contains(rect: SurfaceRect, point: GuiPoint, tolerance: f32) -> bool {
 mod tests {
     use super::*;
     use lc_engine::{
-        CommandStackSnapshot, EnvironmentFrame, Landscape, LiquidSegment, ObjectId, ObjectVertex,
-        PlayerState, RgbColor, Vector2,
+        CommandStackSnapshot, EnvironmentFrame, Landscape, LiquidSegment, MaterialId, ObjectId,
+        ObjectVertex, PlayerState, RgbColor, Vector2,
     };
     use lc_graphics::{BitmapFont, PixelFormat};
     use std::collections::HashMap;
@@ -6142,6 +6150,77 @@ mod tests {
         );
         let expected = blend_color_over(liquid, sky);
         assert_eq!(pixel, expected);
+    }
+
+    #[test]
+    fn textured_acid_liquid_keeps_its_material_color() {
+        // C++ bakes the material's Color and both texture patterns into
+        // Surface32 (C4Landscape.cpp:2619-2633). Its liquid pass supplies an
+        // alpha-only animation mask (:2599-2616) to BlitLandscape (:261-270);
+        // it never replaces Acid's RGB with a generic water color.
+        let mut landscape: Landscape = serde_json::from_value(serde_json::json!({
+            "width": 1,
+            "surface": [1],
+            "world_height": 1,
+            "pixels": {
+                "width": 1,
+                "height": 1,
+                "bytes": "01",
+                "texture_names": [null, "Smooth"],
+                "densities": [0, 25],
+                "material_names": [null, "Acid"]
+            }
+        }))
+        .expect("pixel landscape");
+        landscape.set_liquid_column(
+            0,
+            vec![LiquidSegment::with_material(
+                0,
+                0,
+                MaterialId::new(1),
+            )],
+        );
+
+        // Neutral 128-valued patterns preserve Acid's (0,190,0) RGB under
+        // CPattern's ModulateClrA + LightenClr composition.
+        let textures = HashMap::from([(
+            "liquid".to_string(),
+            ImageData::new(1, 1, vec![128, 128, 128, 255]),
+        )]);
+        let materials = HashMap::from([(
+            "acid".to_string(),
+            MaterialRenderInfo::new(
+                [0, 190, 0, 0, 200, 0, 0, 210, 0],
+                [0; 6],
+                Some("Liquid".to_string()),
+                0,
+                25,
+            ),
+        )]);
+
+        let mut snapshot = make_snapshot();
+        snapshot.landscape = Some(landscape);
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            1,
+            "Acid color",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_textures(Arc::new(textures));
+        graphics.set_material_render_info(Arc::new(materials));
+
+        let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
+        graphics.render_frame(&snapshot, &viewports);
+
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(Color::opaque(0, 190, 0)),
+            "the liquid animation path must preserve Acid's material RGB"
+        );
     }
 
     #[test]
