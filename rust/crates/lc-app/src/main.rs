@@ -16920,10 +16920,12 @@ mod tests {
         lc_engine::ObjectMenuState {
             caption: "Choose".to_string(),
             symbol_id: "MENU".to_string(),
+            title_symbol: lc_engine::ObjectMenuSymbol::default(),
             identification: serde_json::from_value(serde_json::json!({ "C4Id": "MENU" }))
                 .expect("menu identification deserializes"),
             style: 0,
             permanent: false,
+            extra: lc_engine::ObjectMenuExtra::default(),
             selection: 0,
             user_menu: true,
             command_object: Some(cursor),

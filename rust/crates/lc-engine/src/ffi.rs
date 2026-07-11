@@ -4623,9 +4623,11 @@ global func Step(state, frame, random)
                     menu: Some(Some(ObjectMenuState {
                         caption: "Choose".to_string(),
                         symbol_id: "NONE".to_string(),
+                        title_symbol: crate::ObjectMenuSymbol::default(),
                         identification: crate::Value::Int(0),
                         style: 0,
                         permanent: false,
+                        extra: crate::ObjectMenuExtra::default(),
                         selection: 0,
                         user_menu: false,
                         command_object: Some(crew),

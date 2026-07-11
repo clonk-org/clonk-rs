@@ -2024,6 +2024,23 @@ impl ObjectMenuSymbol {
     }
 }
 
+/// Optional lower-strip presentation selected by `C4Menu::Extra`
+/// (`C4Menu.h:47-56`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ObjectMenuExtra {
+    #[default]
+    None,
+    /// `C4MN_Extra_Value`: show the selected item's value beside the
+    /// wealth symbol (`C4Menu.cpp:843-907`).
+    Value,
+}
+
+impl ObjectMenuExtra {
+    fn is_none(&self) -> bool {
+        *self == Self::None
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectMenuItem {
     pub caption: String,
@@ -2063,6 +2080,10 @@ pub struct ObjectMenuState {
     /// CreateMenu symbol even when idMenuID overrides `identification`.
     #[serde(default)]
     pub symbol_id: String,
+    /// Presentation recipe for title symbols composed by `DrawMenuSymbol`
+    /// instead of a plain definition picture (`C4Menu.cpp:42-82`).
+    #[serde(default, skip_serializing_if = "ObjectMenuSymbol::is_definition")]
+    pub title_symbol: ObjectMenuSymbol,
     /// C4Menu::Identification: idMenuID if given, else the symbol id
     /// (C4Script.cpp:1452). Kept as the raw script value (C4ID or int)
     /// so GetMenu returns exactly what the script compares against.
@@ -2071,6 +2092,9 @@ pub struct ObjectMenuState {
     pub style: i32,
     /// C4Menu::Permanent (SetPermanent, C4Menu.cpp:942-945).
     pub permanent: bool,
+    /// Optional lower-strip payload selected by `C4Menu::SetExtra`.
+    #[serde(default, skip_serializing_if = "ObjectMenuExtra::is_none")]
+    pub extra: ObjectMenuExtra,
     /// C4Menu::Selection (-1 = none, C4Menu.cpp:284).
     pub selection: i32,
     /// C4ObjectMenu::UserMenu — script menus always pass fUserMenu=true
@@ -65596,9 +65620,11 @@ protected func FlyBaseStart()
                 menu: Some(Some(ObjectMenuState {
                     caption: "Base".to_string(),
                     symbol_id: "HUT1".to_string(),
+                    title_symbol: ObjectMenuSymbol::default(),
                     identification: Value::Int(14),
                     style: 1,
                     permanent: true,
+                    extra: ObjectMenuExtra::default(),
                     selection: -1,
                     user_menu: false,
                     command_object: Some(occupant),

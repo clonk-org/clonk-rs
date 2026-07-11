@@ -3394,10 +3394,12 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
     let menu = crate::ObjectMenuState {
         caption,
         symbol_id,
+        title_symbol: crate::ObjectMenuSymbol::default(),
         identification,
         // Style & C4MN_Style_BaseMask (C4Menu::InitMenu, C4Menu.cpp:359).
         style,
         permanent,
+        extra: crate::ObjectMenuExtra::default(),
         selection: -1,
         user_menu: true,
         command_object,
