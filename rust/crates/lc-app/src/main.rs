@@ -3135,6 +3135,10 @@ struct GameApp {
     /// `C4Player::MouseControl` analogue: gates in-game mouse gameplay
     /// input (C4MainMenu.cpp:847-849).
     mouse_control: bool,
+    /// False when `[Head] DisableMouse=1`; C++ then neither assigns mouse
+    /// control nor offers its Options entry (C4Player.cpp:1907-1912;
+    /// C4MainMenu.cpp:563-571).
+    mouse_control_allowed: bool,
     save_browser: Option<SaveBrowserState>,
     save_browser_return_to_menu: bool,
     mode: AppMode,
@@ -5992,6 +5996,7 @@ impl GameApp {
             script_menu_presentation: None,
             display_flags: DisplayFlags::default(),
             mouse_control: true,
+            mouse_control_allowed: true,
             save_browser: None,
             save_browser_return_to_menu: false,
             mode: AppMode::Loading,
@@ -7423,7 +7428,9 @@ impl GameApp {
             }
             MenuAction::ToggleMouseControl => {
                 let selection = self.ingame_menu_selection();
-                self.mouse_control = !self.mouse_control;
+                if self.mouse_control_allowed {
+                    self.mouse_control = !self.mouse_control;
+                }
                 self.ingame_menu =
                     Some(IngameMenuState::options_menu(&self.option_flags(), selection));
             }
@@ -7598,7 +7605,7 @@ impl GameApp {
                 .as_ref()
                 .map(|audio| audio.options.music_enabled)
                 .unwrap_or(false),
-            mouse_shown: true,
+            mouse_shown: self.mouse_control_allowed,
             mouse: self.mouse_control,
         }
     }
@@ -11319,6 +11326,8 @@ impl GameApp {
         self.input = InputDispatcher::new();
         self.ingame_pointer = None;
         self.mouse_state = None;
+        self.mouse_control_allowed = !scenario_data.disables_mouse();
+        self.mouse_control = self.mouse_control_allowed;
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(Some(&path));
             audio.reset_sfx();
@@ -11397,6 +11406,8 @@ impl GameApp {
         self.input = InputDispatcher::new();
         self.ingame_pointer = None;
         self.mouse_state = None;
+        self.mouse_control_allowed = true;
+        self.mouse_control = true;
         self.sky = None;
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(None);
@@ -11476,6 +11487,8 @@ impl GameApp {
         self.input = InputDispatcher::new();
         self.ingame_pointer = None;
         self.mouse_state = None;
+        self.mouse_control_allowed = true;
+        self.mouse_control = true;
 
         if scenario_info.sandbox {
             match self.audio.as_mut() {
@@ -11498,6 +11511,8 @@ impl GameApp {
                     path.display()
                 )
             })?;
+            self.mouse_control_allowed = !scenario_data.disables_mouse();
+            self.mouse_control = self.mouse_control_allowed;
             if let Some(audio) = self.audio.as_mut() {
                 audio.configure_scenario(Some(path));
                 audio.reset_sfx();
@@ -16778,6 +16793,14 @@ mod tests {
         .expect("load real Tutorial03");
         app.activate_loaded_scenario(scenario, scenario_data)
             .expect("activate real Tutorial03");
+        assert!(
+            !app.mouse_control,
+            "Tutorial03 DisableMouse=1 must suppress player mouse control and the menu close X like C++ (C4Player.cpp:1907-1912; C4Menu.cpp:1270-1276)"
+        );
+        assert!(
+            !app.option_flags().mouse_shown,
+            "DisableMouse must remove the in-game Options entry like C++ (C4MainMenu.cpp:563-571)"
+        );
 
         let clonk = app
             .engine
