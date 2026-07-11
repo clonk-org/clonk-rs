@@ -1721,10 +1721,21 @@ impl Engine {
                 }
             }
             COM_DOWN => {
-                // The DrawCommandQuery gates (:3701-3704) skip the ungrab when
-                // the target shows its own Down control in the command bar —
-                // command-bar metadata is not modelled, so ungrab runs.
-                if target_index.is_some() {
+                // C++ queries the three Down command slots and only ungrabs
+                // when none is visible for this player's control style
+                // (C4Object.cpp:3712-3721; C4Object.cpp:2938-2951).
+                let target_has_down_command = target_index.is_some_and(|target_index| {
+                    ["ControlDown", "ControlDownSingle", "ControlDownDouble"]
+                        .iter()
+                        .any(|function| {
+                            self.object_control_command_is_visible(
+                                target_index,
+                                controller,
+                                function,
+                            )
+                        })
+                });
+                if target_index.is_some() && !target_has_down_command {
                     self.object_com_ungrab(index)?;
                 }
             }
@@ -2344,6 +2355,46 @@ impl Engine {
             .get(&self.objects[index].definition_id)
             .map(|definition| definition.script.has_function(function))
             .unwrap_or(false)
+    }
+
+    /// `DrawCommandQuery`'s function-presence and `Method=` filter
+    /// (C4ScriptHost.cpp:95-118; C4Object.cpp:2938-2951). C4Aul functions
+    /// default to `All`; an unknown Method value also falls back to `All`
+    /// (C4AulLink.cpp:200; C4AulParse.cpp:355-367).
+    fn object_control_command_is_visible(
+        &self,
+        index: usize,
+        controller: i32,
+        function: &str,
+    ) -> bool {
+        let Some(control_style) = self
+            .players
+            .get(&controller)
+            .map(|player| player.control.control_style)
+        else {
+            return false;
+        };
+        let Some(function) = self
+            .definitions
+            .get(&self.objects[index].definition_id)
+            .and_then(|definition| definition.script.functions().get(function))
+        else {
+            return false;
+        };
+        let method = function.description.as_deref().and_then(|description| {
+            description.split('|').find_map(|segment| {
+                let (key, value) = segment.split_once('=')?;
+                key.trim()
+                    .eq_ignore_ascii_case("Method")
+                    .then(|| value.trim())
+            })
+        });
+        match method {
+            Some(method) if method.eq_ignore_ascii_case("None") => false,
+            Some(method) if method.eq_ignore_ascii_case("Classic") => !control_style,
+            Some(method) if method.eq_ignore_ascii_case("JumpAndRun") => control_style,
+            _ => true,
+        }
     }
 
     fn object_procedure(&self, index: usize) -> ActionProcedure {
@@ -5194,6 +5245,59 @@ protected func ControlCursorRight() { return(1); }
             "the override kept the cursor in place"
         );
         let _ = b;
+    }
+
+    #[test]
+    fn jump_and_run_down_keeps_grabbing_a_target_with_a_down_command() {
+        // AutoStopDirectCom's DFA_PUSH/COM_Down branch retains the grab when
+        // DrawCommandQuery exposes a JumpAndRun ControlDown command
+        // (C4Object.cpp:3712-3721). The callback may legitimately be falsy;
+        // its command metadata, not its return value, owns this gate.
+        let vehicle = r#"
+#strict
+protected func ControlDown(pCaller)
+{
+  [$CtrlDown$|Method=JumpAndRun]
+  DoDamage(1);
+}
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        engine
+            .register_definition(
+                Definition::from_script("DRCK", "Derrick", vehicle)
+                    .expect("derrick compiles"),
+            )
+            .expect("register derrick");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine
+            .players
+            .get_mut(&1)
+            .expect("player exists")
+            .control
+            .control_style = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let derrick = engine
+            .spawn_object(SpawnConfig::new("DRCK"))
+            .expect("spawn derrick");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.action.name = "Push".to_string();
+        engine.objects[crew_index].state.action.target = Some(derrick);
+
+        engine.player_in_com(1, COM_DOWN, 0).expect("in_com");
+
+        let derrick_index = engine
+            .find_object_index(derrick)
+            .expect("derrick exists");
+        assert_eq!(
+            engine.objects[derrick_index].state.damage, 1,
+            "the target callback still runs first"
+        );
+        let snapshot = engine.object_snapshot(crew).expect("crew snapshot");
+        assert_eq!(snapshot.action.name, "Push");
+        assert_eq!(snapshot.action.target, Some(derrick));
     }
 
     #[test]
