@@ -27830,10 +27830,145 @@ impl Engine {
         Ok(())
     }
 
+    /// ObjectActionThrow (C4ObjectCom.cpp:120-137): resolve the physical
+    /// force/facing first, honor the ordinary SetAction gate, then consume
+    /// exactly one synced rotation draw and perform C4Object::Exit.
+    fn try_object_action_throw(
+        &mut self,
+        actor_id: ObjectId,
+        object_id: ObjectId,
+    ) -> Result<bool, EngineError> {
+        let Some(actor_index) = self.find_object_index(actor_id) else {
+            return Ok(false);
+        };
+        let definition_id = self.objects[actor_index].definition_id.clone();
+        let action_library = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
+            .action_library()
+            .clone();
+        let current_action = self.objects[actor_index].state.action.name.clone();
+        if action_library.procedure_for_action(&current_action) != ActionProcedure::Walk
+            || !action_library.contains("Throw")
+            || (action_library.blocks_other_actions(&current_action) && current_action != "Throw")
+        {
+            return Ok(false);
+        }
+        if !self.objects[actor_index].state.contents.contains(&object_id) {
+            return Ok(false);
+        }
+
+        // Force and direction precede SetAction in C++ and therefore cannot
+        // be changed by Throw's StartCall/Walk's AbortCall.
+        let throw_force = math::val_by_physical(400, self.object_physical(actor_index).throw);
+        let direction = if self.objects[actor_index].state.direction == Direction::Left {
+            -1
+        } else {
+            1
+        };
+        let previous_action = self.objects[actor_index].state.action.clone();
+        let action_update = ActionUpdate::default()
+            .with_name("Throw")
+            .with_force(false);
+        let result = self.objects[actor_index]
+            .state
+            .action
+            .apply_update_with_library(&action_update, &action_library);
+        if !matches!(result, ActionUpdateResult::Applied) {
+            return Ok(false);
+        }
+        self.objects[actor_index].fixed_position = FixedVec2::from_ints(
+            self.objects[actor_index].state.position.x,
+            self.objects[actor_index].state.position.y,
+        );
+        if previous_action.name != self.objects[actor_index].state.action.name {
+            self.objects[actor_index]
+                .record_action_event(previous_action.clone(), ActionTransitionKind::Forced);
+        }
+        self.trigger_action_callbacks(actor_index, Some(previous_action.name))?;
+
+        let Some(actor_index) = self.find_object_index(actor_id) else {
+            return Ok(true);
+        };
+        let position = self.objects[actor_index].state.position;
+        let shape_top = self.objects[actor_index]
+            .current_shape_rect()
+            .map(|rect| rect.y)
+            .unwrap_or(0);
+        let rotation = self.rng.random(360);
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(true);
+        };
+        let Some(previous_container) = self.objects[object_index].state.container else {
+            return Ok(true);
+        };
+
+        if let Some(container_index) = self.find_object_index(previous_container) {
+            self.objects[container_index]
+                .state
+                .contents
+                .retain(|&child| child != object_id);
+            self.refresh_object_ocf(container_index);
+        }
+        {
+            let object = &mut self.objects[object_index];
+            object.state.container = None;
+            object.set_position(Vector2::new(position.x, position.y + shape_top - 1));
+            object.state.rotation = rotation;
+            object.fixed_rotation = itofix(rotation);
+            object.fixed_velocity = FixedVec2::new(
+                throw_force * direction,
+                -throw_force,
+            );
+            object.state.velocity = object.velocity_pixels();
+            object.rotation_velocity = throw_force * direction;
+            object.state.mobile = true;
+            object.state.in_liquid = false;
+            object.state.menu = None;
+        }
+        self.update_sector_for_index(object_index);
+        self.refresh_object_ocf(object_index);
+
+        // Exit calls Ejection first and Departure second; both are fail-safe
+        // and may re-enter the object (C4Object.cpp:1532-1563).
+        if let Some(container_index) = self.find_object_index(previous_container) {
+            if let Err(error) = self.call_object_function(
+                container_index,
+                "Ejection",
+                vec![object_reference_value(object_id)],
+            ) {
+                tracing::warn!(%error, "script error in Ejection; continuing like C++ fail-safe Call");
+            }
+        }
+        if let Some(object_index) = self.find_object_index(object_id) {
+            if let Err(error) = self.call_object_function(
+                object_index,
+                "Departure",
+                vec![object_reference_value(previous_container)],
+            ) {
+                tracing::warn!(%error, "script error in Departure; continuing like C++ fail-safe Call");
+            }
+        }
+        // ObjectActionThrow ignores Exit's boolean (including callback
+        // re-entry) and reports success once SetAction succeeded.
+        Ok(true)
+    }
+
     fn apply_command_event(&mut self, event: CommandEvent) -> Result<(), EngineError> {
         match event {
             CommandEvent::ApplyObjectUpdate { object_id, update } => {
                 self.apply_object_update(object_id, update)?;
+            }
+            CommandEvent::ThrowObject {
+                actor_id,
+                object_id,
+                complete_command_on_success,
+            } => {
+                let success = self.try_object_action_throw(actor_id, object_id)?;
+                if success && complete_command_on_success {
+                    self.complete_command(actor_id, CommandId::Throw)?;
+                }
             }
             CommandEvent::SetObjectCommand {
                 object_id,
@@ -39222,6 +39357,86 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::ZERO);
         assert_eq!(object.action.name, "Throw");
+    }
+
+    #[test]
+    fn object_action_throw_exits_content_after_action_gate() {
+        // ObjectActionThrow computes force/facing, changes action without an
+        // Action.Target argument, then Exit's the item with one Random(360)
+        // draw (C4ObjectCom.cpp:120-137; C4Object.cpp:1532-1563).
+        let mut clonk =
+            Definition::from_script("CLNK", "Clonk", "#strict 2\n").expect("script compiles");
+        clonk.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        let mut physical = PhysicalInfo::default();
+        physical.throw = 50_000;
+        clonk.set_physical(physical);
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "Throw".to_string(),
+            ActionSpec::default().with_procedure("throw"),
+        );
+        clonk.configure_actions(Some("Walk".to_string()), actions);
+        let item =
+            Definition::from_script("FLAG", "Flag", "#strict 2\n").expect("script compiles");
+
+        let mut engine = Engine::with_seed(7);
+        engine.register_definition(clonk).expect("CLNK registers");
+        engine.register_definition(item).expect("FLAG registers");
+        let clonk_id = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_position(Vector2::new(100, 200))
+                    .with_direction(Direction::Right)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("CLNK spawns");
+        let flag_id = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(clonk_id))
+            .expect("FLAG spawns");
+        engine
+            .apply_object_update(clonk_id, ObjectUpdate::new().with_action_update(
+                ActionUpdate::default().with_target(Some(flag_id)),
+            ))
+            .expect("action target is seeded");
+
+        let mut expected_rng = engine.debug_rng_clone();
+        let expected_rotation = expected_rng.random(360);
+        let before = engine.object_snapshot(clonk_id).expect("CLNK is ready");
+        let before_index = engine.find_object_index(clonk_id).expect("CLNK is indexed");
+        let shape_top = engine.objects[before_index]
+            .current_shape_rect()
+            .map(|rect| rect.y)
+            .unwrap_or(0);
+        let expected_exit = Vector2::new(
+            before.position.x,
+            before.position.y + shape_top - 1,
+        );
+        assert!(
+            engine
+                .try_object_action_throw(clonk_id, flag_id)
+                .expect("throw succeeds")
+        );
+
+        let clonk = engine.object_snapshot(clonk_id).expect("CLNK remains");
+        let flag = engine.object_snapshot(flag_id).expect("FLAG remains");
+        let throw_force = math::val_by_physical(400, 50_000);
+        assert_eq!(clonk.action.name, "Throw");
+        assert_eq!(clonk.action.target, Some(flag_id));
+        assert!(clonk.contents.is_empty());
+        assert_eq!(flag.container, None);
+        assert_eq!(flag.position, expected_exit);
+        assert_eq!(flag.rotation, expected_rotation);
+        let flag_index = engine.find_object_index(flag_id).expect("FLAG is indexed");
+        assert_eq!(
+            engine.objects[flag_index].fixed_velocity,
+            FixedVec2::new(throw_force, -throw_force)
+        );
+        assert_eq!(engine.objects[flag_index].rotation_velocity, throw_force);
+        assert_eq!(engine.debug_rng_clone(), expected_rng);
     }
 
     #[test]

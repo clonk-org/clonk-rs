@@ -3,7 +3,7 @@ mod support;
 
 use std::error::Error;
 
-use lc_engine::{Engine, ObjectId, COM_DOWN, COM_LEFT, COM_UP};
+use lc_engine::{Engine, ObjectId, COM_DOWN, COM_LEFT, COM_THROW, COM_UP};
 use support::real_scenario::{join_local_player, load_tutorial};
 use support::virtual_player::VirtualPlayer;
 
@@ -31,12 +31,12 @@ fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
         .any(|message| message.lines.iter().any(|line| line.contains(needle)))
 }
 
-fn clonk_carries_loam(engine: &Engine, clonk: ObjectId) -> bool {
+fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
     engine.object_snapshot(clonk).is_some_and(|clonk| {
         clonk.contents.iter().any(|item| {
             engine
                 .object_snapshot(*item)
-                .is_some_and(|item| item.definition_id == "LOAM")
+                .is_some_and(|item| item.definition_id == definition)
         })
     })
 }
@@ -141,7 +141,7 @@ fn tutorial02_virtual_player_flies_to_the_far_island_and_collects_loam(
             };
             clonk_now.action.name == "Push"
                 && clonk_now.action.target == Some(balloon)
-                && balloon_now.position.x >= 450
+                && balloon_now.position.x >= 520
         },
     )?;
 
@@ -189,10 +189,23 @@ fn tutorial02_virtual_player_flies_to_the_far_island_and_collects_loam(
     // Script3. BALN has no ControlDownDouble override, so DFA_PUSH handles it
     // as ObjectComUnGrab (src/C4Object.cpp:3520-3567).
     player.double_tap(COM_DOWN)?;
-    player.wait_until("Clonk lets go of the balloon", 30, |engine| {
-        engine
-            .object_snapshot(clonk)
-            .is_some_and(|object| object.action.name != "Push")
+    let landing = player.wait_until("Clonk lets go and lands on the far island", 100, |engine| {
+        engine.object_snapshot(clonk).is_some_and(|object| {
+            object.action.name == "Walk"
+                && (450..710).contains(&object.position.x)
+                && (270..320).contains(&object.position.y)
+        })
+    });
+    if let Err(error) = landing {
+        panic!(
+            "{error}; clonk={:?}; balloon={:?}",
+            player.engine().object_snapshot(clonk),
+            player.engine().object_snapshot(balloon)
+        );
+    }
+
+    player.wait_until("the landing collectible contact resolves", 20, |engine| {
+        clonk_carries(engine, clonk, "FLAG") || clonk_carries(engine, clonk, "LOAM")
     })?;
 
     // Script3's wait(20) resumes the scenario script after 200 frames; Script4
@@ -200,6 +213,26 @@ fn tutorial02_virtual_player_flies_to_the_far_island_and_collects_loam(
     // Script6..Script19 names at its 10-frame cadence before Script20 introduces
     // the collectibles placed by CreateMaterial (Tutorial02/Script.c:27-34,
     // 65-105; C4ScriptHost.cpp:222-231).
+    if clonk_carries(player.engine(), clonk, "FLAG") {
+        player.wait_until(
+            "Tutorial02 asks the player to put down the accidentally collected flag",
+            450,
+            |engine| tutorial_message_contains(engine, "Please drop the flag for now"),
+        )?;
+        player.tap(COM_THROW)?;
+        let dropped_flag = player.wait_until("the flag leaves the Clonk's inventory", 30, |engine| {
+            !clonk_carries(engine, clonk, "FLAG")
+        });
+        if let Err(error) = dropped_flag {
+            let flag = object_with_definition(player.engine(), "FLAG")
+                .and_then(|id| player.engine().object_snapshot(id));
+            panic!(
+                "{error}; clonk={:?}; flag={flag:?}",
+                player.engine().object_snapshot(clonk)
+            );
+        }
+    }
+
     let pickup_prompt = player.wait_until(
         "Tutorial02 asks the player to pick up a loam chunk",
         450,
@@ -215,12 +248,12 @@ fn tutorial02_virtual_player_flies_to_the_far_island_and_collects_loam(
         );
     }
 
-    if !clonk_carries_loam(player.engine(), clonk) {
+    if !clonk_carries(player.engine(), clonk, "LOAM") {
         let collected = player.hold_until(
             COM_LEFT,
             "Clonk naturally collects Tutorial02 loam",
             180,
-            |engine| clonk_carries_loam(engine, clonk),
+            |engine| clonk_carries(engine, clonk, "LOAM"),
         );
         if let Err(error) = collected {
             panic!(

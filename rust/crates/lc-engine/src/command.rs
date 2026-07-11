@@ -3567,11 +3567,18 @@ mod tests {
 
     #[test]
     fn throw_sets_throw_action_when_in_range() {
+        // C4Command::Throw faces/stops at the targeted position, then
+        // ObjectActionThrow performs the action-gated exit atomically
+        // (C4Command.cpp:950-957; C4ObjectCom.cpp:120-137).
         let actor_id = ObjectId::new(450);
         let target_id = ObjectId::new(460);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.position = Vector2::new(100, 200);
+        actor.shape_top = -10;
+        actor.direction = Direction::Right;
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.physical.throw = 50_000;
         actor.contents = vec![target_id];
 
         let mut item = snapshot_with_id(target_id.as_u64());
@@ -3586,6 +3593,8 @@ mod tests {
 
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let rng = std::cell::RefCell::new(crate::LcgRng::seed_from_u64(7));
+        let expected_rng = rng.borrow().clone();
         let ctx = CommandRuntimeContext {
             landscape: None,
             frame: 52,
@@ -3599,7 +3608,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
+            rng: Some(&rng),
         };
 
         let mut state = ThrowState::from_request(
@@ -3612,13 +3621,24 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.status, CommandStatus::Running);
         let update = result.update.expect("throw should update actor");
         assert_eq!(update.command_direction, Some(CommandDirection::Stop));
-        let action = update.action.expect("throw should set action");
-        assert_eq!(action.name.as_deref(), Some("Throw"));
-        assert_eq!(action.target, Some(Some(target_id)));
+        assert!(update.action.is_none(), "the engine event gates SetAction");
         assert_eq!(update.direction, Some(Direction::Right));
+        assert_eq!(result.events.len(), 1);
+        let CommandEvent::ThrowObject {
+            actor_id: event_actor,
+            object_id,
+            complete_command_on_success,
+        } = &result.events[0]
+        else {
+            panic!("outdoor Throw must emit one atomic throw event")
+        };
+        assert_eq!(*event_actor, actor_id);
+        assert_eq!(*object_id, target_id);
+        assert!(*complete_command_on_success);
+        assert_eq!(*rng.borrow(), expected_rng, "the event owns the RNG draw");
     }
 
     #[test]
@@ -7399,6 +7419,14 @@ pub enum CommandEvent {
     ApplyObjectUpdate {
         object_id: ObjectId,
         update: ObjectUpdate,
+    },
+    /// ObjectComThrow -> ObjectActionThrow is one ordered operation: the
+    /// action transition must succeed before Random(360) and C4Object::Exit
+    /// run (C4ObjectCom.cpp:120-137).
+    ThrowObject {
+        actor_id: ObjectId,
+        object_id: ObjectId,
+        complete_command_on_success: bool,
     },
     /// Assign a fresh command stack to another object. C4CMD_Activate
     /// uses `Target->SetCommand(C4CMD_Exit)` rather than exiting the
@@ -11413,12 +11441,18 @@ impl ThrowState {
         }
         self.last_evaluated = Some(ctx.frame);
 
-        let mut pending_update = self.update_to_stop(ctx);
+        let mut pending_update = None;
 
         if ctx.object.action_procedure == ActionProcedure::Dig {
-            let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
-            let update = pending_update.take().unwrap_or_default();
-            pending_update = Some(update.with_action_update(idle_action));
+            // C4Command::Throw first ObjectComStop's a digging Clonk back to
+            // Walk (C4Command.cpp:912-913; C4ObjectCom.cpp:239-244).
+            let walk_action = ActionUpdate::default().with_name("Walk").with_force(false);
+            let update = self.update_to_stop(ctx).unwrap_or_default();
+            pending_update = Some(
+                update
+                    .with_velocity(Vector2::ZERO)
+                    .with_action_update(walk_action),
+            );
         }
 
         if ctx.object.action_procedure == ActionProcedure::Push {
@@ -11509,36 +11543,53 @@ impl ThrowState {
         }
 
         let mut update = pending_update.unwrap_or_default();
-        update.command_direction = Some(CommandDirection::Stop);
 
         if let Some(position) = self.throw_position() {
+            update.command_direction = Some(CommandDirection::Stop);
             if position.x > ctx.position.x {
                 update.direction = Some(Direction::Right);
-            } else if position.x < ctx.position.x {
+            } else {
                 update.direction = Some(Direction::Left);
             }
-        } else if let Some(target_id) = self.target {
-            if let Some(snapshot) = ctx.resolve(target_id) {
-                if snapshot.position.x > ctx.position.x {
-                    update.direction = Some(Direction::Right);
-                } else if snapshot.position.x < ctx.position.x {
-                    update.direction = Some(Direction::Left);
-                }
-            }
         }
 
-        let mut action_update = ActionUpdate::default()
-            .with_name("Throw")
-            .with_force(true)
-            .with_phase(0)
-            .with_ticks(0);
-
-        if let Some(target_id) = self.target {
-            action_update = action_update.with_target(Some(target_id));
+        // ObjectActionThrow changes the Clonk action, then immediately exits
+        // the selected (or first) content. Keep that ordered operation in the
+        // engine: SetAction may reject the transition, and only a successful
+        // transition consumes Random(360) (C4ObjectCom.cpp:120-137).
+        let item_id = self
+            .target
+            .filter(|target| ctx.object.contents.contains(target))
+            .or_else(|| ctx.object.contents.first().copied());
+        let targeted = self.throw_position().is_some();
+        let Some(object_id) = item_id else {
+            return if targeted {
+                CommandStepResult::running(Some(update))
+            } else {
+                CommandStepResult::completed(Some(update))
+            };
+        };
+        if !matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Walk | ActionProcedure::Dig
+        ) {
+            return if targeted {
+                CommandStepResult::running(Some(update))
+            } else {
+                CommandStepResult::completed(Some(update))
+            };
         }
-
-        update = update.with_action_update(action_update);
-        CommandStepResult::completed(Some(update))
+        let event = CommandEvent::ThrowObject {
+            actor_id: ctx.object.id,
+            object_id,
+            complete_command_on_success: targeted,
+        };
+        let update = (!update.is_empty()).then_some(update);
+        if targeted {
+            CommandStepResult::running(update).with_events(vec![event])
+        } else {
+            CommandStepResult::completed(update).with_events(vec![event])
+        }
     }
 }
 
