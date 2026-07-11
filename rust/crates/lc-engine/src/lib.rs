@@ -2050,6 +2050,20 @@ impl ObjectMenuExtra {
     fn is_none(&self) -> bool {
         *self == Self::None
     }
+
+    pub(crate) fn from_legacy(value: i32) -> Self {
+        match value {
+            0 => Self::None,
+            1 => Self::Components,
+            2 => Self::Value,
+            3 => Self::MagicValue,
+            4 => Self::Info,
+            5 => Self::ComponentsMagic,
+            6 => Self::LiveMagicValue,
+            7 => Self::ComponentsLiveMagic,
+            value => Self::Unknown(value),
+        }
+    }
 }
 
 /// One cached `C4MenuItem::Components` entry. C++ resolves this when the
@@ -44393,6 +44407,255 @@ func Trigger() {
         // The first SELECTABLE item took the initial selection
         // (item 0 is not selectable, so index 1).
         assert_eq!(menu.selection, 1);
+    }
+
+    #[test]
+    fn menu_item_caches_custom_components_from_the_menu_target_builder_like_cpp() {
+        // C4MenuItem resolves and caches components at construction time with
+        // pObjInstance=null and pBuilder=Menu->GetParentObject(), i.e. the
+        // MENU TARGET rather than the command object (C4Menu.cpp:76-97;
+        // C4Def.cpp:1266-1275,1322-1355). CreateMenu forwards iExtra=1 as
+        // C4MN_Extra_Components (C4Script.cpp:1420-1448).
+        let builder_script = r#"
+        local component_mode;
+        func SetComponentMode(value) { component_mode = value; }
+        func MenuComponentMode() { return component_mode; }
+        "#;
+        let command_script = r#"
+        func MenuComponentMode() { return 0; }
+        func Open(builder) {
+            CreateMenu(CXCN, builder, this(), C4MN_Extra_Components, "Build");
+            return AddMenuItem("Build", "Choose", DYNA, builder);
+        }
+        "#;
+        let item_script = r#"
+        protected func GetCustomComponents(builder) {
+            if (builder->~MenuComponentMode()) return [WOOD, WOOD, METL];
+            return [GOLD];
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        for id in ["WOOD", "METL", "GOLD", "ROCK"] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, id, "").expect("component definition compiles"),
+                )
+                .expect("component definition registers");
+        }
+        engine
+            .register_definition(
+                Definition::from_script("BULD", "Builder", builder_script)
+                    .expect("builder compiles"),
+            )
+            .expect("builder registers");
+        engine
+            .register_definition(
+                Definition::from_script("CMND", "Command", command_script)
+                    .expect("command compiles"),
+            )
+            .expect("command registers");
+        let mut item =
+            Definition::from_script("DYNA", "Dynamic", item_script).expect("item compiles");
+        item.set_components(vec![DefinitionComponent {
+            id: "ROCK".to_string(),
+            count: 9,
+        }]);
+        engine.register_definition(item).expect("item registers");
+        let builder = engine
+            .spawn_object(SpawnConfig::new("BULD"))
+            .expect("builder spawns");
+        let command = engine
+            .spawn_object(SpawnConfig::new("CMND"))
+            .expect("command spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine,
+                    object: ObjectId,
+                    function: &str,
+                    args: Vec<Value>| {
+            let index = engine.find_object_index(object).expect("object exists");
+            engine
+                .call_object_function(index, function, args)
+                .expect("script call succeeds")
+        };
+        call(
+            &mut engine,
+            builder,
+            "SetComponentMode",
+            vec![Value::Int(1)],
+        );
+        assert_eq!(
+            call(
+                &mut engine,
+                command,
+                "Open",
+                vec![object_reference_value(builder)],
+            ),
+            Value::Bool(true)
+        );
+        // The C4MenuItem owns the resolved C4IDList. A later builder-state
+        // change must not re-run GetCustomComponents during presentation.
+        call(
+            &mut engine,
+            builder,
+            "SetComponentMode",
+            vec![Value::Int(0)],
+        );
+
+        let menu = engine
+            .debug_object_menu(builder.as_u64())
+            .expect("builder exists")
+            .expect("builder owns the menu");
+        assert_eq!(menu.command_object, Some(command));
+        assert_eq!(menu.extra, ObjectMenuExtra::Components);
+        assert_eq!(
+            menu.items[0].components,
+            vec![
+                ObjectMenuComponent {
+                    definition_id: "WOOD".to_string(),
+                    count: 2,
+                },
+                ObjectMenuComponent {
+                    definition_id: "METL".to_string(),
+                    count: 1,
+                },
+            ],
+            "the target BULD, not command CMND, is the custom-component builder"
+        );
+    }
+
+    #[test]
+    fn menu_item_custom_component_fallbacks_and_force_no_desc_match_cpp() {
+        // GetCustomComponents overrides DefCore components only when it
+        // returns an array: an EMPTY array is still an override, while a
+        // missing function or non-array result falls back to Def->Component
+        // (C4Def.cpp:1266-1275,1322-1355). An omitted AddMenuItem info
+        // caption falls back to pDef->GetDesc unless ForceNoDesc is set
+        // (C4Script.cpp:1590-1594).
+        let command_script = r#"
+        func Open(builder) {
+            CreateMenu(CXCN, builder, this(), C4MN_Extra_Components, "Build");
+            AddMenuItem("Empty", "Choose", EMPT, builder);
+            AddMenuItem("Non-array", "Choose", NARR, builder);
+            AddMenuItem("Missing", "Choose", MISS, builder);
+            return AddMenuItem("No description", "Choose", MISS, builder,
+                               0, 0, 0, C4MN_Add_ForceNoDesc);
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        for id in ["WOOD", "METL", "GOLD"] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, id, "").expect("component definition compiles"),
+                )
+                .expect("component definition registers");
+        }
+        engine
+            .register_definition(
+                Definition::from_script("BULD", "Builder", "").expect("builder compiles"),
+            )
+            .expect("builder registers");
+        engine
+            .register_definition(
+                Definition::from_script("CMND", "Command", command_script)
+                    .expect("command compiles"),
+            )
+            .expect("command registers");
+
+        let register_item = |engine: &mut Engine,
+                             id: &str,
+                             script: &str,
+                             component: &str,
+                             count: u32,
+                             description: &str| {
+            let mut item = Definition::from_script(id, id, script).expect("item compiles");
+            item.set_components(vec![DefinitionComponent {
+                id: component.to_string(),
+                count,
+            }]);
+            item.set_description(Some(description.to_string()));
+            engine.register_definition(item).expect("item registers");
+        };
+        register_item(
+            &mut engine,
+            "EMPT",
+            "protected func GetCustomComponents(builder) { return []; }",
+            "WOOD",
+            5,
+            "Empty custom description.",
+        );
+        register_item(
+            &mut engine,
+            "NARR",
+            "protected func GetCustomComponents(builder) { return 17; }",
+            "METL",
+            3,
+            "Non-array description.",
+        );
+        register_item(
+            &mut engine,
+            "MISS",
+            "",
+            "GOLD",
+            2,
+            "Missing-hook description.",
+        );
+
+        let builder = engine
+            .spawn_object(SpawnConfig::new("BULD"))
+            .expect("builder spawns");
+        let command = engine
+            .spawn_object(SpawnConfig::new("CMND"))
+            .expect("command spawns");
+        engine.tick().expect("tick succeeds");
+        let command_index = engine.find_object_index(command).expect("command exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    command_index,
+                    "Open",
+                    vec![object_reference_value(builder)],
+                )
+                .expect("Open succeeds"),
+            Value::Bool(true)
+        );
+
+        let menu = engine
+            .debug_object_menu(builder.as_u64())
+            .expect("builder exists")
+            .expect("builder owns the menu");
+        assert_eq!(menu.extra, ObjectMenuExtra::Components);
+        assert_eq!(menu.items.len(), 4);
+        assert!(
+            menu.items[0].components.is_empty(),
+            "an empty custom array overrides EMPT's static WOOD component"
+        );
+        assert_eq!(menu.items[0].info_caption, "Empty custom description.");
+        assert_eq!(
+            menu.items[1].components,
+            vec![ObjectMenuComponent {
+                definition_id: "METL".to_string(),
+                count: 3,
+            }],
+            "a non-array result falls back to NARR's DefCore components"
+        );
+        assert_eq!(menu.items[1].info_caption, "Non-array description.");
+        assert_eq!(
+            menu.items[2].components,
+            vec![ObjectMenuComponent {
+                definition_id: "GOLD".to_string(),
+                count: 2,
+            }],
+            "a missing hook falls back to MISS's DefCore components"
+        );
+        assert_eq!(menu.items[2].info_caption, "Missing-hook description.");
+        assert_eq!(menu.items[3].components, menu.items[2].components);
+        assert_eq!(
+            menu.items[3].info_caption, "",
+            "C4MN_Add_ForceNoDesc suppresses the omitted-caption fallback"
+        );
     }
 
     #[test]

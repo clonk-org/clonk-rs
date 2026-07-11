@@ -3374,8 +3374,10 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         "CreateMenu",
         "command object",
     )?;
+    let extra = parse_optional_i32(args.get(3), "CreateMenu", "extra")?.unwrap_or(0);
     let caption = parse_optional_string(args.get(4), "CreateMenu", "caption")?
         .unwrap_or_default();
+    let extra_data = parse_optional_i32(args.get(5), "CreateMenu", "extra data")?.unwrap_or(0);
     let style = parse_optional_i32(args.get(6), "CreateMenu", "style")?.unwrap_or(0) & 127;
     let permanent = args.get(7).map(value_raw_truthy).unwrap_or(false);
     let menu_id = args.get(8).cloned().unwrap_or(Value::Nil);
@@ -3416,8 +3418,8 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         // Style & C4MN_Style_BaseMask (C4Menu::InitMenu, C4Menu.cpp:359).
         style,
         permanent,
-        extra: crate::ObjectMenuExtra::default(),
-        extra_data: 0,
+        extra: crate::ObjectMenuExtra::from_legacy(extra),
+        extra_data,
         selection: -1,
         user_menu: true,
         command_object,
@@ -3693,6 +3695,48 @@ fn sprintf_menu_command(format: &str, parameter: &str, click: i32) -> String {
     out
 }
 
+fn menu_components_from_custom(values: Vec<Value>) -> Vec<crate::ObjectMenuComponent> {
+    let mut components = Vec::<crate::ObjectMenuComponent>::new();
+    let mut current_id: Option<String> = None;
+    let mut current_count = 0_u32;
+    let store = |components: &mut Vec<crate::ObjectMenuComponent>, id: String, count: u32| {
+        if let Some(component) = components
+            .iter_mut()
+            .find(|component| component.definition_id == id)
+        {
+            component.count = count;
+        } else {
+            components.push(crate::ObjectMenuComponent {
+                definition_id: id,
+                count,
+            });
+        }
+    };
+
+    for value in values {
+        let Value::C4Id(id) = value else {
+            continue;
+        };
+        if id.is_empty() || id == "NONE" {
+            continue;
+        }
+        if current_id.as_deref().is_some_and(|current| current != id) {
+            store(
+                &mut components,
+                current_id.take().unwrap_or_default(),
+                current_count,
+            );
+            current_count = 0;
+        }
+        current_id = Some(id);
+        current_count = current_count.saturating_add(1);
+    }
+    if let Some(id) = current_id {
+        store(&mut components, id, current_count);
+    }
+    components
+}
+
 /// FnAddMenuItem (C4Script.cpp:1471-1734): appends one item to the menu
 /// object's OPEN menu. Sim-observable pieces ported: the composed
 /// left/right-click commands (new-style %d sprintf vs old-style
@@ -3713,7 +3757,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     )?;
     let mut count = parse_optional_i32(args.get(4), "AddMenuItem", "count")?.unwrap_or(0);
     let parameter = args.get(5).cloned().unwrap_or(Value::Nil);
-    let info_caption =
+    let mut info_caption =
         parse_optional_string(args.get(6), "AddMenuItem", "info caption")?.unwrap_or_default();
     let extra = parse_optional_i32(args.get(7), "AddMenuItem", "extra")?.unwrap_or(0);
     let xpar = args.get(8).cloned().unwrap_or(Value::Nil);
@@ -3722,30 +3766,62 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = menu_target.or(active_object_id()) else {
         return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1474)
     };
-    let (menu, def_name) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return (None, String::new());
-        };
-        // pDef = C4Id2Def(idItem), falling back to the menu object's own
-        // def (C4Script.cpp:1488-1489).
-        let item_def = match &item_id {
-            Value::C4Id(id) | Value::String(id) if !id.is_empty() => context
-                .definition_metadata(id)
-                .map(|meta| meta.name.clone()),
-            _ => None,
-        };
-        let def_name = item_def
-            .or_else(|| {
-                context.get_world_object(target).and_then(|object| {
+    let (menu, def_name, def_description, static_components, component_script) =
+        HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let Some(context) = borrow.as_ref() else {
+                return (None, String::new(), String::new(), Vec::new(), None);
+            };
+            // pDef = C4Id2Def(idItem), falling back to the menu object's own
+            // def (C4Script.cpp:1488-1489).
+            let item_definition_id = match &item_id {
+                Value::C4Id(id) | Value::String(id) if !id.is_empty() => Some(id.as_str()),
+                _ => None,
+            };
+            let item_metadata =
+                item_definition_id.and_then(|id| context.definition_metadata(id));
+            let presentation_definition_id = item_metadata
+                .and(item_definition_id)
+                .map(str::to_string)
+                .or_else(|| {
                     context
-                        .definition_metadata(object.definition_id())
-                        .map(|meta| meta.name.clone())
+                        .get_world_object(target)
+                        .map(|object| object.definition_id().to_string())
+                });
+            let def_name = presentation_definition_id
+                .as_deref()
+                .and_then(|id| context.definition_metadata(id))
+                .map(|metadata| metadata.name.clone())
+                .unwrap_or_default();
+            let def_description = presentation_definition_id
+                .as_deref()
+                .and_then(|id| context.world.definition_description(id))
+                .unwrap_or_default()
+                .to_string();
+            let static_components = item_metadata
+                .map(|metadata| {
+                    metadata
+                        .components
+                        .iter()
+                        .map(|(definition_id, count)| crate::ObjectMenuComponent {
+                            definition_id: definition_id.clone(),
+                            count: *count,
+                        })
+                        .collect()
                 })
-            })
-            .unwrap_or_default();
-        (context.object_menu(target), def_name)
-    });
+                .unwrap_or_default();
+            let component_script = item_definition_id
+                .filter(|_| item_metadata.is_some())
+                .and_then(|id| context.world.definition_script(id))
+                .cloned();
+            (
+                context.object_menu(target),
+                def_name,
+                def_description,
+                static_components,
+                component_script,
+            )
+        });
     let Some(mut menu) = menu else {
         return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1475)
     };
@@ -3755,6 +3831,9 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         .as_deref()
         .map(|text| text.replacen("%s", &def_name, 1))
         .unwrap_or_default();
+    if info_caption.is_empty() && extra & 512 == 0 {
+        info_caption = def_description;
+    }
 
     // Typed parameter -> command text (C4Script.cpp:1513-1546).
     let parameter_text = match &parameter {
@@ -3833,6 +3912,20 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         count = 12_345_678; // C4MN_Item_NoCount
     }
     let selectable = !command.is_empty();
+    let components = match component_script
+        .and_then(|script| {
+            call_scoped_script_function(
+                script,
+                "GetCustomComponents",
+                &[object_reference_value(target)],
+            )
+        }) {
+        Some(result) => match result? {
+            Value::Array(values) => menu_components_from_custom(values),
+            _ => static_components,
+        },
+        None => static_components,
+    };
     // First selectable item takes the selection, WITHOUT callbacks
     // (C4Menu::AddItem -> SetSelection(ItemCount-1, false, false)).
     if menu.selection == -1 && selectable {
@@ -3846,7 +3939,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         count,
         item_id: c4id_text_of(&item_id),
         symbol: crate::ObjectMenuSymbol::default(),
-        components: Vec::new(),
+        components,
         selectable,
         value: own_value,
     });

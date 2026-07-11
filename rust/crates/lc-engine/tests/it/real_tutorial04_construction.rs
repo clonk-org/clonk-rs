@@ -2,7 +2,10 @@ use std::env;
 use std::path::PathBuf;
 
 use lc_engine::scenario::LegacyDefinitionResolver;
-use lc_engine::{Engine, JoinPlayerConfig, ObjectUpdate, Scenario, ScenarioError, COM_DIG};
+use lc_engine::{
+    Engine, JoinPlayerConfig, ObjectMenuComponent, ObjectMenuExtra, ObjectUpdate, Scenario,
+    ScenarioError, COM_DIG,
+};
 use lc_resources::Group;
 use lc_script::Value;
 
@@ -101,7 +104,37 @@ fn tutorial04_conkit_opens_the_real_elevator_construction_menu() {
         )
     });
     assert_eq!(menu.identification, Value::C4Id("CXCN".to_string()));
+    assert_eq!(menu.symbol_id, "CXCN");
+    assert_eq!(menu.style, 0, "C4MN_Style_Normal");
+    assert!(!menu.permanent);
+    assert_eq!(menu.command_object, Some(conkit));
+    assert_eq!(menu.columns, 5);
+    assert_eq!(
+        menu.extra,
+        ObjectMenuExtra::Components,
+        "CNKT passes C4MN_Extra_Components to CreateMenu (C4Script.cpp:1420-1448)"
+    );
     assert_eq!(menu.items.len(), 1, "Tutorial04 knows only ELEV");
     assert_eq!(menu.items[0].item_id, "ELEV");
+    assert_eq!(menu.items[0].caption, "Construction: Elevator");
+    assert_eq!(
+        menu.items[0].info_caption,
+        "The elevator will automatically move to pick up waiting clonks, but may also be switched to permanent movement.",
+        "AddMenuItem falls back to ELEV's localized description (C4Script.cpp:1590-1594)"
+    );
+    assert_eq!(
+        menu.items[0].components,
+        vec![
+            ObjectMenuComponent {
+                definition_id: "WOOD".to_string(),
+                count: 4,
+            },
+            ObjectMenuComponent {
+                definition_id: "METL".to_string(),
+                count: 2,
+            },
+        ],
+        "C4MenuItem caches ELEV's ordered components at AddMenuItem time (C4Menu.cpp:92-97; C4Def.cpp:1322-1355)"
+    );
     assert_eq!(menu.selection, 0);
 }
