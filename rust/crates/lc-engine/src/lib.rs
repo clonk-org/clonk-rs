@@ -29611,6 +29611,46 @@ impl Engine {
         if radius <= 0 {
             return;
         }
+        if self
+            .landscape
+            .as_ref()
+            .is_some_and(|landscape| landscape.pixel_grid().is_some())
+        {
+            // C4Landscape::ShakeFree walks top-to-bottom in this exact
+            // circle order. ShakeFreePix clears each DigFree pixel, creates
+            // its zero-velocity PXS, then probes instability; non-DigFree
+            // material is left in place (C4Landscape.cpp:928-938,999-1010).
+            for ycnt in (-radius..radius).rev() {
+                let remaining = i64::from(radius) * i64::from(radius)
+                    - i64::from(ycnt) * i64::from(ycnt);
+                let line_width = (remaining as f64).sqrt() as i32;
+                let y = center.y + ycnt;
+                for xcnt in -line_width..line_width + i32::from(line_width == 0) {
+                    let x = center.x + xcnt;
+                    let material = {
+                        let materials = &self.materials;
+                        self.landscape
+                            .as_mut()
+                            .and_then(|landscape| landscape.dig_free_pix(x, y, materials))
+                    };
+                    if let Some(material) = material.filter(|material| {
+                        self.materials
+                            .get_by_id(*material)
+                            .is_some_and(|material| material.dig_free())
+                    }) {
+                        self.pxs_system.create(
+                            material,
+                            itofix(x),
+                            itofix(y),
+                            C4Fixed::ZERO,
+                            C4Fixed::ZERO,
+                        );
+                    }
+                    self.check_instability_range(x, y);
+                }
+            }
+            return;
+        }
         let Some(landscape) = self.landscape.as_mut() else {
             return;
         };
@@ -36786,6 +36826,61 @@ mod tests {
             "shake operation should release earth particles"
         );
         Ok(())
+    }
+
+    #[test]
+    fn shake_circle_clears_only_dig_free_grid_pixels_like_cpp() {
+        // C4Landscape::ShakeFreePix clears DigFree material and creates a
+        // PXS, but preserves other material (C4Landscape.cpp:928-938).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            DigFree=1
+
+            [Material Granite]
+            Name=Granite
+            Density=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let granite = materials.id_of("Granite").expect("granite exists");
+        let mut engine = Engine::with_seed(9);
+        engine.set_materials(materials);
+
+        let mut densities = vec![0; 128];
+        densities[30] = 100;
+        densities[40] = 100;
+        let mut names = vec![None; 128];
+        names[30] = Some("Earth".to_owned());
+        names[40] = Some("Granite".to_owned());
+        let mut bytes = vec![0; 25];
+        bytes[2 * 5 + 2] = 30;
+        bytes[2 * 5 + 3] = 40;
+        let grid = landscape::PixelGrid::new(5, 5, bytes, densities, names, vec![None; 128]);
+        let mut landscape = Landscape::new(5, vec![5; 5]).expect("landscape builds");
+        landscape.set_world_height(5);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+
+        engine.execute_shake_circle_operation(Vector2::new(2, 2), 2);
+
+        let landscape = engine.landscape().expect("landscape remains set");
+        assert_eq!(landscape.material_at(2, 2), None, "DigFree Earth clears");
+        assert_eq!(
+            landscape.material_at(3, 2),
+            Some(granite),
+            "non-DigFree Granite survives"
+        );
+        assert_eq!(engine.pxs_system.count(), 1);
+        assert_eq!(
+            engine.pxs_system.iter().next().map(|pxs| pxs.mat),
+            Some(earth),
+            "the cleared Earth becomes one zero-velocity PXS"
+        );
     }
 
     #[test]
