@@ -29,6 +29,9 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+# We never step into registry deps in a debugger; line tables keep file:line
+# in backtraces while skipping the expensive full-DWARF codegen at opt 3.
+debug = "line-tables-only"
 
 # Full-frame output upscaling is hot per-pixel code on the present path;
 # the crate is tiny and rarely changes, so opt 3 costs no iteration time.
