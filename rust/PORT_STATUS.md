@@ -6,11 +6,11 @@ are in `git log -- rust/ parity/`.
 ## Current
 
 Tutorials 01–10 complete their real victory flows through player controls and
-live menus. The app physically completes Tutorials 01–02 through their real
+live menus. The app physically completes Tutorials 01–03 through their real
 inventories, menus, vehicles, digging/building, goals, and GameOver flows. App
-tests also cover Tutorial 03's Buy/Contents route and Tutorial 04 from HUT2
-through CNKT to an ELEV site. S/Z/X/C mapping, unbound arrows, jumping, and
-classic/AutoStop release behavior are pinned.
+tests also cover Tutorial 04 from HUT2 through CNKT to an ELEV site. S/Z/X/C
+mapping, unbound arrows, jumping, and classic/AutoStop release behavior are
+pinned.
 
 Next: close tutorial presentation/UI parity, then resume Goldrush at its pinned
 first mismatch: frame 3327, object #1451, Decay/DoCon Y synchronization; RNG is
@@ -21,7 +21,7 @@ still aligned.
 ```sh
 cargo nextest run -p lc-engine -E 'test(/^(real_tutorial(0[1-9]|10)_(virtual_play|route)|real_tutorial02_balloon_platform)::/)'
 cargo nextest run -p lc-engine -E 'test(/^virtual_player_harness::/)'
-cargo nextest run -p lc-app -E 'test(/app_virtual_keyboard_(completes_real_tutorial0[12]|enters_tutorial03|builds_tutorial04)/)'
+cargo nextest run -p lc-app -E 'test(/app_virtual_keyboard_(completes_real_tutorial0[1-3]|builds_tutorial04)/)'
 cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask engine-snapshots verify
