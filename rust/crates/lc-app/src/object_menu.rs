@@ -314,6 +314,50 @@ fn command_image_for_menu_symbol(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ComponentFooterCell {
+    component_index: usize,
+    rect: Rect,
+    count_label: String,
+}
+
+fn component_footer_cells(
+    mut remaining: Rect,
+    components: &[lc_engine::ObjectMenuComponent],
+) -> Vec<ComponentFooterCell> {
+    // C4IDList::Draw asks GetSectionCount before applying
+    // Right|Triple|Half to each TruncateSection. Keep that slightly unusual
+    // capacity rule: a 16px-high strip reports width/16 sections, while each
+    // actual component cell consumes 16*3/2 = 24 pixels from the right
+    // (C4IDList.cpp:207-227; C4Facet.cpp:38-42,182-213).
+    let section_count = if remaining.height == 0 {
+        0
+    } else {
+        remaining.width / remaining.height
+    } as usize;
+    let cell_width = remaining.height.saturating_mul(3) / 2;
+    components
+        .iter()
+        .take(section_count)
+        .enumerate()
+        .map_while(|(component_index, component)| {
+            (cell_width != 0 && cell_width <= remaining.width).then(|| {
+                remaining.width -= cell_width;
+                ComponentFooterCell {
+                    component_index,
+                    rect: Rect::new(
+                        remaining.x + remaining.width as i32,
+                        remaining.y,
+                        cell_width,
+                        remaining.height,
+                    ),
+                    count_label: format!("{}x", component.count),
+                }
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn engine_script_menu_layout(
     area: Rect,
     font: &HudFont<'_>,
@@ -402,6 +446,7 @@ pub fn render_engine_script_menu(
     gfx: &IngameMenuGraphics,
     title_icon: Option<&ImageData>,
     item_icons: &[Option<ImageData>],
+    selected_component_icons: &[Option<ImageData>],
     show_close_button: bool,
     time_on_selection: u32,
 ) {
@@ -422,6 +467,7 @@ pub fn render_engine_script_menu(
             gfx,
             title_icon,
             item_icons,
+            selected_component_icons,
             selected,
             show_close_button,
             time_on_selection,
@@ -449,6 +495,7 @@ fn render_engine_normal_menu(
     gfx: &IngameMenuGraphics,
     title_icon: Option<&ImageData>,
     item_icons: &[Option<ImageData>],
+    selected_component_icons: &[Option<ImageData>],
     selected: Option<usize>,
     show_close_button: bool,
     time_on_selection: u32,
@@ -691,7 +738,33 @@ fn render_engine_normal_menu(
                 }
             }
         }
-        if menu.extra == ObjectMenuExtra::Value {
+        if menu.extra == ObjectMenuExtra::Components {
+            if let Some(components) = selected
+                .and_then(|selection| menu.items.get(selection))
+                .map(|item| item.components.as_slice())
+            {
+                for cell in component_footer_cells(remaining, components) {
+                    let picture = selected_component_icons
+                        .get(cell.component_index)
+                        .cloned()
+                        .flatten();
+                    draw_command_image_cell(
+                        surface,
+                        &gfx.hud,
+                        cell.rect,
+                        &CommandImage::Picture(picture),
+                    );
+                    font.draw(
+                        surface,
+                        cell.rect.x + cell.rect.width as i32 - 1,
+                        cell.rect.y + cell.rect.height as i32 - 1 - font.line_height(),
+                        &cell.count_label,
+                        CLASSIC_CAPTION_COLOR,
+                        TextAlign::Right,
+                    );
+                }
+            }
+        } else if menu.extra == ObjectMenuExtra::Value {
             if let Some(value) = selected
                 .and_then(|selection| menu.items.get(selection))
                 .and_then(|item| item.value)
@@ -2177,6 +2250,7 @@ mod tests {
             &gfx,
             None,
             &[None],
+            &[],
             true,
             0,
         );
@@ -2331,6 +2405,7 @@ mod tests {
             &gfx,
             None,
             &item_icons,
+            &[],
             false,
             0,
         );
@@ -2453,6 +2528,7 @@ mod tests {
             &gfx,
             None,
             &[None],
+            &[],
             false,
             0,
         );
@@ -2499,6 +2575,131 @@ mod tests {
             value_text,
             CLASSIC_CAPTION_COLOR
         ));
+    }
+
+    #[test]
+    fn engine_components_menu_draws_cached_requirements_right_to_left() {
+        // C4MenuItem snapshots the selected definition's components, then
+        // C4MN_Extra_Components draws those C4IDList entries from the footer's
+        // right edge in stored order. Right|Triple|Half turns each 16px-high
+        // section into a 24x16 cell; counts are literal "Nx" labels at the
+        // cell's bottom-right (C4Menu.cpp:92-97,843-899;
+        // C4IDList.cpp:207-227; C4Facet.cpp:182-213).
+        fn solid(width: u32, height: u32, rgba: [u8; 4]) -> ImageData {
+            ImageData::new(width, height, rgba.repeat((width * height) as usize))
+        }
+
+        fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
+            (rect.y..rect.y + rect.height as i32).any(|y| {
+                (rect.x..rect.x + rect.width as i32).any(|x| {
+                    surface.get_pixel(x as u32, y as u32) == Some(color)
+                })
+            })
+        }
+
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(CXCN, this(), this(), 1, "No construction plans available");
+            AddMenuItem("Construction: Elevator", "CreateConstructionSite", ELEV, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("CXCN", "Construction", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("CXCN"))
+            .expect("menu object spawns");
+        let mut menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        menu.extra = lc_engine::ObjectMenuExtra::Components;
+        menu.selection = 0;
+        menu.items[0].components = vec![
+            lc_engine::ObjectMenuComponent {
+                definition_id: "WOOD".to_string(),
+                count: 4,
+            },
+            lc_engine::ObjectMenuComponent {
+                definition_id: "METL".to_string(),
+                count: 2,
+            },
+        ];
+
+        let font = lc_graphics::BitmapFont::new();
+        let hud_font = HudFont::Fallback(&font);
+        let area = Rect::new(0, 0, 640, 480);
+        let layout = engine_script_menu_layout(area, &hud_font, &menu, true);
+        assert_eq!(layout.bounds, Rect::new(391, 369, 179, 76));
+        let footer = Rect::new(
+            layout.bounds.x + 1,
+            layout.bounds.y + layout.bounds.height as i32 - CLASSIC_COMMAND_HEIGHT - 1,
+            layout.bounds.width - 2,
+            CLASSIC_COMMAND_HEIGHT as u32,
+        );
+        assert_eq!(footer, Rect::new(392, 428, 177, 16));
+        let remaining_after_six_controls = Rect::new(
+            footer.x + 6 * CLASSIC_COMMAND_HEIGHT,
+            footer.y,
+            footer.width - 6 * CLASSIC_COMMAND_HEIGHT as u32,
+            footer.height,
+        );
+        assert_eq!(
+            component_footer_cells(remaining_after_six_controls, &menu.items[0].components)
+                .into_iter()
+                .map(|cell| (cell.rect, cell.count_label))
+                .collect::<Vec<_>>(),
+            vec![
+                (Rect::new(545, 428, 24, 16), "4x".to_string()),
+                (Rect::new(521, 428, 24, 16), "2x".to_string()),
+            ],
+            "stored WOOD,METL order must render first/rightmost, hence visually METL,WOOD"
+        );
+
+        let wood = Color::opaque(146, 92, 45);
+        let metal = Color::opaque(92, 112, 132);
+        let component_icons = vec![
+            Some(solid(8, 8, [wood.r, wood.g, wood.b, wood.a])),
+            Some(solid(8, 8, [metal.r, metal.g, metal.b, metal.a])),
+        ];
+        let gfx = IngameMenuGraphics {
+            show_commands: true,
+            ..IngameMenuGraphics::default()
+        };
+        let mut surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
+        render_engine_script_menu(
+            &mut surface,
+            area,
+            &hud_font,
+            &font,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &[None],
+            &component_icons,
+            false,
+            0,
+        );
+
+        let metal_cell = Rect::new(521, 428, 24, 16);
+        let wood_cell = Rect::new(545, 428, 24, 16);
+        assert!(contains_color(&surface, metal_cell, metal));
+        assert!(!contains_color(&surface, metal_cell, wood));
+        assert!(contains_color(&surface, wood_cell, wood));
+        assert!(!contains_color(&surface, wood_cell, metal));
+        assert!(
+            contains_color(&surface, metal_cell, CLASSIC_CAPTION_COLOR),
+            "METL cell must overlay the white literal 2x count"
+        );
+        assert!(
+            contains_color(&surface, wood_cell, CLASSIC_CAPTION_COLOR),
+            "WOOD cell must overlay the white literal 4x count"
+        );
     }
 
     #[test]
@@ -2605,6 +2806,7 @@ mod tests {
             &gfx,
             None,
             &icons,
+            &[],
             true,
             0,
         );
@@ -2637,6 +2839,7 @@ mod tests {
             &gfx,
             None,
             &icons,
+            &[],
             true,
             0,
         );

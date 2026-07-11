@@ -10531,6 +10531,20 @@ impl GameApp {
                         .map(definition_menu_picture)
                 })
                 .collect::<Vec<_>>();
+            let selected_component_icons = usize::try_from(menu.selection)
+                .ok()
+                .and_then(|selection| menu.items.get(selection))
+                .map(|item| {
+                    item.components
+                        .iter()
+                        .map(|component| {
+                            self.engine
+                                .definition_picture_image(&component.definition_id)
+                                .map(definition_menu_picture)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             {
                 let show_commands = self.display_flags.show_commands;
                 let show_command_keys = self.display_flags.show_command_keys;
@@ -10574,6 +10588,7 @@ impl GameApp {
                     gfx,
                     title_icon.as_ref(),
                     &item_icons,
+                    &selected_component_icons,
                     self.mouse_control,
                     script_menu_time,
                 );
