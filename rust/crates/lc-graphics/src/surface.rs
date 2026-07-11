@@ -673,7 +673,7 @@ impl Surface {
 mod tests {
     use super::*;
     use crate::color::Color;
-    use rand::Rng;
+    use rand::{rngs::SmallRng, Rng, SeedableRng};
 
     #[test]
     fn fill_sets_all_pixels() {
@@ -943,7 +943,9 @@ mod tests {
         dest.fill(Color::opaque(10, 20, 30));
 
         let mut src = Surface::new(4, 4, PixelFormat::Rgba8888);
-        let mut rng = rand::thread_rng();
+        // Seeded so the dev-dep needs no thread_rng (std_rng feature), keeping
+        // rand's feature set identical between the build and test graphs.
+        let mut rng = SmallRng::seed_from_u64(0x5EED);
         for y in 0..4u32 {
             for x in 0..4u32 {
                 let color = Color::new(rng.gen(), rng.gen(), rng.gen(), 255);
