@@ -28867,6 +28867,7 @@ impl Engine {
                 function,
                 caller,
                 tx,
+                tx_definition,
                 ty,
                 target2,
                 on_result,
@@ -28876,7 +28877,12 @@ impl Engine {
                 };
                 let mut args = Vec::new();
                 args.push(object_reference_value(caller));
-                args.push(tx.map(Value::Int).unwrap_or(Value::Nil));
+                args.push(
+                    tx_definition
+                        .map(Value::C4Id)
+                        .or_else(|| tx.map(Value::Int))
+                        .unwrap_or(Value::Nil),
+                );
                 let ty_value = Value::Int(ty.unwrap_or(0));
                 args.push(ty_value);
                 let target2_value = target2.map(object_reference_value).unwrap_or(Value::Nil);
@@ -28952,7 +28958,11 @@ impl Engine {
                     .target
                     .map(object_reference_value)
                     .unwrap_or(Value::Nil),
-                command.tx.map(Value::Int).unwrap_or(Value::Nil),
+                command
+                    .tx_definition
+                    .map(Value::C4Id)
+                    .or_else(|| command.tx.map(Value::Int))
+                    .unwrap_or(Value::Nil),
                 Value::Int(command.ty.unwrap_or(0)),
                 command
                     .target2

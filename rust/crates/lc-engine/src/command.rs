@@ -2680,6 +2680,50 @@ mod tests {
     }
 
     #[test]
+    fn enter_moves_toward_the_target_while_contained_elsewhere() {
+        // Enter does not stall when the actor is in another structure. Its
+        // far branch queues MoveTo(target entrance), and MoveTo then queues
+        // Exit before steering (C4Command.cpp:586-615,213-217). Workshop
+        // production relies on this after Acquire buys material in HUT3.
+        let actor_id = ObjectId::new(51);
+        let current_container_id = ObjectId::new(52);
+        let target_id = ObjectId::new(53);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(20, 20);
+        actor.container = Some(current_container_id);
+        let current_container = snapshot_with_id(current_container_id.as_u64());
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(120, 20);
+        target.shape = DefinitionRect::new(110, 10, 20, 20);
+        target.ocf = ocf::ENTRANCE;
+        target.entrance_status = true;
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (current_container_id, current_container),
+            (target_id, target),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 10);
+        let mut state = EnterState::from_request(
+            &CommandRequest::new(CommandId::Enter).with_target(Some(target_id)),
+        )
+        .expect("Enter state");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        match result.operations.as_slice() {
+            [CommandOperation::PushFront(request)] => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.target, Some(target_id));
+                assert_eq!(request.update_interval, 50);
+            }
+            other => panic!("expected MoveTo target entrance, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn grab_requests_move_when_far() {
         let actor_id = ObjectId::new(200);
         let target_id = ObjectId::new(300);
@@ -4598,7 +4642,11 @@ mod tests {
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.command_direction = CommandDirection::Right;
 
-        let target = snapshot_with_id(target_id.as_u64());
+        // C4Command::Call only requires a non-null Target pointer; it does
+        // not require Alive (C4Command.cpp:2355-2365). Real targets include
+        // nonliving structures such as Tutorial07's WRKS.
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.alive = false;
 
         let mut objects = HashMap::new();
         objects.insert(builder.id, builder.clone());
@@ -4644,6 +4692,7 @@ mod tests {
                 function,
                 caller,
                 tx,
+                tx_definition,
                 ty,
                 target2,
                 on_result,
@@ -4652,6 +4701,7 @@ mod tests {
                 assert_eq!(function, "ControlCall");
                 assert_eq!(*caller, builder_id);
                 assert_eq!(*tx, Some(42));
+                assert!(tx_definition.is_none());
                 assert_eq!(*ty, Some(7));
                 assert_eq!(*target2, Some(target2_id));
                 assert!(on_result.is_none());
@@ -5078,6 +5128,7 @@ mod tests {
                 function,
                 caller,
                 tx,
+                tx_definition,
                 ty,
                 target2,
                 on_result,
@@ -5086,6 +5137,7 @@ mod tests {
                 assert_eq!(function, "ControlTransfer");
                 assert_eq!(*caller, actor_id);
                 assert_eq!(*tx, Some(42));
+                assert!(tx_definition.is_none());
                 assert_eq!(*ty, Some(-5));
                 assert!(target2.is_none());
                 match on_result {
@@ -5271,6 +5323,74 @@ mod tests {
                 assert_eq!(request.ty, Some(0));
             }
             other => panic!("expected MoveTo request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_enters_the_container_of_an_internal_target() {
+        // C4Command::Build ignores Tx/Ty and, when the incomplete target is
+        // contained elsewhere, enters Target->Contained rather than walking
+        // to the placeholder coordinates (C4Command.cpp:823-899). Workshop
+        // passes explicit zero slots in AddCommand(...,"Build",pToBuild,...)
+        // (Objects.c4d/Structures.c4d/Workshop.c4d/Script.c:76-91).
+        let builder_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+        let workshop_id = ObjectId::new(3);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(8, 199);
+        builder.physical.can_construct = 1;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(150, 184);
+        target.container = Some(workshop_id);
+        target.alive = false;
+        target.construction = FULL_CON / 100;
+
+        let mut workshop = snapshot_with_id(workshop_id.as_u64());
+        workshop.position = target.position;
+        workshop.alive = false;
+        workshop.category = CATEGORY_STRUCTURE;
+
+        let objects = HashMap::from([
+            (builder.id, builder.clone()),
+            (target.id, target),
+            (workshop.id, workshop),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = BuildState::from_request(
+            &CommandRequest::new(CommandId::Build)
+                .with_target(Some(target_id))
+                .with_tx(Some(0))
+                .with_ty(Some(0)),
+        )
+        .expect("Build state");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        match result.operations.as_slice() {
+            [CommandOperation::PushFront(request)] => {
+                assert_eq!(request.id, CommandId::Enter);
+                assert_eq!(request.target, Some(workshop_id));
+                assert_eq!(request.update_interval, 50);
+            }
+            other => panic!("expected Enter workshop request, got {other:?}"),
         }
     }
 
@@ -7782,6 +7902,10 @@ pub struct CommandRequest {
     pub target: Option<ObjectId>,
     pub target2: Option<ObjectId>,
     pub tx: Option<i32>,
+    /// C4Command::Tx is a tagged C4Value. Most commands use its integer
+    /// payload, but Call must preserve a C4ID tag for script parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_definition: Option<DefinitionId>,
     pub ty: Option<i32>,
     pub data: CommandData,
     pub update_interval: u32,
@@ -7796,6 +7920,7 @@ impl CommandRequest {
             target: None,
             target2: None,
             tx: None,
+            tx_definition: None,
             ty: None,
             data: CommandData::None,
             update_interval: 0,
@@ -7816,6 +7941,13 @@ impl CommandRequest {
 
     pub fn with_tx(mut self, tx: Option<i32>) -> Self {
         self.tx = tx;
+        self.tx_definition = None;
+        self
+    }
+
+    pub fn with_tx_definition(mut self, definition_id: DefinitionId) -> Self {
+        self.tx = definition_id_to_c4id(&definition_id);
+        self.tx_definition = Some(definition_id);
         self
     }
 
@@ -7958,6 +8090,8 @@ pub enum CommandEvent {
         function: String,
         caller: ObjectId,
         tx: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tx_definition: Option<DefinitionId>,
         ty: Option<i32>,
         target2: Option<ObjectId>,
         #[serde(default)]
@@ -8176,6 +8310,7 @@ pub struct CommandView {
     pub name: String,
     pub target: Option<ObjectId>,
     pub tx: Option<i32>,
+    pub tx_definition: Option<DefinitionId>,
     pub ty: Option<i32>,
     pub target2: Option<ObjectId>,
     pub data: CommandData,
@@ -8187,6 +8322,7 @@ impl CommandView {
             name,
             target: request.and_then(|request| request.target),
             tx: request.and_then(|request| request.tx),
+            tx_definition: request.and_then(|request| request.tx_definition.clone()),
             ty: request.and_then(|request| request.ty),
             target2: request.and_then(|request| request.target2),
             data: request
@@ -9152,12 +9288,6 @@ impl EnterState {
             return CommandStepResult::failed(self.update_to_stop(ctx));
         }
 
-        if let Some(container) = ctx.object.container {
-            if container != self.target && target_snapshot.container != Some(container) {
-                return CommandStepResult::running(self.update_to_stop(ctx));
-            }
-        }
-
         // "If in entrance range": C4Command::Enter tests the clonk point
         // against the target's shape (Target->At(cx, cy, ocf),
         // C4Command.cpp:586-588).
@@ -9169,6 +9299,7 @@ impl EnterState {
                     function: "ActivateEntrance".into(),
                     caller: ctx.object.id,
                     tx: None,
+                    tx_definition: None,
                     ty: None,
                     target2: None,
                     on_result: None,
@@ -9259,6 +9390,7 @@ impl ExitState {
                 function: "ActivateEntrance".into(),
                 caller: ctx.object.id,
                 tx: None,
+                tx_definition: None,
                 ty: None,
                 target2: None,
                 on_result: Some(CallResultAction::FailCommandOnFalse {
@@ -9328,9 +9460,9 @@ impl BuildState {
     }
 
     fn target_position(&self, ctx: &CommandRuntimeContext<'_>) -> Option<Vector2> {
-        if let Some(site) = self.site {
-            return Some(site);
-        }
+        // C4Command::Build approaches Target itself; unlike Construct, its
+        // Tx/Ty fields are not a construction-site override
+        // (C4Command.cpp:823-899).
         ctx.resolve_position(self.target)
     }
 
@@ -9431,12 +9563,21 @@ impl BuildState {
 
         let mut operations = Vec::new();
         if !is_structure && self.should_issue_move(ctx.frame) {
-            let mut request = CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(target_position.x))
-                .with_ty(Some(target_position.y));
-            if same_container {
-                request = request.with_target(target_snapshot.container);
-            }
+            let request = target_snapshot.container.map_or_else(
+                || {
+                    CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(target_position.x))
+                        .with_ty(Some(target_position.y))
+                        .with_update_interval(50)
+                        .with_mode(CommandMode::SilentSub)
+                },
+                |container| {
+                    CommandRequest::new(CommandId::Enter)
+                        .with_target(Some(container))
+                        .with_update_interval(50)
+                        .with_mode(CommandMode::SilentSub)
+                },
+            );
             operations.push(CommandOperation::PushFront(request));
         }
 
@@ -9811,6 +9952,7 @@ impl TransferState {
                 function: "ControlTransfer".into(),
                 caller: ctx.object.id,
                 tx: self.tx,
+                tx_definition: None,
                 ty: self.ty,
                 target2: None,
                 on_result: Some(CallResultAction::CompleteCommandOnFalse {
@@ -12286,6 +12428,8 @@ struct CallState {
     target: ObjectId,
     function: String,
     tx: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tx_definition: Option<DefinitionId>,
     ty: Option<i32>,
     target2: Option<ObjectId>,
     executed: bool,
@@ -12302,6 +12446,7 @@ impl CallState {
             target,
             function,
             tx: request.tx,
+            tx_definition: request.tx_definition.clone(),
             ty: request.ty,
             target2: request.target2,
             executed: false,
@@ -12318,7 +12463,7 @@ impl CallState {
             return CommandStepResult::failed(None);
         };
 
-        if !target_snapshot.is_active() {
+        if !target_snapshot.is_status_active() {
             self.executed = true;
             return CommandStepResult::failed(None);
         }
@@ -12335,6 +12480,7 @@ impl CallState {
             function: self.function.clone(),
             caller: ctx.object.id,
             tx: self.tx,
+            tx_definition: self.tx_definition.clone(),
             ty: self.ty,
             target2: self.target2,
             on_result: None,

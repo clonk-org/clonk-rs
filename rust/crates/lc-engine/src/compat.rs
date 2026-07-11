@@ -1607,13 +1607,21 @@ fn parse_command_request(
         None
     };
 
-    let tx = if args.len() > 2 {
+    let (tx, tx_definition) = if args.len() > 2 {
         match &args[2] {
-            Value::Nil => None,
-            other => Some(value_to_i32(other, function, "Tx")?),
+            Value::Nil => (None, None),
+            // Tx is a C4Value rather than C4ValueInt in all three C++
+            // wrappers. In legacy syntax ConvertTo(C4V_Int) leaves a C4ID's
+            // type tag intact, and C4CMD_Call forwards that tagged value to
+            // its script callback (C4Script.cpp:840-916).
+            Value::C4Id(id) => (
+                definition_id_to_c4id(id),
+                (!id.is_empty()).then(|| id.clone()),
+            ),
+            other => (Some(value_to_i32(other, function, "Tx")?), None),
         }
     } else {
-        None
+        (None, None)
     };
 
     let ty = if args.len() > 3 {
@@ -1683,7 +1691,7 @@ fn parse_command_request(
             CommandArgLayout::Add => CommandMode::SilentSub,
         });
 
-    Ok(CommandRequest::new(id)
+    let request = CommandRequest::new(id)
         .with_target(target)
         .with_target2(target2)
         .with_tx(tx)
@@ -1691,7 +1699,10 @@ fn parse_command_request(
         .with_data(data)
         .with_update_interval(update_interval)
         .with_retries(retries)
-        .with_mode(mode))
+        .with_mode(mode);
+    Ok(tx_definition
+        .map(|definition| request.clone().with_tx_definition(definition))
+        .unwrap_or(request))
 }
 
 fn parse_player_type_filter(value: Option<&Value>, function: &str) -> Result<i32, RuntimeError> {
@@ -13575,7 +13586,11 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
                 .target
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil)),
-            2 => Ok(view.tx.map(Value::Int).unwrap_or(Value::Nil)),
+            2 => Ok(view
+                .tx_definition
+                .map(Value::C4Id)
+                .or_else(|| view.tx.map(Value::Int))
+                .unwrap_or(Value::Nil)),
             3 => Ok(Value::Int(view.ty.unwrap_or(0))),
             4 => Ok(view
                 .target2
@@ -17692,7 +17707,11 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
                 .target
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil),
-            command.tx.map(Value::Int).unwrap_or(Value::Nil),
+            command
+                .tx_definition
+                .map(Value::C4Id)
+                .or_else(|| command.tx.map(Value::Int))
+                .unwrap_or(Value::Nil),
             Value::Int(command.ty.unwrap_or(0)),
             command
                 .target2
@@ -17796,8 +17815,9 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
 fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
     // C++ FnAddCommand leads with the object slot (pObj, szCommand, ...;
     // C4Script.cpp:870-874); 0/nil means the calling object. The
-    // name-first form stays for the command-DSL fixtures. Like
-    // SetCommand, only the SELF form is dispatchable (documented gap).
+    // name-first form stays for the command-DSL fixtures. A FOREIGN target
+    // re-dispatches through the reentrancy seam like SetCommand and
+    // AppendCommand so the write folds into that object's command stack.
     let mut args = args;
     let mut leading_target: Option<ObjectId> = None;
     let leads_with_object_slot = matches!(
@@ -17812,6 +17832,14 @@ fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
         // C++ FnAddCommand: !szCommand -> false (C4Script.cpp:843-899).
         return Ok(Value::Bool(false));
+    }
+    if let Some(target) = leading_target {
+        if active_object_id() != Some(target) {
+            return match call_world_object_function(target, "AddCommand", args) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
     }
 
     let command_name = match &args[0] {
@@ -17841,16 +17869,6 @@ fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
         };
-        if let Some(target) = leading_target {
-            if target != object.id() {
-                tracing::warn!(
-                    ?target,
-                    "AddCommand on a FOREIGN object is not dispatchable yet; ignoring"
-                );
-                return Ok(Value::Bool(false));
-            }
-        }
-
         let success = object.push_command_front(request);
         Ok(Value::Bool(success))
     })
@@ -34249,6 +34267,77 @@ func Missing() { return ComponentAll(nil, WOOD); }
     }
 
     #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // HostWorldContext definition scripts are shared read-only by the fixture.
+    fn add_command_targets_a_foreign_worker_like_cpp() {
+        // FnAddCommand queues directly on its explicit pObj
+        // (C4Script.cpp:871-892). Workshop::SelectProduction invokes it
+        // from WRKS script context with the CLNK worker as pObj
+        // (Objects.c4d/Structures.c4d/Workshop.c4d/Script.c:68-72).
+        let worker_id = ObjectId::new(2);
+        let worker = HostWorldObject::new(
+            worker_id,
+            "CLNK",
+            ObjectStatus::Normal,
+            "Walk",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            Vec::new(),
+        )));
+        let mut worker_script = lc_script::Engine::new();
+        register_host_functions(&mut worker_script);
+        let world = HostWorldContext::from_objects(vec![worker])
+            .with_definition_metadata(Rc::new(HashMap::from([(
+                DefinitionId::from("CLNK"),
+                DefinitionMetadata::default(),
+            )])))
+            .with_definition_scripts(HashMap::from([(
+                DefinitionId::from("CLNK"),
+                Arc::new(worker_script),
+            )]));
+        let args = [
+            object_reference_value(worker_id),
+            Value::String("Enter".into()),
+            object_reference_value(ObjectId::new(1)),
+        ];
+
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || add_command(&args));
+
+        assert_eq!(result.expect("foreign AddCommand succeeds"), Value::Bool(true));
+        let operations = &outcome
+            .other_objects
+            .iter()
+            .find(|outcome| outcome.object_id == worker_id)
+            .expect("foreign worker outcome recorded")
+            .command_operations;
+        match operations.as_slice() {
+            [CommandOperation::PushFront(request)] => {
+                assert_eq!(request.id, CommandId::Enter);
+                assert_eq!(request.target, Some(ObjectId::new(1)));
+            }
+            other => panic!("expected one foreign PushFront, got {other:?}"),
+        }
+        assert!(outcome.command_operations.is_empty(), "caller remains unchanged");
+    }
+
+    #[test]
     fn append_command_pushes_back() {
         let args = vec![
             Value::String("MoveTo".into()),
@@ -34358,6 +34447,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             name: "MoveTo".into(),
             target: None,
             tx: Some(200),
+            tx_definition: None,
             ty: Some(90),
             target2: None,
             data: CommandData::Integer(0),
@@ -34744,6 +34834,48 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 assert_eq!(request.mode, CommandMode::SilentSub);
             }
             other => panic!("expected PushFront operation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn add_command_call_accepts_the_workshop_c4id_tx_argument() {
+        // FnAddCommand deliberately keeps Tx as C4Value for C4CMD_Call
+        // (C4Script.cpp:871-892). Workshop::SelectProduction passes its
+        // product C4ID in that slot and StartProduction must receive the
+        // same typed value (Objects.c4d/Structures.c4d/Workshop.c4d/
+        // Script.c:68-81).
+        let this = object_reference_value(ObjectId::new(1));
+        let args = vec![
+            this.clone(),
+            Value::String("Call".into()),
+            this,
+            Value::C4Id("BALN".into()),
+            Value::Bool(false),
+            Value::Int(0),
+            Value::Int(0),
+            Value::String("StartProduction".into()),
+            Value::Int(0),
+            Value::Int(1),
+        ];
+
+        let (result, outcome) = with_object_host_context(|| add_command(&args));
+
+        assert_eq!(result.expect("Workshop AddCommand succeeds"), Value::Bool(true));
+        match &outcome.command_operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Call);
+                assert_eq!(request.target, Some(ObjectId::new(1)));
+                assert_eq!(
+                    request.tx,
+                    definition_id_to_c4id("BALN"),
+                    "the command retains the C4ID's raw C4Value payload"
+                );
+                assert_eq!(request.tx_definition.as_deref(), Some("BALN"));
+                assert_eq!(request.ty, Some(0));
+                assert_eq!(request.data, CommandData::Text("StartProduction".into()));
+                assert_eq!(request.mode, CommandMode::Base);
+            }
+            other => panic!("expected PushFront operation, got {other:?}"),
         }
     }
 
