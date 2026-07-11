@@ -3013,7 +3013,7 @@ impl GraphicsSystem {
                     crew.portrait.as_ref(),
                     crew.rank_symbols.as_ref(),
                 );
-                hud::draw_inventory(&mut self.surface, rect, &crew.inventory);
+                hud::draw_inventory(&mut self.surface, &font, rect, &crew.inventory);
                 hud::draw_energy_bar(
                     &mut self.surface,
                     &self.hud_graphics,

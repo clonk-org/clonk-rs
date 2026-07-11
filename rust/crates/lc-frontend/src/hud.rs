@@ -473,6 +473,7 @@ pub fn draw_cursor_info(
 /// (src/C4ObjectList.cpp:343-372; src/C4Facet.cpp:44-48).
 pub fn draw_inventory(
     surface: &mut Surface,
+    font: &HudFont<'_>,
     viewport: SurfaceRect,
     inventory: &[InventoryOverlay],
 ) {
@@ -487,6 +488,18 @@ pub fn draw_inventory(
         );
         if let Some(picture) = item.picture.as_ref() {
             draw_image_aspect(surface, picture, cell);
+        }
+        // DrawIDList writes "{count}x" at the section's bottom-right for
+        // every stack except a single item (C4ObjectList.cpp:343-368).
+        if item.count != 1 {
+            font.draw(
+                surface,
+                cell.x + cell.width as i32 - 1,
+                cell.y + cell.height as i32 - 1 - font.line_height(),
+                &format!("{}x", item.count),
+                MESSAGE_COLOR,
+                TextAlign::Right,
+            );
         }
     }
 }
@@ -1593,7 +1606,13 @@ mod tests {
             },
         ];
 
-        draw_inventory(&mut target, viewport, &inventory);
+        let font = bitmap_font();
+        draw_inventory(
+            &mut target,
+            &HudFont::Fallback(&font),
+            viewport,
+            &inventory,
+        );
 
         // Origin = (10+5, 20+100-5-35) = (15,80); the second section starts
         // at x=50. Pixels immediately above/left remain untouched.
@@ -1603,6 +1622,42 @@ mod tests {
         assert_eq!(target.get_pixel(84, 114), Some(Color::opaque(10, 220, 10)));
         assert_eq!(target.get_pixel(14, 80), Some(Color::opaque(0, 0, 0)));
         assert_eq!(target.get_pixel(15, 79), Some(Color::opaque(0, 0, 0)));
+    }
+
+    #[test]
+    fn inventory_stack_draws_cpp_count_suffix_at_bottom_right() {
+        let render = |count| {
+            let mut target = surface(60, 60);
+            let font = bitmap_font();
+            let inventory = [crate::InventoryOverlay {
+                object_id: lc_engine::ObjectId::new(1),
+                definition_id: "ROCK".to_string(),
+                picture: None,
+                count,
+            }];
+            draw_inventory(
+                &mut target,
+                &HudFont::Fallback(&font),
+                SurfaceRect::new(0, 0, 60, 60),
+                &inventory,
+            );
+            target
+        };
+
+        let single = render(1);
+        let stack = render(2);
+        assert!(
+            single
+                .pixels()
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0, 0, 0, 255]),
+            "DrawIDList suppresses the count for exactly one item"
+        );
+        assert_ne!(
+            stack.pixels(),
+            single.pixels(),
+            "a stack draws the C++ `2x` suffix"
+        );
     }
 
     #[test]
