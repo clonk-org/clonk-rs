@@ -1,5 +1,4 @@
 #[allow(dead_code)]
-mod support;
 
 use std::error::Error;
 
@@ -7,8 +6,8 @@ use lc_engine::{
     Engine, JoinPlayerConfig, ObjectId, COM_CURSOR_RIGHT, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT,
     COM_THROW, COM_UP,
 };
-use support::real_scenario::load_tutorial;
-use support::virtual_player::VirtualPlayer;
+use crate::support::real_scenario::load_tutorial;
+use crate::support::virtual_player::VirtualPlayer;
 
 fn load_tutorial06() -> (Engine, i32) {
     let mut engine = load_tutorial(6, 0);
