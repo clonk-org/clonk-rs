@@ -357,6 +357,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn move_to_crew_uses_one_fifth_shape_width_as_target_range() {
+        // Crew override the default five-pixel MoveToRange with
+        // Shape.Wdt/5. Tutorial05's eight-pixel-wide CLNK at x=156 must
+        // therefore walk toward the elevator's centering point x=160
+        // instead of treating the four-pixel gap as arrived
+        // (C4Command.cpp:286-306; Case.c4d/Script.c:171-220).
+        let mut clonk = walking_jumper(Vector2::new(156, 100));
+        clonk.shape = DefinitionRect::new(-4, -9, 8, 18);
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&clonk, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(160))
+                .with_ty(Some(100)),
+        );
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Right),
+            "four pixels exceeds CLNK Shape.Wdt/5 = 1"
+        );
+    }
+
     // C4Command::MoveTo DFA_SWIM arm (C4Command.cpp:370-382): on Tick2
     // frames (Game.iTick2 != 0, i.e. odd FrameCounter) the swimmer steers
     // horizontally toward Tx (with target range); on !Tick2 frames it
@@ -3289,7 +3318,7 @@ mod tests {
     }
 
     #[test]
-    fn ungrab_sets_idle_and_completes() {
+    fn ungrab_stands_in_walk_and_completes() {
         let actor_id = ObjectId::new(370);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
@@ -3324,8 +3353,12 @@ mod tests {
         let update = result.update.expect("ungrab should update actor");
         assert_eq!(update.command_direction, Some(CommandDirection::Stop));
         let action = update.action.expect("ungrab should reset action");
-        assert_eq!(action.name.as_deref(), Some("Idle"));
-        assert_eq!(action.target, Some(None));
+        assert_eq!(action.name.as_deref(), Some("Walk"));
+        assert_eq!(
+            action.target, None,
+            "ObjectActionStand retains the former action target"
+        );
+        assert_eq!(update.velocity, Some(Vector2::ZERO));
     }
 
     #[test]
@@ -8556,7 +8589,14 @@ impl MoveToState {
 
         let dx = target.x - position.x;
         let dy = target.y - position.y;
-        if dx.abs() <= self.tolerance && dy.abs() <= self.tolerance {
+        // Crew use their shape width rather than the global MoveToRange:
+        // `iTargetRange = Shape.Wdt / 5` (C4Command.cpp:286-292).
+        let target_range = if ctx.object.ocf & ocf::CREW_MEMBER != 0 {
+            ctx.object.shape.width / 5
+        } else {
+            self.tolerance
+        };
+        if dx.abs() <= target_range && dy.abs() <= target_range {
             self.arrived_frames += 1;
         } else {
             self.arrived_frames = 0;
@@ -8575,9 +8615,9 @@ impl MoveToState {
             // range. ComDir is left alone when no condition hits.
             ActionProcedure::Swim => {
                 if ctx.frame % 2 != 0 {
-                    if dx > self.tolerance {
+                    if dx > target_range {
                         CommandDirection::Right
-                    } else if dx < -self.tolerance {
+                    } else if dx < -target_range {
                         CommandDirection::Left
                     } else {
                         self.last_direction
@@ -8593,9 +8633,9 @@ impl MoveToState {
             // DFA_SCALE (C4Command.cpp:335-338): vertical steering only —
             // cy > Ty + range climbs Up, cy < Ty - range slides Down.
             ActionProcedure::Scale => {
-                if dy < -self.tolerance {
+                if dy < -target_range {
                     CommandDirection::Up
-                } else if dy > self.tolerance {
+                } else if dy > target_range {
                     CommandDirection::Down
                 } else {
                     self.last_direction
@@ -8607,9 +8647,9 @@ impl MoveToState {
             // DFA_PUSH/DFA_PULL (C4Command.cpp:329-333): horizontal
             // steering only, measured from the vehicle position above.
             ActionProcedure::Push | ActionProcedure::Pull => {
-                if dx > self.tolerance {
+                if dx > target_range {
                     CommandDirection::Right
-                } else if dx < -self.tolerance {
+                } else if dx < -target_range {
                     CommandDirection::Left
                 } else {
                     self.last_direction
@@ -8618,22 +8658,22 @@ impl MoveToState {
             // DFA_HANGLE (C4Command.cpp:384-387): horizontal steering
             // only; the angle-based drop follows below.
             ActionProcedure::Hang => {
-                if dx > self.tolerance {
+                if dx > target_range {
                     CommandDirection::Right
-                } else if dx < -self.tolerance {
+                } else if dx < -target_range {
                     CommandDirection::Left
                 } else {
                     self.last_direction
                 }
             }
             _ => {
-                if dx > self.tolerance {
+                if dx > target_range {
                     CommandDirection::Right
-                } else if dx < -self.tolerance {
+                } else if dx < -target_range {
                     CommandDirection::Left
-                } else if dy > self.tolerance {
+                } else if dy > target_range {
                     CommandDirection::Down
-                } else if dy < -self.tolerance {
+                } else if dy < -target_range {
                     CommandDirection::Up
                 } else {
                     CommandDirection::Stop
@@ -10563,11 +10603,14 @@ impl UnGrabState {
         }
 
         if ctx.object.action_procedure == ActionProcedure::Push {
-            let action_update = ActionUpdate::default()
-                .with_name("Idle")
-                .with_target(None)
-                .with_force(true);
-            update = update.with_action_update(action_update);
+            // ObjectComUnGrab calls ObjectActionStand: ComDir Stop, Walk,
+            // and zero xdir/ydir. SetActionByName receives no target, so
+            // the previous target is retained (C4ObjectCom.cpp:41-46,
+            // 261-278; C4Object.cpp:4142-4143).
+            let action_update = ActionUpdate::default().with_name("Walk").with_force(true);
+            update = update
+                .with_action_update(action_update)
+                .with_velocity(Vector2::ZERO);
             needs_update = true;
         }
 
