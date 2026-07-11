@@ -17239,13 +17239,14 @@ mod tests {
     }
 
     #[test]
-    fn app_virtual_keyboard_flies_tutorial02_and_starts_first_loam_bridge() {
+    fn app_virtual_keyboard_completes_real_tutorial02_route() {
         // The real window path maps keyboard-set-one X/X to Grab and S to Up.
         // While the Clonk pushes BALN, Jump'n'Run ControlUpdate follows held
         // S/X state and keeps DFA_PUSH attached to its moving solid mask; X/X
-        // then falls through to UnGrab before physical D/D, Z and A activate
-        // the first LOAM bridge (C4Object.cpp:3321-3338,3682-3724,5058-5114;
-        // Tutorial02.c4s/Script.c:58-149).
+        // then falls through to UnGrab. Physical C/Z/D/A/S complete all three
+        // LOAM bridges, recover FLAG and return it through HUT3's Put menu
+        // (C4Object.cpp:3321-3338,3682-3724,4581-4652,5058-5114;
+        // Tutorial02.c4s/Script.c:58-214).
         let mut app = real_tutorial_app(2, "Tutorial 2 virtual player");
 
         let clonk = app
@@ -17260,6 +17261,7 @@ mod tests {
             .find(|object| object.definition_id == "BALN")
             .expect("Tutorial02 BALN")
             .id;
+        let hut = app_object_with_definition(&app, "HUT3").expect("Tutorial02 HUT3");
         let loam_menu_identification =
             serde_json::from_value(serde_json::json!({ "C4Id": "LMMS" }))
                 .expect("LOAM menu identification deserializes");
@@ -17568,7 +17570,7 @@ mod tests {
 
         // Contact may deterministically choose FLAG or one of four LOAM
         // objects. Script30 requires a real world Throw when FLAG wins; face
-        // the island center with one Z frame, then use physical A.
+        // the island center with physical Z, then use physical A.
         if app_clonk_carries(&app, clonk, "FLAG") {
             advance_app_until(&mut app, "Tutorial02 temporary FLAG prompt", 450, |app| {
                 app_tutorial_message_contains(app, "Please drop the flag for now")
@@ -17576,7 +17578,11 @@ mod tests {
             AppVirtualKeyboard::new(&mut app)
                 .press(VirtualKeyCode::Z)
                 .expect("physical Z faces island center");
-            app.update().expect("face left before throwing FLAG");
+            advance_app_until(&mut app, "CLNK faces left before throwing FLAG", 30, |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.direction == Direction::Left)
+            });
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
@@ -17702,6 +17708,544 @@ mod tests {
             bridge_start,
             "physical menu inputs must start Bridge without positioning the CLNK"
         );
+
+        // C++ advances the moving UpLeft bridge first at Action.Time 6, then
+        // moves sixteen (-1,-1) steps before returning to Walk
+        // (C4Object.cpp:4581-4652,4755-4756).
+        for _ in 0..6 {
+            app.update().expect("advance first LOAM Bridge step");
+        }
+        let first_bridge_step = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("CLNK survives first LOAM Bridge step");
+        assert_eq!(first_bridge_step.action.name, "Bridge");
+        assert_eq!(first_bridge_step.action.time, 6);
+        assert_eq!(
+            first_bridge_step.action.data, 0x0064_0110,
+            "LOAM must request C++'s moving, non-wall Earth bridge"
+        );
+        assert_eq!(
+            first_bridge_step.position,
+            Vector2::new(bridge_start.x - 1, bridge_start.y - 1)
+        );
+        advance_app_until(&mut app, "first UpLeft bridge completes", 114, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        let first_bridge_end = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("CLNK after first bridge")
+            .position;
+        assert_eq!(
+            (
+                first_bridge_end.x - bridge_start.x,
+                first_bridge_end.y - bridge_start.y,
+            ),
+            (-16, -16)
+        );
+        advance_app_until(&mut app, "Tutorial02 three-bridge prompt", 180, |app| {
+            app_tutorial_message_contains(app, "build three diagonal bridges")
+        });
+
+        // Cross back over bridge one for LOAM2, release C to stop, then return
+        // with Z to its upper-left endpoint. Every fresh LMMS begins at row 7;
+        // exactly one physical Z selects row 6, Diagonal left.
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("physical C crosses bridge one for LOAM2");
+        advance_app_until(&mut app, "CLNK collects LOAM2", 220, |app| {
+            app_clonk_carries(app, clonk, "LOAM")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C after LOAM2 pickup");
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("physical Z returns to bridge-one endpoint");
+        advance_app_until(&mut app, "CLNK returns to bridge-one endpoint", 220, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.container.is_none()
+                    && object.action.name == "Walk"
+                    && object.position.x <= first_bridge_end.x
+            })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z at bridge-one endpoint");
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("first physical D for LOAM2");
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("second physical D for LOAM2");
+        }
+        advance_app_until(&mut app, "LOAM2 opens LMMS", 20, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == loam_menu_identification)
+        });
+        assert_eq!(
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .map(|(_, menu)| menu.selection),
+            Some(7)
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::Z)
+            .expect("physical Z selects LOAM2 Diagonal left");
+        assert_eq!(
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .and_then(|(_, menu)| {
+                    usize::try_from(menu.selection)
+                        .ok()
+                        .and_then(|index| menu.items.get(index))
+                })
+                .map(|item| item.caption.as_str()),
+            Some("Diagonal left")
+        );
+        let second_bridge_start = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("CLNK before second bridge")
+            .position;
+        assert!(
+            (second_bridge_start.x - first_bridge_end.x).abs() <= 1
+                && (second_bridge_start.y - first_bridge_end.y).abs() <= 1,
+            "bridge two must continue bridge one; first_end={first_bridge_end:?}, second_start={second_bridge_start:?}"
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A starts second bridge");
+        advance_app_until(&mut app, "CLNK starts second Bridge", 10, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Bridge")
+        });
+        advance_app_until(&mut app, "second UpLeft bridge completes", 114, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        let second_bridge_end = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("CLNK after second bridge")
+            .position;
+        assert_eq!(
+            (
+                second_bridge_end.x - second_bridge_start.x,
+                second_bridge_end.y - second_bridge_start.y,
+            ),
+            (-16, -16)
+        );
+
+        // Cross both spans for LOAM3. FLAG may be encountered first after the
+        // earlier Script30 throw; face right with a physical C frame, throw it
+        // using world A, finish Throw, then continue to adjacent LOAM.
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("physical C crosses two bridges for LOAM3");
+        advance_app_until(&mut app, "CLNK reaches LOAM3 or FLAG", 260, |app| {
+            app_clonk_carries(app, clonk, "LOAM") || app_clonk_carries(app, clonk, "FLAG")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C at far-island material");
+        if app_clonk_carries(&app, clonk, "FLAG") {
+            AppVirtualKeyboard::new(&mut app)
+                .press(VirtualKeyCode::C)
+                .expect("physical C faces right before rethrowing FLAG");
+            advance_app_until(&mut app, "CLNK faces right before rethrowing FLAG", 30, |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.direction == Direction::Right)
+            });
+            {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .release(VirtualKeyCode::C)
+                    .expect("release physical C before rethrowing FLAG");
+                assert_eq!(
+                    keyboard
+                        .engine()
+                        .object_snapshot(clonk)
+                        .expect("CLNK before rethrowing FLAG")
+                        .direction,
+                    Direction::Right
+                );
+                keyboard
+                    .tap(VirtualKeyCode::A)
+                    .expect("physical world-A rethrows FLAG");
+            }
+            advance_app_until(&mut app, "recollected FLAG leaves CLNK", 30, |app| {
+                !app_clonk_carries(app, clonk, "FLAG")
+            });
+            advance_app_until(&mut app, "CLNK finishes rethrowing FLAG", 30, |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+            });
+            AppVirtualKeyboard::new(&mut app)
+                .press(VirtualKeyCode::C)
+                .expect("physical C continues to LOAM3");
+            advance_app_until(&mut app, "CLNK collects LOAM3", 100, |app| {
+                app_clonk_carries(app, clonk, "LOAM")
+            });
+            AppVirtualKeyboard::new(&mut app)
+                .release(VirtualKeyCode::C)
+                .expect("release physical C after LOAM3 pickup");
+        }
+        assert!(app_clonk_carries(&app, clonk, "LOAM"));
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("physical Z returns to bridge-two endpoint");
+        advance_app_until(&mut app, "CLNK returns to bridge-two endpoint", 260, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.container.is_none()
+                    && object.action.name == "Walk"
+                    && object.position.x <= second_bridge_end.x
+            })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z at bridge-two endpoint");
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("first physical D for LOAM3");
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("second physical D for LOAM3");
+        }
+        advance_app_until(&mut app, "LOAM3 opens LMMS", 20, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == loam_menu_identification)
+        });
+        assert_eq!(
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .map(|(_, menu)| menu.selection),
+            Some(7)
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::Z)
+            .expect("physical Z selects LOAM3 Diagonal left");
+        assert_eq!(
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .and_then(|(_, menu)| {
+                    usize::try_from(menu.selection)
+                        .ok()
+                        .and_then(|index| menu.items.get(index))
+                })
+                .map(|item| item.caption.as_str()),
+            Some("Diagonal left")
+        );
+        let third_bridge_start = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("CLNK before third bridge")
+            .position;
+        assert!(
+            (third_bridge_start.x - second_bridge_end.x).abs() <= 1
+                && (third_bridge_start.y - second_bridge_end.y).abs() <= 1,
+            "bridge three must continue bridge two; second_end={second_bridge_end:?}, third_start={third_bridge_start:?}"
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A starts third bridge");
+        advance_app_until(&mut app, "CLNK starts third Bridge", 10, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Bridge")
+        });
+        advance_app_until(&mut app, "third UpLeft bridge completes", 114, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        let third_bridge_end = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("CLNK after third bridge")
+            .position;
+        assert_eq!(
+            (
+                third_bridge_end.x - third_bridge_start.x,
+                third_bridge_end.y - third_bridge_start.y,
+            ),
+            (-16, -16)
+        );
+        let three_bridge_delta = (
+            third_bridge_end.x - bridge_start.x,
+            third_bridge_end.y - bridge_start.y,
+        );
+        assert!(
+            (three_bridge_delta.0 + 48).abs() <= 2
+                && (three_bridge_delta.1 + 48).abs() <= 2
+                && (360..445).contains(&third_bridge_end.x)
+                && (240..290).contains(&third_bridge_end.y),
+            "three contiguous bridges must reach Script81; delta={three_bridge_delta:?}, end={third_bridge_end:?}"
+        );
+        advance_app_until(&mut app, "Tutorial02 close-enough prompt", 180, |app| {
+            app_tutorial_message_contains(app, "close enough to jump")
+        });
+
+        // Walk back over all three bridges for FLAG. Four LOAM chunks exist
+        // for three spans, so throw a spare left with world A before continuing
+        // right to FLAG; inventory slot zero must then be FLAG.
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("physical C returns to far-island pickup");
+        advance_app_until(&mut app, "CLNK reaches FLAG or spare LOAM", 420, |app| {
+            app_clonk_carries(app, clonk, "FLAG") || app_clonk_carries(app, clonk, "LOAM")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C at final pickup");
+        if app_clonk_carries(&app, clonk, "LOAM") {
+            AppVirtualKeyboard::new(&mut app)
+                .press(VirtualKeyCode::Z)
+                .expect("physical Z faces left before spare LOAM throw");
+            advance_app_until(&mut app, "CLNK faces left before spare LOAM throw", 30, |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.direction == Direction::Left)
+            });
+            {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .release(VirtualKeyCode::Z)
+                    .expect("release physical Z before spare LOAM throw");
+                assert_eq!(
+                    keyboard
+                        .engine()
+                        .object_snapshot(clonk)
+                        .expect("CLNK before spare LOAM throw")
+                        .direction,
+                    Direction::Left
+                );
+                keyboard
+                    .tap(VirtualKeyCode::A)
+                    .expect("physical world-A throws spare LOAM");
+            }
+            advance_app_until(&mut app, "spare LOAM leaves CLNK", 30, |app| {
+                !app_clonk_carries(app, clonk, "LOAM")
+            });
+            advance_app_until(&mut app, "CLNK finishes throwing spare LOAM", 30, |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+            });
+        }
+        if !app_clonk_carries(&app, clonk, "FLAG") {
+            AppVirtualKeyboard::new(&mut app)
+                .press(VirtualKeyCode::C)
+                .expect("physical C continues to FLAG");
+            advance_app_until(&mut app, "CLNK collects FLAG", 180, |app| {
+                app_clonk_carries(app, clonk, "FLAG")
+            });
+            AppVirtualKeyboard::new(&mut app)
+                .release(VirtualKeyCode::C)
+                .expect("release physical C after FLAG pickup");
+        }
+        let flag = app
+            .engine
+            .object_snapshot(clonk)
+            .and_then(|object| object.contents.first().copied())
+            .expect("FLAG occupies CLNK inventory slot zero");
+        assert_eq!(
+            app.engine
+                .object_snapshot(flag)
+                .expect("carried FLAG")
+                .definition_id,
+            "FLAG"
+        );
+
+        // Keep physical Z held over all three bridges and both jumps home. S
+        // release must preserve the held Left bit on each jump.
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("physical Z starts FLAG return");
+        advance_app_until(&mut app, "FLAG-carrying CLNK reaches bridge endpoint", 420, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Walk" && object.position.x <= third_bridge_end.x
+            })
+        });
+        let first_return_jump_frame = app.engine.frame();
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S jumps to center island");
+            assert_ne!(
+                keyboard.player_control().pressed_coms & (1 << lc_engine::COM_LEFT),
+                0,
+                "first S release must preserve held Z"
+            );
+        }
+        advance_app_until(&mut app, "FLAG-carrying CLNK lands on center island", 140, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Walk" && (290..390).contains(&object.position.x)
+            })
+        });
+        advance_app_until(&mut app, "CLNK reaches center-island jump edge", 120, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk" && object.position.x <= 310)
+        });
+        // The Jump'n'Run center hop can finish inside C4DoubleClick's ten-tick
+        // window. Keep Z held, but do not let the second physical S become an
+        // ignored COM_Up_D and turn the intended jump into a walk-off fall.
+        while app
+            .engine
+            .frame()
+            .saturating_sub(first_return_jump_frame)
+            <= 10
+        {
+            app.update().expect("wait out first return S double-click buffer");
+            assert_eq!(
+                app.engine
+                    .object_snapshot(clonk)
+                    .expect("CLNK waits at center-island jump edge")
+                    .action
+                    .name,
+                "Walk"
+            );
+        }
+        let second_jump_start = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("CLNK at center-island jump edge")
+            .position;
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S jumps to home island");
+            assert_ne!(
+                keyboard.player_control().pressed_coms & (1 << lc_engine::COM_LEFT),
+                0,
+                "second S release must preserve held Z"
+            );
+        }
+        app.update().expect("execute second physical S jump");
+        let launched = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("CLNK after second S executes");
+        assert_eq!(launched.action.name, "Jump");
+        assert!(
+            launched.velocity.y < 0,
+            "second physical S must launch upward; clonk={launched:?}"
+        );
+        for _ in 0..160 {
+            if app
+                .engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk" && object.position.x <= 230)
+            {
+                break;
+            }
+            app.update().expect("advance second FLAG return jump");
+        }
+        let home_landing = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("FLAG-carrying CLNK after second return jump");
+        assert!(
+            home_landing.action.name == "Walk" && home_landing.position.x <= 230,
+            "FLAG-carrying CLNK must land from {second_jump_start:?}; clonk={home_landing:?}"
+        );
+        let hut_position = app
+            .engine
+            .object_snapshot(hut)
+            .expect("HUT3 survives Tutorial02")
+            .position;
+        advance_app_until(&mut app, "FLAG-carrying CLNK reaches HUT3 entrance", 160, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Walk"
+                    && (hut_position.x + 2..hut_position.x + 19)
+                        .contains(&object.position.x)
+                    && (hut_position.y + 4..hut_position.y + 25)
+                        .contains(&object.position.y)
+            })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z at HUT3 entrance");
+        assert_eq!(
+            app.engine
+                .object_snapshot(hut)
+                .expect("HUT3 before FLAG return")
+                .base,
+            -1,
+            "HUT3 must not be a base while FlyBase FLAG is absent"
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S enters HUT3");
+        advance_app_until(&mut app, "FLAG-carrying CLNK enters HUT3", 80, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+
+        // AutoContextMenu inserts Put first for the contained FLAG. Physical A
+        // is therefore MenuEnter/Put, not a direct contained Throw
+        // (C4Player.cpp:1502-1513; C4ObjectMenu.cpp:335-359).
+        advance_app_until(&mut app, "HUT3 auto-context Put row", 20, |app| {
+            app.engine.cursor_object_menu(app.local_owner).is_some_and(
+                |(_, menu)| {
+                    menu.selection == 0
+                        && menu.items.first().is_some_and(|item| item.caption == "Put")
+                },
+            )
+        });
+        advance_app_until(&mut app, "Tutorial02 FLAG Put prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Press 'throw' to put the flag")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A puts FLAG into HUT3");
+        advance_app_until(&mut app, "FLAG enters HUT3", 80, |app| {
+            app.engine
+                .object_snapshot(flag)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+        advance_app_until(&mut app, "HUT3 restores the player base", 80, |app| {
+            app.engine
+                .object_snapshot(hut)
+                .is_some_and(|object| object.base == app.local_owner)
+        });
+        advance_app_until(&mut app, "Tutorial02 selects Tutorial03", 180, |app| {
+            app.engine.next_mission().path == r"Tutorial.c4f\Tutorial03.c4s"
+        });
+        advance_app_until(&mut app, "Tutorial02 reaches GameOver", 320, |app| {
+            app.snapshot.game_over && app.game_over_dialog.is_some()
+        });
+        assert!(
+            app.snapshot
+                .round_results
+                .fulfilled_goals
+                .iter()
+                .any(|goal| goal == "SCRG"),
+            "Tutorial02 must fulfill SCRG before GameOver"
+        );
+        assert_eq!(
+            app.engine.next_mission().path,
+            r"Tutorial.c4f\Tutorial03.c4s"
+        );
+        app.render(&mut rendered)
+            .expect("render Tutorial02 GameOver through GameApp");
     }
 
     #[test]
