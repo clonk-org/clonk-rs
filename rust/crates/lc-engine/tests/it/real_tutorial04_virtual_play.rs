@@ -211,7 +211,7 @@ fn carry_gold_from_tunnel_to_hut(
     Ok(())
 }
 
-fn return_from_hut_and_collect_one_gold(
+fn return_from_hut_to_tunnel(
     player: &mut VirtualPlayer<'_>,
     clonk: ObjectId,
     elevator_case: ObjectId,
@@ -308,6 +308,13 @@ fn return_from_hut_and_collect_one_gold(
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Walk")
     })?;
+    Ok(())
+}
+
+fn collect_one_gold_in_tunnel(
+    player: &mut VirtualPlayer<'_>,
+    clonk: ObjectId,
+) -> Result<(), Box<dyn Error>> {
     for attempt in 1..=4 {
         if clonk_contents_count(player.engine(), clonk, "GOLD") == 1 {
             break;
@@ -404,6 +411,141 @@ fn return_from_hut_and_collect_one_gold(
     player.assert_milestone("the empty Clonk collects one more GOLD chunk", |engine| {
         clonk_contents_count(engine, clonk, "GOLD") == 1
     })?;
+    Ok(())
+}
+
+fn return_from_hut_and_collect_one_gold(
+    player: &mut VirtualPlayer<'_>,
+    clonk: ObjectId,
+    elevator_case: ObjectId,
+    hut: ObjectId,
+    owner: i32,
+) -> Result<(), Box<dyn Error>> {
+    return_from_hut_to_tunnel(player, clonk, elevator_case, hut, owner)?;
+    collect_one_gold_in_tunnel(player, clonk)
+}
+
+fn blast_one_tfln(
+    player: &mut VirtualPlayer<'_>,
+    clonk: ObjectId,
+    next_face_x: i32,
+    remaining: usize,
+) -> Result<(), Box<dyn Error>> {
+    if player
+        .engine()
+        .object_snapshot(clonk)
+        .is_some_and(|object| object.action.name == "Hangle")
+    {
+        player.tap(COM_DOWN)?;
+    }
+    player.wait_until(
+        "the Clonk stands before each replacement blast",
+        60,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        },
+    )?;
+    player.press(COM_LEFT)?;
+    for _ in 0..120 {
+        if player
+            .engine()
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.position.x <= next_face_x)
+        {
+            break;
+        }
+        player.ticks(1)?;
+    }
+    player.release(COM_LEFT)?;
+    if player
+        .engine()
+        .object_snapshot(clonk)
+        .is_some_and(|object| object.position.x > next_face_x)
+    {
+        // Successive floor blasts can leave a low Earth lip in front of
+        // the newly exposed (non-diggable) gold. Clear that lip with the
+        // same real Dig+Left controls before placing the next flint.
+        player.tap(COM_DIG)?;
+        player.wait_until(
+            "the Clonk digs through the blast-pocket lip",
+            30,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Dig")
+            },
+        )?;
+        player.hold_until(
+            COM_LEFT,
+            "the Dig action reaches the next blast face",
+            120,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x <= next_face_x + 5)
+            },
+        )?;
+        player.wait_until(
+            "the Clonk stops digging at the next gold face",
+            40,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        )?;
+    }
+    // Down+Throw is C++'s ordinary drop chord. It places each flint on
+    // the lower tunnel floor instead of arcing into the low ceiling, so
+    // successive blasts open the gold face and let the Clonk advance
+    // (C4ObjectCom.cpp:1013-1036,658-671).
+    player.press(COM_DOWN)?;
+    player.tap(COM_THROW)?;
+    player.release(COM_DOWN)?;
+    player.wait_until(
+        "a replacement TFLN leaves the Clonk's inventory",
+        30,
+        |engine| clonk_contents_count(engine, clonk, "TFLN") == remaining,
+    )?;
+    let thrown = player
+        .engine()
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| object.definition_id == "TFLN" && object.container.is_none())
+        .map(|object| object.id)
+        .expect("the thrown replacement TFLN exists in the tunnel");
+    let retreat_x = player
+        .engine()
+        .object_snapshot(clonk)
+        .expect("Clonk survives the replacement throw")
+        .position
+        .x
+        + 28;
+    player.hold_until(
+        COM_RIGHT,
+        "the Clonk retreats before each replacement TFLN detonates",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.position.x >= retreat_x)
+        },
+    )?;
+    player.wait_until("the replacement TFLN detonates", 180, |engine| {
+        engine.object_snapshot(thrown).is_none()
+    })?;
+    player.wait_until(
+        "the Clonk recovers after each replacement blast",
+        60,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        },
+    )?;
     Ok(())
 }
 
@@ -1105,121 +1247,7 @@ fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
 
     let mut next_face_x = 452;
     for remaining in (0..3).rev() {
-        if player
-            .engine()
-            .object_snapshot(clonk)
-            .is_some_and(|object| object.action.name == "Hangle")
-        {
-            player.tap(COM_DOWN)?;
-        }
-        player.wait_until(
-            "the Clonk stands before each replacement blast",
-            60,
-            |engine| {
-                engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.action.name == "Walk")
-            },
-        )?;
-        player.press(COM_LEFT)?;
-        for _ in 0..120 {
-            if player
-                .engine()
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.x <= next_face_x)
-            {
-                break;
-            }
-            player.ticks(1)?;
-        }
-        player.release(COM_LEFT)?;
-        if player
-            .engine()
-            .object_snapshot(clonk)
-            .is_some_and(|object| object.position.x > next_face_x)
-        {
-            // Successive floor blasts can leave a low Earth lip in front of
-            // the newly exposed (non-diggable) gold. Clear that lip with the
-            // same real Dig+Left controls before placing the next flint.
-            player.tap(COM_DIG)?;
-            player.wait_until(
-                "the Clonk digs through the blast-pocket lip",
-                30,
-                |engine| {
-                    engine
-                        .object_snapshot(clonk)
-                        .is_some_and(|object| object.action.name == "Dig")
-                },
-            )?;
-            player.hold_until(
-                COM_LEFT,
-                "the Dig action reaches the next blast face",
-                120,
-                |engine| {
-                    engine
-                        .object_snapshot(clonk)
-                        .is_some_and(|object| object.position.x <= next_face_x + 5)
-                },
-            )?;
-            player.wait_until(
-                "the Clonk stops digging at the next gold face",
-                40,
-                |engine| {
-                    engine
-                        .object_snapshot(clonk)
-                        .is_some_and(|object| object.action.name == "Walk")
-                },
-            )?;
-        }
-        // Down+Throw is C++'s ordinary drop chord. It places each flint on
-        // the lower tunnel floor instead of arcing into the low ceiling, so
-        // successive blasts open the gold face and let the Clonk advance
-        // (C4ObjectCom.cpp:1013-1036,658-671).
-        player.press(COM_DOWN)?;
-        player.tap(COM_THROW)?;
-        player.release(COM_DOWN)?;
-        player.wait_until(
-            "a replacement TFLN leaves the Clonk's inventory",
-            30,
-            |engine| clonk_contents_count(engine, clonk, "TFLN") == remaining,
-        )?;
-        let thrown = player
-            .engine()
-            .snapshot()
-            .objects
-            .iter()
-            .find(|object| object.definition_id == "TFLN" && object.container.is_none())
-            .map(|object| object.id)
-            .expect("the thrown replacement TFLN exists in the tunnel");
-        let retreat_x = player
-            .engine()
-            .object_snapshot(clonk)
-            .expect("Clonk survives the replacement throw")
-            .position
-            .x
-            + 28;
-        player.hold_until(
-            COM_RIGHT,
-            "the Clonk retreats before each replacement TFLN detonates",
-            80,
-            |engine| {
-                engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.position.x >= retreat_x)
-            },
-        )?;
-        player.wait_until("the replacement TFLN detonates", 180, |engine| {
-            engine.object_snapshot(thrown).is_none()
-        })?;
-        player.wait_until(
-            "the Clonk recovers after each replacement blast",
-            60,
-            |engine| {
-                engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.action.name == "Walk")
-            },
-        )?;
+        blast_one_tfln(&mut player, clonk, next_face_x, remaining)?;
         next_face_x -= 18;
     }
     player.wait_until(
