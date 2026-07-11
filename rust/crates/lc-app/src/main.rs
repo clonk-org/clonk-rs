@@ -16758,13 +16758,14 @@ mod tests {
     }
 
     #[test]
-    fn app_virtual_keyboard_plays_tutorial01_through_real_gold_dig() {
+    fn app_virtual_keyboard_completes_real_tutorial01_route() {
         // Drive Tutorial01 through the same physical keyboard-one boundary as
         // C++: A/S/D/Z/X/C are Throw/Up/Dig/Left/Down/Right
-        // (C4Config.cpp:624-635). Script50..206 requires FLAG delivery through
-        // HUT2's real context menu, then a buffered DigSingle followed by live
-        // DownLeft/Left steering to GOLD (Tutorial01/Script.c:61-168;
-        // C4Player.cpp:1213-1229,1490-1554; C4Object.cpp:3645-3651,3743-3754).
+        // (C4Config.cpp:624-635). The complete real script requires FLAG
+        // delivery through HUT2's context menu, buffered DigSingle plus live
+        // DownLeft/Left steering to GOLD, and a physical return climb before
+        // SCRG fulfills (Tutorial01/Script.c:61-182; C4Player.cpp:1213-1229,
+        // 1490-1554; C4Object.cpp:3618-3628,3645-3651,3743-3754).
         let mut app = real_tutorial_app(1, "Tutorial 1 app virtual player");
         let clonk = app
             .engine
@@ -17115,6 +17116,126 @@ mod tests {
         );
         app.render(&mut rendered)
             .expect("render Tutorial01 with GOLD inventory");
+
+        // Walk out of the excavated tunnel, then preserve held physical C
+        // while reacting to the same Walk/Scale/Jump transitions as the
+        // engine virtual route. Re-pressing C on entry to DFA_SCALE supplies
+        // the edge C++ uses to let go or climb; an S tap on landing/flight
+        // transitions jumps clear without assigning position or action
+        // (C4Object.cpp:3618-3628,4823-4855).
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("physical C walks out of the GOLD tunnel");
+        advance_app_until(&mut app, "GOLD-carrying CLNK exits the tunnel", 180, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.position.x >= 215)
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C outside the GOLD tunnel");
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("physical C starts the return climb");
+        let mut previous_action = String::new();
+        for _ in 0..1_800 {
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("GOLD-carrying CLNK survives the return");
+            if clonk_now.position.x >= 558 {
+                break;
+            }
+            let action = clonk_now.action.name.clone();
+            let entered_scale =
+                action.starts_with("Scale") && !previous_action.starts_with("Scale");
+            let left_scale_in_flight =
+                action == "Jump" && previous_action.starts_with("Scale");
+            let landed = action == "Walk" && previous_action != "Walk";
+            if entered_scale {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .release(VirtualKeyCode::C)
+                    .expect("release physical C on Scale transition");
+                keyboard
+                    .press(VirtualKeyCode::C)
+                    .expect("re-press physical C on Scale transition");
+            } else if landed || left_scale_in_flight {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .tap(VirtualKeyCode::S)
+                    .expect("physical S advances the return climb");
+                assert_ne!(
+                    keyboard.player_control().pressed_coms & (1 << lc_engine::COM_RIGHT),
+                    0,
+                    "releasing S must preserve held C during the return climb"
+                );
+            }
+            previous_action = action;
+            app.update().expect("advance Tutorial01 return climb");
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C on the cabin hill");
+        assert!(
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.position.x >= 558),
+            "the GOLD-carrying CLNK must reach the cabin hill naturally"
+        );
+        advance_app_until(&mut app, "GOLD-carrying CLNK lands beside HUT2", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("physical Z aligns GOLD-carrying CLNK with HUT2");
+        advance_app_until(
+            &mut app,
+            "GOLD-carrying CLNK aligns with HUT2 entrance",
+            60,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x <= 570)
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z at HUT2 entrance");
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S enters HUT2 with GOLD");
+        }
+        advance_app_until(&mut app, "GOLD-carrying CLNK enters HUT2", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+
+        advance_app_until(&mut app, "Tutorial01 selects Tutorial02", 240, |app| {
+            app.engine.next_mission().path == r"Tutorial.c4f\Tutorial02.c4s"
+        });
+        advance_app_until(&mut app, "Tutorial01 reaches GameOver", 320, |app| {
+            app.snapshot.game_over && app.game_over_dialog.is_some()
+        });
+        assert!(
+            app.snapshot
+                .round_results
+                .fulfilled_goals
+                .iter()
+                .any(|goal| goal == "SCRG"),
+            "Tutorial01 must fulfill its real SCRG before GameOver"
+        );
+        assert_eq!(
+            app.engine.next_mission().path,
+            r"Tutorial.c4f\Tutorial02.c4s"
+        );
+        app.render(&mut rendered)
+            .expect("render Tutorial01 GameOver through GameApp");
     }
 
     #[test]
