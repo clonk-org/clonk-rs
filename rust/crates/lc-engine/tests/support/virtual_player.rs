@@ -8,6 +8,7 @@ use std::fmt;
 
 const RECENT_STATE_LIMIT: usize = 6;
 const RECENT_ID_LIMIT: usize = 8;
+const DOUBLE_CLICK_TICKS: u32 = 10;
 
 /// Headless input driver for parity tests.
 ///
@@ -170,6 +171,13 @@ impl<'engine> VirtualPlayer<'engine> {
             self.engine.tick()?;
         }
         Ok(())
+    }
+
+    /// Let C++'s buffered `LastCom` become `COM_Single` before repeating the
+    /// same physical control. The buffer flushes only after `C4DoubleClick`
+    /// (10) frames (`src/C4Constants.h:156`; `src/C4Player.cpp:1217-1228`).
+    pub fn wait_out_double_click(&mut self) -> Result<(), VirtualPlayerError> {
+        self.ticks(DOUBLE_CLICK_TICKS + 1)
     }
 
     /// Hold a physical control while ticking toward a milestone, then emit

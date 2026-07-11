@@ -89,7 +89,7 @@ fn physical_controls_preserve_cpp_press_release_double_and_single_timing(
         Some(Value::Nil),
         "C4Player::ExecuteControl waits while LastComDelay == C4DoubleClick"
     );
-    player.ticks(1)?;
+    player.wait_out_double_click()?;
     assert_eq!(
         local(player.engine(), crew, "dig_single"),
         Some(Value::Int(1)),
