@@ -8,6 +8,7 @@ default = []
 ffi = ["dep:tracing-subscriber"]
 
 [dependencies]
+lc-engine-core = { path = "../lc-engine-core" }
 lc-script = { path = "../lc-script" }
 lc-resources = { path = "../lc-resources" }
 rand = { version = "0.8", default-features = false, features = ["std"] }

@@ -1925,6 +1925,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "image",
+ "lc-engine-core",
  "lc-resources",
  "lc-script",
  "once_cell",
@@ -1937,6 +1938,14 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "lc-engine-core"
+version = "0.1.0"
+dependencies = [
+ "rand_core 0.6.4",
+ "serde",
 ]
 
 [[package]]

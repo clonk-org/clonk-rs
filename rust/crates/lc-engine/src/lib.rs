@@ -31,7 +31,7 @@ mod map_creator;
 mod map_creator_s2;
 mod mass_mover;
 mod material;
-mod math;
+pub(crate) use lc_engine_core::math;
 mod message;
 pub mod ocf;
 #[cfg(test)]
@@ -42,7 +42,7 @@ mod player;
 pub mod player_file;
 pub mod pxs;
 mod record;
-mod rng;
+pub(crate) use lc_engine_core::rng;
 mod round_results;
 pub mod scenario;
 mod script_constants;
