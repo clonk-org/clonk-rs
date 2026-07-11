@@ -148,6 +148,12 @@ impl Surface {
         self.clip = Some(clip);
     }
 
+    /// Return the active clipping rectangle so nested renderers can restore
+    /// their caller's primary clipper after drawing a bounded child.
+    pub fn clip(&self) -> Option<Rect> {
+        self.clip
+    }
+
     /// Remove the clipping rectangle; draws cover the full surface again
     /// (C++ `NoPrimaryClipper`).
     pub fn clear_clip(&mut self) {
@@ -886,6 +892,7 @@ mod tests {
         let mut dest = Surface::new(4, 4, PixelFormat::Rgba8888);
         dest.fill(Color::opaque(0, 0, 0));
         dest.set_clip(Rect::new(1, 1, 2, 2)); // only the 2x2 block at (1,1)
+        assert_eq!(dest.clip(), Some(Rect::new(1, 1, 2, 2)));
 
         let mut src = Surface::new(4, 4, PixelFormat::Rgba8888);
         src.fill(Color::opaque(255, 255, 255));
@@ -900,6 +907,7 @@ mod tests {
 
         // Clearing the clip restores full-surface drawing.
         dest.clear_clip();
+        assert_eq!(dest.clip(), None);
         dest.blit(&src, Point::new(0, 0)).unwrap();
         assert_eq!(dest.get_pixel(0, 0), Some(Color::opaque(255, 255, 255)));
     }
