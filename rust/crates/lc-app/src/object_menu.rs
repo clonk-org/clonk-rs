@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use lc_engine::{
     CommandKind, ContextMenuEntry, ControlCommand, DefinitionPictureImage, Engine, ObjectId,
-    ObjectMenuSymbol, SimulationSnapshot, OWNER_NONE,
+    ObjectMenuExtra, ObjectMenuSymbol, SimulationSnapshot, OWNER_NONE,
 };
 use lc_frontend::{
     default_owner_color,
@@ -346,7 +346,8 @@ pub(crate) fn engine_script_menu_layout(
     let max_lines = ((area.height as i32 - 100) / item_height).max(1);
     let lines = natural_lines.max(1).min(max_lines);
     let title_height = font.line_height().max(CLASSIC_TITLE_HEIGHT);
-    let command_height = i32::from(show_commands) * CLASSIC_COMMAND_HEIGHT;
+    let command_height = i32::from(show_commands || menu.extra != ObjectMenuExtra::None)
+        * CLASSIC_COMMAND_HEIGHT;
     let width = columns * item_width + 2 * CLASSIC_FRAME_WIDTH;
     let height = lines * item_height
         + title_height
@@ -472,17 +473,33 @@ fn render_engine_normal_menu(
     if let Some(caption_bar) = gfx.caption_bar.as_ref() {
         draw_caption_bar(surface, title_rect, caption_bar);
     }
-    let icon_indent = title_icon.map_or(0, |icon| {
+    let icon_indent = if menu.title_symbol == ObjectMenuSymbol::Definition {
+        title_icon.map_or(0, |icon| {
+            let side = (title_height - 2) as u32;
+            draw_image_region_aspect(
+                surface,
+                icon,
+                Rect::new(0, 0, icon.width(), icon.height()),
+                Rect::new(x + 1, y + 1, side, side),
+                false,
+            );
+            title_height
+        })
+    } else {
         let side = (title_height - 2) as u32;
-        draw_image_region_aspect(
+        let image = command_image_for_menu_symbol(
+            menu.title_symbol,
+            title_icon.cloned(),
+            gfx,
+        );
+        draw_command_image_cell(
             surface,
-            icon,
-            Rect::new(0, 0, icon.width(), icon.height()),
+            &gfx.hud,
             Rect::new(x + 1, y + 1, side, side),
-            false,
+            &image,
         );
         title_height
-    });
+    };
     // WoodenLabel restricts its title text to the label bounds and reserves
     // a 20px right indent whenever Dialog::SetTitle adds the mouse close
     // button. Store/restore the caller's primary clipper around that child
@@ -590,7 +607,7 @@ fn render_engine_normal_menu(
         }
     }
 
-    if gfx.show_commands {
+    if gfx.show_commands || menu.extra != ObjectMenuExtra::None {
         let extra = Rect::new(
             x + 1,
             y + height - CLASSIC_COMMAND_HEIGHT - 1,
@@ -599,40 +616,22 @@ fn render_engine_normal_menu(
         );
         draw_border(surface, extra, CLASSIC_EXTRA_FRAME_COLOR);
         let mut remaining = extra;
-        let mut truncate_control = || {
-            // C4Facet::TruncateSection(C4FCT_Left) returns an empty facet
-            // without changing the source once another square no longer
-            // fits (C4Facet.cpp:182-217). A five-column normal menu can
-            // therefore show at most five of the six controls requested by
-            // an item with Command2.
-            let size = remaining.height;
-            (size <= remaining.width && size != 0).then(|| {
-                let cell = Rect::new(remaining.x, remaining.y, size, size);
-                remaining.x += size as i32;
-                remaining.width -= size;
-                cell
-            })
-        };
-        let tiny = tiny_font.unwrap_or(font);
-        if let Some(cell) = truncate_control() {
-            draw_command_key(
-                surface,
-                gfx,
-                tiny,
-                cell.x,
-                cell.y,
-                cell.width,
-                3,
-                &gfx.throw_key,
-            );
-        }
-        if let Some(cell) = truncate_control() {
-            draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 0, 0);
-        }
-        if selected
-            .and_then(|selection| menu.items.get(selection))
-            .is_some_and(|item| !item.command2.is_empty())
-        {
+        if gfx.show_commands {
+            let mut truncate_control = || {
+                // C4Facet::TruncateSection(C4FCT_Left) returns an empty facet
+                // without changing the source once another square no longer
+                // fits (C4Facet.cpp:182-217). A five-column normal menu can
+                // therefore show at most five of the six controls requested by
+                // an item with Command2.
+                let size = remaining.height;
+                (size <= remaining.width && size != 0).then(|| {
+                    let cell = Rect::new(remaining.x, remaining.y, size, size);
+                    remaining.x += size as i32;
+                    remaining.width -= size;
+                    cell
+                })
+            };
+            let tiny = tiny_font.unwrap_or(font);
             if let Some(cell) = truncate_control() {
                 draw_command_key(
                     surface,
@@ -641,35 +640,88 @@ fn render_engine_normal_menu(
                     cell.x,
                     cell.y,
                     cell.width,
-                    11,
-                    &gfx.special2_key,
+                    3,
+                    &gfx.throw_key,
                 );
             }
             if let Some(cell) = truncate_control() {
-                draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 2, 1);
+                draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 0, 0);
+            }
+            if selected
+                .and_then(|selection| menu.items.get(selection))
+                .is_some_and(|item| !item.command2.is_empty())
+            {
+                if let Some(cell) = truncate_control() {
+                    draw_command_key(
+                        surface,
+                        gfx,
+                        tiny,
+                        cell.x,
+                        cell.y,
+                        cell.width,
+                        11,
+                        &gfx.special2_key,
+                    );
+                }
+                if let Some(cell) = truncate_control() {
+                    draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 2, 1);
+                }
+            }
+            if let Some(cell) = truncate_control() {
+                draw_command_key(
+                    surface,
+                    gfx,
+                    tiny,
+                    cell.x,
+                    cell.y,
+                    cell.width,
+                    5,
+                    &gfx.dig_key,
+                );
+            }
+            if let Some(cell) = truncate_control() {
+                if menu
+                    .items
+                    .iter()
+                    .any(|item| item.symbol == ObjectMenuSymbol::Exit)
+                {
+                    draw_command_image_cell(surface, &gfx.hud, cell, &CommandImage::Exit);
+                } else {
+                    draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 1, 0);
+                }
             }
         }
-        if let Some(cell) = truncate_control() {
-            draw_command_key(
-                surface,
-                gfx,
-                tiny,
-                cell.x,
-                cell.y,
-                cell.width,
-                5,
-                &gfx.dig_key,
-            );
-        }
-        if let Some(cell) = truncate_control() {
-            if menu
-                .items
-                .iter()
-                .any(|item| item.symbol == ObjectMenuSymbol::Exit)
+        if menu.extra == ObjectMenuExtra::Value {
+            if let Some(value) = selected
+                .and_then(|selection| menu.items.get(selection))
+                .and_then(|item| item.value)
             {
-                draw_command_image_cell(surface, &gfx.hud, cell, &CommandImage::Exit);
-            } else {
-                draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 1, 0);
+                let value = value.to_string();
+                let value_width = font.text_width(&value);
+                let right = remaining.x + remaining.width as i32 - 1;
+                if let Some(wealth) = gfx.hud.wealth.as_ref() {
+                    let wealth_rect = Rect::new(
+                        right - value_width - 2 * CLASSIC_COMMAND_HEIGHT,
+                        remaining.y,
+                        (2 * CLASSIC_COMMAND_HEIGHT) as u32,
+                        CLASSIC_COMMAND_HEIGHT as u32,
+                    );
+                    draw_image_region_aspect(
+                        surface,
+                        wealth,
+                        Rect::new(0, 0, wealth.width(), wealth.height()),
+                        wealth_rect,
+                        false,
+                    );
+                }
+                font.draw(
+                    surface,
+                    right,
+                    remaining.y,
+                    &value,
+                    CLASSIC_CAPTION_COLOR,
+                    TextAlign::Right,
+                );
             }
         }
     }
@@ -2305,6 +2357,148 @@ mod tests {
             CLASSIC_COMMAND_HEIGHT as u32,
         );
         assert!(contains_color(&surface, command_strip, cyan));
+    }
+
+    #[test]
+    fn engine_buy_menu_draws_cpp_title_symbol_and_value_footer() {
+        // C4Object::ActivateMenu(C4MN_Buy) supplies a composed Buy title
+        // facet and C4MN_Extra_Value (C4Object.cpp:1919-1928). C4Menu keeps
+        // one 16px footer whenever Extra is set, independently of command
+        // hints, then DrawValue places a 32x16 wealth facet immediately left
+        // of the selected value at the footer's right edge
+        // (C4Menu.h:248-264; C4Menu.cpp:843-907; C4Facet.cpp:240-260).
+        fn solid(width: u32, height: u32, rgba: [u8; 4]) -> ImageData {
+            ImageData::new(width, height, rgba.repeat((width * height) as usize))
+        }
+
+        fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
+            (rect.y..rect.y + rect.height as i32).any(|y| {
+                (rect.x..rect.x + rect.width as i32).any(|x| {
+                    surface.get_pixel(x as u32, y as u32) == Some(color)
+                })
+            })
+        }
+
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Nothing to buy");
+            AddMenuItem("Buy Lorry", "Choose()", LORY, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let mut menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        menu.title_symbol = lc_engine::ObjectMenuSymbol::Buy { owner: 7 };
+        menu.extra = lc_engine::ObjectMenuExtra::Value;
+        menu.selection = 0;
+        menu.items[0].value = Some(25);
+
+        let red = Color::opaque(240, 20, 20);
+        let green = Color::opaque(20, 220, 20);
+        let yellow = Color::opaque(240, 220, 20);
+        let magenta = Color::opaque(220, 20, 220);
+        let mut arrow = vec![0_u8; 16 * 8 * 4];
+        for y in 0..8 {
+            for x in 0..16 {
+                let offset = (y * 16 + x) * 4;
+                let color = if x < 8 { yellow } else { magenta };
+                arrow[offset..offset + 4]
+                    .copy_from_slice(&[color.r, color.g, color.b, color.a]);
+            }
+        }
+        let gfx = IngameMenuGraphics {
+            hud: lc_frontend::HudGraphics {
+                flag: Some(solid(8, 8, [0, 0, 255, 255])),
+                wealth: Some(solid(8, 8, [green.r, green.g, green.b, green.a])),
+                arrow: Some(ImageData::new(16, 8, arrow)),
+                ..lc_frontend::HudGraphics::default()
+            },
+            owner_colors: HashMap::from([(7, red)]),
+            show_commands: false,
+            ..IngameMenuGraphics::default()
+        };
+        let font = lc_graphics::BitmapFont::new();
+        let hud_font = HudFont::Fallback(&font);
+        let area = Rect::new(0, 0, 640, 480);
+        let layout = engine_script_menu_layout(area, &hud_font, &menu, false);
+        let mut menu_without_extra = menu.clone();
+        menu_without_extra.extra = lc_engine::ObjectMenuExtra::None;
+        let layout_without_extra =
+            engine_script_menu_layout(area, &hud_font, &menu_without_extra, false);
+        assert_eq!(
+            layout.bounds.height,
+            layout_without_extra.bounds.height + CLASSIC_COMMAND_HEIGHT as u32,
+            "C4Menu::GetMarginBottom reserves the footer for Extra without DrawMenuControls"
+        );
+
+        let mut surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
+        render_engine_script_menu(
+            &mut surface,
+            area,
+            &hud_font,
+            &font,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &[None],
+            false,
+            0,
+        );
+
+        let title_symbol = Rect::new(
+            layout.title.x + 1,
+            layout.title.y + 1,
+            layout.title.height - 2,
+            layout.title.height - 2,
+        );
+        for color in [red, green, yellow] {
+            assert!(
+                contains_color(&surface, title_symbol, color),
+                "missing Buy title component {color:?}"
+            );
+        }
+        assert!(
+            !contains_color(&surface, title_symbol, magenta),
+            "Buy uses arrow phase 0, not Sell phase 1"
+        );
+
+        let footer = Rect::new(
+            layout.bounds.x + 1,
+            layout.bounds.y + layout.bounds.height as i32 - CLASSIC_COMMAND_HEIGHT - 1,
+            layout.bounds.width - 2,
+            CLASSIC_COMMAND_HEIGHT as u32,
+        );
+        let value_width = hud_font.text_width("25");
+        let wealth = Rect::new(
+            footer.x + footer.width as i32 - 1 - value_width - 2 * CLASSIC_COMMAND_HEIGHT,
+            footer.y,
+            (2 * CLASSIC_COMMAND_HEIGHT) as u32,
+            CLASSIC_COMMAND_HEIGHT as u32,
+        );
+        assert!(contains_color(&surface, wealth, green));
+        let value_text = Rect::new(
+            footer.x + footer.width as i32 - 1 - value_width,
+            footer.y,
+            value_width.max(1) as u32,
+            footer.height,
+        );
+        assert!(contains_color(
+            &surface,
+            value_text,
+            CLASSIC_CAPTION_COLOR
+        ));
     }
 
     #[test]

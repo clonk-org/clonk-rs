@@ -16913,6 +16913,73 @@ mod tests {
         let mut rendered = vec![0_u8; 320 * 200 * 4];
         app.render(&mut rendered)
             .expect("render Tutorial03 context menu through the app");
+
+        // Physical X is the classic down control and physical A is Throw;
+        // while a menu is open C4Player::InCom translates them to MenuDown
+        // and MenuEnter (C4Player.cpp:1502-1513). This is the exact Tutorial03
+        // input path from Context -> Buy, without mutating menu state.
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::X)
+                .expect("physical X selects Buy");
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release physical X");
+            keyboard
+                .press(VirtualKeyCode::A)
+                .expect("physical A enters Buy");
+            keyboard
+                .release(VirtualKeyCode::A)
+                .expect("release physical A");
+        }
+        for _ in 0..20 {
+            let buy_menu_open = app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == serde_json::from_value(
+                    serde_json::json!({ "Int": 4 }),
+                ).expect("buy identification deserializes"));
+            if buy_menu_open {
+                break;
+            }
+            app.update().expect("advance physical Buy selection");
+        }
+        let (_, buy_menu) = app
+            .engine
+            .cursor_object_menu(app.local_owner)
+            .expect("physical X/A opens Tutorial03 Buy menu");
+        assert_eq!(
+            buy_menu.identification,
+            serde_json::from_value(serde_json::json!({ "Int": 4 }))
+                .expect("buy identification deserializes")
+        );
+        assert_eq!(
+            buy_menu.title_symbol,
+            lc_engine::ObjectMenuSymbol::Buy {
+                owner: app
+                    .engine
+                    .object_snapshot(hut)
+                    .expect("Tutorial03 HUT3 remains active")
+                    .owner,
+            },
+            "C4MN_Buy title uses the contained building owner (C4Object.cpp:1919-1928)"
+        );
+        assert_eq!(
+            buy_menu.extra,
+            lc_engine::ObjectMenuExtra::Value,
+            "C4MN_Buy exposes selected value in its footer"
+        );
+        assert_eq!(
+            buy_menu
+                .items
+                .iter()
+                .map(|item| (item.caption.as_str(), item.count, item.value))
+                .collect::<Vec<_>>(),
+            vec![("Buy Lorry", 1, Some(20))]
+        );
+        app.render(&mut rendered)
+            .expect("render Tutorial03 Buy menu through the app");
         reset_cached_app_paths();
     }
 
