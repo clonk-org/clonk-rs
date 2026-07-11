@@ -2107,6 +2107,25 @@ mod tests {
             }
             other => panic!("expected delegated put request, got {:?}", other),
         }
+
+        // C4Command::Drop calls ObjectComPutTake while pushing and then
+        // immediately Finish(true); once the delegated Put has moved the item
+        // into that target, Drop must not enqueue Get and pull it back out
+        // (C4Command.cpp:998-1049, especially :1043-1048).
+        objects
+            .get_mut(&actor_id)
+            .expect("actor present")
+            .contents
+            .clear();
+        objects
+            .get_mut(&item_id)
+            .expect("item present")
+            .container = Some(pushed_id);
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
     }
 
     #[test]
@@ -11027,6 +11046,14 @@ impl DropState {
 
         if item_snapshot.destroyed {
             return CommandStepResult::failed(update);
+        }
+
+        // C4Command::Drop's contained/pushing branches call
+        // ObjectComPutTake and finish immediately. Once our delegated Put has
+        // transferred the item to that same container, do not try to Get it
+        // back into the actor (C4Command.cpp:1036-1049).
+        if self.delegated_put && item_snapshot.container == self.delegated_container {
+            return CommandStepResult::completed(update);
         }
 
         if item_snapshot.container != Some(ctx.object.id) {
