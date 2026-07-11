@@ -12713,7 +12713,8 @@ impl Take2State {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum AcquireScriptResult {
+#[doc(hidden)]
+pub enum AcquireScriptResult {
     Continue,
     Handled,
     Complete,

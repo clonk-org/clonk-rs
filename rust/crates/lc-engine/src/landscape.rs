@@ -381,7 +381,8 @@ pub(crate) struct RuntimeTexMapMaterial {
 /// matching, the available texture/material inventories, and the exact
 /// `DefaultMatTex` result for every material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RuntimeTexMapState {
+#[doc(hidden)]
+pub struct RuntimeTexMapState {
     pub(crate) densities: Vec<i32>,
     pub(crate) material_names: Vec<Option<String>>,
     pub(crate) texture_names: Vec<Option<String>>,
@@ -842,7 +843,9 @@ impl Landscape {
             .expect("flat landscape constructs")
     }
 
-    pub(crate) fn with_default_material(
+    #[doc(hidden)]
+
+    pub fn with_default_material(
         width: u32,
         surface: Vec<i32>,
         default_material: Option<MaterialId>,

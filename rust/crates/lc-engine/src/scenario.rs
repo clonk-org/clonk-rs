@@ -273,21 +273,21 @@ impl Default for LegacyC4SVal {
 
 #[derive(Debug, Clone, Default)]
 pub struct ScenarioObjectives {
-    pub(crate) create_objects: Vec<CreateObjectObjective>,
-    pub(crate) clear_objects: Vec<ClearObjectObjective>,
-    pub(crate) clear_materials: Vec<ClearMaterialObjective>,
+    #[doc(hidden)] pub create_objects: Vec<CreateObjectObjective>,
+    #[doc(hidden)] pub clear_objects: Vec<ClearObjectObjective>,
+    #[doc(hidden)] pub clear_materials: Vec<ClearMaterialObjective>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CreateObjectObjective {
-    pub(crate) definition: String,
-    pub(crate) count: i32,
+    #[doc(hidden)] pub definition: String,
+    #[doc(hidden)] pub count: i32,
 }
 
 #[derive(Debug, Clone)]
 pub struct ClearObjectObjective {
-    pub(crate) definition: String,
-    pub(crate) count: i32,
+    #[doc(hidden)] pub definition: String,
+    #[doc(hidden)] pub count: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -3837,18 +3837,19 @@ fn derive_legacy_physics(
 /// (C4Weather.cpp:36-70) plus the NoInitialize gate for the rain-cloud
 /// block (:49-58).
 #[derive(Debug, Clone)]
-pub(crate) struct LegacyWeatherInit {
-    pub(crate) season: LegacyC4SVal,
-    pub(crate) year_speed: LegacyC4SVal,
-    pub(crate) climate: LegacyC4SVal,
-    pub(crate) wind: LegacyC4SVal,
-    pub(crate) rain: LegacyC4SVal,
-    pub(crate) precipitation: String,
-    pub(crate) lightning: LegacyC4SVal,
-    pub(crate) meteorite: LegacyC4SVal,
-    pub(crate) volcano: LegacyC4SVal,
-    pub(crate) earthquake: LegacyC4SVal,
-    pub(crate) no_initialize: bool,
+#[doc(hidden)]
+pub struct LegacyWeatherInit {
+    #[doc(hidden)] pub season: LegacyC4SVal,
+    #[doc(hidden)] pub year_speed: LegacyC4SVal,
+    #[doc(hidden)] pub climate: LegacyC4SVal,
+    #[doc(hidden)] pub wind: LegacyC4SVal,
+    #[doc(hidden)] pub rain: LegacyC4SVal,
+    #[doc(hidden)] pub precipitation: String,
+    #[doc(hidden)] pub lightning: LegacyC4SVal,
+    #[doc(hidden)] pub meteorite: LegacyC4SVal,
+    #[doc(hidden)] pub volcano: LegacyC4SVal,
+    #[doc(hidden)] pub earthquake: LegacyC4SVal,
+    #[doc(hidden)] pub no_initialize: bool,
 }
 
 fn derive_legacy_weather_init(

@@ -2921,7 +2921,8 @@ impl Engine {
     /// `C4Player::ObjectCommand` (C4Player.cpp:1397-1443): route a control
     /// command to the selected crew (and always the cursor), with the
     /// classic down-double throw→drop conversion.
-    pub(crate) fn player_object_command(
+    #[doc(hidden)]
+    pub fn player_object_command(
         &mut self,
         owner: i32,
         mut command: CommandId,
