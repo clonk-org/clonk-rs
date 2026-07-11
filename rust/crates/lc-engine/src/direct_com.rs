@@ -700,7 +700,16 @@ impl Engine {
     /// The player's crew roster in C4Player::Crew order (join order), with
     /// only active objects like the C++ list after ClearPointers.
     fn player_crew_roster(&self, owner: i32) -> Vec<ObjectId> {
-        self.crew_members(owner)
+        self.players
+            .get(&owner)
+            .map(|player| player.crew().to_vec())
+            .unwrap_or_else(|| self.crew_members(owner))
+            .into_iter()
+            .filter(|id| {
+                self.find_object_index(*id)
+                    .is_some_and(|index| self.objects[index].state.status.is_active())
+            })
+            .collect()
     }
 
     /// `C4Player::GetHiRankActiveCrew` (C4Player.cpp:1003-1021): without
@@ -4582,8 +4591,9 @@ protected func ControlContents(idTarget) { return(1); }
         );
     }
 
-    /// Three crew members in roster (creation) order for the cursor-com
-    /// cycling tests; the cursor starts on the first.
+    /// Three equal-definition crew members for cursor-com cycling. C++
+    /// stMain order is newest-first, while the cursor is deliberately put on
+    /// the oldest member to exercise both link walking and wrap-around.
     fn crew_trio(engine: &mut Engine) -> [ObjectId; 3] {
         register_clonk(engine, "CLNK", "#strict\n");
         engine
@@ -4630,14 +4640,15 @@ protected func ControlContents(idTarget) { return(1); }
     }
 
     #[test]
-    fn cursor_left_wraps_to_the_last_crew_member() {
-        // C4Player::CursorLeft (C4Player.cpp:1278-1293): walking Prev off
-        // the front rescans from Crew.Last.
+    fn cursor_left_steps_to_the_previous_master_order_crew_member() {
+        // C4Player::CursorLeft (C4Player.cpp:1278-1293): equal-definition
+        // crew links are newest-first, so the member before the oldest is
+        // the middle-created Clonk.
         let mut engine = Engine::new();
-        let [_, _, c] = crew_trio(&mut engine);
+        let [_, b, _] = crew_trio(&mut engine);
 
         engine.player_in_com(1, COM_CURSOR_LEFT, 0).expect("in_com");
-        assert_eq!(engine.crew_cursor(1), Some(c));
+        assert_eq!(engine.crew_cursor(1), Some(b));
     }
 
     #[test]
@@ -4645,14 +4656,14 @@ protected func ControlContents(idTarget) { return(1); }
         // After a cursor com CursorSelection = 1, so CursorToggle flips the
         // cursor's Select and arms CursorToggled (C4Player.cpp:1322-1327).
         let mut engine = Engine::new();
-        let [a, b, _] = crew_trio(&mut engine);
+        let [a, _, c] = crew_trio(&mut engine);
 
         engine.player_in_com(1, COM_CURSOR_RIGHT, 0).expect("right");
-        assert_eq!(engine.crew_cursor(1), Some(b));
+        assert_eq!(engine.crew_cursor(1), Some(c));
         engine.player_in_com(1, COM_CURSOR_TOGGLE, 0).expect("toggle");
         assert_eq!(
             engine.selected_crew(1),
-            vec![a, b],
+            vec![c, a],
             "the new cursor's Select toggled ON"
         );
         assert_eq!(control_state(&engine, 1).cursor_toggled, 1);
@@ -4666,16 +4677,16 @@ protected func ControlContents(idTarget) { return(1); }
         // CursorSelection commits SelectSingleByCursor — only the cursor
         // stays selected.
         let mut engine = Engine::new();
-        let [_, b, _] = crew_trio(&mut engine);
+        let [_, _, c] = crew_trio(&mut engine);
 
         engine.player_in_com(1, COM_CURSOR_RIGHT, 0).expect("right");
         engine.player_in_com(1, COM_DOWN, 0).expect("down");
         assert_eq!(
             engine.selected_crew(1),
-            vec![b],
+            vec![c],
             "SelectSingleByCursor unselected the rest (C4Player.cpp:1308-1317)"
         );
-        assert_eq!(engine.crew_cursor(1), Some(b));
+        assert_eq!(engine.crew_cursor(1), Some(c));
         assert_eq!(control_state(&engine, 1).cursor_selection, 0);
     }
 
@@ -4712,10 +4723,10 @@ protected func ControlContents(idTarget) { return(1); }
 
         engine.player_in_com(1, COM_CURSOR_TOGGLE, 0).expect("toggle");
         // a was selected -> off; b, c were unselected -> on.
-        assert_eq!(engine.selected_crew(1), vec![b, c]);
+        assert_eq!(engine.selected_crew(1), vec![c, b]);
         assert_eq!(
             engine.crew_cursor(1),
-            Some(b),
+            Some(c),
             "AdjustCursorCommand moves the cursor to the first Select"
         );
         let _ = a;

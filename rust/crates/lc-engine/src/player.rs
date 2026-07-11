@@ -335,7 +335,7 @@ impl Player {
             production_unit,
             color,
         } = config;
-        let mut player = Self {
+        Self {
             id,
             player_info_id,
             name,
@@ -374,9 +374,7 @@ impl Player {
             position_index: -1,
             control: PlayerControlState::default(),
             extra_data: Vec::new(),
-        };
-        player.sort_crew();
-        player
+        }
     }
 
     pub fn from_state(state: PlayerState) -> Self {
@@ -417,7 +415,7 @@ impl Player {
             control,
             extra_data,
         } = state;
-        let mut player = Self {
+        Self {
             id,
             player_info_id,
             name,
@@ -456,9 +454,7 @@ impl Player {
             position_index: -1,
             control,
             extra_data,
-        };
-        player.sort_crew();
-        player
+        }
     }
 
     pub fn to_state(&self) -> PlayerState {
@@ -801,7 +797,6 @@ impl Player {
 
     pub fn set_crew(&mut self, crew: Vec<ObjectId>) {
         self.crew = crew;
-        self.sort_crew();
     }
 
     pub fn home_base_material(&self) -> &HashMap<DefinitionId, u32> {
@@ -941,10 +936,6 @@ impl Player {
 
     pub fn set_production_unit(&mut self, unit: u32) {
         self.production_unit = unit;
-    }
-
-    fn sort_crew(&mut self) {
-        self.crew.sort_unstable_by_key(|id| id.as_u64());
     }
 }
 

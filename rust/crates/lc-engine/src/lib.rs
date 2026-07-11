@@ -20971,20 +20971,32 @@ impl Engine {
                 continue;
             }
             self.known_crew_owners.insert(owner);
-            if object.state.status.is_active() {
-                crew_map.entry(owner).or_default().push(object.id);
-            }
             if object.state.status.is_active() && object.state.alive {
                 active_alive.insert(owner);
             }
         }
 
-        for crew in crew_map.values_mut() {
-            // C4Player::Crew is newest-first (Add stMain inserts before
-            // older same-category crew); GetCrew's index order and
-            // GetHiRank's first-of-equal-ranks tie-break follow it
-            // (C4Player.cpp:1003-1020).
-            crew.sort_unstable_by_key(|id| std::cmp::Reverse(id.as_u64()));
+        // C4Player::Crew uses C4ObjectList::stMain, so its links follow the
+        // C++ master object list rather than object numbers. `exec_list` is
+        // that list in reverse execution order; walk it backwards to retain
+        // the exact GetCrew/Cursor order, including loaded arbitrary IDs
+        // (C4ObjectList.cpp:110-195; C4Player.cpp:1003-1020,1261-1293).
+        for &object_id in self.exec_list.iter().rev() {
+            let Some(object) = self
+                .find_object_index(object_id)
+                .map(|index| &self.objects[index])
+            else {
+                continue;
+            };
+            if object.state.crew_member
+                && object.state.owner != OWNER_NONE
+                && object.state.status.is_active()
+            {
+                crew_map
+                    .entry(object.state.owner)
+                    .or_default()
+                    .push(object_id);
+            }
         }
 
         if !self.players.is_empty() {

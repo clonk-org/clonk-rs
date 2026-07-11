@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 use lc_engine::scenario::LegacyDefinitionResolver;
-use lc_engine::{Engine, JoinPlayerConfig, Scenario, ScenarioError};
+use lc_engine::{Engine, JoinPlayerConfig, Scenario, ScenarioError, COM_CURSOR_RIGHT};
 use lc_resources::Group;
 
 struct ContentResolver {
@@ -100,5 +100,36 @@ fn tutorial05_cnmt_rule_stalls_the_unfed_elevator_at_eighty_percent() {
     assert_eq!(
         stalled.construction, 80_000,
         "CNMT must prevent free construction progress"
+    );
+}
+
+#[test]
+fn tutorial05_cpp_crew_order_starts_at_constructor_then_cycles_to_valley() {
+    // PlaceReadyCrew adds each equal-definition CLNK to C4Player::Crew with
+    // stMain ordering, so the newest recruit is first. Tutorial05 binds
+    // GetCrew(plr,0) as the constructor and GetCrew(plr,1) as the valley
+    // Clonk, then C4Player::AdjustCursorCommand chooses that first equal-rank
+    // crew member (C4Player.cpp:481-570,1003-1020,1235-1258;
+    // C4ObjectList.cpp:110-195; Tutorial05/Script.c:32-39).
+    let (mut engine, owner) = load_tutorial05();
+    let constructor = engine
+        .crew_cursor(owner)
+        .and_then(|id| engine.object_snapshot(id))
+        .expect("Tutorial05 starts with a crew cursor");
+    assert!(
+        constructor.position.x < 220 && constructor.position.y < 200,
+        "the initial cursor must be the constructor beside ELEV, got {constructor:?}"
+    );
+
+    engine
+        .player_in_com(owner, COM_CURSOR_RIGHT, 0)
+        .expect("real CursorRight control succeeds");
+    let valley = engine
+        .crew_cursor(owner)
+        .and_then(|id| engine.object_snapshot(id))
+        .expect("CursorRight selects another crew member");
+    assert!(
+        (200..300).contains(&valley.position.x) && valley.position.y >= 350,
+        "one CursorRight must select the valley Clonk, got {valley:?}"
     );
 }
