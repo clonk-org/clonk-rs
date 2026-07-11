@@ -292,6 +292,8 @@ pub struct DefCore {
     /// Shape-relative fire emission offset (C4Shape::FireTop).
     pub fire_top: i32,
     pub solid_mask: Option<TargetRect>,
+    /// `TopFace` (C4Def.cpp:306): source facet plus object-relative draw target.
+    pub top_face: Option<TargetRect>,
     pub vertices: Vec<DefVertex>,
     pub contact_density: i32,
     pub contact_function_calls: bool,
@@ -635,6 +637,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut shape_offset: Option<(i32, i32)> = None;
     let mut fire_top: i32 = 0;
     let mut solid_mask: Option<TargetRect> = None;
+    let mut top_face: Option<TargetRect> = None;
     let mut vertex_count: usize = 0;
     let mut vertex_x = [0i32; C4D_MAX_VERTEX];
     let mut vertex_y = [0i32; C4D_MAX_VERTEX];
@@ -793,6 +796,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "solidmask" => {
                 solid_mask =
+                    parse_target_rect(value).filter(|rect| rect.width > 0 && rect.height > 0);
+            }
+            "topface" => {
+                top_face =
                     parse_target_rect(value).filter(|rect| rect.width > 0 && rect.height > 0);
             }
             "vertices" => {
@@ -1015,6 +1022,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         }),
         fire_top,
         solid_mask,
+        top_face,
         vertices,
         contact_density,
         contact_function_calls,
@@ -2866,6 +2874,32 @@ Attach=1
                 target_y: 4,
             })
         );
+    }
+
+    #[test]
+    fn parse_def_core_top_face_target_rect() {
+        // C4DefCore::CompileFunc reads TopFace as C4TargetRect
+        // (src/C4Def.cpp:306); the last two values are the draw target.
+        let data = br#"
+            [DefCore]
+            id=ELEC
+            TopFace=0,1,24,26,-3,4
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(
+            parsed.top_face,
+            Some(TargetRect {
+                x: 0,
+                y: 1,
+                width: 24,
+                height: 26,
+                target_x: -3,
+                target_y: 4,
+            })
+        );
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=ELEC\n").expect("defcore parsed");
+        assert_eq!(defaulted.top_face, None, "C4TargetRect defaults empty");
     }
 
     #[test]
