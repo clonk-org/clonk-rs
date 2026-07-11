@@ -17519,6 +17519,30 @@ impl Engine {
                 }
             }
 
+            // C4Object::ExecMovement removes ordinary objects whose origin
+            // has crossed strictly below GBackHgt, before effects and life
+            // execute (src/C4Movement.cpp:598-617).
+            let crossed_landscape_bottom = !exec_movement_contained
+                && !exec_movement_static_back
+                && self.object_is_below_landscape_bottom(idx);
+            if crossed_landscape_bottom {
+                // Rust defers SetAction callbacks; C++ ran movement-induced
+                // Start/Abort calls inline before reaching this predicate.
+                // Drain them first, then re-check because a callback may
+                // move, save, attach, or delete the object.
+                self.trigger_action_callbacks(idx, Some(previous_action_name.clone()))?;
+                if self.objects[idx].destroyed
+                    || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
+                {
+                    continue;
+                }
+                self.update_sector_for_index(idx);
+                if self.object_is_below_landscape_bottom(idx) {
+                    self.assign_out_of_bounds_removal(idx)?;
+                    continue;
+                }
+            }
+
             dbg_stage(&self.objects[idx], "POSTMOVE");
             self.apply_landscape_at_index(idx);
             // Masks follow every state change this frame
@@ -26700,6 +26724,82 @@ impl Engine {
         if let Some(idx) = self.find_object_index(object_id) {
             let _ =
                 self.call_object_function(idx, "Death", vec![Value::Int(death_causing_player)])?;
+        }
+        Ok(())
+    }
+
+    /// Bottom half of C4Object::ExecMovement's out-of-bounds predicate
+    /// (src/C4Movement.cpp:598-605). Contained and StaticBack objects return
+    /// before this tail; Border_Bottom clamps instead; live DFA_ATTACH targets
+    /// get one frame to disappear first.
+    fn object_is_below_landscape_bottom(&self, idx: usize) -> bool {
+        let Some(object) = self.objects.get(idx) else {
+            return false;
+        };
+        let Some(height) = self
+            .landscape
+            .as_ref()
+            .map(|landscape| landscape.estimated_height())
+        else {
+            return false;
+        };
+        if object.state.position.y <= height {
+            return false;
+        }
+        let Some(definition) = self.definitions.get(&object.definition_id) else {
+            return false;
+        };
+        if definition.border_bound() & C4D_BORDER_BOTTOM != 0 {
+            return false;
+        }
+        let attached_to_target = matches!(
+            definition
+                .action_library()
+                .procedure_for_action(&object.state.action.name),
+            ActionProcedure::Attach
+        ) && object.state.action.target.is_some();
+        !attached_to_target
+    }
+
+    /// `AssignDeath(true); AssignRemoval()` from the movement tail
+    /// (src/C4Movement.cpp:613-614). Rust's object store has no two-frame
+    /// `RemovalDelay` tombstone yet, so the normal end-of-frame destroyed
+    /// cleanup removes it after all synchronous callbacks have run.
+    fn assign_out_of_bounds_removal(&mut self, idx: usize) -> Result<(), EngineError> {
+        let Some(object_id) = self.objects.get(idx).map(|object| object.id) else {
+            return Ok(());
+        };
+        tolerate_script_error(self.assign_death(idx, true))?;
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        if self.objects[idx].destroyed {
+            return Ok(());
+        }
+        tolerate_script_error(self.call_object_function(idx, "Destruction", Vec::new()))?;
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        if self.objects[idx].destroyed {
+            return Ok(());
+        }
+        let definition_id = self.objects[idx].definition_id.clone();
+        // AssignRemoval clears effects while Status is still normal
+        // (src/C4Object.cpp:257-269); callbacks therefore observe a live
+        // removal target, and cannot veto a ClearAll removal.
+        let mut events = self.objects[idx].drain_effects_with_reason(EffectStopReason::Cleared);
+        // C4Effect::ClearAll recurses into pNext first, so Stop callbacks run
+        // from the highest list entry back to the lowest
+        // (src/C4Effect.cpp:407-424).
+        events.reverse();
+        if !events.is_empty() {
+            self.dispatch_object_effect_events(idx, &definition_id, events)?;
+        }
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        if !self.objects[idx].destroyed {
+            let _ = self.objects[idx].mark_destroyed();
         }
         Ok(())
     }

@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    CommandDirection, Engine, JoinPlayerConfig, Scenario, ScenarioError, COM_DOWN, COM_UP,
+    CommandDirection, Engine, JoinPlayerConfig, ObjectUpdate, Scenario, ScenarioError, Vector2,
+    COM_DOWN, COM_UP,
 };
 use lc_resources::Group;
 
@@ -171,5 +172,41 @@ fn tutorial02_balloon_lift_keeps_the_pushing_clonk_on_its_platform() {
     assert!(
         balloon_after_lift.position.y < balloon_before_lift.position.y,
         "BALN::ControlUp must move the platform upward"
+    );
+}
+
+#[test]
+fn tutorial02_open_bottom_removes_the_clonk_in_the_crossing_tick() {
+    // Tutorial02 has BottomOpen=1. C4Object::ExecMovement removes an ordinary
+    // object at y > GBackHgt in that same tick (src/C4Movement.cpp:598-617).
+    let (mut engine, player) = load_tutorial02();
+    let clonk = engine
+        .crew_cursor(player)
+        .expect("Tutorial02 joins one selected CLNK");
+    for _ in 0..160 {
+        if engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.container.is_none())
+        {
+            break;
+        }
+        engine.tick().expect("startup Exit frame");
+    }
+    let landscape = engine.landscape().expect("Tutorial02 has a landscape");
+    assert!(landscape.bottom_open());
+    let below_bottom = landscape.estimated_height() + 1;
+    engine
+        .apply_object_update(
+            clonk,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(100, below_bottom))
+                .with_velocity(Vector2::ZERO),
+        )
+        .expect("place CLNK below the open bottom");
+
+    engine.tick().expect("out-of-bounds movement tick");
+    assert!(
+        engine.object_snapshot(clonk).is_none(),
+        "the raw open bottom must not leave the CLNK alive for another frame"
     );
 }

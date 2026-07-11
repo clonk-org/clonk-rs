@@ -12325,6 +12325,11 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
             vec![None; 2],
         );
         let mut landscape = Landscape::new(20, vec![0; 20]).expect("landscape builds");
+        // The 20x20 pixel plane is this fixture's GBackWdt/GBackHgt. Pin
+        // GBackHgt explicitly just like the real landscape loader; the
+        // surface-depth fallback is zero because this fixture only paints
+        // two isolated contact pixels.
+        landscape.set_world_height(20);
         landscape.set_pixel_grid(grid);
 
         let mut engine = Engine::with_seed(0);
@@ -24711,6 +24716,222 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
                 .val(),
             262
         );
+    }
+
+    #[test]
+    fn movement_bottom_removal_uses_the_strict_boundary_and_cpp_exemptions() {
+        // C4Object::ExecMovement tests `y > GBackHgt` after movement and
+        // stabilization, then calls AssignDeath(true) + AssignRemoval
+        // (src/C4Movement.cpp:598-617). The boundary itself still survives.
+        let mut definition = simple_definition("FALL");
+        definition.set_category(CATEGORY_LIVING);
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
+        let mut bounded = simple_definition("BNDD");
+        bounded.set_category(CATEGORY_LIVING);
+        bounded.set_border_bound(C4D_BORDER_BOTTOM);
+        let mut static_back = simple_definition("STAT");
+        static_back.set_category(CATEGORY_STATIC_BACK);
+        let mut attached = simple_definition("ATCH");
+        attached.set_category(CATEGORY_LIVING);
+        attached.configure_actions(
+            Some("Attach".to_string()),
+            HashMap::from([(
+                "Attach".to_string(),
+                ActionSpec::default().with_procedure("Attach"),
+            )]),
+        );
+        let mut engine = Engine::with_seed(42);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .register_definition(bounded)
+            .expect("bounded definition registers");
+        engine
+            .register_definition(static_back)
+            .expect("static definition registers");
+        engine
+            .register_definition(attached)
+            .expect("attach definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        let mut landscape = Landscape::flat(16, 20);
+        landscape.set_world_height(20);
+        landscape.set_border_open(0, 0, true, true);
+        engine.set_landscape(landscape);
+
+        let boundary = engine
+            .spawn_object(
+                SpawnConfig::new("FALL")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(8, 20))
+                    .with_mobile(true),
+            )
+            .expect("boundary object spawns");
+        let below = engine
+            .spawn_object(
+                SpawnConfig::new("FALL")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(8, 21))
+                    .with_mobile(true),
+            )
+            .expect("below-bottom object spawns");
+        let crossing = engine
+            .spawn_object(
+                SpawnConfig::new("FALL")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(10, 20))
+                    .with_velocity(Vector2::new(0, 1))
+                    .with_mobile(true),
+            )
+            .expect("crossing object spawns");
+        let bounded = engine
+            .spawn_object(
+                SpawnConfig::new("BNDD")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(6, 21))
+                    .with_mobile(true),
+            )
+            .expect("border-bound object spawns");
+        let contained = engine
+            .spawn_object(
+                SpawnConfig::new("FALL")
+                    .with_category(CATEGORY_LIVING)
+                    .with_container(bounded),
+            )
+            .expect("contained object spawns");
+        let static_back = engine
+            .spawn_object(
+                SpawnConfig::new("STAT")
+                    .with_category(CATEGORY_STATIC_BACK)
+                    .with_position(Vector2::new(4, 21))
+                    .with_mobile(true),
+            )
+            .expect("StaticBack object spawns");
+        let mut attach_action = ActionState::new("Attach");
+        attach_action.target = Some(bounded);
+        let attached = engine
+            .spawn_object(
+                SpawnConfig::new("ATCH")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(6, 21))
+                    .with_action(attach_action)
+                    .with_mobile(true),
+            )
+            .expect("attached object spawns");
+
+        engine.tick().expect("movement tick succeeds");
+
+        let boundary = engine.object_snapshot(boundary).expect("boundary remains");
+        assert!(boundary.alive);
+        assert_eq!(boundary.status, ObjectStatus::Normal);
+        assert!(
+            engine.object_snapshot(below).is_none(),
+            "AssignDeath and AssignRemoval complete in the out-of-bounds tick"
+        );
+        assert!(
+            engine.object_snapshot(crossing).is_none(),
+            "crossing from y == GBackHgt is removed in that movement tick"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(bounded)
+                .expect("Border_Bottom object remains")
+                .status,
+            ObjectStatus::Normal
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(contained)
+                .expect("contained object remains")
+                .container,
+            Some(bounded)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(static_back)
+                .expect("StaticBack object remains")
+                .status,
+            ObjectStatus::Normal
+        );
+        let attached = engine
+            .object_snapshot(attached)
+            .expect("DFA_ATTACH object with a target remains");
+        assert_eq!(attached.action.name, "Attach");
+        assert_eq!(attached.action.target, Some(bounded));
+    }
+
+    #[test]
+    fn out_of_bounds_callbacks_run_before_timer_and_step_despite_death_error() {
+        // ExecMovement performs AssignDeath(true) then AssignRemoval before
+        // C4Object::Execute can reach effects/life/timer
+        // (src/C4Movement.cpp:613-617; src/C4Object.cpp:1069-1091).
+        // Engine callbacks are fail-safe, so a Death error must still permit
+        // Destruction and removal.
+        let script = r#"
+            static iOrder, iTimer, iStep, iEffectOrder;
+            func Death() {
+                iOrder = 1;
+                iEffectOrder = 0;
+                MissingDeathFunction();
+            }
+            func Destruction() { iOrder = iOrder * 10 + 2; }
+            func FxLowStop(target, number, reason, temp) {
+                iEffectOrder = iEffectOrder * 10 + 1;
+            }
+            func FxHighStop(target, number, reason, temp) {
+                iEffectOrder = iEffectOrder * 10 + 2;
+            }
+            func After() { iTimer = 1; }
+            func Step() { iStep = 1; }
+        "#;
+        let mut definition =
+            Definition::from_script("HOOK", "Hook", script).expect("script compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_category(CATEGORY_LIVING);
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
+        definition.set_timer(1);
+        definition.set_timer_call(Some("After".to_string()));
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                ("Dead".to_string(), ActionSpec::default()),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(43);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        let mut landscape = Landscape::flat(16, 20);
+        landscape.set_world_height(20);
+        landscape.set_border_open(0, 0, true, true);
+        engine.set_landscape(landscape);
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("HOOK")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(8, 20))
+                    .with_velocity(Vector2::new(0, 1))
+                    .add_effect(EffectState::new("Low").with_priority(10))
+                    .add_effect(EffectState::new("High").with_priority(100))
+                    .with_mobile(true),
+            )
+            .expect("object spawns");
+
+        engine.tick().expect("Death error is fail-safe");
+
+        assert!(engine.object_snapshot(object).is_none());
+        let globals = engine.snapshot().script_globals.named;
+        assert_eq!(globals.get("iOrder"), Some(&Value::Int(12)));
+        assert_eq!(
+            globals.get("iEffectOrder"),
+            Some(&Value::Int(21)),
+            "AssignRemoval clears effects from high to low list order"
+        );
+        assert_eq!(globals.get("iTimer"), Some(&Value::Nil));
+        assert_eq!(globals.get("iStep"), Some(&Value::Nil));
     }
 
     #[test]
