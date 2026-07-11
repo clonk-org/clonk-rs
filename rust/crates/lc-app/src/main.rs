@@ -16900,6 +16900,10 @@ mod tests {
             .expect("integer menu identification deserializes");
         assert_eq!(menu.identification, context_identification);
         assert_eq!(
+            menu.caption, "Cabin",
+            "C4Def::Load must replace HUT3's DefCore fallback with Names.txt US localization (C4Def.cpp:635-639)"
+        );
+        assert_eq!(
             menu.items
                 .iter()
                 .map(|item| item.caption.as_str())

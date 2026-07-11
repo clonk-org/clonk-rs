@@ -5392,7 +5392,7 @@ fn collect_definitions_from_group<S: AsRef<str>>(
 ) -> Result<(), ScenarioError> {
     let mut primary_definition = false;
     if group.exists("DefCore.txt") {
-        let resource = ResourceDefinitionData::load(group)?;
+        let resource = ResourceDefinitionData::load_with_languages(group, languages)?;
         if !skip_ids.contains(&resource.core.id.to_ascii_uppercase()) {
             primary_definition = true;
             let mut definition = scenario_definition_from_resource(resource, Some(group.clone()));

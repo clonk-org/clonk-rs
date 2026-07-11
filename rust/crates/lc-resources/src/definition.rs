@@ -57,7 +57,17 @@ pub struct DefinitionGraphicsVariant {
 
 impl Definition {
     pub fn load(group: &Group) -> Result<Self, DefinitionError> {
-        let core = DefCore::load(group)?;
+        Self::load_with_languages(group, &crate::scenario::DEFAULT_LANGUAGE_SEQUENCE)
+    }
+
+    pub fn load_with_languages<S: AsRef<str>>(
+        group: &Group,
+        languages: &[S],
+    ) -> Result<Self, DefinitionError> {
+        let mut core = DefCore::load(group)?;
+        if let Some(name) = load_definition_name(group, languages)? {
+            core.name = Some(name);
+        }
 
         let mut script = load_scripts(group)?;
 
@@ -128,6 +138,33 @@ fn load_definition_description(group: &Group) -> Result<Option<String>, Definiti
     let bytes = group.read_file(DESCRIPTION)?;
     let description = decode_legacy_script_text(&bytes).trim().to_string();
     Ok((!description.is_empty()).then_some(description))
+}
+
+/// `C4Def::Load`'s localized `C4CFN_DefNames = "Names{}.txt|Names.txt"`:
+/// load the first filename admitted by the language sequence, then select
+/// the first matching `XX:` line from that one component
+/// (`C4Def.cpp:635-639`; `C4ComponentHost.cpp:55-94,238-260`).
+fn load_definition_name<S: AsRef<str>>(
+    group: &Group,
+    languages: &[S],
+) -> Result<Option<String>, DefinitionError> {
+    let candidates = languages
+        .iter()
+        .map(|language| format!("Names{}.txt", language.as_ref()))
+        .chain(std::iter::once("Names.txt".to_string()));
+    let Some(candidate) = candidates.into_iter().find(|name| group.exists(name)) else {
+        return Ok(None);
+    };
+    let text = decode_legacy_script_text(&group.read_file(candidate)?);
+    Ok(languages.iter().find_map(|language| {
+        let needle = format!("{}:", language.as_ref());
+        text.find(&needle).and_then(|position| {
+            let value = &text[position + needle.len()..];
+            let end = value.find(['\r', '\n']).unwrap_or(value.len());
+            let value = value[..end].to_string();
+            (!value.is_empty()).then_some(value)
+        })
+    }))
 }
 
 /// Decodes a single named image from the def group, `None` when absent.
@@ -2320,6 +2357,32 @@ mod tests {
         let definition = Definition::load(&group).expect("load definition");
 
         assert_eq!(definition.description(), Some("A safe home base."));
+    }
+
+    #[test]
+    fn definition_name_uses_localized_names_component() {
+        // C4Def::Load loads Names{}.txt|Names.txt after DefCore and replaces
+        // C4Def::Name with the first language-sequence match
+        // (C4Def.cpp:635-639; C4ComponentHost.cpp:238-260). HUT3 therefore
+        // presents as "Cabin", not its DefCore fallback "Hut".
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Hut3.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=HUT3\nName=Hut\n",
+        )
+        .expect("DefCore");
+        fs::write(def_dir.join("Names.txt"), b"DE:H\xfctte\r\nUS:Cabin\r\n")
+            .expect("localized names");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let definition = Definition::load(&group).expect("load definition");
+
+        assert_eq!(definition.core.name.as_deref(), Some("Cabin"));
+        let german = Definition::load_with_languages(&group, &["DE", "US"])
+            .expect("load German definition name");
+        assert_eq!(german.core.name.as_deref(), Some("Hütte"));
     }
 
     #[test]
