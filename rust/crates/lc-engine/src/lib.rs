@@ -23600,6 +23600,17 @@ impl Engine {
         Ok(false)
     }
 
+    /// `ObjectComStop` (C4ObjectCom.cpp:239-245): enter ActIdle first,
+    /// then stand in Walk when that action exists.
+    fn object_com_stop_action(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+    ) -> Result<bool, EngineError> {
+        self.force_action_with_calls(idx, definition_id, "Idle")?;
+        self.object_action_stand(idx, definition_id)
+    }
+
     /// ObjectActionFlat (C4ObjectCom.cpp:96-102): "FlatUp", dirs zeroed.
     fn object_action_flat(
         &mut self,
@@ -24659,8 +24670,7 @@ impl Engine {
         idx: usize,
         definition_id: &DefinitionId,
     ) -> Result<(), EngineError> {
-        self.force_action_with_calls(idx, definition_id, "Idle")?;
-        self.object_action_stand(idx, definition_id)?;
+        self.object_com_stop_action(idx, definition_id)?;
         let wait = CommandRequest::new(CommandId::Wait)
             .with_update_interval(50)
             .with_mode(CommandMode::SilentSub);
