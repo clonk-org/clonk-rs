@@ -25726,6 +25726,29 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
     }
 
     #[test]
+    fn definition_from_resource_carries_top_face_like_cpp() -> Result<(), EngineError> {
+        // C4DefCore::CompileFunc stores TopFace on C4Def (src/C4Def.cpp:306),
+        // and C4Object::UpdateFace consumes that same target rect
+        // (src/C4Object.cpp:368-377).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("ElevatorCar.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=ELEC\nName=Elevator Car\nTopFace=0,1,24,26,-12,-13\n",
+        )
+        .expect("write defcore");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource)?;
+        assert_eq!(
+            definition.top_face(),
+            Some(DefinitionTargetRect::new(0, 1, 24, 26, -12, -13))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn definition_from_resource_carries_auto_context_menu_like_cpp() -> Result<(), EngineError> {
         // C4DefCore::CompileFunc reads AutoContextMenu into the definition
         // (src/C4Def.cpp:416); C4Object::AutoContextMenu consults that flag

@@ -6194,6 +6194,8 @@ pub struct Definition {
     /// C4Shape::FireTop (C4Shape.cpp:509).
     fire_top: i32,
     solid_mask: Option<DefinitionTargetRect>,
+    /// DefCore `TopFace` (C4Def.cpp:306), drawn in the second object pass.
+    top_face: Option<DefinitionTargetRect>,
     shape_vertices: Vec<ObjectVertex>,
     contact_density: i32,
     contact_function_calls: bool,
@@ -6402,6 +6404,7 @@ impl Definition {
             shape: None,
             fire_top: 0,
             solid_mask: None,
+            top_face: None,
             shape_vertices: Vec::new(),
             contact_density: CONTACT_DENSITY_SOLID,
             contact_function_calls: false,
@@ -6606,6 +6609,7 @@ impl Definition {
         definition.set_mass(resource.core.mass);
         definition.set_picture(resource.core.picture.map(DefinitionPicture::from));
         definition.set_solid_mask(resource.core.solid_mask.map(DefinitionTargetRect::from));
+        definition.set_top_face(resource.core.top_face.map(DefinitionTargetRect::from));
         if let Some(image) = resource.picture_image.as_ref() {
             definition.set_picture_image(Some(DefinitionPictureImage::from_resource(
                 image,
@@ -7213,6 +7217,14 @@ impl Definition {
     pub fn set_solid_mask(&mut self, rect: Option<DefinitionTargetRect>) {
         self.solid_mask = rect.filter(DefinitionTargetRect::is_positive);
         self.rebuild_solid_mask_pixels();
+    }
+
+    pub fn top_face(&self) -> Option<DefinitionTargetRect> {
+        self.top_face
+    }
+
+    pub fn set_top_face(&mut self, rect: Option<DefinitionTargetRect>) {
+        self.top_face = rect.filter(DefinitionTargetRect::is_positive);
     }
 
     /// Per-pixel decode for an ARBITRARY mask rect — Objects.txt
@@ -16173,6 +16185,14 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .and_then(|definition| definition.shape_rect())
+    }
+
+    /// DefCore `TopFace` presentation metadata (src/C4Def.cpp:306), used by
+    /// the frontend's second object rendering pass (src/C4ObjectList.cpp:390-396).
+    pub fn definition_top_face(&self, definition_id: &str) -> Option<DefinitionTargetRect> {
+        self.definitions
+            .get(definition_id)
+            .and_then(|definition| definition.top_face())
     }
 
     /// DefCore `StretchGrowth` → C4Def::GrowthType (src/C4Def.cpp:387):
@@ -27123,6 +27143,7 @@ impl Engine {
         definition.set_mass(core.mass);
         definition.set_picture(core.picture.map(DefinitionPicture::from));
         definition.set_solid_mask(core.solid_mask.map(DefinitionTargetRect::from));
+        definition.set_top_face(core.top_face.map(DefinitionTargetRect::from));
         definition.set_shape_rect(core.shape.map(DefinitionRect::from));
         definition.set_fire_top(core.fire_top);
         definition.set_shape_vertices(
