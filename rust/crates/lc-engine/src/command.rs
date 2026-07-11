@@ -771,6 +771,37 @@ mod tests {
         assert_eq!(state.step(&ctx).status, CommandStatus::Completed);
     }
 
+    #[test]
+    fn move_to_exits_a_container_before_steering() {
+        // C4Command::MoveTo always delegates Exit before its path and
+        // movement logic, which lets Build's automatic Acquire return from
+        // a base with the component (C4Command.cpp:213-217).
+        let container_id = ObjectId::new(9);
+        let mut walker = walking_jumper(Vector2::new(100, 100));
+        walker.container = Some(container_id);
+        let objects = HashMap::from([(container_id, snapshot_with_id(9))]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(200))
+                .with_ty(Some(100)),
+        );
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.iter().any(|operation| matches!(
+            operation,
+            CommandOperation::PushFront(request)
+                if request.id == CommandId::Exit
+                    && request.mode == CommandMode::SilentSub
+                    && request.update_interval == 50
+        )));
+        assert!(result.update.is_none(), "contained MoveTo does not steer");
+    }
+
     // C4Command::MoveTo pushing (C4Command.cpp:257-265): without the
     // C4CMD_MoveTo_PushTarget Data flag (C4Command.h:69) — or against a
     // Grab=2 grab-only target — a pushing mover lets go (UnGrab sub-
@@ -1495,6 +1526,62 @@ mod tests {
             event,
             CommandEvent::ApplyObjectUpdate { object_id, update }
                 if *object_id == item_id && update.container == Some(Some(actor_id))
+        )));
+    }
+
+    #[test]
+    fn get_enters_nonliving_structure_for_contained_item() {
+        // C4Command::Get treats a target container as an object with Status,
+        // not as a living object. A HUT3 therefore remains a valid entrance
+        // on the automatic construction-material route
+        // (C4Command.cpp:1180-1217).
+        let actor_id = ObjectId::new(101);
+        let container_id = ObjectId::new(201);
+        let item_id = ObjectId::new(301);
+        let actor = snapshot_with_id(actor_id.as_u64());
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.alive = false;
+        container.ocf = ocf::ENTRANCE;
+        container.contents.push(item_id);
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "WOOD".into();
+        item.alive = false;
+        item.collectible = true;
+        item.construction = FULL_CON;
+        item.container = Some(container_id);
+        let objects = HashMap::from([
+            (actor_id, actor),
+            (container_id, container),
+            (item_id, item),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state =
+            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
+                .expect("state created");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.iter().any(|operation| matches!(
+            operation,
+            CommandOperation::PushFront(request)
+                if request.id == CommandId::Enter && request.target == Some(container_id)
         )));
     }
 
@@ -2455,6 +2542,55 @@ mod tests {
             }
         );
         assert!(result.operations.is_empty());
+    }
+
+    #[test]
+    fn enter_rechecks_an_opened_door_before_its_interval_expires() {
+        // UpdateInterval is a command lifetime decremented before every
+        // execution; it never throttles C4Command::Enter. After the first
+        // call activates a closed door, the very next frame may enter it
+        // (C4Command.cpp:545-616,1545-1555).
+        let actor_id = ObjectId::new(32);
+        let target_id = ObjectId::new(42);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(10, 10);
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.shape = DefinitionRect::new(0, 0, 20, 20);
+        target.ocf = ocf::ENTRANCE;
+        target.entrance_status = false;
+        let mut objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut state = EnterState::from_request(
+            &CommandRequest::new(CommandId::Enter)
+                .with_target(Some(target_id))
+                .with_update_interval(50),
+        )
+        .expect("state created");
+
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let first_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 100);
+        let first = state.step(&first_ctx);
+        assert!(matches!(
+            first.events.as_slice(),
+            [CommandEvent::CallObjectFunction { function, .. }] if function == "ActivateEntrance"
+        ));
+
+        objects
+            .get_mut(&target_id)
+            .expect("target present")
+            .entrance_status = true;
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let next_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 101);
+        let next = state.step(&next_ctx);
+        assert_eq!(next.status, CommandStatus::Completed);
+        assert_eq!(
+            next.events,
+            vec![CommandEvent::EnterObject {
+                object_id: actor_id,
+                container_id: target_id,
+            }]
+        );
     }
 
     #[test]
@@ -4267,6 +4403,45 @@ mod tests {
     }
 
     #[test]
+    fn exit_rechecks_an_opened_door_before_its_interval_expires() {
+        // C4Command::Exit executes every frame; UpdateInterval is command
+        // lifetime, not a polling delay (C4Command.cpp:624-650,1545-1555).
+        // That matters for HUT3's nine-frame OpenDoor and forty-frame
+        // DoorOpen window (Hut3.c4d/ActMap.txt:2-26).
+        let actor_id = ObjectId::new(93);
+        let container_id = ObjectId::new(103);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.entrance_status = false;
+        container.ocf |= ocf::ENTRANCE;
+        let mut objects = HashMap::from([(actor_id, actor), (container_id, container)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_update_interval(50))
+                .expect("state created");
+
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let first_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 100);
+        let first = state.step(&first_ctx);
+        assert!(matches!(
+            first.events.as_slice(),
+            [CommandEvent::CallObjectFunction { function, .. }] if function == "ActivateEntrance"
+        ));
+
+        objects
+            .get_mut(&container_id)
+            .expect("container present")
+            .entrance_status = true;
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let next_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 101);
+        let next = state.step(&next_ctx);
+        assert_eq!(next.status, CommandStatus::Completed);
+        assert_eq!(next.update.and_then(|update| update.container), Some(None));
+    }
+
+    #[test]
     fn exit_stops_building_procedure() {
         let actor_id = ObjectId::new(110);
         let container_id = ObjectId::new(120);
@@ -5386,6 +5561,10 @@ mod tests {
         item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
         item.collectible = true;
         item.construction = FULL_CON;
+        // Construction components are nonliving. C4Command::Acquire filters
+        // by OCF_Available/full construction/fire, never OCF_Alive
+        // (C4Command.cpp:2105-2132).
+        item.alive = false;
 
         let mut objects = HashMap::new();
         objects.insert(builder.id, builder);
@@ -8541,6 +8720,17 @@ impl MoveToState {
             self.init_evaluation(ctx);
             return CommandStepResult::running(None);
         }
+
+        // C4Command::MoveTo leaves any container before pathfinding or
+        // steering. The default AddCommand mode is SilentSub
+        // (C4Command.cpp:213-217; C4Object.h:221-225).
+        if ctx.object.container.is_some() {
+            let exit = CommandRequest::new(CommandId::Exit)
+                .with_update_interval(50)
+                .with_mode(CommandMode::SilentSub);
+            return CommandStepResult::running(None)
+                .with_operations(vec![CommandOperation::PushFront(exit)]);
+        }
         let target = match self.resolve_target_position(ctx) {
             Some(position) => position,
             None => {
@@ -8943,14 +9133,6 @@ impl EnterState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         let Some(target_snapshot) = ctx.resolve(self.target) else {
             return CommandStepResult::failed(self.update_to_stop(ctx));
         };
@@ -9045,14 +9227,6 @@ impl ExitState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         let Some(container_id) = ctx.object.container else {
             return CommandStepResult::completed(self.update_to_stop(ctx));
         };
@@ -11380,7 +11554,7 @@ impl GetState {
         let Some(container_snapshot) = ctx.resolve(container_id) else {
             return CommandStepResult::failed(self.ensure_stop(ctx, update));
         };
-        if !container_snapshot.is_active() {
+        if !container_snapshot.is_status_active() {
             return CommandStepResult::failed(self.ensure_stop(ctx, update));
         }
 
@@ -12428,7 +12602,7 @@ impl AcquireState {
         candidate: &CommandObjectSnapshot,
         ctx: &CommandRuntimeContext<'_>,
     ) -> bool {
-        if candidate.destroyed || !candidate.status.is_active() || !candidate.alive {
+        if candidate.destroyed || !candidate.status.is_active() {
             return false;
         }
         if candidate.definition_id != self.definition_id {

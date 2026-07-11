@@ -1554,7 +1554,10 @@ fn consume_optional_object_reference_argument(
     let Some(value) = args.get(*index) else {
         return Ok(None);
     };
-    if !matches!(value, Value::Object(_) | Value::Proplist(_) | Value::Nil) {
+    if !matches!(
+        value,
+        Value::Object(_) | Value::Proplist(_) | Value::Nil | Value::Int(0)
+    ) {
         return Ok(None);
     }
     let object_id = parse_object_reference_argument(value, function, parameter)?;
@@ -20587,21 +20590,19 @@ fn construction_check(
         return Ok(false);
     }
 
-    let mut solid_count: i32 = 0;
-    let mut support_count: i32 = 0;
-    for column in rect_left..rect_right {
-        let surface = match landscape.surface_height(column) {
-            Some(height) => height,
-            None => return Ok(false),
-        };
-        let overlap_start = rect_top.max(surface);
-        let overlap_height = (rect_bottom - overlap_start).max(0);
-        solid_count = solid_count.saturating_add(overlap_height);
-
-        let support_start = rect_bottom.max(surface);
-        let support_height = (rect_bottom + 5 - support_start).max(0);
-        support_count = support_count.saturating_add(support_height);
-    }
+    // ConstructionCheck uses AreaSolidCount over the actual pixel plane;
+    // column surface heights are not equivalent in caves or below a closed
+    // roof (C4Landscape.cpp:1090-1098,2125-2158).
+    let solid_count = (rect_top..rect_bottom)
+        .flat_map(|y| (rect_left..rect_right).map(move |x| (x, y)))
+        .filter(|&(x, y)| landscape.is_solid_at(x, y))
+        .count()
+        .min(i32::MAX as usize) as i32;
+    let support_count = (rect_bottom..rect_bottom.saturating_add(5))
+        .flat_map(|y| (rect_left..rect_right).map(move |x| (x, y)))
+        .filter(|&(x, y)| landscape.is_solid_at(x, y))
+        .count()
+        .min(i32::MAX as usize) as i32;
 
     let area_threshold = ((i64::from(width) * i64::from(effective_height)) / 20)
         .clamp(0, i64::from(i32::MAX)) as i32;
@@ -37836,6 +37837,100 @@ public func SeedFull()
             object_reference_value(ObjectId::new(1))
         );
         assert_eq!(outcome.spawns[0].construction, expected_growth);
+    }
+
+    #[test]
+    fn create_contents_consumes_explicit_zero_container_before_count() {
+        // Tutorial06 calls HUT3->CreateContents(METL, 0, 2) and WOOD with
+        // count 4. The typed object slot converts integer zero to nullptr;
+        // iCount remains the following argument (C4Script.cpp:1938-1951).
+        let (result, outcome) = with_object_host_context(|| {
+            create_contents(&[
+                Value::C4Id("WOOD".into()),
+                Value::Int(0),
+                Value::Int(4),
+            ])
+        });
+
+        assert_eq!(
+            result.expect("CreateContents accepts the null object slot"),
+            object_reference_value(ObjectId::new(4))
+        );
+        assert_eq!(outcome.spawns.len(), 4);
+        assert!(outcome.spawns.iter().all(|spawn| {
+            spawn.definition_id == "WOOD" && spawn.container == Some(ObjectId::new(1))
+        }));
+    }
+
+    #[test]
+    fn create_construction_counts_tutorial06_cave_pixels_not_roof_surface() {
+        // Tutorial06 is TopOpen=0: the valid ELEV site at (332,148) has a
+        // solid cave roof above it and floor support below it. C++ counts
+        // the actual pixels in the construction rectangle and its five-row
+        // support strip (C4Landscape.cpp:1090-1098,2125-2158); it does not
+        // treat the first solid surface in each column as solid forever.
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 200;
+        let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize];
+        for y in 0..25 {
+            pixels[y * WIDTH as usize..(y + 1) * WIDTH as usize].fill(1);
+        }
+        for y in 150..HEIGHT as usize {
+            pixels[y * WIDTH as usize..(y + 1) * WIDTH as usize].fill(1);
+        }
+        let mut densities = vec![0; 2];
+        densities[1] = 100;
+        let mut landscape = Landscape::new(WIDTH, vec![0; WIDTH as usize])
+            .expect("Tutorial06 cave fixture builds");
+        landscape.set_world_height(HEIGHT as i32);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            pixels,
+            densities,
+            vec![None; 2],
+            vec![None; 2],
+        ));
+        landscape.refresh_all_raster_columns();
+        assert_eq!(landscape.surface_height(32), Some(0), "the roof is first");
+
+        let definitions = HashMap::from([(
+            DefinitionId::from("ELEV"),
+            DefinitionMetadata {
+                category: crate::CATEGORY_STRUCTURE,
+                constructable: true,
+                shape: Some(DefinitionRect::new(-14, -28, 28, 56)),
+                ..DefinitionMetadata::default()
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let args = [
+            Value::C4Id("ELEV".into()),
+            Value::Int(32),
+            Value::Int(148),
+            Value::Int(1),
+            Value::Int(1),
+            Value::Bool(true),
+            Value::Bool(true),
+        ];
+
+        let (result, outcome) =
+            with_effect_context(None, &[], world, 1, || create_construction(&args));
+
+        assert_eq!(
+            result.expect("CreateConstruction checks the cave site"),
+            object_reference_value(ObjectId::new(1))
+        );
+        assert_eq!(outcome.spawns.len(), 1);
     }
 
     #[test]

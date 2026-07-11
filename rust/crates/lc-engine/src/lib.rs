@@ -22705,15 +22705,28 @@ impl Engine {
         let desired_construction =
             (i64::from(current_construction) + delta).clamp(0, i64::from(FULL_CON)) as i32;
 
-        if need_material
-            && !required_components.is_empty()
-            && !self.ensure_build_components(
-                idx,
-                target_idx,
-                desired_construction,
-                &required_components,
-            )
-        {
+        let missing_component = need_material
+            .then(|| {
+                self.ensure_build_components(
+                    idx,
+                    target_idx,
+                    current_construction,
+                    &required_components,
+                )
+            })
+            .flatten();
+        if let Some(missing_component) = missing_component {
+            // C4Object::Build asks a crew builder to acquire the first
+            // component whose inserted ratio trails the current Con ratio.
+            // It is a retrying subcommand in front of the retained Build
+            // order (C4Object.cpp:1682-1750).
+            let acquire = CommandRequest::new(CommandId::Acquire)
+                .with_data(CommandData::Text(missing_component))
+                .with_update_interval(50)
+                .with_retries(1)
+                .with_mode(CommandMode::SilentSub);
+            self.objects[idx]
+                .apply_command_operations([CommandOperation::PushFront(acquire)]);
             // Target::Build returned false because the next construction
             // fraction has no material: DFA_BUILD calls ObjectComStop before
             // returning (C4Object.cpp:5033-5050).
@@ -22830,13 +22843,17 @@ impl Engine {
         &mut self,
         builder_idx: usize,
         target_idx: usize,
-        desired_construction: i32,
+        current_construction: i32,
         required: &[DefinitionComponent],
-    ) -> bool {
+    ) -> Option<DefinitionId> {
         if required.is_empty() {
-            return true;
+            return None;
         }
 
+        // Target::Build tries at most one full-con object of every missing
+        // component per invocation, first from the builder, then from the
+        // construction's container
+        // (C4Object.cpp:1694-1723).
         for component in required {
             if component.count == 0 {
                 continue;
@@ -22857,30 +22874,37 @@ impl Engine {
                     .insert(component.id.clone(), inserted);
             }
 
-            let required_for_progress = ((i64::from(component.count)
-                * i64::from(desired_construction))
-                + (i64::from(FULL_CON) - 1))
-                / i64::from(FULL_CON);
-
-            while i64::from(inserted) < required_for_progress {
-                if inserted >= component.count {
-                    return false;
-                }
+            if inserted < component.count {
                 let consumed = self.consume_component_from_contents(builder_idx, &component.id)
-                    || self.consume_component_from_container_of(builder_idx, &component.id)
                     || self.consume_component_from_container_of(target_idx, &component.id);
-                if !consumed {
-                    return false;
+                if consumed {
+                    inserted += 1;
+                    self.objects[target_idx]
+                        .state
+                        .components
+                        .insert(component.id.clone(), inserted);
                 }
-                inserted += 1;
-                self.objects[target_idx]
-                    .state
-                    .components
-                    .insert(component.id.clone(), inserted);
             }
         }
 
-        true
+        required.iter().find_map(|component| {
+            (component.count != 0)
+                .then(|| {
+                    let inserted = self.objects[target_idx]
+                        .state
+                        .components
+                        .get(&component.id)
+                        .copied()
+                        .unwrap_or(0);
+                    let inserted_percent =
+                        i64::from(inserted).saturating_mul(100) / i64::from(component.count);
+                    let construction_percent = i64::from(current_construction)
+                        .saturating_mul(100)
+                        / i64::from(FULL_CON);
+                    (inserted_percent < construction_percent).then(|| component.id.clone())
+                })
+                .flatten()
+        })
     }
 
     fn consume_component_from_contents(
@@ -40698,7 +40722,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.set_construction_needs_material(true);
 
         let structure_id = engine
-            .spawn_object(SpawnConfig::new("Structure").with_construction(0))
+            // CreateConstruction sites enter the world at one percent;
+            // a zero-construction NewObject is removed before return
+            // (C4Game.cpp:1110-1129; C4Object.cpp:1513-1517).
+            .spawn_object(SpawnConfig::new("Structure").with_construction(1_000))
             .expect("structure spawns");
 
         let mut build_state = ActionState::new("Build");
@@ -40720,9 +40747,9 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .object(structure_id)
             .expect("structure present")
             .construction;
-        assert_eq!(before, 0);
+        assert_eq!(before, 1_000);
         assert_eq!(
-            after, 0,
+            after, 1_000,
             "construction should not progress without components"
         );
         assert_eq!(
@@ -40731,6 +40758,21 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
                 .and_then(|builder| builder.action_procedure.as_deref()),
             Some("walk"),
             "a material refusal must stop DFA_BUILD like ObjectComStop"
+        );
+        assert_eq!(
+            snapshot
+                .object(builder_id)
+                .map(|builder| builder.command_stack.command_names()),
+            Some(vec!["Acquire".to_owned()]),
+            "C4Object::Build must queue Acquire for the first missing component"
+        );
+        assert_eq!(
+            snapshot
+                .object(builder_id)
+                .and_then(|builder| builder.command_stack.command_views().first().cloned())
+                .map(|command| command.data),
+            Some(CommandData::Text("Wood".to_owned())),
+            "Acquire must request the exact missing component (C4Object.cpp:1725-1747)"
         );
         Ok(())
     }
