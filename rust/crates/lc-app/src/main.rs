@@ -18249,7 +18249,7 @@ mod tests {
     }
 
     #[test]
-    fn app_virtual_keyboard_enters_tutorial03_base_and_exposes_context_menu() {
+    fn app_virtual_keyboard_completes_real_tutorial03_route() {
         // Tutorial03 teaches the permanent building-menu sequence after the
         // Clonk enters HUT3: C4MN_Context=14 exposes Contents/Buy/Sell/Info/Exit
         // before the player selects Buy (Tutorial03.c4s/Script.c:106-145;
@@ -18381,6 +18381,9 @@ mod tests {
         let mut rendered = vec![0_u8; 320 * 200 * 4];
         app.render(&mut rendered)
             .expect("render Tutorial03 context menu through the app");
+        advance_app_until(&mut app, "Tutorial03 Buy-menu prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Select option 'Buy'")
+        });
 
         // Physical X is the classic down control and physical A is Throw;
         // while a menu is open C4Player::InCom translates them to MenuDown
@@ -18447,6 +18450,9 @@ mod tests {
         );
         app.render(&mut rendered)
             .expect("render Tutorial03 Buy menu through the app");
+        advance_app_until(&mut app, "Tutorial03 buy-LORY prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Buy a lorry")
+        });
 
         // Buy the selected LORY with physical A/Throw. C++ leaves the
         // permanent Buy menu open and refills its C4IDList row at count zero
@@ -18494,6 +18500,9 @@ mod tests {
             .expect("permanent Buy menu remains after purchase");
         assert_eq!(buy_menu.identification, buy_identification);
         assert_eq!(buy_menu.items[0].count, 0);
+        advance_app_until(&mut app, "Tutorial03 close-Buy prompt", 240, |app| {
+            app_tutorial_message_contains(app, "close the buy menu")
+        });
 
         // D closes Buy back to auto-context; A activates its first Contents
         // row, then A activates LORY out of HUT3. These remain ordinary
@@ -18513,6 +18522,9 @@ mod tests {
             }
             app.update().expect("restore context after Buy");
         }
+        advance_app_until(&mut app, "Tutorial03 Contents prompt", 240, |app| {
+            app_tutorial_message_contains(app, "select 'Contents'")
+        });
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard.tap(VirtualKeyCode::A).expect("open Contents");
@@ -18541,6 +18553,9 @@ mod tests {
         );
         app.render(&mut rendered)
             .expect("render Tutorial03 Contents menu through the app");
+        advance_app_until(&mut app, "Tutorial03 activate-LORY prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Activate the lorry")
+        });
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard.tap(VirtualKeyCode::A).expect("activate LORY");
@@ -18561,6 +18576,9 @@ mod tests {
                 .is_some_and(|object| object.container.is_none()),
             "Contents activation must exit LORY from HUT3"
         );
+        advance_app_until(&mut app, "Tutorial03 leave-HUT3 prompt", 240, |app| {
+            app_tutorial_message_contains(app, "exit the hut")
+        });
 
         // Close Contents, then close the restored context menu. Its C++ close
         // command is Exit, so the tutorial-taught two physical D presses exit
@@ -18602,6 +18620,352 @@ mod tests {
                 .is_some_and(|object| object.container.is_none()),
             "physical D/D route must exit CLNK from HUT3"
         );
+
+        // Once both objects are outside, Tutorial03 teaches the complete real
+        // production route: LORY to SAWM, TRE2 through SAWM, ORE1 into LORY,
+        // then LORY into FNDR. The engine replay uses the same fresh-player
+        // Jump'n'Run/AutoContext preferences, so retain its physical bounds
+        // exactly at GameApp::handle_key (Tutorial03.c4s/Script.c:204-284;
+        // C4Object.cpp:3573-3740; C4ObjectCom.cpp:247-278).
+        advance_app_until(&mut app, "Tutorial03 closes HUT3's cursor menu", 20, |app| {
+            app.engine.cursor_object_menu(app.local_owner).is_none()
+        });
+        assert!(
+            app.engine.cursor_object_menu(app.local_owner).is_none(),
+            "no engine cursor menu may intercept the first world X"
+        );
+        assert!(
+            !app.menu_controls_active(),
+            "no app menu may intercept the first world X"
+        );
+        let sawmill = app_object_with_definition(&app, "SAWM").expect("Tutorial03 SAWM");
+        let foundry = app_object_with_definition(&app, "FNDR").expect("Tutorial03 FNDR");
+        let tree = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .filter(|object| object.definition_id == "TRE2")
+            .min_by_key(|object| (object.position.x - 167).abs())
+            .expect("Tutorial03 first full TRE2 near x=167")
+            .id;
+
+        advance_app_until(&mut app, "Tutorial03 LORY grab prompt", 180, |app| {
+            app_tutorial_message_contains(app, "once to grab the lorry")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs LORY");
+        advance_app_until(&mut app, "physical X grabs LORY", 40, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(lorry)
+            })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("physical Z pushes LORY left");
+        advance_app_until(&mut app, "LORY reaches the sawmill chute", 240, |app| {
+            app.engine.object_snapshot(lorry).is_some_and(|lorry| {
+                (194..=218).contains(&lorry.position.x)
+                    && (257..=277).contains(&lorry.position.y)
+            })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z at the sawmill chute");
+        advance_app_until(&mut app, "Tutorial03 LORY release prompt", 180, |app| {
+            app_tutorial_message_contains(app, "again to let go of the lorry")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X releases LORY");
+        advance_app_until(&mut app, "physical X releases LORY", 40, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+
+        advance_app_until(&mut app, "Tutorial03 first-tree prompt", 180, |app| {
+            app_tutorial_message_contains(app, "first tree on the left")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("physical Z walks to TRE2");
+        advance_app_until(
+            &mut app,
+            "CLNK stands inside the first TRE2 shape",
+            120,
+            |app| {
+                app.engine
+                    .object_snapshot(tree)
+                    .zip(app.engine.object_snapshot(clonk))
+                    .is_some_and(|(tree, clonk)| {
+                        (tree.position.x - 20..=tree.position.x + 20)
+                            .contains(&clonk.position.x)
+                            && (tree.position.y - 28..=tree.position.y + 28)
+                                .contains(&clonk.position.y)
+                    })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z at TRE2");
+        advance_app_until(&mut app, "Tutorial03 double-Dig prompt", 180, |app| {
+            app_tutorial_message_contains(app, "twice quickly to start chopping")
+        });
+
+        // Two immediate physical D taps synthesize COM_Dig_D and must choose
+        // Chop, not Script20's intentional too-slow Dig recovery branch
+        // (C4Player.cpp:1522-1536; Tutorial03.c4s/Script.c:36-63).
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard.tap(VirtualKeyCode::D).expect("first physical D");
+            keyboard.tap(VirtualKeyCode::D).expect("second physical D");
+        }
+        advance_app_until(&mut app, "physical D/D starts Chop", 80, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Chop")
+        });
+        advance_app_until(&mut app, "TRE2 is chopped into a vehicle", 800, |app| {
+            app.engine
+                .object_snapshot(tree)
+                .is_some_and(|object| object.category & lc_engine::CATEGORY_VEHICLE != 0)
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial03 felled-tree grab prompt",
+            180,
+            |app| {
+                app_tutorial_message_contains(app, "grab the felled tree")
+                    && app
+                        .engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs felled TRE2");
+        advance_app_until(&mut app, "physical X grabs felled TRE2", 80, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(tree)
+            })
+        });
+        advance_app_until(&mut app, "Tutorial03 SAWM tree prompt", 180, |app| {
+            app_tutorial_message_contains(app, "Push the tree over to the sawmill")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("physical C pushes TRE2 right");
+        advance_app_until(&mut app, "TRE2 reaches the SAWM gate", 240, |app| {
+            app.engine.object_snapshot(tree).is_some_and(|tree| {
+                (239..=259).contains(&tree.position.x)
+                    && (254..=279).contains(&tree.position.y)
+            })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C at SAWM");
+        advance_app_until(&mut app, "Tutorial03 SAWM Up prompt", 180, |app| {
+            app_tutorial_message_contains(app, "press 'up' to push it into the sawmill")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S pushes TRE2 into SAWM");
+        advance_app_until(&mut app, "SAWM consumes TRE2", 240, |app| {
+            app.engine.object_snapshot(tree).is_none()
+        });
+        advance_app_until(&mut app, "SAWM's five WOOD enter LORY", 600, |app| {
+            app.engine
+                .snapshot()
+                .objects
+                .into_iter()
+                .filter(|object| object.definition_id == "WOOD" && object.container == Some(lorry))
+                .count()
+                >= 5
+        });
+        assert!(
+            app.engine.object_snapshot(sawmill).is_some(),
+            "SAWM must survive after consuming TRE2"
+        );
+
+        advance_app_until(&mut app, "Tutorial03 creates ORE1", 180, |app| {
+            app_tutorial_message_contains(app, "dig out the chunk of ore")
+                && app_object_with_definition(app, "ORE1").is_some()
+        });
+        let ore = app_object_with_definition(&app, "ORE1").expect("Tutorial03 ORE1");
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("physical C walks to ORE1");
+        advance_app_until(&mut app, "CLNK reaches the ORE1 digging face", 600, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.position.x >= 480)
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C at ORE1");
+
+        // A single D is buffered to COM_Dig_S after C4DoubleClick. Wait for
+        // Dig before pressing X+C so another physical command cannot flush the
+        // pending single early (C4Player.cpp:1215-1229,1522-1531).
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D starts ORE1 dig");
+        advance_app_until(&mut app, "CLNK starts digging toward ORE1", 30, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Dig")
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::X)
+                .expect("physical X supplies Dig down");
+            keyboard
+                .press(VirtualKeyCode::C)
+                .expect("physical C supplies Dig right");
+        }
+        advance_app_until(&mut app, "real dig tunnel collects ORE1", 300, |app| {
+            app.engine
+                .object_snapshot(ore)
+                .is_some_and(|object| object.container == Some(clonk))
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release physical X after ORE1 pickup");
+            keyboard
+                .release(VirtualKeyCode::C)
+                .expect("release physical C after ORE1 pickup");
+        }
+        advance_app_until(&mut app, "ORE1-carrying CLNK finishes Dig", 80, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+
+        advance_app_until(&mut app, "Tutorial03 ORE1 throw prompt", 180, |app| {
+            app_tutorial_message_contains(app, "Throw the chunk of ore into the lorry")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("physical Z returns to LORY");
+        advance_app_until(&mut app, "CLNK reaches LORY's right side", 800, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .zip(app.engine.object_snapshot(lorry))
+                .is_some_and(|(clonk, lorry)| {
+                    clonk.position.x >= lorry.position.x + 40
+                        && clonk.position.x <= lorry.position.x + 42
+                })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z beside LORY");
+        assert!(
+            app.engine.cursor_object_menu(app.local_owner).is_none(),
+            "no engine cursor menu may intercept the world A throw"
+        );
+        assert!(
+            !app.menu_controls_active(),
+            "no app menu may intercept the world A throw"
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A throws ORE1 into LORY");
+        advance_app_until(&mut app, "ORE1 enters LORY", 180, |app| {
+            app.engine
+                .object_snapshot(ore)
+                .is_some_and(|object| object.container == Some(lorry))
+        });
+
+        advance_app_until(&mut app, "Tutorial03 FNDR prompt", 240, |app| {
+            app_tutorial_message_contains(
+                app,
+                "grab the lorry and push it into the gate of the foundry",
+            )
+        });
+        advance_app_until(&mut app, "CLNK finishes the real Throw", 80, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("physical Z returns to LORY's grab area");
+        advance_app_until(&mut app, "CLNK returns to LORY's grab area", 160, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .zip(app.engine.object_snapshot(lorry))
+                .is_some_and(|(clonk, lorry)| clonk.position.x <= lorry.position.x + 10)
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z at LORY");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs loaded LORY");
+        advance_app_until(&mut app, "CLNK grabs loaded LORY", 60, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(lorry)
+            })
+        });
+
+        // S while pushing invokes ObjectComEnter on LORY. Its real Entrance
+        // callback transfers ORE1 and WOOD into FNDR before metal production
+        // (C4Object.cpp:3702-3710; Lorry.c4d/Script.c:82-91).
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("physical C pushes loaded LORY to FNDR");
+        advance_app_until(&mut app, "loaded LORY reaches the FNDR gate", 400, |app| {
+            app.engine.object_snapshot(lorry).is_some_and(|lorry| {
+                (356..=376).contains(&lorry.position.x)
+                    && (253..=279).contains(&lorry.position.y)
+            })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C at FNDR");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S pushes LORY into FNDR");
+        advance_app_until(&mut app, "loaded LORY enters FNDR", 120, |app| {
+            app.engine
+                .object_snapshot(lorry)
+                .is_some_and(|object| object.container == Some(foundry))
+        });
+        advance_app_until(&mut app, "Tutorial03 explains FNDR", 240, |app| {
+            app_tutorial_message_contains(app, "foundry processes ore and fuel into metal")
+        });
+        advance_app_until(&mut app, "FNDR produces METL", 600, |app| {
+            app_object_with_definition(app, "METL").is_some()
+        });
+        advance_app_until(&mut app, "Tutorial03 explains METL", 240, |app| {
+            app_tutorial_message_contains(app, "Metal can be used to build vehicles")
+        });
+        advance_app_until(&mut app, "Tutorial03 selects Tutorial04", 240, |app| {
+            app.engine.next_mission().path == r"Tutorial.c4f\Tutorial04.c4s"
+        });
+        advance_app_until(&mut app, "Tutorial03 reaches GameOver", 320, |app| {
+            app.snapshot.game_over && app.game_over_dialog.is_some()
+        });
+        assert!(
+            app.snapshot
+                .round_results
+                .fulfilled_goals
+                .iter()
+                .any(|goal| goal == "SCRG"),
+            "Tutorial03 must fulfill SCRG before GameOver"
+        );
+        assert_eq!(
+            app.engine.next_mission().path,
+            r"Tutorial.c4f\Tutorial04.c4s"
+        );
+        app.render(&mut rendered)
+            .expect("render Tutorial03 GameOver through GameApp");
     }
 
     #[test]
