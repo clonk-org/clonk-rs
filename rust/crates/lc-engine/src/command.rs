@@ -3766,7 +3766,11 @@ mod tests {
     }
 
     #[test]
-    fn throw_requests_ungrab_when_pushing() {
+    fn untargeted_throw_puts_into_pushed_target_without_ungrabbing() {
+        // C4Command::Throw only ungrabs for a targeted-coordinate throw.
+        // With no coordinates, DFA_PUSH instead calls ObjectComPutTake on
+        // Action.Target and immediately finishes (C4Command.cpp:910-984,
+        // especially :927-934 and :973-979).
         let actor_id = ObjectId::new(470);
         let push_target_id = ObjectId::new(471);
         let item_id = ObjectId::new(472);
@@ -3816,14 +3820,14 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Running);
-        assert_eq!(result.operations.len(), 1);
-        match &result.operations[0] {
-            CommandOperation::PushFront(request) => {
-                assert_eq!(request.id, CommandId::UnGrab);
-            }
-            other => panic!("unexpected operation: {:?}", other),
-        }
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+        assert_eq!(result.events.len(), 1);
+        let CommandEvent::ApplyObjectUpdate { object_id, update } = &result.events[0] else {
+            panic!("pushed-target Throw must transfer one item")
+        };
+        assert_eq!(*object_id, item_id);
+        assert_eq!(update.container, Some(Some(push_target_id)));
     }
 
     #[test]
@@ -11808,7 +11812,7 @@ impl ThrowState {
             );
         }
 
-        if ctx.object.action_procedure == ActionProcedure::Push {
+        if ctx.object.action_procedure == ActionProcedure::Push && self.throw_position().is_some() {
             if !self.ungrab_requested {
                 self.ungrab_requested = true;
                 let request = CommandRequest::new(CommandId::UnGrab)
@@ -11887,6 +11891,27 @@ impl ThrowState {
                 .or_else(|| ctx.object.contents.first().copied());
             let events = item_id
                 .map(|object_id| CommandEvent::ApplyObjectUpdate {
+                    object_id,
+                    update: ObjectUpdate::new().with_container(container_id),
+                })
+                .into_iter()
+                .collect();
+            return CommandStepResult::completed(pending_update).with_events(events);
+        }
+
+        // Untargeted Throw while pushing is the grabbed-object twin of the
+        // contained branch above: ObjectComPutTake uses Action.Target and the
+        // command finishes without ungrabbing (C4Command.cpp:973-979).
+        if ctx.object.action_procedure == ActionProcedure::Push {
+            let item_id = self
+                .target
+                .filter(|target| ctx.object.contents.contains(target))
+                .or_else(|| ctx.object.contents.first().copied());
+            let events = ctx
+                .object
+                .action_target
+                .zip(item_id)
+                .map(|(container_id, object_id)| CommandEvent::ApplyObjectUpdate {
                     object_id,
                     update: ObjectUpdate::new().with_container(container_id),
                 })
