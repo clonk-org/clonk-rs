@@ -477,16 +477,12 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
                 .object_snapshot(clonk)
                 .is_some_and(|object| object.container.is_none())
         })?;
-        // One visible right-hand step clears the IGLO entrance contact before
-        // the player reverses toward the ocean; both key edges still travel
-        // through C4Player::InCom (src/C4Player.cpp:1490-1554).
-        player.press(COM_RIGHT)?;
-        player.ticks(1)?;
-        player.release(COM_RIGHT)?;
+        // Leave through IGLO's still-open western entrance before its door
+        // closes (FarWorlds Igloo DefCore Entrance=-28,-4,23,18).
         player.hold_until(
             COM_LEFT,
             "the Clonk returns to the western ocean",
-            160,
+            300,
             |engine| {
                 engine
                     .object_snapshot(clonk)
@@ -504,7 +500,11 @@ fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             |engine| {
                 engine
                     .object_snapshot(clonk)
-                    .is_some_and(|object| object.position.x >= 325)
+                    .zip(engine.object_snapshot(igloo))
+                    .is_some_and(|(clonk, igloo)| {
+                        clonk.action.name == "Walk"
+                            && clonk.position.x >= igloo.position.x - 28
+                    })
             },
         )?;
         player.tap(COM_UP)?;
