@@ -1936,6 +1936,7 @@ impl Engine {
         let crew_id = self.objects[crew_index].id;
         let base_id = self.objects[base_index].id;
         let base_player = self.objects[base_index].state.base;
+        let base_owner = self.objects[base_index].state.owner;
         let mut material = self
             .players
             .get(&base_player)
@@ -1986,11 +1987,11 @@ impl Engine {
         self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
             caption: "There is nothing to buy.".to_string(),
             symbol_id: String::new(),
-            title_symbol: crate::ObjectMenuSymbol::default(),
+            title_symbol: crate::ObjectMenuSymbol::Buy { owner: base_owner },
             identification: Value::Int(4),
             style: 0,
             permanent: true,
-            extra: crate::ObjectMenuExtra::default(),
+            extra: crate::ObjectMenuExtra::Value,
             selection,
             user_menu: false,
             command_object: Some(crew_id),
@@ -2014,6 +2015,7 @@ impl Engine {
         const CATEGORY_TRADE_LIVING: i32 = 1 << 16;
         let crew_id = self.objects[crew_index].id;
         let base_id = self.objects[base_index].id;
+        let base_owner = self.objects[base_index].state.owner;
         let base_definition = self.objects[base_index].definition_id.clone();
         let contents = self.objects[base_index].state.contents.clone();
         let sell_category = crate::CATEGORY_STATIC_BACK
@@ -2090,11 +2092,11 @@ impl Engine {
         self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
             caption: format!("{} is empty.", base_name),
             symbol_id: String::new(),
-            title_symbol: crate::ObjectMenuSymbol::default(),
+            title_symbol: crate::ObjectMenuSymbol::Sell { owner: base_owner },
             identification: Value::Int(5),
             style: 0,
             permanent: true,
-            extra: crate::ObjectMenuExtra::default(),
+            extra: crate::ObjectMenuExtra::Value,
             selection,
             user_menu: false,
             command_object: Some(crew_id),
@@ -4121,6 +4123,8 @@ protected func ControlCommand(szCommand) { return(1); }
         // commands (C4ObjectMenu.cpp:207-237).
         let mut engine = Engine::new();
         let (crew, hut) = contained_base_fixture(&mut engine, 1);
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.owner = 7;
         let mut lorry =
             Definition::from_script("LORY", "Lorry", "#strict\n").expect("lorry compiles");
         lorry.set_value(25);
@@ -4136,6 +4140,16 @@ protected func ControlCommand(szCommand) { return(1); }
             .expect("crew exists")
             .expect("buy menu opens");
         assert_eq!(menu.identification, Value::Int(4), "C4MN_Buy");
+        assert_eq!(
+            menu.title_symbol,
+            crate::ObjectMenuSymbol::Buy { owner: 7 },
+            "C4Object::ActivateMenu composes C4MN_Buy with pTarget->Owner (C4Object.cpp:1919-1928; C4Menu.cpp:43-65)"
+        );
+        assert_eq!(
+            menu.extra,
+            crate::ObjectMenuExtra::Value,
+            "C4MN_Buy enables C4MN_Extra_Value (C4Object.cpp:1926; C4Menu.cpp:843-907)"
+        );
         assert!(menu.permanent);
         assert_eq!(menu.command_object, Some(crew));
         assert_eq!(menu.selection, 0);
@@ -4801,6 +4815,7 @@ protected func IsBuilt() { return GetCon() >= 100; }
             .spawn_object(SpawnConfig::new("HUT3"))
             .expect("spawn hut");
         let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.owner = 8;
         engine.objects[hut_index].state.base = 1;
         let first_flag = engine
             .spawn_object(SpawnConfig::new("FLAG").with_container(hut))
@@ -4825,6 +4840,16 @@ protected func IsBuilt() { return GetCon() >= 100; }
             .expect("crew exists")
             .expect("sell menu opens");
         assert_eq!(menu.identification, Value::Int(5), "C4MN_Sell");
+        assert_eq!(
+            menu.title_symbol,
+            crate::ObjectMenuSymbol::Sell { owner: 8 },
+            "C4Object::ActivateMenu composes C4MN_Sell with pTarget->Owner (C4Object.cpp:1932-1941; C4Menu.cpp:43-70)"
+        );
+        assert_eq!(
+            menu.extra,
+            crate::ObjectMenuExtra::Value,
+            "C4MN_Sell enables C4MN_Extra_Value (C4Object.cpp:1938; C4Menu.cpp:843-907)"
+        );
         assert_eq!(
             menu.items
                 .iter()
