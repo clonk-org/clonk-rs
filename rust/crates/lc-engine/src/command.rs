@@ -8464,6 +8464,12 @@ pub struct CommandStack {
     entries: VecDeque<ActiveCommand>,
 }
 
+impl Default for CommandStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandStack {
     pub fn new() -> Self {
         Self {

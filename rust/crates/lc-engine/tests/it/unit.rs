@@ -1,3 +1,8 @@
+#![allow(
+    clippy::field_reassign_with_default,
+    clippy::type_complexity
+)]
+
 // lc-engine's former inline unit tests (lib.rs `mod tests`), moved out so
 // engine edits no longer recompile a second ~100k-line lib-test unit. The
 // glob re-export lets the module body keep its original `use super::*;`.

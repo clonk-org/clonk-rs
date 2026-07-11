@@ -1414,7 +1414,6 @@ impl BridgeParameters {
 }
 
 #[doc(hidden)]
-
 pub fn encode_bridge_action_data(
     duration: i32,
     move_clonk: bool,
@@ -3647,7 +3646,6 @@ impl Object {
     }
 
     #[doc(hidden)]
-
     pub fn set_position(&mut self, position: Vector2) {
         self.state.position = position;
         self.fixed_position = FixedVec2::from_ints(position.x, position.y);
@@ -3701,7 +3699,6 @@ impl Object {
     }
 
     #[doc(hidden)]
-
     pub fn current_shape_rect(&self) -> Option<DefinitionRect> {
         transformed_shape_rect(
             self.shape_template.rect,
@@ -3788,7 +3785,6 @@ impl Object {
     }
 
     #[doc(hidden)]
-
     pub fn set_fixed_velocity(&mut self, velocity: FixedVec2) {
         self.fixed_velocity = velocity;
         self.state.velocity = self.velocity_pixels();
@@ -4511,7 +4507,6 @@ impl Object {
     }
 
     #[doc(hidden)]
-
     pub fn mark_destroyed(&mut self) -> Vec<EffectEvent> {
         if self.destroyed {
             return Vec::new();
@@ -8755,7 +8750,6 @@ impl Definition {
     }
 
     #[doc(hidden)]
-
     pub fn call_object_function(
         &self,
         state: &ObjectState,
@@ -10847,7 +10841,6 @@ fn contact_callback_name(cnat: u32) -> Option<&'static str> {
 }
 
 #[doc(hidden)]
-
 pub fn movement_hit_speed_flags(velocity: FixedVec2) -> u32 {
     let speed = i64::from(velocity.x.val()).abs() + i64::from(velocity.y.val()).abs();
     let mut flags = 0;
@@ -12159,7 +12152,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn set_teams(&mut self, teams: Vec<TeamInfo>) {
         self.teams = Rc::new(teams);
     }
@@ -14496,7 +14488,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn evaluate_round_goals(
         &mut self,
     ) -> Result<(Vec<DefinitionId>, Vec<DefinitionId>), EngineError> {
@@ -14619,7 +14610,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn apply_scenario_batch(&mut self, batch: ScenarioBatch) -> Result<Vec<ObjectId>, EngineError> {
         let ScenarioBatch {
             spawns,
@@ -15066,7 +15056,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn call_object_function(
         &mut self,
         index: usize,
@@ -16339,7 +16328,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn tick_player_systems(&mut self) {
         if self.players.is_empty() {
             return;
@@ -16414,7 +16402,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn update_player_asset_values(&mut self) {
         if self.players.is_empty() {
             return;
@@ -16458,7 +16445,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn trigger_lightning(&mut self, position: i32) -> Result<bool, EngineError> {
         const LIGHTNING_DEFINITION: &str = "FXL1";
         if !self.definitions.contains_key(LIGHTNING_DEFINITION) {
@@ -20981,7 +20967,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn apply_player_commands(&mut self, commands: Vec<PlayerCommand>) -> Result<(), EngineError> {
         for command in commands {
             match command {
@@ -21737,7 +21722,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn apply_physics_at_index(&mut self, idx: usize) -> Result<bool, EngineError> {
         if idx >= self.objects.len() {
             return Ok(false);
@@ -23990,7 +23974,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn apply_no_attach_action(
         &mut self,
         idx: usize,
@@ -25057,7 +25040,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn apply_landscape_at_index(&mut self, idx: usize) {
         if idx >= self.objects.len() {
             return;
@@ -26897,7 +26879,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn apply_weather_init(
         &mut self,
         init: &crate::scenario::LegacyWeatherInit,
@@ -29382,7 +29363,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn apply_landscape_operations(&mut self, operations: Vec<LandscapeOperation>) {
         if operations.is_empty() {
             return;
@@ -29772,7 +29752,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn execute_shake_circle_operation(&mut self, center: Vector2, radius: i32) {
         if radius <= 0 {
             return;
@@ -30908,7 +30887,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn mrf_insert_check(
         &mut self,
         x: &mut i32,
@@ -31034,7 +31012,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn apply_transfer_zone_commands(
         &mut self,
         commands: Vec<TransferZoneCommand>,
@@ -31065,7 +31042,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn set_transfer_zone(
         &mut self,
         owner: ObjectId,
@@ -32427,7 +32403,6 @@ impl Engine {
     }
 
     #[doc(hidden)]
-
     pub fn process_spawn_queue_with_outcomes(
         &mut self,
         queue: Vec<SpawnConfig>,
@@ -33474,7 +33449,6 @@ fn value_to_direction(
 }
 
 #[doc(hidden)]
-
 pub fn value_to_command_direction(
     definition: &str,
     function: &str,
