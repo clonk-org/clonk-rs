@@ -18776,7 +18776,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let created = HOST_CONTEXT.with(|cell| {
+    let registration = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
@@ -18784,7 +18784,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
 
         // C4Id2Def failure: no object, silent nullptr (C4Game.cpp:1146).
         if context.world.definition_known(&definition) == Some(false) {
-            return Ok(Value::Nil);
+            return Ok(None);
         }
 
         let metadata = context
@@ -18834,39 +18834,27 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         // cthr->Obj->Owner`); GoldRush's global `CreateObject(NOPC)`
         // lands on owner 0 in C++.
         let owner = owner_override.unwrap_or(0);
-        // C4Game::NewObject's DoCon(fInitial) bottom-growth adjust runs
-        // BEFORE the next script line executes (C4Object.cpp:1401-1470):
-        // the created object's center is y - (Shape.Hgt + Shape.y), and
-        // sibling calls in the same script (ConnectWagon's beam offsets)
-        // read the FINAL position.
         let raw_position = Vector2::new(
             base_position.x.saturating_add(x_offset),
             base_position.y.saturating_add(y_offset),
-        );
-        let position = Vector2::new(
-            raw_position.x,
-            crate::docon_initial_center_y(
-                metadata.shape,
-                metadata.stretch_growth,
-                metadata.line,
-                crate::FULL_CON,
-                raw_position.y,
-            ),
         );
 
         let id = context.allocate_object_id();
 
         let mut spawn = SpawnConfig::new(definition.clone())
-            .with_position(position)
+            .with_position(raw_position)
             .with_owner(owner)
             .with_category(definition_category)
+            // C4Object starts at Con=0. C4Game::NewObject exposes that live
+            // state to Construction before applying the initial FullCon.
+            .with_construction(0)
             .with_id(id);
         if let Some(layer) = creator_layer {
             spawn = spawn.with_layer(layer);
         }
         // "Set initial controller to creating controller, so more
         // complicated cause-effect-chains can be traced back to the
-        // causing player" (FnCreateObject, C4Script.cpp:1905-1906).
+        // causing player" (FnCreateObject, C4Script.cpp:1899-1900).
         let creator_controller = context
             .object_context()
             .map(ObjectScopeContext::controller)
@@ -18874,23 +18862,19 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(controller) = creator_controller {
             spawn = spawn.with_controller(controller);
         }
-        // Creation callbacks run synchronously below - materialization
-        // must not repeat Initialize (C4Game.cpp:1117-1127).
+        // Creation callbacks and initial DoCon run synchronously below;
+        // materialization must repeat neither operation.
         spawn.initialized = true;
         spawn.position_adjusted = true;
-        // The DoCon initial adjust moves the INT y only (C++ leaves fix_y
-        // at the given center) — carry the raw fixed alongside.
-        if position.y != raw_position.y {
-            spawn.fixed_position = Some(FixedVec2::from_ints(raw_position.x, raw_position.y));
-        }
 
+        let initial_alive = metadata.category & crate::CATEGORY_LIVING != 0;
         let preview_ocf = ocf::compute(
             metadata.ocf_base,
             metadata.crew_member,
-            true,
+            initial_alive,
             ObjectStatus::Normal,
             false,
-            FULL_CON,
+            0,
             metadata.category,
         );
         let preview = HostWorldObject::with_category(
@@ -18903,19 +18887,24 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             None,
             owner,
             definition_category,
+            if initial_alive {
+                metadata.physical.energy
+            } else {
+                0
+            },
             0,
-            FULL_CON,
             0,
-            position,
+            raw_position,
             Vector2::ZERO,
             0,
-            Vec::new(),
+            metadata.vertices.clone(),
             0,
             0,
             0,
             None,
             None,
         )
+        .with_alive(initial_alive)
         .with_ocf(preview_ocf)
         // A callable scope for nested calls on the fresh object — C++
         // creates objects live mid-call (Game.CreateObject), so scripts
@@ -18924,43 +18913,181 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         // fold only touched fields.
         .with_full_state(Rc::new({
             let mut state = crate::preview_spawn_state(
-                position,
+                raw_position,
                 owner,
-                creator_controller.unwrap_or(owner),
+                owner,
                 definition_category,
-                FULL_CON,
+                0,
                 metadata.vertices.clone(),
             );
+            state.alive = initial_alive;
+            state.energy = if initial_alive {
+                metadata.physical.energy
+            } else {
+                0
+            };
+            state.crew_member = metadata.crew_member;
             state.layer = creator_layer;
             state.blit_mode = metadata.blit_mode;
             state
         }));
 
         context.register_spawn(spawn, preview);
-        Ok(object_reference_value(id))
+        Ok(Some((
+            id,
+            context.object_context().map(ObjectScopeContext::id),
+            creator_controller,
+            metadata.shape,
+            metadata.stretch_growth,
+            metadata.line,
+            metadata.ocf_base,
+            metadata.crew_member,
+            metadata.category,
+            initial_alive,
+        )))
+    })?;
+    let Some((
+        target,
+        creator,
+        creator_controller,
+        shape,
+        stretch_growth,
+        line,
+        ocf_base,
+        crew_member,
+        category,
+        alive,
+    )) = registration
+    else {
+        return Ok(Value::Nil);
+    };
+
+    // C4Game::NewObject makes the raw Con=0 object script-visible, then
+    // invokes Construction with the creator (C4Game.cpp:1102-1121).
+    let creator_arg = creator.map(object_reference_value).unwrap_or(Value::Nil);
+    if let Some(Err(error)) =
+        call_world_object_own_function(target, "Construction", &[creator_arg])
+    {
+        tracing::warn!(
+            id = target.as_u64(),
+            callback = "Construction",
+            %error,
+            "creation callback failed; continuing like C++ fail-safe Call"
+        );
+    }
+    let removed = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| context.nested_object_destroyed(target))
+            .unwrap_or(false)
+    });
+    if removed {
+        return Ok(Value::Nil);
+    }
+
+    // Initial DoCon(FullCon,true) runs only after Construction. Its straight
+    // growth keeps the old bottom fixed in integer coordinates and leaves
+    // fix_y at the supplied raw center (C4Object.cpp:1428-1515).
+    let crossed_full_con = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        if !context.ensure_object_scope(target) {
+            return false;
+        }
+        let (was_full, pre_growth_position, adjusted_position) = {
+            let Some(scope) = context.object_scope_mut(target) else {
+                return false;
+            };
+            let was_full = scope.construction() >= FULL_CON;
+            let final_construction = scope
+                .construction()
+                .saturating_add(FULL_CON)
+                .clamp(0, FULL_CON);
+            let pre_growth_position = scope.effective_position();
+            let adjusted_position = Vector2::new(
+                pre_growth_position.x,
+                crate::docon_initial_center_y(
+                    shape,
+                    stretch_growth,
+                    line,
+                    final_construction,
+                    pre_growth_position.y,
+                ),
+            );
+            scope.current_construction = final_construction;
+            scope.pending_update.construction = None;
+            scope.current_position = adjusted_position;
+            scope.pending_update.position = None;
+            scope.cached_ocf = Some(ocf::compute(
+                ocf_base,
+                crew_member,
+                alive,
+                ObjectStatus::Normal,
+                false,
+                final_construction,
+                category,
+            ));
+            (was_full, pre_growth_position, adjusted_position)
+        };
+        if let Some(spawn) = context
+            .pending_spawns
+            .iter_mut()
+            .find(|spawn| spawn.id == Some(target))
+        {
+            spawn.position = adjusted_position;
+            spawn.construction = FULL_CON;
+            spawn.fixed_position = (adjusted_position != pre_growth_position)
+                .then_some(FixedVec2::from_ints(
+                    pre_growth_position.x,
+                    pre_growth_position.y,
+                ));
+        }
+        !was_full
     });
 
-    // C4Game::NewObject runs PSF_Construction and the initial DoCon's
-    // PSF_Initialize INSIDE FnCreateObject (C4Game.cpp:1117-1127): the
-    // new object's script side effects exist the moment CreateObject
-    // returns (GoldRush bandits' appended Life effect precedes SetAI's
-    // RemoveEffect). Both are fail-silent when the def lacks them; errors
-    // log and continue like C4Object::Call(fPassError=false).
-    if let Ok(value @ Value::Object(_)) = &created {
-        if let Some(target) = object_id_from_value(value) {
-            for callback in ["Construction", "Initialize"] {
-                if let Some(Err(error)) = call_world_object_own_function(target, callback, &[]) {
-                    tracing::warn!(
-                        id = target.as_u64(),
-                        callback,
-                        %error,
-                        "creation callback failed; continuing like C++ fail-safe Call"
-                    );
-                }
+    if crossed_full_con {
+        for callback in ["Completion", "Initialize"] {
+            if let Some(Err(error)) = call_world_object_own_function(target, callback, &[]) {
+                tracing::warn!(
+                    id = target.as_u64(),
+                    callback,
+                    %error,
+                    "creation callback failed; continuing like C++ fail-safe Call"
+                );
             }
         }
     }
-    created
+
+    let removed = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return true;
+        };
+        if context.nested_object_destroyed(target) {
+            return true;
+        }
+        // FnCreateObject applies the creating controller only after
+        // Game.CreateObject (and therefore every lifecycle callback) returns
+        // (C4Script.cpp:1886-1902).
+        if let Some(controller) = creator_controller {
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.set_controller(controller);
+            }
+            if let Some(preview) = context.pending_objects.get_mut(&target) {
+                if let Some(state) = preview.state.as_mut() {
+                    Rc::make_mut(state).controller = controller;
+                }
+            }
+        }
+        false
+    });
+    Ok(if removed {
+        Value::Nil
+    } else {
+        object_reference_value(target)
+    })
 }
 
 fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -36819,6 +36946,89 @@ func Missing() { return ComponentAll(nil, WOOD); }
         assert_eq!(spawn.owner, 0);
         assert_eq!(spawn.id, Some(ObjectId::new(1)));
         assert_eq!(outcome.next_object_id, 2);
+    }
+
+    #[test]
+    fn create_object_runs_construction_before_initial_growth_and_completion() {
+        // NewObject exposes the object at raw (x,y), Con=0 while Construction
+        // runs; only then does initial DoCon keep the shaped object's bottom
+        // fixed and call Completion followed by Initialize
+        // (C4Game.cpp:1102-1146; C4Object.cpp:1428-1515).
+        let hut_script = r#"#strict
+local pBasement, iConstructionCon, iConstructionY, iCompletionY, iInitializeY, iOrder;
+
+protected func Construction()
+{
+    iConstructionCon = GetCon();
+    iConstructionY = GetY();
+    iOrder = 1;
+    pBasement = CreateObject(BASE, 0, 8, -1);
+}
+
+protected func Completion()
+{
+    iCompletionY = GetY();
+    iOrder = iOrder * 10 + 2;
+}
+
+protected func Initialize()
+{
+    iInitializeY = GetY();
+    iOrder = iOrder * 10 + 3;
+}
+"#;
+        let caller_script = r#"#strict
+public func Seed() { return(CreateObject(HUT1, 100, 100, -1)); }
+"#;
+        let mut engine = crate::Engine::with_seed(1);
+        let mut hut = crate::Definition::from_script("HUT1", "Hut", hut_script)
+            .expect("hut script compiles");
+        hut.set_shape_rect(Some(DefinitionRect::new(-18, -24, 36, 40)));
+        engine.register_definition(hut).expect("hut registers");
+        let mut basement = crate::Definition::from_script("BASE", "Basement", "#strict")
+            .expect("basement script compiles");
+        basement.set_shape_rect(Some(DefinitionRect::new(-4, -2, 8, 4)));
+        engine
+            .register_definition(basement)
+            .expect("basement registers");
+        let caller = crate::Definition::from_script("CALL", "Caller", caller_script)
+            .expect("caller script compiles");
+        engine.register_definition(caller).expect("caller registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller_id).expect("caller exists");
+
+        let hut_value = engine
+            .call_object_function(caller_index, "Seed", Vec::new())
+            .expect("Seed runs");
+        let hut_id = object_id_from_value(&hut_value).expect("Seed returns hut");
+        let hut_index = engine.find_object_index(hut_id).expect("hut exists");
+        let hut = &engine.objects[hut_index].state;
+        assert_eq!(hut.position, Vector2::new(100, 84));
+        assert_eq!(hut.construction, FULL_CON);
+        assert_eq!(
+            hut.local_vars.get("iConstructionCon"),
+            Some(&Value::Int(0))
+        );
+        assert_eq!(
+            hut.local_vars.get("iConstructionY"),
+            Some(&Value::Int(100))
+        );
+        assert_eq!(hut.local_vars.get("iCompletionY"), Some(&Value::Int(84)));
+        assert_eq!(hut.local_vars.get("iInitializeY"), Some(&Value::Int(84)));
+        assert_eq!(hut.local_vars.get("iOrder"), Some(&Value::Int(123)));
+
+        let basement = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "BASE")
+            .expect("Construction creates basement");
+        assert_eq!(
+            basement.state.position,
+            Vector2::new(100, 106),
+            "nested CreateObject is relative to the parent's raw pre-growth position"
+        );
     }
 
     fn place_animal_world(
