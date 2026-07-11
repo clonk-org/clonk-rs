@@ -3415,6 +3415,9 @@ struct Object {
     /// movement config. Transient — recomputed at every ExecAction, never
     /// serialized.
     upright_t_attach: u32,
+    /// C4Object::iLastAttachMovementFrame: prevents two moving masks from
+    /// carrying the same object twice in one frame (C4SolidMask.cpp:187-193).
+    last_attach_movement_frame: Option<u64>,
     /// Last energy-loss causing player (C4Object::LastEnergyLossCausePlayer,
     /// read by AssignDeath for kill attribution).
     last_energy_loss_cause: i32,
@@ -3528,6 +3531,7 @@ impl Object {
             solid_mask_bake: None,
             state,
             upright_t_attach: 0,
+            last_attach_movement_frame: None,
             last_energy_loss_cause: OWNER_NONE,
             command_queue: VecDeque::new(),
             commands: CommandStack::new(),
@@ -10380,6 +10384,16 @@ struct SolidMaskBake {
     rotated: Option<RotatedBake>,
 }
 
+/// Objects resting on a moving solid mask at removal time. C++ stores this
+/// beside the mask until `Put(..., fRestoreAttachment=true)` can translate
+/// them by the mask owner's movement delta (C4SolidMask.cpp:178-195,
+/// 276-305).
+#[derive(Debug)]
+struct SolidMaskAttachmentBackup {
+    removal_position: Vector2,
+    object_ids: Vec<ObjectId>,
+}
+
 impl SolidMaskBake {
     fn overlaps(&self, other: &SolidMaskBake) -> bool {
         self.x < other.x + other.width
@@ -10438,6 +10452,21 @@ impl SolidMaskBake {
             }
         }
     }
+
+    /// DensityProvider for attachment backup (C4SolidMask.cpp:204-228).
+    /// Unrotated masks read their raw alpha even when another mask owned the
+    /// landscape pixel; rotated masks instead read the saved put buffer.
+    fn provides_attachment_density_at(&self, vehicle: u8, x: i32, y: i32) -> bool {
+        let local_x = x - self.x;
+        let local_y = y - self.y;
+        if local_x < 0 || local_y < 0 || local_x >= self.width || local_y >= self.height {
+            return false;
+        }
+        match self.rotated {
+            None => self.mask_set(self.tx + local_x, self.ty + local_y),
+            Some(_) => self.buffer[(local_y * self.width + local_x) as usize] != vehicle,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -10480,6 +10509,15 @@ struct MovementStepOutcome {
     /// C4Movement.cpp:358) — ContactAction dispatches on them.
     contact_cnat: u32,
     solid_mask_removed: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExecMovementOutcome {
+    alive: bool,
+    /// Whether the positional integration reached C4Object::DoMotion.
+    /// Only that path removes the solid mask with attachment backup;
+    /// rotation-only updates use UpdateSolidMask(false) in C++.
+    did_motion: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -17150,17 +17188,21 @@ impl Engine {
                     // The mover's own mask leaves the plane for its own
                     // movement (C++ masks vanish/reappear through
                     // UpdatePos; C4Movement.cpp:440 re-puts after).
-                    self.remove_solid_mask(idx);
-                    if !self.exec_object_movement(
+                    let mask_attachments = self.remove_solid_mask_for_movement(idx);
+                    let movement_outcome = self.exec_object_movement(
                         idx,
                         &action_library,
                         &definition_id,
                         &solid_mask_indices,
-                    )? {
-                        self.update_solid_mask(idx);
+                    )?;
+                    self.update_solid_mask(idx);
+                    self.restore_solid_mask_attachments(
+                        idx,
+                        movement_outcome.did_motion.then_some(mask_attachments).flatten(),
+                    );
+                    if !movement_outcome.alive {
                         continue;
                     }
-                    self.update_solid_mask(idx);
                     // Demobilization (C4Movement.cpp:572) runs after
                     // DoMovement, so same-frame friction/contact zeroing
                     // demobilizes immediately.
@@ -21043,16 +21085,17 @@ impl Engine {
     /// The Mobile leg of C4Object::ExecMovement - DoMovement plus the
     /// tail C++ runs inside it: the InLiquid update
     /// (C4Movement.cpp:443-460), ContactAction/NoAttachAction dispatch
-    /// (:463-470) and the Hit* calls (:472-478). Returns Ok(false) when
-    /// the object died during movement and the caller must skip the
-    /// rest of its frame (C4Object.cpp:1064-1070).
+    /// (:463-470) and the Hit* calls (:472-478). Reports both whether the
+    /// object survived and whether positional integration reached DoMotion;
+    /// only the latter restores a moving mask's attachment backup
+    /// (C4Movement.cpp:121-126,443-445).
     fn exec_object_movement(
         &mut self,
         idx: usize,
         action_library: &ActionLibrary,
         definition_id: &DefinitionId,
         solid_mask_indices: &[usize],
-    ) -> Result<bool, EngineError> {
+    ) -> Result<ExecMovementOutcome, EngineError> {
         let old_movement_velocity = self.objects[idx].fixed_velocity;
         let old_movement_hit_flags = movement_hit_speed_flags(old_movement_velocity);
         let action_name = self.objects[idx].state.action.name.clone();
@@ -21260,6 +21303,7 @@ impl Engine {
             )?;
             outcome
         };
+        let did_motion = movement_outcome.solid_mask_removed;
         self.rng = contact_rng;
         self.audio_registry = contact_audio;
         self.sync_next_object_id(contact_next_object_id);
@@ -21289,7 +21333,10 @@ impl Engine {
         if self.objects[idx].destroyed
             || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
         {
-            return Ok(false);
+            return Ok(ExecMovementOutcome {
+                alive: false,
+                did_motion,
+            });
         }
         self.update_sector_for_index(idx);
         // C4Object::InLiquid update, inline in DoMovement after
@@ -21363,7 +21410,10 @@ impl Engine {
             if self.objects[idx].destroyed
                 || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
             {
-                return Ok(false);
+                return Ok(ExecMovementOutcome {
+                    alive: false,
+                    did_motion,
+                });
             }
         }
         if movement_outcome.no_attach {
@@ -21382,10 +21432,16 @@ impl Engine {
         if self.objects[idx].destroyed
             || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
         {
-            return Ok(false);
+            return Ok(ExecMovementOutcome {
+                alive: false,
+                did_motion,
+            });
         }
 
-        Ok(true)
+        Ok(ExecMovementOutcome {
+            alive: true,
+            did_motion,
+        })
     }
 
     fn apply_physics_at_index(&mut self, idx: usize) -> Result<bool, EngineError> {
@@ -27100,23 +27156,42 @@ impl Engine {
         self.objects[index].solid_mask_bake = Some(bake);
     }
 
-    /// C4SolidMask::Remove (C4SolidMask.cpp:233-283): restore the saved
-    /// bytes (only where the pixel is STILL MCVehic — landscape changes
-    /// under the mask win, _SBackPixIfMask) and RE-PUT every overlapping
-    /// other mask across the freed rect.
+    /// Ordinary C4SolidMask::Remove callers do not carry attached objects
+    /// (SetRotation/DoCon/Enter/Exit/destruction all pass false in C++).
     fn remove_solid_mask(&mut self, index: usize) {
+        self.remove_solid_mask_impl(index, false);
+    }
+
+    /// C4Object::DoMotion removes its mask with fBackupAttachment=true
+    /// (C4Movement.cpp:121-126); the later Put restores these riders.
+    fn remove_solid_mask_for_movement(
+        &mut self,
+        index: usize,
+    ) -> Option<SolidMaskAttachmentBackup> {
+        self.remove_solid_mask_impl(index, true)
+    }
+
+    /// C4SolidMask::Remove (C4SolidMask.cpp:233-305): restore the saved
+    /// bytes (only where the pixel is STILL MCVehic — landscape changes
+    /// under the mask win), re-put overlapping masks, then optionally
+    /// remember objects attached to this exact mask.
+    fn remove_solid_mask_impl(
+        &mut self,
+        index: usize,
+        backup_attachments: bool,
+    ) -> Option<SolidMaskAttachmentBackup> {
         if index >= self.objects.len() {
-            return;
+            return None;
         }
         let Some(bake) = self.objects[index].solid_mask_bake.take() else {
-            return;
+            return None;
         };
         let Some(vehicle) = self
             .landscape
             .as_ref()
             .and_then(|landscape| landscape.grid_vehicle_byte())
         else {
-            return;
+            return None;
         };
         for cy in 0..bake.height {
             for cx in 0..bake.width {
@@ -27181,6 +27256,172 @@ impl Engine {
                 }
             }
             self.objects[other].solid_mask_bake = Some(updated);
+        }
+
+        backup_attachments
+            .then(|| self.capture_solid_mask_attachments(index, &bake, vehicle))
+            .flatten()
+    }
+
+    /// C4Object::IsMoveableBySolidMask (C4Object.h:434-440).
+    fn object_is_moveable_by_solid_mask(&self, index: usize) -> bool {
+        let Some(object) = self.objects.get(index) else {
+            return false;
+        };
+        if object.state.status != ObjectStatus::Normal
+            || object.state.category & (CATEGORY_STATIC_BACK | CATEGORY_STRUCTURE) != 0
+            || object.state.container.is_some()
+            || (object.state.category & CATEGORY_VEHICLE != 0
+                && object.state.ocf & ocf::GRAB == 0)
+        {
+            return false;
+        }
+        let Some(definition) = self.definitions.get(&object.definition_id) else {
+            return false;
+        };
+        definition
+            .action_library()
+            .is_idle_action(&object.state.action.name)
+            || definition
+                .action_library()
+                .procedure_for_action(&object.state.action.name)
+                != ActionProcedure::Float
+    }
+
+    /// Raw C4Shape::CheckContact: no Contact* script callbacks. During mask
+    /// backup the mover is already removed; during restore it has been put at
+    /// its new position (C4SolidMask.cpp:286,185).
+    fn object_shape_contacts_at(&self, index: usize, position: Vector2) -> bool {
+        let Some(object) = self.objects.get(index) else {
+            return true;
+        };
+        let Some(landscape) = self.landscape.as_ref() else {
+            return false;
+        };
+        let indices: Vec<usize> = (0..self.objects.len()).collect();
+        let masks = self.solid_masks_for_movement(&indices);
+        let contact_density = self
+            .definitions
+            .get(&object.definition_id)
+            .map(|definition| definition.contact_density())
+            .unwrap_or(CONTACT_DENSITY_SOLID);
+        !shape_contact_check(
+            &object.state.vertices,
+            position,
+            landscape,
+            &self.materials,
+            &masks,
+            Some(object.id),
+            contact_density,
+        )
+        .vertices
+        .is_empty()
+    }
+
+    fn object_contacts_solid_mask(
+        &self,
+        index: usize,
+        bake: &SolidMaskBake,
+        vehicle: u8,
+    ) -> bool {
+        let Some(object) = self.objects.get(index) else {
+            return false;
+        };
+        let check_mask = object.frame_t_attach | CNAT_BOTTOM;
+        object.state.vertices.iter().any(|vertex| {
+            if vertex.cnat & CNAT_NO_COLLISION != 0 {
+                return false;
+            }
+            let x = object.state.position.x + vertex.x;
+            let y = object.state.position.y + vertex.y;
+            (check_mask & CNAT_CENTER != 0
+                && bake.provides_attachment_density_at(vehicle, x, y))
+                || (check_mask & CNAT_LEFT != 0
+                    && bake.provides_attachment_density_at(vehicle, x - 1, y))
+                || (check_mask & CNAT_RIGHT != 0
+                    && bake.provides_attachment_density_at(vehicle, x + 1, y))
+                || (check_mask & CNAT_TOP != 0
+                    && bake.provides_attachment_density_at(vehicle, x, y - 1))
+                || (check_mask & CNAT_BOTTOM != 0
+                    && bake.provides_attachment_density_at(vehicle, x, y + 1))
+        })
+    }
+
+    fn capture_solid_mask_attachments(
+        &self,
+        mover_index: usize,
+        bake: &SolidMaskBake,
+        vehicle: u8,
+    ) -> Option<SolidMaskAttachmentBackup> {
+        let mover = self.objects.get(mover_index)?;
+        let object_ids = (0..self.objects.len())
+            .filter(|index| *index != mover_index)
+            .filter(|index| self.object_is_moveable_by_solid_mask(*index))
+            .filter(|index| {
+                let position = self.objects[*index].state.position;
+                !self.object_shape_contacts_at(*index, position)
+            })
+            .filter(|index| self.object_contacts_solid_mask(*index, bake, vehicle))
+            .map(|index| self.objects[index].id)
+            .collect();
+        Some(SolidMaskAttachmentBackup {
+            removal_position: mover.state.position,
+            object_ids,
+        })
+    }
+
+    /// C4SolidMask::Put(..., fRestoreAttachment=true), including the
+    /// destination contact probe, once-per-frame guard, and MovePosition's
+    /// recursive mask lifecycle for stacked carriers (C4SolidMask.cpp:178-195;
+    /// C4Movement.cpp:547-556).
+    fn restore_solid_mask_attachments(
+        &mut self,
+        mover_index: usize,
+        backup: Option<SolidMaskAttachmentBackup>,
+    ) {
+        let Some(backup) = backup else {
+            return;
+        };
+        let Some(mover) = self.objects.get(mover_index) else {
+            return;
+        };
+        // C++ restores only from Put; a removed/ineligible mover clears the
+        // backup without translating anything.
+        if mover.solid_mask_bake.is_none() {
+            return;
+        }
+        let dx = mover.state.position.x - backup.removal_position.x;
+        let dy = mover.state.position.y - backup.removal_position.y;
+        if dx == 0 && dy == 0 {
+            return;
+        }
+
+        for object_id in backup.object_ids {
+            let Some(index) = self.find_object_index(object_id) else {
+                continue;
+            };
+            if !self.object_is_moveable_by_solid_mask(index) {
+                continue;
+            }
+            let old_position = self.objects[index].state.position;
+            let new_position = Vector2::new(old_position.x + dx, old_position.y + dy);
+            if self.object_shape_contacts_at(index, new_position)
+                || self.objects[index].last_attach_movement_frame == Some(self.frame)
+            {
+                continue;
+            }
+
+            self.objects[index].last_attach_movement_frame = Some(self.frame);
+            let nested_backup = self.remove_solid_mask_for_movement(index);
+            {
+                let object = &mut self.objects[index];
+                object.state.position = new_position;
+                object.fixed_position.x += itofix(dx);
+                object.fixed_position.y += itofix(dy);
+            }
+            self.update_sector_for_index(index);
+            self.update_solid_mask(index);
+            self.restore_solid_mask_attachments(index, nested_backup);
         }
     }
 
@@ -58319,6 +58560,7 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             engine
                 .exec_object_movement(idx, &actions, &definition_id, &[])
                 .expect("movement succeeds")
+                .alive
         );
 
         let idx = engine.find_object_index(mover_id).expect("mover survives");
