@@ -2180,11 +2180,16 @@ pub struct ObjectMenuState {
 /// rotation step restores the WHOLE record on contact undo (`Shape =
 /// lshape`, C4Movement.cpp:395-417). A dense pixel always maps to a real
 /// material (solid masks paint MVehic), so `AttachMat != MNone` is
-/// exactly "the last attach succeeded" — tracked as `mat_valid`.
+/// exactly "the last attach succeeded" — tracked as `mat_valid`. The
+/// cached MVehic identity must survive independently of later landscape
+/// changes because `C4Game::ShakeObjects` reads it directly.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShapeAttachRecord {
     /// `Shape.AttachMat != MNone`.
     pub mat_valid: bool,
+    /// `Shape.AttachMat == MVehic` at the successful attachment probe.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mat_vehicle: bool,
     /// Absolute attachment position (`iAttachX`/`iAttachY`).
     pub x: i32,
     pub y: i32,
@@ -11040,6 +11045,22 @@ fn movement_density_at(
     landscape.density_at(x, y, materials)
 }
 
+fn movement_is_vehicle_at(
+    landscape: &Landscape,
+    materials: &MaterialSet,
+    solid_masks: &[SolidMaskRect],
+    excluded_solid_mask: Option<ObjectId>,
+    x: i32,
+    y: i32,
+) -> bool {
+    solid_masks
+        .iter()
+        .any(|mask| Some(mask.object_id) != excluded_solid_mask && mask.contains(x, y))
+        || materials.id_of("Vehicle").is_some_and(|vehicle| {
+            landscape.border_material_at(x, y) == Some(vehicle)
+        })
+}
+
 /// The SCRIPT PathFree (FnPathFree → ::PathFree, C4Landscape.cpp:
 /// 2052-2055): the ForLine per-pixel Bresenham (:1683-1738) where any
 /// GBackSolid pixel blocks. GBackSolid sees the baked C4SolidMask
@@ -11260,6 +11281,7 @@ fn shape_attach(
     // vertex fields only overwrite on success (C4Shape.cpp:176,217-219,
     // 253-255).
     record.mat_valid = false;
+    record.mat_vehicle = false;
     let (xcd, ycd) = attach_direction(attach);
     if xcd == 0 && ycd == 0 {
         return false;
@@ -11291,6 +11313,14 @@ fn shape_attach(
                 {
                     *record = ShapeAttachRecord {
                         mat_valid: true,
+                        mat_vehicle: movement_is_vehicle_at(
+                            landscape,
+                            materials,
+                            solid_masks,
+                            excluded_solid_mask,
+                            ax,
+                            ay,
+                        ),
                         x: ax,
                         y: ay,
                         vtx: vtx as i32,
@@ -11320,6 +11350,14 @@ fn shape_attach(
                 {
                     *record = ShapeAttachRecord {
                         mat_valid: true,
+                        mat_vehicle: movement_is_vehicle_at(
+                            landscape,
+                            materials,
+                            solid_masks,
+                            excluded_solid_mask,
+                            ax,
+                            ay,
+                        ),
                         x: ax,
                         y: ay,
                         vtx: vtx as i32,

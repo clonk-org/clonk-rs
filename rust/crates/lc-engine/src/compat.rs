@@ -35108,6 +35108,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             t_attach: CNAT_BOTTOM,
             attach: ShapeAttachRecord {
                 mat_valid: true,
+                mat_vehicle: false,
                 x: 30,
                 y: 15,
                 vtx: 0,
@@ -35156,6 +35157,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             t_attach: CNAT_BOTTOM,
             attach: ShapeAttachRecord {
                 mat_valid: true,
+                mat_vehicle: false,
                 x: 30,
                 y: 15,
                 vtx: 1,
@@ -35180,6 +35182,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             t_attach: CNAT_BOTTOM,
             attach: ShapeAttachRecord {
                 mat_valid: true,
+                mat_vehicle: false,
                 x: 30,
                 y: 15,
                 vtx: 1,

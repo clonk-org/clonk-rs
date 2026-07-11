@@ -50,6 +50,111 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shape_attach_record_preserves_cached_vehicle_material() {
+        // C4Shape::Attach caches PixCol2Mat(GBackPix) in AttachMat together
+        // with iAttachX/Y/Vtx (C4Shape.cpp:213-219,247-256). ShakeObjects
+        // later distinguishes MVehic without resampling the landscape.
+        let record = ShapeAttachRecord {
+            mat_valid: true,
+            mat_vehicle: true,
+            x: 12,
+            y: 34,
+            vtx: 2,
+        };
+
+        let encoded = serde_json::to_string(&record).expect("attach record encodes");
+        let decoded: ShapeAttachRecord =
+            serde_json::from_str(&encoded).expect("attach record decodes");
+        assert_eq!(decoded, record);
+
+        let legacy: ShapeAttachRecord =
+            serde_json::from_str(r#"{"mat_valid":true,"x":12,"y":34,"vtx":2}"#)
+                .expect("pre-vehicle-bit attach record remains readable");
+        assert!(!legacy.mat_vehicle);
+    }
+
+    #[test]
+    fn shape_attach_caches_vehicle_material_at_the_probe() {
+        // C4Shape::Attach stores PixCol2Mat(GBackPix(ax, ay)) at the exact
+        // successful probe (C4Shape.cpp:213-219). A later ShakeObjects call
+        // must therefore see MVehic even if the support has since changed.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            Friction=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let vehicle = materials.id_of("Vehicle").expect("vehicle material exists");
+        let mut engine = Engine::with_seed(1);
+        engine.set_materials(materials);
+
+        let mut definition =
+            Definition::from_script("WALK", "Walker", "").expect("walker definition compiles");
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([(
+                "Walk".to_string(),
+                ActionSpec::default().with_procedure("WALK"),
+            )]),
+        );
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
+        engine
+            .register_definition(definition)
+            .expect("walker definition registers");
+
+        let mut pixels = vec![0_u8; 25];
+        pixels[3 * 5 + 2] = 10;
+        let mut densities = vec![0_i32; 128];
+        densities[10] = 100;
+        let mut names = vec![None; 128];
+        names[10] = Some("Vehicle".to_string());
+        let grid = landscape::PixelGrid::new(5, 5, pixels, densities, names, vec![None; 128]);
+        let mut landscape = Landscape::new(5, vec![5; 5]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.border_material_at(2, 3)),
+            Some(vehicle)
+        );
+        assert_eq!(
+            engine
+                .landscape()
+                .map(|landscape| landscape.density_at(2, 3, engine.materials())),
+            Some(100)
+        );
+
+        let walker = engine
+            .spawn_object(
+                SpawnConfig::new("WALK")
+                    .with_position(Vector2::new(2, 2))
+                    .with_action(ActionState::new("Walk"))
+                    .with_category(CATEGORY_OBJECT)
+                    .with_mobile(true),
+            )
+            .expect("walker spawns");
+        let index = engine.find_object_index(walker).expect("walker exists");
+        engine.tick().expect("walker attachment executes");
+
+        assert!(
+            engine.objects[index].state.shape_attach.mat_valid,
+            "attachment missing: pos={:?} vel={:?} mobile={} action={:?} t_attach={} vertices={:?}",
+            engine.objects[index].state.position,
+            engine.objects[index].state.velocity,
+            engine.objects[index].state.mobile,
+            engine.objects[index].state.action,
+            engine.objects[index].state.t_attach,
+            engine.objects[index].state.vertices
+        );
+        assert!(engine.objects[index].state.shape_attach.mat_vehicle);
+    }
+
+    #[test]
     fn direction_json_round_trip_preserves_raw_int32() {
         // C4Action::CompileFunc persists Action.Dir verbatim
         // (C4Action.cpp:45-54); save/snapshot JSON must do the same.
@@ -12171,6 +12276,7 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
         let idx = engine.find_object_index(id).unwrap();
         engine.objects[idx].state.shape_attach = ShapeAttachRecord {
             mat_valid: true,
+            mat_vehicle: false,
             x: 30,
             y: 15,
             vtx: 0,
@@ -12214,6 +12320,7 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
         let idx = engine.find_object_index(id).unwrap();
         engine.objects[idx].state.shape_attach = ShapeAttachRecord {
             mat_valid: true,
+            mat_vehicle: false,
             x: 0,
             y: 0,
             vtx: 0,
@@ -12256,6 +12363,7 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
         let idx = engine.find_object_index(id).unwrap();
         engine.objects[idx].state.shape_attach = ShapeAttachRecord {
             mat_valid: true,
+            mat_vehicle: false,
             x: 0,
             y: 0,
             vtx: 0,
