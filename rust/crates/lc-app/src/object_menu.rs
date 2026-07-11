@@ -453,6 +453,29 @@ fn render_engine_normal_menu(
         );
         title_height
     });
+    // WoodenLabel restricts its title text to the label bounds and reserves
+    // a 20px right indent whenever Dialog::SetTitle adds the mouse close
+    // button. Store/restore the caller's primary clipper around that child
+    // draw (C4GuiLabels.cpp:168-209; C4GuiDialogs.cpp:386-421).
+    let previous_clip = surface.clip();
+    let title_text_right = if show_close_button {
+        layout.close_button_rect().x
+    } else {
+        x + width
+    };
+    let title_text_clip = Rect::new(
+        x + icon_indent,
+        title_rect.y,
+        title_text_right.saturating_sub(x + icon_indent).max(0) as u32,
+        title_rect.height,
+    );
+    let nested_clip = previous_clip
+        .map(|clip| {
+            clip.intersection(title_text_clip)
+                .unwrap_or(Rect::new(0, 0, 0, 0))
+        })
+        .unwrap_or(title_text_clip);
+    surface.set_clip(nested_clip);
     font.draw(
         surface,
         x + icon_indent + 5,
@@ -461,6 +484,10 @@ fn render_engine_normal_menu(
         CLASSIC_CAPTION_COLOR,
         TextAlign::Left,
     );
+    match previous_clip {
+        Some(clip) => surface.set_clip(clip),
+        None => surface.clear_clip(),
+    }
     if show_close_button {
         if let Some(gui_icons) = gfx.gui_icons.as_ref() {
             let source_x = i32::from(CLASSIC_CLOSE_ICON % 6) * 40;
@@ -2410,6 +2437,26 @@ mod tests {
             &icons,
             true,
             0,
+        );
+
+        // WoodenLabel clips title text to its bounds and reserves a 20px
+        // right indent for a mouse close button (C4GuiLabels.cpp:168-209;
+        // C4GuiDialogs.cpp:386-421). Even an overlong selected caption must
+        // not paint outside a narrow menu title.
+        let title_right = narrow_layout.title.x + narrow_layout.title.width as i32;
+        let title_overflow = (narrow_layout.title.y
+            ..narrow_layout.title.y + narrow_layout.title.height as i32)
+            .find_map(|y| {
+                (title_right..title_right + 80).find_map(|x| {
+                    overflow_surface
+                        .get_pixel(x as u32, y as u32)
+                        .filter(|color| *color != Color::new(0, 0, 0, 0))
+                        .map(|color| (x, y, color))
+                })
+            });
+        assert_eq!(
+            title_overflow, None,
+            "C++ WoodenLabel clipping must keep narrow menu captions inside the title"
         );
 
         // A one-column menu cannot fit all six requested controls.

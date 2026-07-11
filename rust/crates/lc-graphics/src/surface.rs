@@ -172,6 +172,19 @@ impl Surface {
         }
     }
 
+    fn pixel_in_clip(&self, x: u32, y: u32) -> bool {
+        self.clip.is_none_or(|clip| {
+            let x = i64::from(x);
+            let y = i64::from(y);
+            let left = i64::from(clip.x);
+            let top = i64::from(clip.y);
+            x >= left
+                && y >= top
+                && x < left + i64::from(clip.width)
+                && y < top + i64::from(clip.height)
+        })
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -262,6 +275,9 @@ impl Surface {
                 height: self.height,
             });
         }
+        if !self.pixel_in_clip(x, y) {
+            return Ok(());
+        }
         let bpp = self.format.bytes_per_pixel();
         let offset = self.pixel_offset(x, y);
         let slice = &mut self.data[offset..offset + bpp];
@@ -277,6 +293,9 @@ impl Surface {
                 width: self.width,
                 height: self.height,
             });
+        }
+        if !self.pixel_in_clip(x, y) {
+            return Ok(());
         }
         let bpp = self.format.bytes_per_pixel();
         let offset = self.pixel_offset(x, y);
@@ -893,6 +912,12 @@ mod tests {
         dest.fill(Color::opaque(0, 0, 0));
         dest.set_clip(Rect::new(1, 1, 2, 2)); // only the 2x2 block at (1,1)
         assert_eq!(dest.clip(), Some(Rect::new(1, 1, 2, 2)));
+        dest.set_pixel(0, 0, Color::opaque(255, 0, 0))
+            .expect("clipped pixel write is discarded");
+        dest.blend_pixel(3, 3, Color::opaque(0, 255, 0))
+            .expect("clipped blend is discarded");
+        assert_eq!(dest.get_pixel(0, 0), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(dest.get_pixel(3, 3), Some(Color::opaque(0, 0, 0)));
 
         let mut src = Surface::new(4, 4, PixelFormat::Rgba8888);
         src.fill(Color::opaque(255, 255, 255));
