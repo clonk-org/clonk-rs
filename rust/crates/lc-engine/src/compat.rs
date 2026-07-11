@@ -11,7 +11,8 @@ use crate::command::{
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::material::MaterialSet;
 use crate::math::{
-    fixed10, fixed100, fixtoi_prec, integer_distance, itofix, itofix_prec, C4Fixed, FixedVec2,
+    fixed10, fixed100, fixtoi, fixtoi_prec, integer_distance, itofix, itofix_prec, C4Fixed,
+    FixedVec2,
 };
 use crate::message::{
     MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_MULTIPLE,
@@ -39,7 +40,7 @@ use crate::{
     CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
 use lc_resources::PhysicalInfo;
-use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
+use lc_script::{Engine as ScriptEngine, HostCallArg, RuntimeError, Value};
 use std::mem;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -587,6 +588,10 @@ pub struct HostWorldContext {
     /// the forward master list (C4Game.cpp:3732-3744).
     master_order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
+    /// C4SolidMask pixels not already baked into the landscape plane.
+    /// Grid worlds bake MCVehic directly; column fixtures retain the same
+    /// overlay used by movement/contact checks.
+    movement_solid_masks: Rc<Vec<crate::SolidMaskRect>>,
     definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
     /// Localized `C4Def::GetDesc` text, kept separate from simulation
     /// metadata so presentation lookup does not enlarge every fixture.
@@ -663,6 +668,7 @@ impl Default for HostWorldContext {
             order: Rc::new(Vec::new()),
             master_order: Rc::new(Vec::new()),
             landscape: None,
+            movement_solid_masks: Rc::new(Vec::new()),
             definitions: Rc::new(HashMap::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
@@ -835,6 +841,7 @@ impl HostWorldContext {
             master_order: Rc::clone(&order),
             order,
             landscape: landscape.map(Rc::new),
+            movement_solid_masks: Rc::new(Vec::new()),
             definitions,
             definition_descriptions: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
@@ -1039,6 +1046,25 @@ impl HostWorldContext {
 
     pub(crate) fn landscape_ref(&self) -> Option<&Landscape> {
         self.landscape.as_deref()
+    }
+
+    pub(crate) fn with_movement_solid_masks(
+        mut self,
+        masks: Vec<crate::SolidMaskRect>,
+    ) -> Self {
+        self.movement_solid_masks = Rc::new(masks);
+        self
+    }
+
+    fn movement_density_at(&self, x: i32, y: i32) -> Option<i32> {
+        Some(crate::movement_density_at(
+            self.landscape_ref()?,
+            self.materials()?,
+            self.movement_solid_masks.as_slice(),
+            None,
+            x,
+            y,
+        ))
     }
 
     pub(crate) fn transfer_zones(&self) -> &[TransferZoneState] {
@@ -6755,6 +6781,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ObjectSetAction", object_set_action);
     script.register_host_function("Smoke", smoke);
     script.register_host_function("Bubble", bubble);
+    script.register_host_reference_function("SimFlight", 0..4, sim_flight);
     script.register_host_function("SetPortrait", set_portrait);
     script.register_host_function("GetPortrait", get_portrait);
     script.register_host_function("SetVisibility", set_visibility);
@@ -10280,6 +10307,125 @@ fn get_gravity(args: &[Value]) -> Result<Value, RuntimeError> {
             .clone();
         Ok(Value::Int(context.gravity()))
     })
+}
+
+/// FnSimFlight (C4Script.cpp:5309-5330) and SimFlight
+/// (C4Movement.cpp:623-653). The first four native C4Value* arguments are
+/// nullable references; simulation runs on local fixed-point copies so a
+/// bounds/iteration failure leaves every caller variable untouched.
+fn sim_flight(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
+    if (0..4).any(|index| !args.get(index).is_some_and(HostCallArg::is_reference)) {
+        return Err(RuntimeError::new(
+            "SimFlight: first four arguments must be variable references",
+        ));
+    }
+
+    let values = args
+        .iter()
+        .map(HostCallArg::read)
+        .collect::<Result<Vec<_>, _>>()?;
+    // FnSimFlight calls getInt() on the referenced C4Values after native
+    // dispatch has validated only that they are references. getInt() returns
+    // zero when the referenced value cannot convert to Int.
+    let read_int = |index: usize| {
+        values
+            .get(index)
+            .and_then(Value::as_c4_int)
+            .unwrap_or(0)
+    };
+    let optional_int = |index: usize, parameter: &str| match values.get(index) {
+        None | Some(Value::Nil) => Ok(None),
+        Some(value) => value.as_c4_int().map(Some).ok_or_else(|| {
+            RuntimeError::new(format!(
+                "SimFlight: expected integer for {parameter}, got {}",
+                value.type_name()
+            ))
+        }),
+    };
+    let density_min = optional_int(4, "density_min")?.unwrap_or(50);
+    let density_max = optional_int(5, "density_max")?.unwrap_or(100);
+    let mut iterations = optional_int(6, "iterations")?.unwrap_or(-1);
+    let precision = optional_int(7, "precision")?.unwrap_or(10);
+    if precision == 0 {
+        return Err(RuntimeError::new("SimFlight: precision must not be zero"));
+    }
+
+    let mut x = itofix(read_int(0));
+    let mut y = itofix(read_int(1));
+    let xdir = itofix_prec(read_int(2), precision);
+    let mut ydir = itofix_prec(read_int(3), precision);
+    let gravity = PHYSICS_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| fixed100(context.gravity()) / 5)
+            .ok_or_else(|| RuntimeError::new("SimFlight requires an active physics context"))
+    })?;
+
+    let succeeded = HOST_CONTEXT.with(|cell| -> Result<bool, RuntimeError> {
+        let borrow = cell.borrow();
+        let context = borrow
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("SimFlight requires an active engine context"))?;
+        let landscape = context
+            .world
+            .landscape_ref()
+            .ok_or_else(|| RuntimeError::new("SimFlight requires an active landscape"))?;
+        let width = landscape.width() as i32;
+        let height = landscape.estimated_height();
+        let mut cx = fixtoi(x);
+        let mut cy = fixtoi(y);
+
+        loop {
+            if iterations == 0 {
+                return Ok(false);
+            }
+            iterations = iterations.wrapping_sub(1);
+            x += xdir;
+            y += ydir;
+            let target_x = fixtoi(x);
+            let target_y = fixtoi(y);
+            // Inside(target_x, 0, GBackWdt) is inclusive in both bounds;
+            // C++ only rejects the lower landscape vertically.
+            if !(0..=width).contains(&target_x) || target_y >= height {
+                return Ok(false);
+            }
+
+            let contact = loop {
+                cx += (target_x - cx).signum();
+                cy += (target_y - cy).signum();
+                let density = context.world.movement_density_at(cx, cy).unwrap_or(0);
+                if (density_min..=density_max).contains(&density) {
+                    break true;
+                }
+                if cx == target_x && cy == target_y {
+                    break false;
+                }
+            };
+            // GravAccel is adjusted for every completed movement frame,
+            // including the frame that first contacts the density.
+            ydir += gravity;
+            if contact {
+                x = itofix(cx);
+                y = itofix(cy);
+                return Ok(true);
+            }
+        }
+    })?;
+
+    if !succeeded {
+        return Ok(Value::Bool(false));
+    }
+    let output = [
+        Value::Int(fixtoi(x)),
+        Value::Int(fixtoi(y)),
+        Value::Int(fixtoi(xdir * precision)),
+        Value::Int(fixtoi(ydir * precision)),
+    ];
+    for (index, value) in output.into_iter().enumerate() {
+        let wrote = args[index].write(value)?;
+        debug_assert!(wrote, "validated SimFlight reference disappeared");
+    }
+    Ok(Value::Bool(true))
 }
 
 fn set_wind(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -27600,6 +27746,7 @@ mod tests {
         "ShakeFree",
         "ShiftContents",
         "ShowInfo",
+        "SimFlight",
         "Sin",
         "Smoke",
         "SortScoreboard",

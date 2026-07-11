@@ -13870,6 +13870,7 @@ impl Engine {
             self.team_home_base_rule,
         )
         .with_teams(Rc::clone(&self.teams))
+        .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
         // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
         // execution. FindBase is one of the APIs that explicitly walks the
