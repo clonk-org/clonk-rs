@@ -13320,7 +13320,7 @@ impl Engine {
 
     fn object_shape_rect(&self, object: &Object) -> DefinitionRect {
         let position = object.state.position;
-        object
+        let mut rect = object
             .current_shape_rect()
             .map(|rect| {
                 DefinitionRect::new(
@@ -13331,7 +13331,31 @@ impl Engine {
                 )
             })
             .or_else(|| vertex_bounds_rect(position, &object.state.vertices))
-            .unwrap_or_else(|| DefinitionRect::new(position.x, position.y, 1, 1))
+            .unwrap_or_else(|| DefinitionRect::new(position.x, position.y, 1, 1));
+        // C4Object::Top/Height and At expand short construction shapes
+        // upward to an 18-pixel action area (C4Object.h:340-344;
+        // C4Object.cpp:1124-1140). C4LArea::Set uses those same accessors,
+        // so sector ObjectShapes membership must include the expansion too.
+        let add_top = (18 - rect.height).max(0);
+        rect.y = rect.y.saturating_sub(add_top);
+        rect.height = rect.height.saturating_add(add_top);
+        rect
+    }
+
+    fn object_entrance_area(&self, object: &Object) -> Option<DefinitionRect> {
+        if object.state.ocf & crate::ocf::ENTRANCE == 0 {
+            return None;
+        }
+        let entrance = self
+            .definitions
+            .get(&object.definition_id)?
+            .entrance_rect()?;
+        Some(DefinitionRect::new(
+            object.state.position.x.saturating_add(entrance.x),
+            object.state.position.y.saturating_add(entrance.y),
+            entrance.width,
+            entrance.height,
+        ))
     }
 
     #[allow(dead_code)]
@@ -13344,7 +13368,9 @@ impl Engine {
         let candidate_ids = self
             .sectors
             .as_ref()
-            .map(|sectors| sectors.object_ids_at(point.x, point.y).to_vec())
+            // C4GameObjects::ObjectsAt returns this sector's ObjectShapes,
+            // not its center-point Objects list (C4GameObjects.cpp:87-90).
+            .map(|sectors| sectors.shape_ids_at(point.x, point.y).to_vec())
             .unwrap_or_else(|| self.objects.iter().map(|object| object.id).collect());
         for candidate_id in candidate_ids {
             if exclude == Some(candidate_id) {
@@ -16415,6 +16441,7 @@ impl Engine {
             },
             shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
             shape: self.object_shape_rect(object),
+            entrance: self.object_entrance_area(object),
             status: object.state.status,
             destroyed: object.destroyed,
             category: object.state.category,
@@ -16656,6 +16683,7 @@ impl Engine {
                     action_time: object.state.action.time,
                     shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
                     shape: self.object_shape_rect(object),
+                    entrance: self.object_entrance_area(object),
                     status: object.state.status,
                     destroyed: object.destroyed,
                     category: object.state.category,
@@ -17732,6 +17760,7 @@ impl Engine {
                         .map(|rect| rect.y)
                         .unwrap_or(0),
                     shape: self.object_shape_rect(&self.objects[idx]),
+                    entrance: self.object_entrance_area(&self.objects[idx]),
                     status: self.objects[idx].state.status,
                     destroyed: self.objects[idx].destroyed,
                     category: self.objects[idx].state.category,
@@ -21592,7 +21621,7 @@ impl Engine {
         }
 
         if matches!(procedure, ActionProcedure::Build)
-            && !self.apply_build_procedure(idx, &definition_id)
+            && !self.apply_build_procedure(idx, &definition_id)?
         {
             return Ok(false);
         }
@@ -22448,7 +22477,11 @@ impl Engine {
         }
     }
 
-    fn apply_build_procedure(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
+    fn apply_build_procedure(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+    ) -> Result<bool, EngineError> {
         let category = self.objects[idx].state.category;
         let is_structure = (category & (CATEGORY_STRUCTURE | CATEGORY_STATIC_BACK)) != 0;
 
@@ -22456,30 +22489,34 @@ impl Engine {
             Some(id) => id,
             None => {
                 if is_structure {
-                    return true;
+                    return Ok(true);
                 }
-                self.reset_action_to_default(idx, definition_id, true);
-                return false;
+                let _ = self.object_action_stand(idx, definition_id)?;
+                return Ok(false);
             }
         };
 
         let target_idx = match self.find_object_index(target_id) {
             Some(index) if index != idx => index,
             _ => {
-                self.reset_action_to_default(idx, definition_id, true);
-                return false;
+                let _ = self.object_action_stand(idx, definition_id)?;
+                return Ok(false);
             }
         };
 
         if self.objects[target_idx].destroyed || !self.objects[target_idx].state.status.is_active()
         {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            let _ = self.object_action_stand(idx, definition_id)?;
+            return Ok(false);
         }
 
         if self.objects[target_idx].state.construction >= FULL_CON {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            // Target::Build returns false once full; DFA_BUILD first loses
+            // only Action.Target and returns. The following no-target frame
+            // calls ObjectComStop -> ObjectActionStand (C4Object.cpp:
+            // 5010-5038), rather than resetting to ActIdle immediately.
+            self.objects[idx].state.action.target = None;
+            return Ok(false);
         }
 
         let target_definition_id = self.objects[target_idx].definition_id.clone();
@@ -22522,19 +22559,44 @@ impl Engine {
                 &required_components,
             )
         {
-            return false;
+            return Ok(false);
         }
 
+        let crossed_full_con = current_construction < FULL_CON
+            && desired_construction >= FULL_CON;
         {
             let target = &mut self.objects[target_idx];
             target.set_construction(desired_construction);
         }
+        self.refresh_object_ocf(target_idx);
+        self.update_sector_for_index(target_idx);
 
-        if self.objects[target_idx].state.construction >= FULL_CON {
-            self.reset_action_to_default(idx, definition_id, true);
+        // C4Object::DoCon dispatches Completion and then Initialize after
+        // the bottom-preserving shape adjustment on the first FullCon
+        // crossing (C4Object.cpp:1498-1503). Completion may delete the
+        // target, in which case C++ suppresses Initialize.
+        if crossed_full_con {
+            if let Some(completion_idx) = self.find_object_index(target_id).filter(|&index| {
+                self.object_survives_creation(index)
+            }) {
+                let _ = tolerate_script_error(self.call_object_function(
+                    completion_idx,
+                    "Completion",
+                    Vec::new(),
+                ))?;
+            }
+            if let Some(initialize_idx) = self.find_object_index(target_id).filter(|&index| {
+                self.object_survives_creation(index)
+            }) {
+                let _ = tolerate_script_error(self.call_object_function(
+                    initialize_idx,
+                    "Initialize",
+                    Vec::new(),
+                ))?;
+            }
         }
 
-        true
+        Ok(true)
     }
 
     /// DFA_CHOP (C4Object.cpp:5202-5221): every Tick3 asks the current
@@ -28368,6 +28430,11 @@ impl Engine {
                     self.complete_command(caller, command)?;
                 }
             }
+            CallResultAction::FailCommandOnFalse { command } => {
+                if !result {
+                    self.fail_command(caller, command)?;
+                }
+            }
         }
         Ok(())
     }
@@ -28385,6 +28452,22 @@ impl Engine {
             .get_mut(index)
             .ok_or(EngineError::UnknownObject(object_id))?;
         object.commands.complete_front_if(command);
+        Ok(())
+    }
+
+    fn fail_command(
+        &mut self,
+        object_id: ObjectId,
+        command: CommandId,
+    ) -> Result<(), EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Err(EngineError::UnknownObject(object_id));
+        };
+        let object = self
+            .objects
+            .get_mut(index)
+            .ok_or(EngineError::UnknownObject(object_id))?;
+        object.commands.fail_front_if(command);
         Ok(())
     }
 
@@ -57829,6 +57912,64 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
     }
 
     #[test]
+    fn at_object_finds_shapes_crossing_the_probe_sector() {
+        let mut definition = simple_definition("TallTarget");
+        definition.set_shape_rect(Some(DefinitionRect::new(-10, -20, 20, 40)));
+        definition.set_ocf_base(ocf::GRAB);
+
+        let mut engine = Engine::with_seed(34);
+        engine.set_landscape(Landscape::flat(120, 120));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        // Spawn y is the con-0 bottom: 60 - (40 - 20) puts the center at
+        // y=40 (sector row 0), while the shape reaches y=59 (row 1).
+        let id = engine
+            .spawn_object(SpawnConfig::new("TallTarget").with_position(Vector2::new(40, 60)))
+            .expect("target spawns");
+        let hit = engine
+            .at_object(Vector2::new(40, 55), ocf::GRAB, None)
+            .expect("ObjectShapes finds a target whose center is in the adjacent sector");
+
+        assert_eq!(hit.1, id);
+        assert_ne!(hit.2 & ocf::GRAB, 0);
+    }
+
+    #[test]
+    fn at_object_finds_low_construction_site_through_minimum_build_top() {
+        let mut definition = simple_definition("BuildSite");
+        definition.set_shape_rect(Some(DefinitionRect::new(-14, -28, 28, 56)));
+        definition.set_constructable(true);
+
+        let mut engine = Engine::with_seed(35);
+        engine.set_landscape(Landscape::flat(120, 120));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("BuildSite")
+                    .with_position(Vector2::new(40, 60))
+                    .with_construction(1_000),
+            )
+            .expect("construction site spawns");
+        let site = engine.object_snapshot(id).expect("construction site exists");
+        let probe = Vector2::new(site.position.x, site.position.y - 15);
+        assert_ne!(
+            probe.y / sector::SECTOR_HEIGHT,
+            site.position.y / sector::SECTOR_HEIGHT,
+            "the regression probe must cross a sector boundary"
+        );
+
+        let hit = engine
+            .at_object(probe, ocf::CONSTRUCT, None)
+            .expect("C4Object::addtop makes the low construction site buildable");
+        assert_eq!(hit.1, id);
+        assert_ne!(hit.2 & ocf::CONSTRUCT, 0);
+    }
+
+    #[test]
     fn at_object_exclusive_candidate_blocks_later_matches() {
         let mut blocker = simple_definition("Blocker");
         blocker.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
@@ -59582,6 +59723,102 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert_eq!(object.position, Vector2::new(3, 6));
         assert_eq!(object.vertices[0].y, 2);
         assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
+        Ok(())
+    }
+
+    #[test]
+    fn build_full_con_crossing_runs_completion_then_initialize() -> Result<(), EngineError> {
+        let mut builder = simple_definition("Builder");
+        builder.set_category(CATEGORY_OBJECT);
+        builder.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("Walk").with_length(1),
+                ),
+                (
+                    "Build".to_string(),
+                    ActionSpec::default().with_procedure("Build").with_length(1),
+                ),
+            ]),
+        );
+        let mut target = Definition::from_script(
+            "Target",
+            "Target",
+            r#"#strict
+local lifecycle;
+protected func Completion() {
+  lifecycle = lifecycle * 10 + 1;
+  return(1);
+}
+protected func Initialize() {
+  if (GetCon() < 100) return(1);
+  lifecycle = lifecycle * 10 + 2;
+  CreateObject(CHLD, 0, 0, GetOwner());
+  return(1);
+}
+"#,
+        )?;
+        target.set_category(CATEGORY_STRUCTURE);
+        target.set_mass(100);
+
+        let mut engine = Engine::with_seed(69);
+        engine.register_definition(builder)?;
+        engine.register_definition(target)?;
+        engine.register_definition(simple_definition("CHLD"))?;
+        let target_id = engine.spawn_object(
+            SpawnConfig::new("Target")
+                .with_position(Vector2::new(40, 60))
+                .with_construction(FULL_CON - 1),
+        )?;
+        let mut build = ActionState::new("Build");
+        build.target = Some(target_id);
+        let builder_id = engine.spawn_object(
+            SpawnConfig::new("Builder")
+                .with_position(Vector2::new(40, 40))
+                .with_action(build),
+        )?;
+
+        engine.tick()?;
+
+        let target = engine.object_snapshot(target_id).expect("target survives");
+        assert_eq!(target.construction, FULL_CON);
+        assert_eq!(target.local_vars.get("lifecycle"), Some(&Value::Int(12)));
+        assert_eq!(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "CHLD")
+                .count(),
+            1,
+            "ELEV-style Initialize creates its child on live completion"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(builder_id)
+                .expect("builder survives crossing")
+                .action
+                .name,
+            "Build",
+            "the crossing tick still sees Target::Build succeed"
+        );
+
+        // The next Build frame sees an already-complete target and clears
+        // Action.Target; the following frame's no-target arm stands via
+        // ObjectActionWalk (C4Object.cpp:5010-5038).
+        engine.tick()?;
+        engine.tick()?;
+        assert_eq!(
+            engine
+                .object_snapshot(builder_id)
+                .expect("builder survives recovery")
+                .action
+                .name,
+            "Walk"
+        );
         Ok(())
     }
 

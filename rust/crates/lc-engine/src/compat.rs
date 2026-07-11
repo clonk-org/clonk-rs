@@ -24735,6 +24735,7 @@ impl EffectHostContext {
                         .unwrap_or(object.action_ticks),
                     shape_top: local_shape.y,
                     shape,
+                    entrance: None,
                 };
                 Some((id, snapshot))
             })

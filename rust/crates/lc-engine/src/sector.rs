@@ -250,6 +250,10 @@ impl SectorMap {
         &self.sector(key).object_shapes
     }
 
+    pub(crate) fn shape_ids_at(&self, x: i32, y: i32) -> &[ObjectId] {
+        self.shape_ids(self.sector_at(x, y))
+    }
+
     /// The per-sector shape lists in C4LArea order, NOT deduplicated:
     /// C4FindObject::Find has no Marker (C4FindObject.cpp:283-294), so an
     /// object whose shape spans sectors is re-encountered per sector.

@@ -69,6 +69,10 @@ pub struct CommandObjectSnapshot {
     /// point-in-shape tests (C4Object.cpp At(), used by C4Command::Enter
     /// :587-588 and Grab :690-691).
     pub shape: DefinitionRect,
+    /// Absolute DefCore entrance area when OCF_Entrance is currently set.
+    /// C4Command::Exit uses its center/bottom for top-level ejection
+    /// (C4Command.cpp:624-645).
+    pub entrance: Option<DefinitionRect>,
 }
 
 impl CommandObjectSnapshot {
@@ -260,6 +264,7 @@ mod tests {
             action_time: 0,
             shape_top: 0,
             shape: DefinitionRect::new(-8, -10, 16, 20),
+            entrance: None,
             id: ObjectId::new(id),
             definition_id: format!("DEF{id}"),
             position: Vector2::ZERO,
@@ -3978,6 +3983,7 @@ mod tests {
         let mut container = snapshot_with_id(container_id.as_u64());
         container.container = Some(parent_id);
         container.position = Vector2::new(12, 34);
+        container.entrance_status = true;
 
         let mut parent = snapshot_with_id(parent_id.as_u64());
         parent.position = Vector2::new(100, -20);
@@ -4028,6 +4034,7 @@ mod tests {
 
         let mut container = snapshot_with_id(container_id.as_u64());
         container.position = Vector2::new(-40, 5);
+        container.entrance_status = true;
 
         let mut objects = HashMap::new();
         objects.insert(actor.id, actor.clone());
@@ -4064,6 +4071,137 @@ mod tests {
     }
 
     #[test]
+    fn exit_uses_open_entrance_bottom_for_top_level_ejection() {
+        // C4Command::Exit places a top-level contained object at the
+        // entrance center/bottom, adjusted by the exiting object's shape
+        // top (C4Command.cpp:624-645). This is the HUT2/TFLN geometry in
+        // Tutorial 4: dropping at the building center makes the flint hit
+        // the ground hard enough to ignite.
+        let actor_id = ObjectId::new(91);
+        let container_id = ObjectId::new(101);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+        actor.shape_top = -3;
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(586, 245);
+        container.alive = false;
+        container.entrance_status = true;
+        container.ocf |= ocf::ENTRANCE;
+        container.entrance = Some(DefinitionRect::new(568, 253, 16, 17));
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(container.id, container);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 20,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("exit should update actor");
+        assert_eq!(update.container, Some(None));
+        assert_eq!(update.position, Some(Vector2::new(576, 266)));
+        assert_eq!(update.velocity, Some(Vector2::ZERO));
+    }
+
+    #[test]
+    fn exit_activates_closed_entrance_and_remains_pending() {
+        let actor_id = ObjectId::new(92);
+        let container_id = ObjectId::new(102);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+        actor.command_direction = CommandDirection::Right;
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.alive = false;
+        container.entrance_status = false;
+        container.ocf |= ocf::ENTRANCE;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(container.id, container);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 20,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result.update.expect("closed-door Exit stops the actor");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert!(update.container.is_none(), "the actor remains contained");
+        assert!(update.position.is_none(), "the actor is not ejected yet");
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::CallObjectFunction {
+                object_id,
+                function,
+                caller,
+                on_result,
+                ..
+            } => {
+                assert_eq!(*object_id, container_id);
+                assert_eq!(function, "ActivateEntrance");
+                assert_eq!(*caller, actor_id);
+                assert_eq!(
+                    on_result,
+                    &Some(CallResultAction::FailCommandOnFalse {
+                        command: CommandId::Exit,
+                    })
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Exit))
+            .expect("Exit command queues");
+        assert!(stack.fail_front_if(CommandId::Exit));
+        assert_eq!(stack.snapshot().commands[0].failures, 1);
+        assert_eq!(
+            stack.step(&ctx).expect("armed failure executes").status,
+            CommandStatus::Failed,
+            "ActivateEntrance=false follows C4Command::Finish(false)"
+        );
+    }
+
+    #[test]
     fn exit_stops_building_procedure() {
         let actor_id = ObjectId::new(110);
         let container_id = ObjectId::new(120);
@@ -4074,6 +4212,7 @@ mod tests {
 
         let mut container = snapshot_with_id(container_id.as_u64());
         container.position = Vector2::new(0, 0);
+        container.entrance_status = true;
 
         let mut objects = HashMap::new();
         objects.insert(actor.id, actor.clone());
@@ -7594,6 +7733,9 @@ pub enum CommandEvent {
 pub enum CallResultAction {
     CompleteCommandOnFalse { command: CommandId },
     CompleteCommandOnTrue { command: CommandId },
+    /// C4Command::Finish(false): arm a command failure for its next
+    /// Execute rather than completing it successfully.
+    FailCommandOnFalse { command: CommandId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -8040,6 +8182,16 @@ impl CommandStack {
         if let Some(front) = self.entries.front() {
             if front.id() == Some(id) {
                 self.entries.pop_front();
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn fail_front_if(&mut self, id: CommandId) -> bool {
+        if let Some(front) = self.entries.front_mut() {
+            if front.id() == Some(id) {
+                front.failures = front.failures.saturating_add(1);
                 return true;
             }
         }
@@ -8833,7 +8985,9 @@ impl ExitState {
         }
 
         let container_snapshot = match ctx.resolve(container_id) {
-            Some(snapshot) if snapshot.is_active() => snapshot,
+            // C4Command::Exit only needs the live Contained pointer;
+            // structures are nonliving but valid containers.
+            Some(snapshot) if snapshot.is_status_active() => snapshot,
             _ => {
                 update.container = Some(None);
                 update.position = Some(ctx.position);
@@ -8841,6 +8995,24 @@ impl ExitState {
                 return CommandStepResult::completed(Some(update));
             }
         };
+
+        // A closed entrance is not an ejection point. C++ asks the
+        // container to open and leaves this Exit command pending; a false
+        // ActivateEntrance result fails it (C4Command.cpp:644-650).
+        if !container_snapshot.entrance_status {
+            let event = CommandEvent::CallObjectFunction {
+                object_id: container_id,
+                function: "ActivateEntrance".into(),
+                caller: ctx.object.id,
+                tx: None,
+                ty: None,
+                target2: None,
+                on_result: Some(CallResultAction::FailCommandOnFalse {
+                    command: CommandId::Exit,
+                }),
+            };
+            return CommandStepResult::running(Some(update)).with_events(vec![event]);
+        }
 
         update.velocity = Some(Vector2::ZERO);
 
@@ -8853,7 +9025,23 @@ impl ExitState {
             }
         } else {
             update.container = Some(None);
-            update.position = Some(container_snapshot.position);
+            update.position = if container_snapshot.entrance_status
+                && container_snapshot.ocf & ocf::ENTRANCE != 0
+            {
+                container_snapshot.entrance.map(|entrance| {
+                    Vector2::new(
+                        entrance.x.saturating_add(entrance.width / 2),
+                        entrance
+                            .y
+                            .saturating_add(entrance.height)
+                            .saturating_add(ctx.object.shape_top)
+                            .saturating_sub(1),
+                    )
+                })
+            } else {
+                None
+            }
+            .or(Some(container_snapshot.position));
         }
 
         CommandStepResult::completed(Some(update))
