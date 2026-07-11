@@ -433,6 +433,7 @@ impl FrontendAssets {
                             DefinitionSprite {
                                 shape: None,
                                 stretch_growth: false,
+                                top_face: None,
                                 image,
                                 actions: HashMap::new(),
                                 color_mask: None,
@@ -6250,6 +6251,7 @@ impl GameApp {
             let default_key = sprite_map_key(definition_id, None);
             let shape_facet = self.engine.definition_shape_rect(definition_id);
             let stretch_growth = self.engine.definition_stretch_growth(definition_id);
+            let top_face = self.engine.definition_top_face(definition_id);
             if let Some(image) = self.engine.definition_sprite_image(definition_id, None) {
                 let width = image.width();
                 let height = image.height();
@@ -6262,6 +6264,7 @@ impl GameApp {
                     DefinitionSprite {
                         shape: shape_facet,
                         stretch_growth,
+                        top_face,
                         image: ImageData::from_arc(width, height, pixels),
                         actions: actions.clone(),
                         color_mask: mask,
@@ -6275,6 +6278,7 @@ impl GameApp {
                     DefinitionSprite {
                         shape: shape_facet,
                         stretch_growth,
+                        top_face,
                         image: ImageData::from_arc(width, height, image.into_pixels()),
                         actions: actions.clone(),
                         color_mask: None,
@@ -6282,6 +6286,7 @@ impl GameApp {
                 );
             } else if let Some(existing) = sprites.get_mut(&default_key) {
                 existing.actions = actions.clone();
+                existing.top_face = top_face;
             }
 
             for variant in self.engine.definition_sprite_variant_names(definition_id) {
@@ -6301,6 +6306,7 @@ impl GameApp {
                         DefinitionSprite {
                             shape: shape_facet,
                             stretch_growth,
+                            top_face,
                             image: ImageData::from_arc(width, height, pixels),
                             actions: actions.clone(),
                             color_mask: mask,

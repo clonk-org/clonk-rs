@@ -23,7 +23,8 @@ mod startup_menu;
 mod startup_options;
 
 use lc_engine::{
-    DefinitionActionGraphics, DefinitionId, DefinitionRect, Direction, DrawTransform,
+    DefinitionActionGraphics, DefinitionId, DefinitionRect, DefinitionTargetRect, Direction,
+    DrawTransform,
     EnvironmentFrame, EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape,
     ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, RgbColor, SimulationSnapshot,
     SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent,
@@ -254,6 +255,8 @@ pub struct DefinitionSprite {
     /// Con scales the shape on both axes (C4Shape::Stretch) instead of
     /// height only (C4Shape::Jolt), C4Object.cpp:329-333.
     pub stretch_growth: bool,
+    /// DefCore `TopFace`: source facet and object-relative target rectangle.
+    pub top_face: Option<DefinitionTargetRect>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1973,17 +1976,91 @@ impl GraphicsSystem {
         sort_for_render(&mut foreground);
         sort_for_render(&mut parallax);
 
-        for object in background
+        let ordered: Vec<_> = background
             .into_iter()
-            .chain(midground.into_iter())
-            .chain(foreground.into_iter())
-        {
+            .chain(midground)
+            .chain(foreground)
+            .collect();
+        for object in &ordered {
             self.paint_object(object, lighting, owner_colors);
+        }
+        for object in &ordered {
+            self.paint_object_top_face(object, owner_colors);
         }
 
-        for object in parallax {
+        for object in &parallax {
             self.paint_object(object, lighting, owner_colors);
         }
+        for object in &parallax {
+            self.paint_object_top_face(object, owner_colors);
+        }
+    }
+
+    /// C4ObjectList draws every base before any TopFace
+    /// (src/C4ObjectList.cpp:390-396). This first increment implements the
+    /// full-construction, upright DefCore TopFace used by the elevator car;
+    /// action FacetTopFace and growth scaling are separate parity slices.
+    fn paint_object_top_face(
+        &mut self,
+        object: &ObjectSnapshot,
+        owner_colors: &HashMap<i32, Color>,
+    ) {
+        if object.construction != FULL_CON || object.rotation.rem_euclid(360) != 0 {
+            return;
+        }
+        let (base_definition_id, base_graphics_name) =
+            if let Some(base) = object.base_graphics.as_ref() {
+                (base.definition.clone(), base.graphics_name.clone())
+            } else {
+                (object.definition_id.clone(), None)
+            };
+        let mut sprite = self
+            .object_sprites
+            .get(&sprite_map_key(
+                &base_definition_id,
+                base_graphics_name.as_deref(),
+            ))
+            .cloned();
+        if sprite.is_none() && base_graphics_name.is_some() {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(&base_definition_id, None))
+                .cloned();
+        }
+        if sprite.is_none() && base_definition_id != object.definition_id {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(&object.definition_id, None))
+                .cloned();
+        }
+        let Some(sprite) = sprite else {
+            return;
+        };
+        let Some(top_face) = sprite.top_face else {
+            return;
+        };
+        let shape = Self::sprite_def_shape(&sprite);
+        let cox = object.position.x + shape.x;
+        let coy = object.position.y + shape.y;
+        self.blit_face(
+            &sprite,
+            SourceRect::new(top_face.x, top_face.y, top_face.width, top_face.height),
+            (
+                (cox + top_face.target_x) as f32,
+                (coy + top_face.target_y) as f32,
+                top_face.width as f32,
+                top_face.height as f32,
+            ),
+            (
+                cox as f32 + shape.width as f32 / 2.0,
+                coy as f32 + shape.height as f32 / 2.0,
+            ),
+            false,
+            owner_colors.get(&object.owner).copied(),
+            self.viewport_zoom.max(MIN_VIEWPORT_ZOOM),
+            0.0,
+            object.draw_transform,
+        );
     }
 
     fn paint_object(
@@ -5087,9 +5164,78 @@ mod tests {
                 color_mask: None,
                 shape,
                 stretch_growth,
+                top_face: None,
             },
         );
         Arc::new(sprites)
+    }
+
+    #[test]
+    fn definition_top_faces_draw_after_every_object_base_like_cpp() {
+        // C4ObjectList::Draw performs one complete base pass and only then a
+        // complete TopFace pass (src/C4ObjectList.cpp:390-396). Thus A's
+        // TopFace must cover the later overlapping base of B.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].container = Some(ObjectId::new(99));
+        let mut top_object = snapshot.objects[0].clone();
+        top_object.id = ObjectId::new(2);
+        top_object.definition_id = "TopObject".to_string();
+        top_object.position = Vector2::new(105, 100);
+        top_object.container = None;
+        top_object.crew_member = false;
+        top_object.action = lc_engine::ActionState::new("Active");
+        let mut base_object = top_object.clone();
+        base_object.id = ObjectId::new(3);
+        base_object.definition_id = "BaseObject".to_string();
+        base_object.action = Default::default();
+        snapshot.objects.extend([top_object, base_object]);
+        snapshot.landscape = Some(Landscape::flat(160, 140));
+
+        let green = Color::opaque(0, 200, 0);
+        let blue = Color::opaque(0, 0, 200);
+        let mut sprites = HashMap::new();
+        sprites.insert(
+            sprite_map_key("TopObject", None),
+            DefinitionSprite {
+                image: ImageData::new(2, 1, vec![0, 0, 0, 0, 0, 200, 0, 255]),
+                actions: HashMap::from([(
+                    "Active".to_string(),
+                    DefinitionActionGraphics::default(),
+                )]),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                stretch_growth: false,
+                top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
+            },
+        );
+        sprites.insert(
+            sprite_map_key("BaseObject", None),
+            DefinitionSprite {
+                image: ImageData::new(1, 1, vec![0, 0, 200, 255]),
+                actions: HashMap::new(),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                stretch_growth: false,
+                top_face: None,
+            },
+        );
+
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "TopFace pass",
+            test_font(),
+            Arc::new(sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(&snapshot.objects[0])]);
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let x = (105 - viewport_x) as u32;
+        let y = (100 - viewport_y) as u32;
+        assert_eq!(graphics.surface().get_pixel(x, y), Some(green));
+        assert_ne!(graphics.surface().get_pixel(x, y), Some(blue));
     }
 
     #[test]
@@ -5390,6 +5536,7 @@ mod tests {
                 color_mask: None,
                 shape: Some(DefinitionRect::new(-4, -4, 8, 8)),
                 stretch_growth: false,
+                top_face: None,
             },
         );
 
