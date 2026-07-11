@@ -5,7 +5,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-arboard = "3.3"
+# Text-only clipboard use; default "image-data" feature would pull a second
+# image crate (0.25) plus moxcms/pxfm/tiff into every workspace build.
+arboard = { version = "3.3", default-features = false }
 lc-launcher = { path = "../lc-launcher" }
 lc-launcher-ui = { path = "../lc-launcher-ui" }
 lc-gui = { path = "../lc-gui" }
