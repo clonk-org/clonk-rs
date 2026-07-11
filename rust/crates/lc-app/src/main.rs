@@ -16569,6 +16569,160 @@ mod tests {
         assert_eq!(keyboard.player_control(), before_arrows);
     }
 
+    #[test]
+    fn app_virtual_keyboard_keeps_tutorial02_clonk_on_rising_balloon() {
+        // The real window path maps keyboard-set-one X/X to Grab and S to Up.
+        // While the Clonk pushes BALN, C++ routes Up to the target and keeps
+        // DFA_PUSH attached to its moving solid mask (C4Player.cpp:1522-1536;
+        // C4Object.cpp:3520-3537,5058-5114; C4SolidMask.cpp:276-305).
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover repository install");
+        let audio_options = AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        };
+        let mut app = GameApp::new(
+            320,
+            200,
+            audio_options,
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Tutorial 2 virtual player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+
+        let scenario = resolve_next_mission_scenario(
+            &app.scenario_catalog,
+            "Tutorial.c4f/Tutorial02.c4s",
+        )
+        .expect("Tutorial02 is present in the real scenario catalog");
+        let scenario_path = scenario.path.clone().expect("Tutorial02 path");
+        let scenario_data = Scenario::load_from_path_with_languages(
+            &scenario_path,
+            &InstallDefinitionResolver::new(Some(Arc::new(paths.clone()))),
+            &startup_language_sequence(Some(&paths)),
+        )
+        .expect("load real Tutorial02");
+        app.activate_loaded_scenario(scenario, scenario_data)
+            .expect("activate real Tutorial02");
+
+        let clonk = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("Tutorial02 selected CLNK");
+        let balloon = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "BALN")
+            .expect("Tutorial02 BALN")
+            .id;
+
+        for _ in 0..160 {
+            let clonk_ready = app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.container.is_none() && object.action.name == "Walk"
+            });
+            let balloon_ready = app
+                .engine
+                .object_snapshot(balloon)
+                .is_some_and(|object| object.container.is_none());
+            if clonk_ready && balloon_ready {
+                break;
+            }
+            app.update().expect("advance Tutorial02 startup");
+        }
+        assert!(
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container.is_none() && object.action.name == "Walk"),
+            "Tutorial02 CLNK exits the starting base through app frames"
+        );
+
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard.press(VirtualKeyCode::X).expect("first physical X");
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release first physical X");
+            keyboard.press(VirtualKeyCode::X).expect("second physical X");
+        }
+        for _ in 0..80 {
+            if app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(balloon)
+            }) {
+                break;
+            }
+            app.update().expect("advance physical Grab command");
+        }
+        let pushing = app.engine.object_snapshot(clonk).expect("CLNK after X/X");
+        let balloon_before = app
+            .engine
+            .object_snapshot(balloon)
+            .expect("BALN before lift");
+        assert_eq!(
+            (pushing.action.name.as_str(), pushing.action.target),
+            ("Push", Some(balloon)),
+            "physical X/X must grab BALN through GameApp"
+        );
+        let platform_delta_y = pushing.position.y - balloon_before.position.y;
+
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release second physical X");
+            keyboard
+                .press(VirtualKeyCode::S)
+                .expect("physical S while pushing BALN");
+        }
+        for lift_frame in 1..=60 {
+            app.update().expect("advance BALN lift through app scheduler");
+            let clonk_now = app.engine.object_snapshot(clonk).expect("CLNK during lift");
+            let balloon_now = app
+                .engine
+                .object_snapshot(balloon)
+                .expect("BALN during lift");
+            assert_eq!(
+                (clonk_now.action.name.as_str(), clonk_now.action.target),
+                ("Push", Some(balloon)),
+                "DFA_PUSH must retain BALN on app lift frame {lift_frame}"
+            );
+            assert!(
+                (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1,
+                "CLNK must remain on BALN's platform on app lift frame {lift_frame}; \
+                 initial delta={platform_delta_y}, clonk={clonk_now:?}, balloon={balloon_now:?}"
+            );
+        }
+        assert!(
+            app.engine
+                .object_snapshot(balloon)
+                .expect("BALN after lift")
+                .position
+                .y
+                < balloon_before.position.y,
+            "physical S must lift BALN"
+        );
+        reset_cached_app_paths();
+    }
+
     fn two_item_script_menu(cursor: ObjectId) -> lc_engine::ObjectMenuState {
         lc_engine::ObjectMenuState {
             caption: "Choose".to_string(),
