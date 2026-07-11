@@ -1,63 +1,54 @@
 # Rust Port Status
 
-C++ (`../src/`) is the simulation oracle. Full parity is not reached; completed
-slices are recorded in `git log -- rust/ parity/`.
+C++ (`../src/`) and `content/` are read-only parity oracles. Completed slices
+are in `git log -- rust/ parity/`.
 
-Near-term priority: make every `Tutorial.c4f` scenario completable from start
-through the C++-matching victory flow, then resume the Goldrush comparator.
+## Current
 
-## Gate
+Tutorials 01–10 complete their real victory flows through player controls and
+live menus. Tutorial 02 separately pins the Clonk to BALN's moving platform,
+including a real-scenario app replay through physical X/X/S keys. App tests
+also pin S/Z/X/C mapping, unbound arrows, jumping, and classic/AutoStop release
+behavior.
 
-The integration baseline is green: workspace nextest, strict clippy, snapshots,
-parity, and 93/93 scenario load/apply+activation. Current focused slices are
-green; rerun the full battery before handoff. Input-only virtual playthroughs
-complete Tutorials 01–04; Tutorial 05 is active and Tutorial 08 reaches its
-first real lorry catch. Goldrush first diverges at frame 3327 (object #1451
-Decay/DoCon Y sync; RNG remains aligned).
+Next: close tutorial presentation/UI parity, then resume Goldrush at its pinned
+first mismatch: frame 3327, object #1451, Decay/DoCon Y synchronization; RNG is
+still aligned.
+
+## Gates
 
 ```sh
+cargo nextest run -p lc-engine -E 'binary(/^real_tutorial(0[1-9]|10)_(virtual_play|route)$/) | binary(real_tutorial02_balloon_platform)'
+cargo nextest run -p lc-engine --test virtual_player_harness
+cargo nextest run -p lc-app -E 'test(app_virtual_keyboard_keeps_tutorial02_clonk_on_rising_balloon)'
 cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask engine-snapshots verify
 cargo xtask parity verify
 ```
 
-Behavioral slices also require their scenario/audit gate and, when relevant, a
-rebuilt pinned live comparison.
+Behavior changes also require the relevant scenario sweep/audit and rebuilt
+live comparison.
 
-## Open parity
+## Remaining parity
 
-- **Simulation:** solid/rotated masks, landscape scan/RNG order, liquids,
-  DigFree/BlastFree, fire/effects/explosions, temperature, map post-init, and
-  same-callback reads after deferred landscape writes, plus remaining non-C++
-  movement damping/clamping/collision behavior.
-- **Commands/objects:** pathfinding/Tick35, FLOAT, Exit/Throw, arrival/intervals,
-  vehicle/linekit/dig, OCF/sectors/find order, containers, permanent crew/base
-  state, elimination, rank/version gates, and remaining menu/trade semantics
-  (script/Put/build rows, target/order/icons, Reject*/NoGet/NoSell, bulk/rebuy,
-  callback and recursive-sale timing).
-- **Script/network/state:** strict C4Value conversion/serialization, remaining
-  DefCore/ActMap/effect/menu/callback order, object-info/evaluation payloads,
-  control synchronization, and protocol/auth/league behavior.
-- **Presentation/resources:** scoreboard GUI, renderer/particles, HUD/player and
-  startup/options/update menus, activation/saved music, streaming MIDI/WAV,
-  controls/config/locale/group I/O, search/scroll/tooltips, and mission access.
+- Tutorial presentation: C++-exact menus, HUD, evaluation screens, rendering,
+  audio, and startup/options interaction.
+- Simulation: landscape/material/RNG order, liquids, masks, fire/effects,
+  movement/collision/attachment, pathfinding, vehicles, lines, digging,
+  OCF/sectors/find order, containers, crew/base state, and callback timing.
+- Script/state/network/resources: strict C4Value/save semantics, effect/menu
+  ordering, synchronized controls/protocols, renderer/particles, audio,
+  configuration/localization, and group I/O.
 
-## Comparator caveats
-
-Comma expressions are accepted out of context; `mrfScript` uses scenario scope.
-Presentation RNG is ignored unless `LC_RUST_ENGINE_COMPARE_PARTICLES=1`.
-Message/render fields compare only when both bridges expose them; the bridge
-does not export client-local player flags. Same-seed landscape is 99.66%
-byte-equal; C++ bakes MCVehic masks while Rust overlays them.
+Comparator caveats: presentation RNG is opt-in; message/render fields compare
+only when both bridges expose them; same-seed landscape is 99.66% byte-equal
+because C++ bakes MCVehic masks while Rust overlays them.
 
 ## Preserve
 
-Keep fixed/integer position and rotation separate except at C++ sync points.
-Preserve shared RNG, reverse execution, IDs, definition/category/sector/content
-order, newest-first contents, callback timing, movement/attachment rules, script
-resource/include order, numeric C4ID order, save restore, authoritative landscape
-masks, scenario-init RNG, crew/find ties, and effect ordering.
-
-`cargo xtask parity record|verify` reports Rust expected/C++ actual and stops at
-the first mismatch. Xtasks skip joins; see xtask help for diagnostics.
+Keep fixed-point state separate from integer projections except at C++ sync
+points. Preserve shared LCG state/count, reverse execution, IDs and all
+definition/category/sector/content/C4ID ordering, newest-first contents,
+callback/effect timing, movement/attachment rules, script include order, save
+state, authoritative landscape masks, scenario-init RNG, and crew/find ties.
