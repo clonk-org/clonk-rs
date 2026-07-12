@@ -299,6 +299,89 @@ fn object_menu_identification(engine: &Engine, owner: i32) -> Option<lc_script::
 }
 
 #[test]
+fn tutorial09_real_ocean_consumes_and_restores_extended_breath() -> Result<(), Box<dyn Error>> {
+    let (mut engine, owner) = load_tutorial09();
+    let clonk = engine
+        .crew_cursor(owner)
+        .expect("Tutorial09 joins one selected CLNK");
+    let mut player = VirtualPlayer::new(&mut engine, owner);
+
+    // Tutorial09/Script.c:25-26 gives the real crew AquaClonk-class Swim and
+    // Breath physicals. On breathable Tick5, C++ fills C4Object::Breath to the
+    // newly installed maximum in one gulp (src/C4Object.cpp:880-919).
+    player.wait_until(
+        "Tutorial09 fills the Clonk's extended breath capacity",
+        10,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.breath == 250_000)
+        },
+    )?;
+    let full_energy = player
+        .engine()
+        .object_snapshot(clonk)
+        .expect("Tutorial09 Clonk exists")
+        .energy;
+
+    player.hold_until(
+        COM_LEFT,
+        "the Clonk enters Tutorial09's real western ocean",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Swim")
+        },
+    )?;
+    player.press(COM_DOWN)?;
+    player.wait_until(
+        "the submerged Clonk consumes one breath interval",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.breath < 250_000)
+        },
+    )?;
+    player.release(COM_DOWN)?;
+
+    let submerged = player
+        .engine()
+        .object_snapshot(clonk)
+        .expect("submerged Tutorial09 Clonk survives");
+    assert_eq!(
+        submerged.breath, 248_000,
+        "C++ consumes 2*C4MaxPhysical/100 on the first submerged Tick5 (C4Object.cpp:901-910)"
+    );
+    assert_eq!(
+        submerged.energy, full_energy,
+        "C++ consumes breath before asphyxiation can damage energy (C4Object.cpp:903-906)"
+    );
+
+    player.hold_until(
+        COM_UP,
+        "the Clonk surfaces and takes a full breath",
+        120,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.breath == 250_000)
+        },
+    )?;
+    assert_eq!(
+        player
+            .engine()
+            .object_snapshot(clonk)
+            .expect("resurfaced Tutorial09 Clonk survives")
+            .energy,
+        full_energy
+    );
+
+    Ok(())
+}
+
+#[test]
 fn tutorial09_virtual_player_completes_the_real_tutorial_route() -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (mut engine, owner) = load_tutorial09();
