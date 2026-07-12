@@ -39,6 +39,8 @@
 
 #include "oracle_fixed.h" // generated from src/Fixed.h by gen_golden.sh
 #include <C4Random.h>     // real engine header (no DEBUGREC)
+#include <C4Constants.h>  // OCF_Alive / CNAT_Bottom
+#include <C4Math.h>       // production Abs helper used by ShakeObjects
 #include <C4ActionCallbacks.h> // real production SetAction callback sequence
 #include <C4ActionDirection.h> // real production ExecAction/SetDir decisions
 #include <C4LandscapePath.h> // real production coarse-path traversal
@@ -60,6 +62,159 @@ int Rnd3()
 {
     FRndPtr3++; if (FRndPtr3 == FRndRes) FRndPtr3 = 0;
     return FRndBuf3[FRndPtr3];
+}
+
+// --- ShakeObjects + raw Fling: exact production bodies ----------------------
+// gen_golden.sh extracts the two method bodies unchanged from src/. Only the
+// minimal fields those methods touch are modeled here. Tumble/Jump return false
+// so both C++ and Rust exercise C4Object::Fling's raw-velocity fallback.
+inline constexpr int32_t C4D_Living_Oracle = 1 << 3;
+inline constexpr int32_t C4D_Object_Oracle = 1 << 4;
+inline constexpr int32_t MNone_Oracle = -1;
+int32_t MVehic = 1;
+
+inline bool MatVehicle(int32_t material) { return material == MVehic; }
+
+struct C4Object;
+
+struct C4ObjectLink
+{
+    C4Object *Obj{};
+    C4ObjectLink *Next{};
+};
+
+struct C4ObjectListOracle
+{
+    C4ObjectLink *First{};
+};
+
+struct C4Object
+{
+    struct ActionState
+    {
+        uint8_t t_attach{};
+    } Action;
+    struct ShapeState
+    {
+        int32_t AttachMat{MNone_Oracle};
+    } Shape;
+
+    int32_t Status{};
+    C4Object *Contained{};
+    int32_t Category{};
+    int32_t x{};
+    int32_t y{};
+    uint32_t OCF{};
+    int32_t Controller{-1};
+    int32_t LastEnergyLossCausePlayer{-1};
+    C4Fixed xdir{Fix0};
+    C4Fixed ydir{Fix0};
+    int32_t Mobile{};
+
+    void UpdatLastEnergyLossCause(int32_t cause)
+    {
+        if (cause != Controller || LastEnergyLossCausePlayer < 0)
+            LastEnergyLossCausePlayer = cause;
+    }
+
+    void Fling(C4Fixed txdir, C4Fixed tydir, bool addSpeed, int32_t causedBy);
+};
+
+inline bool ObjectActionTumble(C4Object *, int32_t, C4Fixed, C4Fixed) { return false; }
+inline bool ObjectActionJump(C4Object *, C4Fixed, C4Fixed, bool) { return false; }
+
+struct C4Game
+{
+    C4ObjectListOracle Objects;
+    void ShakeObjects(int32_t tx, int32_t ty, int32_t range, int32_t causedBy);
+};
+
+// Exact source text generated from src/C4Game.cpp and src/C4Object.cpp.
+#define C4D_Living C4D_Living_Oracle
+#include "shake_objects.inc"
+#include "object_fling.inc"
+#undef C4D_Living
+
+static void printShakeObjectsCase()
+{
+    struct Row
+    {
+        const char *Name;
+        int32_t Status;
+        bool Contained;
+        int32_t Category;
+        int32_t X;
+        int32_t Y;
+        uint8_t Attach;
+        int32_t AttachMat;
+        uint32_t Ocf;
+    };
+    const Row rows[] = {
+        {"deleted", 0, false, C4D_Living_Oracle | C4D_Object_Oracle, 10, 10, CNAT_Bottom, 0, 0},
+        {"boundary_unattached", 1, false, C4D_Living_Oracle | C4D_Object_Oracle, -10, 30, 0, 0, 0},
+        {"contained", 1, true, C4D_Living_Oracle | C4D_Object_Oracle, 10, 10, CNAT_Bottom, 0, 0},
+        {"vehicle", 1, false, C4D_Living_Oracle | C4D_Object_Oracle, 10, 10, CNAT_Bottom, 1, 0},
+        {"caller", 1, false, C4D_Object_Oracle, 10, 10, CNAT_Bottom, 0, 0},
+        {"inactive_attached", 2, false, C4D_Living_Oracle | C4D_Object_Oracle, 10, 10, CNAT_Bottom, 0, 0},
+        {"out_of_range", 1, false, C4D_Living_Oracle | C4D_Object_Oracle, 31, 10, CNAT_Bottom, 0, 0},
+        {"attached_gate_rejected", 1, false, C4D_Living_Oracle | C4D_Object_Oracle, 10, 10, CNAT_Bottom, 0, 0},
+        {"attached_mnone", 1, false, C4D_Living_Oracle | C4D_Object_Oracle, 10, 10, CNAT_Bottom, MNone_Oracle, 0},
+    };
+    constexpr std::size_t rowCount = sizeof(rows) / sizeof(rows[0]);
+    C4Object objects[rowCount]{};
+    C4ObjectLink links[rowCount]{};
+    for (std::size_t i = 0; i < rowCount; ++i)
+    {
+        objects[i].Status = rows[i].Status;
+        objects[i].Category = rows[i].Category;
+        objects[i].x = rows[i].X;
+        objects[i].y = rows[i].Y;
+        objects[i].Action.t_attach = rows[i].Attach;
+        objects[i].Shape.AttachMat = rows[i].AttachMat;
+        objects[i].OCF = rows[i].Ocf;
+        objects[i].Controller = -1;
+        objects[i].xdir.val = 1000 + static_cast<int32_t>(i);
+        objects[i].ydir.val = -(2000 + static_cast<int32_t>(i));
+    }
+    objects[2].Contained = &objects[4];
+
+    C4Game game;
+    C4ObjectLink *tail = nullptr;
+    for (std::size_t i = 0; i < rowCount; ++i)
+    {
+        // C4GameObjects::Add places C4OS_INACTIVE objects solely in
+        // InactiveObjects, outside the Game.Objects list ShakeObjects walks.
+        if (objects[i].Status == 2) continue;
+        links[i].Obj = &objects[i];
+        if (tail) tail->Next = &links[i]; else game.Objects.First = &links[i];
+        tail = &links[i];
+    }
+    FixedRandom(2);
+    Randomize3();
+    const int32_t countBefore = RandomCount;
+    const uint32_t holdBefore = RandomHold;
+    const int32_t rnd3Before = FRndPtr3;
+    game.ShakeObjects(10, 10, 20, 7);
+
+    printf("\"shake_objects\":{\"seed\":2,\"x\":10,\"y\":10,\"range\":20,"
+           "\"caused_by\":7,\"rng_before\":{\"count\":%d,\"hold\":%u,\"rnd3_ptr\":%d},"
+           "\"rng_after\":{\"count\":%d,\"hold\":%u,\"rnd3_ptr\":%d},\"objects\":[",
+           countBefore, holdBefore, rnd3Before, RandomCount, RandomHold, FRndPtr3);
+    for (std::size_t i = 0; i < rowCount; ++i)
+    {
+        if (i) printf(",");
+        printf("{\"name\":\"%s\",\"status\":%d,\"contained\":%d,\"category\":%d,"
+               "\"x\":%d,\"y\":%d,\"t_attach_before\":%u,\"attach_mat\":%d,\"ocf\":%u,"
+               "\"xdir_before\":%d,\"ydir_before\":%d,\"xdir_after\":%d,\"ydir_after\":%d,"
+               "\"t_attach_after\":%u,\"mobile_after\":%d,\"controller_after\":%d}",
+               rows[i].Name, rows[i].Status, rows[i].Contained ? 1 : 0, rows[i].Category,
+               rows[i].X, rows[i].Y, static_cast<unsigned int>(rows[i].Attach), rows[i].AttachMat,
+               rows[i].Ocf, 1000 + static_cast<int32_t>(i), -(2000 + static_cast<int32_t>(i)),
+               objects[i].xdir.val, objects[i].ydir.val,
+               static_cast<unsigned int>(objects[i].Action.t_attach), objects[i].Mobile,
+               objects[i].Controller);
+    }
+    printf("]}");
 }
 
 // --- tiny JSON helpers (avoid a JSON dependency in the oracle) ---------------
@@ -840,7 +995,12 @@ int main()
     printSolidMaskGraphicsCases();
     printf(",\n");
 
-    // 16. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 16. Exact production ShakeObjects master-order/RNG gate sequence and
+    //     C4Object::Fling raw fallback.
+    printShakeObjectsCase();
+    printf(",\n");
+
+    // 17. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");

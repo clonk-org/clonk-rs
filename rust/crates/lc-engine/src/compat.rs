@@ -4318,6 +4318,21 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         };
         object.pending_update.change_def = Some(new_id);
+        // ChangeDef resets and then forcibly leaves the object in ActIdle
+        // before swapping definitions (C4Object.cpp:1214-1215). A later
+        // SetAction in the same script call may overwrite this with an action
+        // from the new definition.
+        let action = object
+            .pending_update
+            .action
+            .get_or_insert_with(ActionUpdate::default);
+        action.set_name("Idle".to_string());
+        action.set_force(true);
+        action.callbacks_dispatched = true;
+        object.reset_action_ticks();
+        object.set_action_phase(0);
+        object.reset_action_data();
+        object.update_effective_action("Idle");
         // A preceding SetObjectBlitMode already staged a write, so update that
         // write to the new default. A pure ChangeDef needs no separate write:
         // the engine's definition swap applies the default atomically.
@@ -6880,6 +6895,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("BlastFree", blast_free);
     script.register_host_function("BlastObject", blast_object);
     script.register_host_function("ShakeFree", shake_free);
+    script.register_host_function("ShakeObjects", shake_objects);
     script.register_host_function("SetSkyParallax", set_sky_parallax);
     script.register_host_function("SetSkyAdjust", set_sky_adjust);
     script.register_host_function("GetSkyAdjust", get_sky_adjust);
@@ -7111,6 +7127,19 @@ fn draw_context_random(range: i32) -> Result<i32, RuntimeError> {
             .clone();
         let mut rng = context.rng.borrow_mut();
         Ok(rng.random(range))
+    })
+}
+
+/// One `Rnd3()` ring read through the active synced random context.
+fn draw_context_rnd3() -> Result<i32, RuntimeError> {
+    RANDOM_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("random context unavailable"))?
+            .clone();
+        let value = context.rng.borrow_mut().rnd3();
+        Ok(value)
     })
 }
 
@@ -14928,69 +14957,31 @@ fn fling(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = target else {
         return Ok(Value::Bool(false));
     };
-    let active = HOST_CONTEXT.with(|cell| {
+    let caused_by = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+            .and_then(|context| context.object_context())
+            .map(ObjectScopeContext::controller)
+            .unwrap_or(OWNER_NONE)
     });
-    {
-        if Some(target) != active {
-            let mut forwarded = vec![
-                Value::Nil,
-                Value::Int(xdir),
-                Value::Int(ydir),
-                Value::Int(prec),
-                Value::Bool(add_speed),
-            ];
-            forwarded[0] = Value::Int(0);
-            return match call_world_object_function(target, "Fling", &forwarded) {
-                Some(result) => result,
-                None => Ok(Value::Bool(false)),
-            };
-        }
-    }
+    native_fling(
+        target,
+        FixedVec2::new(itofix_prec(xdir, prec), itofix_prec(ydir, prec)),
+        add_speed,
+        caused_by,
+    )?;
     HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
-        let Some(object) = context.object_context_mut() else {
-            return Ok(Value::Bool(false));
-        };
-        let mut txdir = itofix_prec(xdir, prec);
-        let mut tydir = itofix_prec(ydir, prec);
-        if add_speed {
-            let velocity = object.fixed_velocity();
-            txdir += velocity.x / 2;
-            tydir += velocity.y / 2;
+        if let Some(object) = cell
+            .borrow_mut()
+            .as_mut()
+            .and_then(|context| context.object_scope_mut(target))
+        {
+            // FnFling clears the WHOLE t_attach value after C4Object::Fling
+            // (C4Script.cpp:353-355), unlike ShakeObjects' direct call.
+            object.set_t_attach(0);
         }
-        let tumble = object.action_library.contains("Tumble");
-        let jump = object.action_library.contains("Jump");
-        if tumble {
-            object.pending_update.direction = Some(if txdir < C4Fixed::ZERO {
-                Direction::Left
-            } else {
-                Direction::Right
-            });
-            object.pending_update.action = Some(
-                ActionUpdate::default()
-                    .with_name("Tumble")
-                    .with_phase(0)
-                    .with_ticks(0)
-                    .with_force(true),
-            );
-        } else if jump {
-            object.pending_update.action = Some(
-                ActionUpdate::default()
-                    .with_name("Jump")
-                    .with_phase(0)
-                    .with_ticks(0)
-                    .with_force(true),
-            );
-        }
-        object.set_fixed_velocity(FixedVec2 { x: txdir, y: tydir });
-        Ok(Value::Bool(true))
-    })
+    });
+    Ok(Value::Bool(true))
 }
 
 /// FnJump (C4Script.cpp:358-363): ObjectComJump — routed as a
@@ -15775,6 +15766,365 @@ fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
         });
         Ok(Value::Bool(true))
     })
+}
+
+/// Native `C4Object::SetActionByName` staging for engine helpers such as
+/// `C4Object::Fling`. This deliberately bypasses script-level function
+/// resolution: C++ calls the object method directly.
+fn native_set_action_by_name(target: ObjectId, name: &str) -> Result<bool, RuntimeError> {
+    let callbacks = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("native action requires an active engine context"))?;
+        if !context.ensure_object_scope(target) {
+            return Ok(None);
+        }
+        let incomplete_activity = context
+            .object_scope(target)
+            .and_then(|object| {
+                object
+                    .pending_update
+                    .change_def
+                    .as_deref()
+                    .or(object.definition_id.as_deref())
+            })
+            .and_then(|definition| context.world.definition_metadata(definition))
+            .is_some_and(|metadata| metadata.fire.incomplete_activity);
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(None);
+        };
+        if !object.action_library.contains(name) {
+            return Ok(None);
+        }
+        let current = object.effective_action_name().to_string();
+        let previous_phase = object.action_phase();
+        let definition = object.definition_id.clone();
+        if object.effective_blocks_other_actions() && current != name {
+            return Ok(None);
+        }
+        // C4Object::SetAction accepts the requested ActMap entry but coerces
+        // the resulting action to ActIdle for incomplete objects whose
+        // definition does not allow incomplete activity (:4127-4130).
+        let actual_name = if object.construction() < FULL_CON && !incomplete_activity {
+            "Idle"
+        } else {
+            name
+        };
+
+        let changed = current != actual_name;
+        let update = object
+            .pending_update
+            .action
+            .get_or_insert_with(ActionUpdate::default);
+        update.set_name(actual_name.to_string());
+        update.set_force(false);
+        update.callbacks_dispatched = true;
+        if changed {
+            object.reset_action_ticks();
+        }
+        object.set_action_phase(0);
+        if object.update_effective_action(actual_name) {
+            object.reset_action_data();
+        }
+        object.current_fixed_position =
+            FixedVec2::from_ints(object.current_position.x, object.current_position.y);
+
+        Ok(Some((
+            object
+                .action_library
+                .start_call_for_action(actual_name)
+                .map(str::to_string),
+            object
+                .action_library
+                .abort_call_for_action(&current)
+                .map(str::to_string),
+            previous_phase,
+            definition,
+        )))
+    })?;
+    let Some((start_call, abort_call, previous_phase, definition)) = callbacks else {
+        return Ok(false);
+    };
+    if let Some(callback) = start_call {
+        if let Some(Err(error)) = call_world_object_own_function(target, &callback, &[]) {
+            tracing::warn!(
+                %error,
+                callback,
+                "native SetAction callback error; continuing like the C++ fail-safe exec"
+            );
+        }
+    }
+    let callbacks_continue = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(target))
+            .is_some_and(|object| {
+                !object.destroy
+                    && object.status != ObjectStatus::Deleted
+                    && object
+                        .pending_update
+                        .change_def
+                        .as_deref()
+                        .or(object.definition_id.as_deref())
+                        == definition.as_deref()
+            })
+    });
+    if callbacks_continue {
+        if let Some(callback) = abort_call {
+            if let Some(Err(error)) =
+                call_world_object_own_function(target, &callback, &[Value::Int(previous_phase)])
+            {
+                tracing::warn!(
+                    %error,
+                    callback,
+                    "native SetAction callback error; continuing like the C++ fail-safe exec"
+                );
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Target-aware `C4Object::SetDir` used by native action helpers.
+fn native_set_dir(target: ObjectId, direction: Direction) -> Result<(), RuntimeError> {
+    let turn_action = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetDir requires an active engine context"))?;
+        if !context.ensure_object_scope(target) {
+            return Ok(None);
+        }
+        let Some(object) = context.object_scope(target) else {
+            return Ok(None);
+        };
+        let action = object.effective_action_name();
+        let directions = object.action_library.directions_for(action);
+        let raw_direction = direction.to_script_value();
+        if object.action_library.is_idle_action(action)
+            || raw_direction < 0
+            || raw_direction >= directions as i32
+        {
+            return Ok(None);
+        }
+        Ok(Some(
+            (object.direction() != direction)
+                .then(|| {
+                    object
+                        .action_library
+                        .turn_action_for(action)
+                        .map(str::to_string)
+                })
+                .flatten(),
+        ))
+    })?;
+    let Some(turn_action) = turn_action else {
+        return Ok(());
+    };
+    if let Some(turn_action) = turn_action {
+        let _ = native_set_action_by_name(target, &turn_action)?;
+    }
+    HOST_CONTEXT.with(|cell| {
+        if let Some(object) = cell
+            .borrow_mut()
+            .as_mut()
+            .and_then(|context| context.object_scope_mut(target))
+        {
+            object.set_direction(direction);
+        }
+    });
+    Ok(())
+}
+
+/// `C4Object::Fling(..., false, caused_by)` as used by ShakeObjects.
+fn native_fling(
+    target: ObjectId,
+    mut velocity: FixedVec2,
+    add_speed: bool,
+    caused_by: i32,
+) -> Result<(), RuntimeError> {
+    let available = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("Fling requires an active engine context"))?;
+        let Some(snapshot) = context.get_world_object(target) else {
+            return Ok(false);
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(false);
+        }
+        let staged_ocf = context
+            .object_scope(target)
+            .map(|object| object.staged_ocf(snapshot.ocf()))
+            .unwrap_or_else(|| snapshot.ocf());
+        if staged_ocf & ocf::ALIVE != 0 {
+            stage_energy_loss_cause(context, target, -1, crate::C4FX_CALL_ENG_SCRIPT, caused_by);
+        } else if context
+            .object_scope(target)
+            .and_then(ObjectScopeContext::container)
+            .is_none()
+        {
+            if let Some(object) = context.object_scope_mut(target) {
+                object.set_controller(caused_by);
+            }
+        }
+        if add_speed {
+            if let Some(object) = context.object_scope(target) {
+                let current = object.fixed_velocity();
+                velocity.x += current.x / 2;
+                velocity.y += current.y / 2;
+            }
+        }
+        Ok(true)
+    })?;
+    if !available {
+        return Ok(());
+    }
+
+    if native_set_action_by_name(target, "Tumble")? {
+        native_set_dir(
+            target,
+            if velocity.x < C4Fixed::ZERO {
+                Direction::Right
+            } else {
+                Direction::Left
+            },
+        )?;
+        HOST_CONTEXT.with(|cell| {
+            if let Some(object) = cell
+                .borrow_mut()
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(target))
+            {
+                // ObjectActionTumble assigns xdir/ydir directly and therefore
+                // preserves C4Object::Mobile. Counteract ObjectDelta's generic
+                // script-velocity mobilization with the live post-callback value.
+                let mobile = object.mobile();
+                object.set_fixed_velocity(velocity);
+                object.set_mobile(mobile);
+            }
+        });
+        return Ok(());
+    }
+
+    let jump_handled = match call_world_object_own_function(
+        target,
+        "OnActionJump",
+        &[
+            Value::Int(fixtoi_prec(velocity.x, 100)),
+            Value::Int(fixtoi_prec(velocity.y, 100)),
+            Value::Bool(false),
+        ],
+    ) {
+        Some(Ok(value)) => value.as_bool(),
+        Some(Err(error)) => {
+            tracing::warn!(
+                %error,
+                "OnActionJump error; continuing like the C++ fail-safe exec"
+            );
+            false
+        }
+        None => false,
+    };
+    if jump_handled {
+        return Ok(());
+    }
+
+    let _ = native_set_action_by_name(target, "Jump")?;
+    HOST_CONTEXT.with(|cell| {
+        if let Some(object) = cell
+            .borrow_mut()
+            .as_mut()
+            .and_then(|context| context.object_scope_mut(target))
+        {
+            object.set_fixed_velocity(velocity);
+            object.set_mobile(true);
+            object.set_t_attach(object.t_attach() & !CNAT_BOTTOM);
+        }
+    });
+    Ok(())
+}
+
+/// FnShakeObjects -> C4Game::ShakeObjects (C4Script.cpp:3104-3106;
+/// C4Game.cpp:1300-1314). Selection and random draws follow master-list
+/// order; Random(3) precedes both attachment gates, while Rnd3 is consumed
+/// only for objects that are actually flung.
+fn shake_objects(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "ShakeObjects expects exactly 3 arguments: x, y, radius",
+        ));
+    }
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "ShakeObjects", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ShakeObjects", "y")?;
+    let radius = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "ShakeObjects", "radius")?;
+    let (ids, caused_by) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("ShakeObjects requires an active engine context"))?;
+        Ok::<_, RuntimeError>((
+            context.master_object_ids(),
+            context
+                .object_context()
+                .map(ObjectScopeContext::controller)
+                .unwrap_or(OWNER_NONE),
+        ))
+    })?;
+
+    for id in ids {
+        let candidate = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            let object = context.get_world_object(id)?;
+            let category = context
+                .object_scope(id)
+                .map(ObjectScopeContext::category)
+                .unwrap_or_else(|| object.category());
+            Some((object, category))
+        });
+        let Some((candidate, category)) = candidate else {
+            continue;
+        };
+        let position = candidate.position();
+        // C4OS_INACTIVE objects live in InactiveObjects rather than the
+        // Game.Objects list traversed by C4Game::ShakeObjects
+        // (C4GameObjects.cpp:54-67).
+        let inside = candidate.status() == ObjectStatus::Normal
+            && candidate.container().is_none()
+            && category & crate::CATEGORY_LIVING != 0
+            && (i64::from(y) - i64::from(position.y)).abs() <= i64::from(radius)
+            && (i64::from(x) - i64::from(position.x)).abs() <= i64::from(radius);
+        if !inside || draw_context_random(3)? != 0 {
+            continue;
+        }
+        let attached_to_world = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            let t_attach = context
+                .object_scope(id)
+                .map(ObjectScopeContext::t_attach)
+                .or_else(|| candidate.full_state().map(|state| state.t_attach))?;
+            Some(
+                t_attach != 0
+                    && candidate
+                        .full_state()
+                        .is_some_and(|state| !state.shape_attach.mat_vehicle),
+            )
+        });
+        if attached_to_world != Some(true) {
+            continue;
+        }
+        native_fling(
+            id,
+            FixedVec2::new(itofix(draw_context_rnd3()?), C4Fixed::ZERO),
+            false,
+            caused_by,
+        )?;
+    }
+    Ok(Value::Nil)
 }
 
 /// FnSetGamma (C4Script.cpp:5004-5008) -> C4GraphicsSystem::SetGamma
@@ -18532,6 +18882,10 @@ fn set_velocity_component(
             component,
             itofix_prec(value, normalise_precision(precision)),
         );
+        // FnSetXDir/FnSetYDir assign Mobile=1 synchronously after the dir
+        // write (C4Script.cpp:697-732). Stage it here so later native
+        // Tumble preserves the live value and call order remains observable.
+        object.set_mobile(true);
         Ok(Value::Bool(true))
     })
 }
@@ -18685,6 +19039,9 @@ fn set_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         }
 
         object.set_rotation_velocity(itofix_prec(value, normalise_precision(precision)));
+        // FnSetRDir sets Mobile=1 just like the linear dir setters
+        // (C4Script.cpp:704-715).
+        object.set_mobile(true);
         Ok(Value::Bool(true))
     })
 }
@@ -24864,6 +25221,7 @@ impl EffectHostContext {
                 // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358).
                 scope.cached_ocf = Some(ocf);
                 scope.walk_rotation = walk_rotation;
+                scope.current_t_attach = walk_rotation.t_attach;
                 scope.current_magic_energy = magic_energy;
                 scope.current_need_energy = need_energy;
                 scope.current_selected = world
@@ -24886,6 +25244,11 @@ impl EffectHostContext {
                 scope
                     .live_commands
                     .restore_from_snapshot(&world_object.command_stack);
+                if let Some(state) = world_object.full_state() {
+                    scope.current_mobile = state.mobile;
+                    scope.current_t_attach = state.t_attach;
+                    scope.walk_rotation.t_attach = state.t_attach;
+                }
             }
         }
         let global = Some(EffectScopeContext::new(global_effects));
@@ -25605,6 +25968,9 @@ impl EffectHostContext {
         );
         scope.current_fixed_position = object.fixed_position;
         scope.current_fixed_velocity = object.fixed_velocity;
+        scope.current_mobile = state.mobile;
+        scope.current_t_attach = state.t_attach;
+        scope.walk_rotation.t_attach = state.t_attach;
         scope.definition_id = Some(object.definition_id().to_string());
         scope
             .live_commands
@@ -26329,6 +26695,10 @@ struct ObjectScopeContext {
     current_damage: i32,
     current_construction: i32,
     current_alive: bool,
+    /// C4Object::Mobile, including explicit native helper overrides.
+    current_mobile: bool,
+    /// This frame's live C4Action::t_attach bitset.
+    current_t_attach: u32,
     current_in_liquid: bool,
     current_own_mass: i32,
     current_owner: i32,
@@ -26436,6 +26806,8 @@ impl ObjectScopeContext {
             current_damage: clamped_damage,
             current_construction: clamped_construction,
             current_alive: alive,
+            current_mobile: false,
+            current_t_attach: 0,
             current_in_liquid: in_liquid,
             current_own_mass: own_mass,
             current_owner: owner,
@@ -26717,6 +27089,27 @@ impl ObjectScopeContext {
         self.pending_update.alive.unwrap_or(self.current_alive)
     }
 
+    fn mobile(&self) -> bool {
+        self.pending_update.mobile.unwrap_or(self.current_mobile)
+    }
+
+    fn set_mobile(&mut self, mobile: bool) {
+        self.current_mobile = mobile;
+        self.pending_update.mobile = Some(mobile);
+    }
+
+    fn t_attach(&self) -> u32 {
+        self.pending_update
+            .t_attach
+            .unwrap_or(self.current_t_attach)
+    }
+
+    fn set_t_attach(&mut self, t_attach: u32) {
+        self.current_t_attach = t_attach;
+        self.walk_rotation.t_attach = t_attach;
+        self.pending_update.t_attach = Some(t_attach);
+    }
+
     /// The cached InLiquid flag (scripts cannot set it; only
     /// FnSetPosition re-derives it, C4Script.cpp:475).
     fn in_liquid(&self) -> bool {
@@ -26875,7 +27268,7 @@ impl ObjectScopeContext {
         // FnGetOCF returns pObj->OCF verbatim (C4Script.cpp:1354-1358):
         // the engine seeds the cached mask at call entry. Bare fixture
         // scopes without a seed keep the preview-grade recompute.
-        self.cached_ocf.unwrap_or_else(|| {
+        let mut mask = self.cached_ocf.unwrap_or_else(|| {
             let alive = self.alive();
             let status = self.status();
             let is_contained = self.container().is_some();
@@ -26888,7 +27281,17 @@ impl ObjectScopeContext {
                 self.construction(),
                 self.current_category,
             )
-        })
+        });
+        // SetAction calls SetOCF before Start/Abort callbacks
+        // (C4Object.cpp:4165-4169). A disabled action immediately removes
+        // the two action-gated bits from same-call GetOCF/world reads.
+        if self
+            .action_library
+            .disables_object(self.effective_action_name())
+        {
+            mask &= !(ocf::COLLECTION | ocf::FIGHT_READY);
+        }
+        mask
     }
 
     /// The OCF mask mid-call world reads see: `base` (the snapshot mask)
@@ -26931,6 +27334,12 @@ impl ObjectScopeContext {
             if self.crew_member && alive {
                 mask |= ocf::CREW_MEMBER;
             }
+        }
+        if self
+            .action_library
+            .disables_object(self.effective_action_name())
+        {
+            mask &= !(ocf::COLLECTION | ocf::FIGHT_READY);
         }
         mask
     }
@@ -27246,6 +27655,11 @@ impl ObjectScopeContext {
     fn set_fixed_velocity(&mut self, velocity: FixedVec2) {
         self.current_fixed_velocity = velocity;
         self.pending_update.fixed_velocity = Some(velocity);
+        // A later whole-vector native write supersedes component setters
+        // staged earlier in the same script call. Component writes after
+        // this remain separate and win during ObjectDelta application.
+        self.pending_update.fixed_velocity_x = None;
+        self.pending_update.fixed_velocity_y = None;
         // Keep the whole-pixel mirror consistent (fixtoi of the fixed value).
         self.pending_update.velocity = Some(Vector2::new(velocity.int_x(), velocity.int_y()));
     }
@@ -27777,6 +28191,7 @@ mod tests {
         "SetXDir",
         "SetYDir",
         "ShakeFree",
+        "ShakeObjects",
         "ShiftContents",
         "ShowInfo",
         "SimFlight",

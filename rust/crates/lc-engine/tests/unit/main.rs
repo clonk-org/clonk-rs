@@ -20015,6 +20015,874 @@ protected func Activity() { return(Fling(GetActionTarget(), 1, -3)); }
     }
 
     #[test]
+    fn shake_objects_flings_attached_living_object_with_cpp_rng_order() {
+        // FnShakeObjects forwards the caller controller, then C4Game walks
+        // master order, draws Random(3), draws Rnd3 only for an attached
+        // non-MVehic living object, and calls Fling(Rnd3, 0, false, cause)
+        // (C4Script.cpp:3104-3106; C4Game.cpp:1300-1314).
+        let mut caller = Definition::from_script(
+            "QUAK",
+            "Quake",
+            "#strict\npublic func Shake() { ShakeObjects(10, 10, 20); }\n",
+        )
+        .expect("caller script compiles");
+        caller.set_category(CATEGORY_OBJECT);
+
+        let mut target =
+            Definition::from_script("CLNK", "Clonk", "#strict\n").expect("target script compiles");
+        target.set_category(CATEGORY_LIVING | CATEGORY_OBJECT);
+        target.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(2);
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        engine
+            .register_definition(target)
+            .expect("target registers");
+        let caller_id = engine
+            .spawn_object(
+                SpawnConfig::new("QUAK")
+                    .with_position(Vector2::new(10, 10))
+                    .with_owner(7),
+            )
+            .expect("caller spawns");
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_position(Vector2::new(12, 10))
+                    .with_action(ActionState::new("Walk"))
+                    .with_category(CATEGORY_LIVING | CATEGORY_OBJECT)
+                    .with_alive(true),
+            )
+            .expect("target spawns");
+        let target_idx = engine.find_object_index(target_id).expect("target exists");
+        let initial_attach = CNAT_BOTTOM | CNAT_LEFT | CNAT_TOP;
+        engine.objects[target_idx].state.mobile = false;
+        engine.objects[target_idx].state.t_attach = initial_attach;
+        engine.objects[target_idx].frame_t_attach = initial_attach;
+        engine.objects[target_idx].state.shape_attach = ShapeAttachRecord {
+            mat_valid: true,
+            mat_vehicle: false,
+            x: 12,
+            y: 11,
+            vtx: 0,
+        };
+
+        let mut expected_rng = engine.rng.clone();
+        assert_eq!(expected_rng.random(3), 0, "fixture passes the shake gate");
+        let expected_xdir = expected_rng.rnd3();
+        let caller_idx = engine.find_object_index(caller_id).expect("caller exists");
+        engine
+            .call_object_function(caller_idx, "Shake", Vec::new())
+            .expect("ShakeObjects executes");
+
+        let target_idx = engine.find_object_index(target_id).expect("target remains");
+        assert_eq!(engine.objects[target_idx].state.action.name, "Tumble");
+        assert_eq!(
+            engine.objects[target_idx].fixed_velocity,
+            FixedVec2::new(itofix(expected_xdir), C4Fixed::ZERO)
+        );
+        assert_eq!(
+            engine.objects[target_idx].state.direction,
+            if expected_xdir < 0 {
+                Direction::Right
+            } else {
+                Direction::Left
+            },
+            "C4Object::Fling passes the raw `(txdir < 0)` bool to SetDir"
+        );
+        assert!(
+            !engine.objects[target_idx].state.mobile,
+            "ObjectActionTumble does not change C4Object::Mobile"
+        );
+        assert_eq!(
+            engine.objects[target_idx].state.t_attach, initial_attach,
+            "ShakeObjects calls C4Object::Fling directly, so Tumble preserves t_attach"
+        );
+        assert_eq!(
+            engine.objects[target_idx].frame_t_attach, initial_attach,
+            "the current-frame attachment latch is preserved too"
+        );
+        assert_eq!(engine.objects[target_idx].last_energy_loss_cause, 7);
+        assert_eq!(engine.rng, expected_rng);
+    }
+
+    #[test]
+    fn fling_foreign_target_bypasses_override_and_clears_all_attach_bits() {
+        // FnFling calls C4Object::Fling directly and only afterward clears
+        // the complete Action.t_attach mask (C4Script.cpp:347-356). A target
+        // definition's same-name script function must not intercept that
+        // native object-method call.
+        let mut caller = Definition::from_script(
+            "FLCL",
+            "Fling caller",
+            "#strict\npublic func Throw(pTarget) { return Fling(pTarget, -2, -3); }\n",
+        )
+        .expect("caller script compiles");
+        caller.set_category(CATEGORY_OBJECT);
+
+        let target_script = r#"#strict
+local override_hit;
+public func Fling(pObj, iX, iY, iPrec, fAddSpeed) {
+    override_hit = 1;
+    return 0;
+}
+"#;
+        let mut target = Definition::from_script("FLTG", "Fling target", target_script)
+            .expect("target script compiles");
+        target.set_category(CATEGORY_OBJECT);
+        target.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_directions(2),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_directions(2),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        engine
+            .register_definition(target)
+            .expect("target registers");
+        let caller_id = engine
+            .spawn_object(
+                SpawnConfig::new("FLCL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(4),
+            )
+            .expect("caller spawns");
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("FLTG")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("target spawns");
+        let target_idx = engine.find_object_index(target_id).expect("target exists");
+        let initial_attach = CNAT_LEFT | CNAT_TOP | CNAT_BOTTOM;
+        engine.objects[target_idx].state.mobile = false;
+        engine.objects[target_idx].state.t_attach = initial_attach;
+        engine.objects[target_idx].frame_t_attach = initial_attach;
+
+        let caller_idx = engine.find_object_index(caller_id).expect("caller exists");
+        let result = engine
+            .call_object_function(
+                caller_idx,
+                "Throw",
+                vec![compat::object_reference_value(target_id)],
+            )
+            .expect("native Fling executes");
+        assert_eq!(result, Value::Bool(true));
+
+        let target_idx = engine.find_object_index(target_id).expect("target remains");
+        let object = &engine.objects[target_idx];
+        assert_ne!(
+            object.state.local_vars.get("override_hit"),
+            Some(&Value::Int(1)),
+            "the target's script-level Fling override must not run"
+        );
+        assert_eq!(object.state.action.name, "Tumble");
+        assert_eq!(
+            object.fixed_velocity,
+            FixedVec2::new(itofix(-2), itofix(-3))
+        );
+        assert_eq!(object.state.direction, Direction::Right);
+        assert!(
+            !object.state.mobile,
+            "the native Tumble branch preserves Mobile"
+        );
+        assert_eq!(object.state.t_attach, 0, "FnFling clears every attach bit");
+        assert_eq!(
+            object.frame_t_attach, 0,
+            "FnFling also clears the current-frame latch"
+        );
+    }
+
+    #[test]
+    fn set_x_dir_and_tumble_fling_preserve_live_order_and_mobile() {
+        // FnSetXDir writes xdir and Mobile=1 synchronously; ObjectActionTumble
+        // then overwrites both velocity components but preserves Mobile
+        // (C4Script.cpp:697-705; C4ObjectCom.cpp:74-80). Reversing the calls
+        // leaves SetXDir's x component last while still keeping Mobile set.
+        let caller_script = r#"#strict
+public func SetThenFling(pTarget) {
+    SetXDir(50, pTarget);
+    return Fling(pTarget, -2, -3);
+}
+
+public func FlingThenSet(pTarget) {
+    Fling(pTarget, -2, -3);
+    return SetXDir(50, pTarget);
+}
+"#;
+        let mut caller = Definition::from_script("FLOR", "Fling order", caller_script)
+            .expect("caller script compiles");
+        caller.set_category(CATEGORY_OBJECT);
+
+        let mut target = Definition::from_script("FLOT", "Fling order target", "#strict\n")
+            .expect("target script compiles");
+        target.set_category(CATEGORY_OBJECT);
+        target.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_directions(2),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_directions(2),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        engine
+            .register_definition(target)
+            .expect("target registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("FLOR").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let set_then_fling = engine
+            .spawn_object(
+                SpawnConfig::new("FLOT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("set-then-fling target spawns");
+        let fling_then_set = engine
+            .spawn_object(
+                SpawnConfig::new("FLOT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("fling-then-set target spawns");
+        for id in [set_then_fling, fling_then_set] {
+            let index = engine.find_object_index(id).expect("target exists");
+            engine.objects[index].state.mobile = false;
+        }
+
+        let caller_idx = engine.find_object_index(caller_id).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_idx,
+                    "SetThenFling",
+                    vec![compat::object_reference_value(set_then_fling)],
+                )
+                .expect("SetXDir then Fling executes"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_idx,
+                    "FlingThenSet",
+                    vec![compat::object_reference_value(fling_then_set)],
+                )
+                .expect("Fling then SetXDir executes"),
+            Value::Bool(true)
+        );
+
+        let first = &engine.objects[engine
+            .find_object_index(set_then_fling)
+            .expect("first target remains")];
+        assert_eq!(first.state.action.name, "Tumble");
+        assert_eq!(
+            first.fixed_velocity,
+            FixedVec2::new(itofix(-2), itofix(-3)),
+            "the later Tumble velocity replaces the earlier SetXDir component"
+        );
+        assert!(
+            first.state.mobile,
+            "Tumble preserves the Mobile=1 written by SetXDir"
+        );
+
+        let second = &engine.objects[engine
+            .find_object_index(fling_then_set)
+            .expect("second target remains")];
+        assert_eq!(second.state.action.name, "Tumble");
+        assert_eq!(
+            second.fixed_velocity,
+            FixedVec2::new(itofix(5), itofix(-3)),
+            "the later SetXDir component replaces only Tumble's x velocity"
+        );
+        assert!(
+            second.state.mobile,
+            "SetXDir sets Mobile=1 after Tumble preserved the false entry value"
+        );
+    }
+
+    #[test]
+    fn fling_incomplete_target_coerces_tumble_to_idle_without_start_call() {
+        // C4Object::SetAction accepts the requested action but coerces it to
+        // ActIdle when Con<FullCon and Def->IncompleteActivity is false
+        // (C4Object.cpp:4127-4146). ObjectActionTumble therefore returns true
+        // and still assigns xdir/ydir, but no Tumble StartCall runs
+        // (C4ObjectCom.cpp:74-79; C4ActionCallbacks.h:29).
+        let mut caller = Definition::from_script(
+            "FIIC",
+            "Incomplete fling caller",
+            "#strict\npublic func Throw(pTarget) { return Fling(pTarget, 2, -3); }\n",
+        )
+        .expect("caller script compiles");
+        caller.set_category(CATEGORY_OBJECT);
+
+        let target_script = r#"#strict
+local tumble_started;
+protected func TumbleStart()
+{
+    tumble_started = 1;
+    return 1;
+}
+"#;
+        let mut target = Definition::from_script("FIIT", "Incomplete fling target", target_script)
+            .expect("target script compiles");
+        target.set_category(CATEGORY_OBJECT);
+        target.set_incomplete_activity(false);
+        target.set_c4_callback_convention(true);
+        target.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_start_call("TumbleStart")
+                        .with_directions(2),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(19);
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        engine
+            .register_definition(target)
+            .expect("target registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("FIIC").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("FIIT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_action(ActionState::new("Walk"))
+                    .with_construction(FULL_CON / 2)
+                    .with_loaded(true),
+            )
+            .expect("incomplete target loads");
+
+        let caller_idx = engine.find_object_index(caller_id).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_idx,
+                    "Throw",
+                    vec![compat::object_reference_value(target_id)],
+                )
+                .expect("native Fling executes"),
+            Value::Bool(true)
+        );
+
+        let target_idx = engine.find_object_index(target_id).expect("target remains");
+        let object = &engine.objects[target_idx];
+        assert_eq!(
+            object.state.action.name, "Idle",
+            "SetAction must coerce Tumble to ActIdle on an incomplete target"
+        );
+        assert_ne!(
+            object.state.local_vars.get("tumble_started"),
+            Some(&Value::Int(1)),
+            "the coerced idle action has no Tumble StartCall"
+        );
+        assert_eq!(
+            object.fixed_velocity,
+            FixedVec2::new(itofix(2), itofix(-3)),
+            "ObjectActionTumble still assigns velocity after SetAction returns true"
+        );
+    }
+
+    #[test]
+    fn fling_tumble_start_change_def_stops_old_abort_and_keeps_new_def_idle() {
+        // SetAction dispatches the new StartCall before the old AbortCall,
+        // then stops the sequence if StartCall changed Def
+        // (C4Object.cpp:4171-4198; C4ActionCallbacks.h:29-31). ChangeDef
+        // itself enforces ActIdle before installing the new definition
+        // (C4Object.cpp:1217-1225), so the outer Tumble request must not be
+        // replayed against the new definition during the Rust outcome fold.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            hooks.set_on_call(move |name, _args| {
+                if matches!(name, "TumbleStart" | "OldAbort") {
+                    calls.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+
+        let mut caller = Definition::from_script(
+            "FCDC",
+            "ChangeDef fling caller",
+            "#strict\npublic func Throw(pTarget) { return Fling(pTarget, -2, -3); }\n",
+        )
+        .expect("caller script compiles");
+        caller.set_category(CATEGORY_OBJECT);
+
+        let old_script = r#"#strict
+protected func TumbleStart()
+{
+    ChangeDef(FCDN);
+    return 1;
+}
+
+protected func OldAbort(int old_phase)
+{
+    return 1;
+}
+"#;
+        let mut old = Definition::from_script("FCDO", "Old fling definition", old_script)
+            .expect("old target script compiles");
+        old.set_category(CATEGORY_OBJECT);
+        old.set_c4_callback_convention(true);
+        old.set_debugger_hooks(hooks);
+        old.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_abort_call("OldAbort"),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_start_call("TumbleStart")
+                        .with_directions(2),
+                ),
+            ]),
+        );
+
+        let mut new = Definition::from_script("FCDN", "New fling definition", "#strict\n")
+            .expect("new target script compiles");
+        new.set_category(CATEGORY_OBJECT);
+        // Keep a Tumble entry on the new definition so an incorrectly
+        // replayed pending action is visible instead of reconciling away.
+        new.configure_actions(
+            None,
+            HashMap::from([(
+                "Tumble".to_string(),
+                ActionSpec::default()
+                    .with_procedure("FLIGHT")
+                    .with_directions(2),
+            )]),
+        );
+
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_definition(new)
+            .expect("new definition registers");
+        engine
+            .register_definition(old)
+            .expect("old definition registers");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("FCDC").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("FCDO")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_action(ActionState::new("Walk"))
+                    .with_loaded(true),
+            )
+            .expect("target loads");
+
+        let caller_idx = engine.find_object_index(caller_id).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_idx,
+                    "Throw",
+                    vec![compat::object_reference_value(target_id)],
+                )
+                .expect("native Fling executes"),
+            Value::Bool(true)
+        );
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["TumbleStart"],
+            "ChangeDef in StartCall must suppress the old action's AbortCall"
+        );
+        let target_idx = engine.find_object_index(target_id).expect("target remains");
+        let object = &engine.objects[target_idx];
+        assert_eq!(object.definition_id, "FCDN");
+        assert_eq!(
+            object.state.action.name, "Idle",
+            "ChangeDef's enforced ActIdle must win over the outer Tumble request"
+        );
+    }
+
+    #[test]
+    fn fling_disabled_tumble_refreshes_ocf_before_start_and_after_foreign_fold() {
+        // SetAction calls SetOCF after changing Action and before dispatching
+        // StartCall (C4Object.cpp:4142-4169). A Disabled action therefore
+        // clears OCF_FightReady and OCF_Collection before TumbleStart reads
+        // GetOCF (C4Object.cpp:593-610). The cached value must remain updated
+        // after the foreign-target outcome folds as well.
+        let mut caller = Definition::from_script(
+            "FOCC",
+            "OCF fling caller",
+            "#strict\npublic func Throw(pTarget) { return Fling(pTarget, 2, -3); }\n",
+        )
+        .expect("caller script compiles");
+        caller.set_category(CATEGORY_OBJECT);
+
+        let target_script = r#"#strict
+local ocf_seen_in_tumble_start;
+protected func TumbleStart()
+{
+    ocf_seen_in_tumble_start = GetOCF();
+    return 1;
+}
+"#;
+        let mut target = Definition::from_script("FOCT", "OCF fling target", target_script)
+            .expect("target script compiles");
+        target.set_category(CATEGORY_LIVING | CATEGORY_OBJECT);
+        target.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        target.set_c4_callback_convention(true);
+        target.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_start_call("TumbleStart")
+                        .with_disabled(true)
+                        .with_directions(2),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(29);
+        engine
+            .register_definition(target)
+            .expect("target registers");
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("FOCC").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("FOCT")
+                    .with_category(CATEGORY_LIVING | CATEGORY_OBJECT)
+                    .with_alive(true)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("target spawns");
+        let target_idx = engine.find_object_index(target_id).expect("target exists");
+        let gated_bits = ocf::FIGHT_READY | ocf::COLLECTION;
+        assert_eq!(
+            engine.objects[target_idx].state.ocf & gated_bits,
+            gated_bits,
+            "the enabled Walk action starts fight-ready and collectible"
+        );
+
+        let caller_idx = engine.find_object_index(caller_id).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_idx,
+                    "Throw",
+                    vec![compat::object_reference_value(target_id)],
+                )
+                .expect("native Fling executes"),
+            Value::Bool(true)
+        );
+
+        let target_idx = engine.find_object_index(target_id).expect("target remains");
+        let object = &engine.objects[target_idx];
+        let seen = object
+            .state
+            .local_vars
+            .get("ocf_seen_in_tumble_start")
+            .and_then(|value| match value {
+                Value::Int(value) => Some(*value as u32),
+                _ => None,
+            })
+            .expect("TumbleStart records GetOCF");
+        assert_eq!(
+            seen & gated_bits,
+            0,
+            "StartCall must observe SetOCF for the disabled Tumble action"
+        );
+        assert_eq!(object.state.action.name, "Tumble");
+        assert_eq!(
+            object.state.ocf & gated_bits,
+            0,
+            "the foreign target's cached OCF must stay refreshed after folding"
+        );
+    }
+
+    #[test]
+    fn shake_objects_matches_cpp_master_order_gate_ledger() {
+        // Frozen C++ oracle fixture (C4Game.cpp:1300-1314), seed 2 after
+        // Randomize3. Inactive objects live outside Game.Objects and consume
+        // no draw; eligible Random(3) draws are 0,0,2,0, so only the final
+        // attached MNone object reaches Rnd3.
+        let mut caller = Definition::from_script(
+            "SHKO",
+            "Shake oracle",
+            "#strict\npublic func Shake() { return ShakeObjects(10, 10, 20); }\n",
+        )
+        .expect("oracle caller compiles");
+        caller.set_category(CATEGORY_OBJECT);
+        let mut target = Definition::from_script("SHKT", "Shake target", "#strict\n")
+            .expect("oracle target compiles");
+        target.set_category(CATEGORY_LIVING | CATEGORY_OBJECT);
+
+        let mut engine = Engine::with_seed(2);
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        engine
+            .register_definition(target)
+            .expect("target registers");
+        let caller_id = engine
+            .spawn_object(
+                SpawnConfig::new("SHKO")
+                    .with_custom_name("caller")
+                    .with_position(Vector2::new(10, 10))
+                    .with_owner(7)
+                    .with_category(CATEGORY_OBJECT),
+            )
+            .expect("caller spawns");
+
+        struct Row {
+            name: &'static str,
+            status: ObjectStatus,
+            position: Vector2,
+            contained: bool,
+            t_attach: u32,
+            mat_valid: bool,
+            mat_vehicle: bool,
+        }
+        let rows = [
+            Row {
+                name: "deleted",
+                status: ObjectStatus::Deleted,
+                position: Vector2::new(10, 10),
+                contained: false,
+                t_attach: CNAT_BOTTOM,
+                mat_valid: true,
+                mat_vehicle: false,
+            },
+            Row {
+                name: "boundary_unattached",
+                status: ObjectStatus::Normal,
+                position: Vector2::new(-10, 30),
+                contained: false,
+                t_attach: 0,
+                mat_valid: true,
+                mat_vehicle: false,
+            },
+            Row {
+                name: "contained",
+                status: ObjectStatus::Normal,
+                position: Vector2::new(10, 10),
+                contained: true,
+                t_attach: CNAT_BOTTOM,
+                mat_valid: true,
+                mat_vehicle: false,
+            },
+            Row {
+                name: "vehicle",
+                status: ObjectStatus::Normal,
+                position: Vector2::new(10, 10),
+                contained: false,
+                t_attach: CNAT_BOTTOM,
+                mat_valid: true,
+                mat_vehicle: true,
+            },
+            Row {
+                name: "inactive_attached",
+                status: ObjectStatus::Inactive,
+                position: Vector2::new(10, 10),
+                contained: false,
+                t_attach: CNAT_BOTTOM,
+                mat_valid: true,
+                mat_vehicle: false,
+            },
+            Row {
+                name: "out_of_range",
+                status: ObjectStatus::Normal,
+                position: Vector2::new(31, 10),
+                contained: false,
+                t_attach: CNAT_BOTTOM,
+                mat_valid: true,
+                mat_vehicle: false,
+            },
+            Row {
+                name: "attached_gate_rejected",
+                status: ObjectStatus::Normal,
+                position: Vector2::new(10, 10),
+                contained: false,
+                t_attach: CNAT_BOTTOM,
+                mat_valid: true,
+                mat_vehicle: false,
+            },
+            Row {
+                name: "attached_mnone",
+                status: ObjectStatus::Normal,
+                position: Vector2::new(10, 10),
+                contained: false,
+                t_attach: CNAT_BOTTOM,
+                mat_valid: false,
+                mat_vehicle: false,
+            },
+        ];
+
+        let mut row_ids = HashMap::new();
+        for (row_index, row) in rows.iter().enumerate() {
+            let raw_x = 1_000 + row_index as i32;
+            let raw_y = -(2_000 + row_index as i32);
+            let id = engine
+                .spawn_object(
+                    SpawnConfig::new("SHKT")
+                        .with_custom_name(row.name)
+                        .with_position(row.position)
+                        .with_fixed_velocity(FixedVec2::new(
+                            C4Fixed::from_raw(raw_x),
+                            C4Fixed::from_raw(raw_y),
+                        ))
+                        .with_category(CATEGORY_LIVING | CATEGORY_OBJECT)
+                        .with_alive(false),
+                )
+                .expect("oracle row spawns");
+            let index = engine.find_object_index(id).expect("oracle row exists");
+            engine.objects[index].state.status = row.status;
+            engine.objects[index].state.container = row.contained.then_some(caller_id);
+            engine.objects[index].state.t_attach = row.t_attach;
+            engine.objects[index].frame_t_attach = row.t_attach;
+            engine.objects[index].state.shape_attach = ShapeAttachRecord {
+                mat_valid: row.mat_valid,
+                mat_vehicle: row.mat_vehicle,
+                x: row.position.x,
+                y: row.position.y,
+                vtx: 0,
+            };
+            row_ids.insert(row.name, id);
+        }
+
+        let master_order = [
+            row_ids["deleted"],
+            row_ids["boundary_unattached"],
+            row_ids["contained"],
+            row_ids["vehicle"],
+            caller_id,
+            row_ids["inactive_attached"],
+            row_ids["out_of_range"],
+            row_ids["attached_gate_rejected"],
+            row_ids["attached_mnone"],
+        ];
+        engine.exec_list = master_order.iter().rev().copied().collect();
+        assert_eq!(
+            (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()),
+            (500, 3_424_448_854, 0)
+        );
+
+        let before = rows
+            .iter()
+            .map(|row| {
+                let id = row_ids[row.name];
+                let index = engine.find_object_index(id).expect("row exists");
+                (row.name, engine.objects[index].fixed_velocity)
+            })
+            .collect::<HashMap<_, _>>();
+        let caller_idx = engine.find_object_index(caller_id).expect("caller exists");
+        let result = engine
+            .call_object_function(caller_idx, "Shake", Vec::new())
+            .expect("ShakeObjects executes");
+        assert_eq!(result, Value::Nil);
+        assert_eq!(
+            (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()),
+            (504, 1_287_806_202, 1)
+        );
+
+        for row in &rows[..rows.len() - 1] {
+            let index = engine
+                .find_object_index(row_ids[row.name])
+                .expect("unchanged row remains");
+            assert_eq!(
+                engine.objects[index].fixed_velocity, before[row.name],
+                "{} must not reach Fling",
+                row.name
+            );
+        }
+        let survivor = engine
+            .find_object_index(row_ids["attached_mnone"])
+            .expect("survivor remains");
+        assert_eq!(
+            engine.objects[survivor].fixed_velocity,
+            FixedVec2::new(C4Fixed::from_raw(65_536), C4Fixed::ZERO)
+        );
+        assert!(engine.objects[survivor].state.mobile);
+        assert_eq!(engine.objects[survivor].state.t_attach, 0);
+        assert_eq!(engine.objects[survivor].frame_t_attach, 0);
+        assert_eq!(engine.objects[survivor].state.controller, 7);
+    }
+
+    #[test]
     fn change_def_swaps_definition_in_place_like_cpp() {
         let mut engine = Engine::with_seed(0);
         let mut old_def = simple_definition("OLDD");

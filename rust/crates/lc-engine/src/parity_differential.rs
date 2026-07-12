@@ -7,7 +7,8 @@
 //! engine code (`src/Fixed.h`, `src/Fixed.cpp`'s `SineTable`, `src/C4Random.h`,
 //! `src/C4ScriptKiller.h`, `src/C4LandscapePath.h`, and
 //! `src/C4ActionDirection.h`, `src/C4ActionCallbacks.h`, and
-//! `src/C4SolidMaskBitmap.h`) by
+//! `src/C4SolidMaskBitmap.h`, plus complete `C4Game::ShakeObjects` and
+//! `C4Object::Fling` bodies) by
 //! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
 //! the C++ oracle, not a Rust-vs-Rust regression.
 //!
@@ -31,8 +32,9 @@ use crate::math::{
 use crate::rng::LcgRng;
 use crate::{
     ActionSpec, ActionState, CommandDirection, Definition, DefinitionRect, DefinitionSpriteImage,
-    DefinitionTargetRect, Direction, Engine, ObjectBaseGraphics, ObjectUpdate, PhysicalInfo,
-    PhysicsSettings, PlayerConfig, SpawnConfig, CATEGORY_OBJECT, OWNER_NONE,
+    DefinitionTargetRect, Direction, Engine, ObjectBaseGraphics, ObjectStatus, ObjectUpdate,
+    PhysicalInfo, PhysicsSettings, PlayerConfig, ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING,
+    CATEGORY_OBJECT, OWNER_NONE,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -505,6 +507,195 @@ fn parity_differential_matches_cpp_golden() {
                 "entry",
                 cpp,
                 rng.rnd3() as i64,
+            );
+        }
+    }
+
+    // 6b. C4Game::ShakeObjects master-list selection, RNG consumption, and
+    // raw C4Object::Fling fallback. The oracle compiles the complete method
+    // bodies mechanically extracted from C4Game.cpp and C4Object.cpp.
+    {
+        let case = &golden["shake_objects"];
+        let objects = case["objects"]
+            .as_array()
+            .expect("shake_objects.objects is an array");
+        let caller_row = objects
+            .iter()
+            .find(|row| row["name"].as_str() == Some("caller"))
+            .expect("shake_objects oracle includes caller row");
+        let caused_by = i(case, "caused_by") as i32;
+        let script = format!(
+            "#strict\npublic func Shake() {{ SetController({caused_by}); ShakeObjects({}, {}, {}); SetController(-1); }}\n",
+            i(case, "x"),
+            i(case, "y"),
+            i(case, "range")
+        );
+        let mut caller = Definition::from_script("SHKO", "Shake oracle", &script)
+            .expect("shake oracle caller compiles");
+        caller.set_category(CATEGORY_OBJECT);
+        let mut target = Definition::from_script("SHKT", "Shake target", "#strict\n")
+            .expect("shake oracle target compiles");
+        target.set_category(CATEGORY_LIVING | CATEGORY_OBJECT);
+
+        let mut engine = Engine::with_seed(i(case, "seed") as u64);
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        engine
+            .register_definition(target)
+            .expect("target registers");
+        engine
+            .register_player(PlayerConfig::new(caused_by, "Shake cause"))
+            .expect("shake cause player registers");
+
+        let spawn_row = |engine: &mut Engine,
+                         row: &Value,
+                         definition_id: &str,
+                         container: Option<crate::ObjectId>| {
+            let config = SpawnConfig::new(definition_id)
+                .with_custom_name(row["name"].as_str().expect("row name"))
+                .with_position(crate::Vector2::new(i(row, "x") as i32, i(row, "y") as i32))
+                .with_fixed_velocity(FixedVec2::new(
+                    C4Fixed::from_raw(i(row, "xdir_before") as i32),
+                    C4Fixed::from_raw(i(row, "ydir_before") as i32),
+                ))
+                .with_category(i(row, "category") as i32)
+                .with_controller(OWNER_NONE)
+                .with_alive(i(row, "ocf") as u32 & crate::ocf::ALIVE != 0);
+            let id = engine
+                .spawn_object(config)
+                .expect("shake oracle row spawns");
+            let index = engine.find_object_index(id).expect("shake row exists");
+            let attach_mat = i(row, "attach_mat");
+            engine.objects[index].state.status =
+                ObjectStatus::from_script_value(i(row, "status") as i32)
+                    .expect("valid C4Object status");
+            engine.objects[index].state.container = container;
+            engine.objects[index].state.t_attach = i(row, "t_attach_before") as u32;
+            engine.objects[index].frame_t_attach = i(row, "t_attach_before") as u32;
+            engine.objects[index].state.shape_attach = ShapeAttachRecord {
+                mat_valid: attach_mat >= 0,
+                mat_vehicle: attach_mat == 1,
+                x: i(row, "x") as i32,
+                y: i(row, "y") as i32,
+                vtx: 0,
+            };
+            engine.objects[index].state.mobile = false;
+            id
+        };
+
+        let caller_id = spawn_row(&mut engine, caller_row, "SHKO", None);
+        let mut ids = HashMap::from([("caller".to_string(), caller_id)]);
+        for row in objects {
+            let name = row["name"].as_str().expect("row name");
+            if name == "caller" {
+                continue;
+            }
+            let container = (i(row, "contained") != 0).then_some(caller_id);
+            ids.insert(
+                name.to_string(),
+                spawn_row(&mut engine, row, "SHKT", container),
+            );
+        }
+        let master_order = objects
+            .iter()
+            .map(|row| ids[row["name"].as_str().expect("row name")])
+            .collect::<Vec<_>>();
+        engine.exec_list = master_order.iter().rev().copied().collect();
+
+        let rng_before = &case["rng_before"];
+        expect_eq(
+            "shake_objects.rng_before",
+            0,
+            "count",
+            i(rng_before, "count"),
+            engine.rng.count as i64,
+        );
+        expect_eq_u64(
+            "shake_objects.rng_before",
+            0,
+            "hold",
+            u(rng_before, "hold"),
+            u64::from(engine.rng.hold),
+        );
+        expect_eq(
+            "shake_objects.rng_before",
+            0,
+            "rnd3_ptr",
+            i(rng_before, "rnd3_ptr"),
+            engine.rng.rnd3_ptr() as i64,
+        );
+
+        let caller_index = engine
+            .find_object_index(caller_id)
+            .expect("shake caller exists");
+        engine
+            .call_object_function(caller_index, "Shake", Vec::new())
+            .expect("ShakeObjects executes");
+
+        let rng_after = &case["rng_after"];
+        expect_eq(
+            "shake_objects.rng_after",
+            0,
+            "count",
+            i(rng_after, "count"),
+            engine.rng.count as i64,
+        );
+        expect_eq_u64(
+            "shake_objects.rng_after",
+            0,
+            "hold",
+            u(rng_after, "hold"),
+            u64::from(engine.rng.hold),
+        );
+        expect_eq(
+            "shake_objects.rng_after",
+            0,
+            "rnd3_ptr",
+            i(rng_after, "rnd3_ptr"),
+            engine.rng.rnd3_ptr() as i64,
+        );
+
+        for (index, row) in objects.iter().enumerate() {
+            let name = row["name"].as_str().expect("row name");
+            let object_index = engine
+                .find_object_index(ids[name])
+                .unwrap_or_else(|| panic!("shake oracle row `{name}` remains"));
+            let object = &engine.objects[object_index];
+            expect_eq(
+                "shake_objects.objects",
+                index,
+                "xdir_after",
+                i(row, "xdir_after"),
+                object.fixed_velocity.x.val() as i64,
+            );
+            expect_eq(
+                "shake_objects.objects",
+                index,
+                "ydir_after",
+                i(row, "ydir_after"),
+                object.fixed_velocity.y.val() as i64,
+            );
+            expect_eq(
+                "shake_objects.objects",
+                index,
+                "t_attach_after",
+                i(row, "t_attach_after"),
+                i64::from(object.state.t_attach),
+            );
+            expect_eq(
+                "shake_objects.objects",
+                index,
+                "mobile_after",
+                i(row, "mobile_after"),
+                i64::from(u8::from(object.state.mobile)),
+            );
+            expect_eq(
+                "shake_objects.objects",
+                index,
+                "controller_after",
+                i(row, "controller_after"),
+                i64::from(object.state.controller),
             );
         }
     }

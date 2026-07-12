@@ -2716,6 +2716,13 @@ struct ObjectDelta {
     /// would quantize it through the int mirror).
     fixed_velocity_x: Option<C4Fixed>,
     fixed_velocity_y: Option<C4Fixed>,
+    /// Explicit `C4Object::Mobile` overwrite for native object helpers whose
+    /// velocity assignment does not share the script Set*Dir mobilization
+    /// rule (notably C4Object::Fling's Tumble branch).
+    mobile: Option<bool>,
+    /// Explicit `C4Object::Action.t_attach` overwrite. Native Fling clears
+    /// either CNAT_Bottom or the complete mask in the same frame.
+    t_attach: Option<u32>,
     rotation: Option<i32>,
     /// Sub-pixel angular velocity (16.16 fixed-point degrees/frame) set by
     /// `SetRDir`. Mirrors C++ `pObj->rdir = itofix(n, prec)` (`C4Script.cpp:710`).
@@ -2795,6 +2802,12 @@ impl ObjectDelta {
         }
         if let Some(y) = update.fixed_velocity_y {
             self.fixed_velocity_y = Some(y);
+        }
+        if let Some(mobile) = update.mobile {
+            self.mobile = Some(mobile);
+        }
+        if let Some(t_attach) = update.t_attach {
+            self.t_attach = Some(t_attach);
         }
         if let Some(rotation) = update.rotation {
             self.rotation = Some(rotation);
@@ -2914,6 +2927,8 @@ impl From<ObjectUpdate> for ObjectDelta {
             own_mass: update.own_mass,
             velocity: update.velocity,
             fixed_velocity: update.fixed_velocity,
+            mobile: update.mobile,
+            t_attach: update.t_attach,
             rotation: update.rotation,
             rotation_velocity: update.rotation_velocity,
             energy: update.energy,
@@ -3000,6 +3015,15 @@ pub struct ObjectUpdate {
     /// See ObjectDelta::fixed_velocity_x — component-only SetXDir/SetYDir.
     pub fixed_velocity_x: Option<C4Fixed>,
     pub fixed_velocity_y: Option<C4Fixed>,
+    /// Explicit C4Object::Mobile overwrite. Applied after the generic
+    /// velocity-write mobilization so native helpers can preserve or force
+    /// the exact C++ branch behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mobile: Option<bool>,
+    /// Explicit C4Object::Action.t_attach overwrite for same-frame native
+    /// attachment changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t_attach: Option<u32>,
     /// Sub-pixel angular velocity (16.16 fixed degrees/frame) from `SetRDir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation_velocity: Option<C4Fixed>,
@@ -3317,6 +3341,8 @@ impl ObjectUpdate {
             && self.fixed_velocity.is_none()
             && self.fixed_velocity_x.is_none()
             && self.fixed_velocity_y.is_none()
+            && self.mobile.is_none()
+            && self.t_attach.is_none()
             && self.rotation.is_none()
             && self.rotation_velocity.is_none()
             && self.energy.is_none()
@@ -3878,6 +3904,19 @@ impl Object {
             || delta.rotation_velocity.is_some()
         {
             self.state.mobile = true;
+        }
+        // Native object helpers can assign velocity without sharing the
+        // script Set*Dir mobilization rule. Their explicit result wins over
+        // the generic rule above (C4Object::Fling's Tumble branch preserves
+        // Mobile, while Jump/raw fallback set it).
+        if let Some(mobile) = delta.mobile {
+            self.state.mobile = mobile;
+        }
+        if let Some(t_attach) = delta.t_attach {
+            // Movement consumes the already-latched frame value after an
+            // action callback; keep the serializable mirror in sync too.
+            self.state.t_attach = t_attach;
+            self.frame_t_attach = t_attach;
         }
         if delta.rotation.is_some() {
             // An explicit rotation re-seeds the fixed accumulator, mirroring C++
@@ -13957,8 +13996,13 @@ impl Engine {
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
         // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
         // execution. FindBase is one of the APIs that explicitly walks the
-        // forward master list (C4Game.cpp:1582,3732-3744).
-        .with_master_order(self.exec_list.iter().rev().copied())
+        // forward master list (C4Game.cpp:1582,3732-3744). Inactive objects
+        // live only in C4GameObjects::InactiveObjects and never enter this
+        // list (C4GameObjects.cpp:54-67).
+        .with_master_order(self.exec_list.iter().rev().copied().filter(|&id| {
+            self.find_object_index(id)
+                .is_some_and(|index| self.objects[index].state.status != ObjectStatus::Inactive)
+        }))
         .with_particle_defs(self.particle_system.def_names())
         .with_crew_ranks(Rc::clone(&self.crew_ranks))
         .with_materials(Some(self.materials_shared()))
@@ -18234,6 +18278,8 @@ impl Engine {
             fixed_velocity,
             fixed_velocity_x,
             fixed_velocity_y,
+            mobile,
+            t_attach,
             rotation,
             rotation_velocity,
             energy,
@@ -18352,6 +18398,15 @@ impl Engine {
             }
             if let Some(rotation_velocity) = rotation_velocity {
                 object.rotation_velocity = rotation_velocity;
+            }
+            // Apply an explicit native-helper result after all velocity
+            // writes that may mobilize the object.
+            if let Some(mobile) = mobile {
+                object.state.mobile = mobile;
+            }
+            if let Some(t_attach) = t_attach {
+                object.state.t_attach = t_attach;
+                object.frame_t_attach = t_attach;
             }
             if let Some(cause) = energy_loss_cause {
                 // Kill-trace mark BEFORE the energy write
@@ -19200,6 +19255,10 @@ impl Engine {
                 .update
                 .as_ref()
                 .is_some_and(|update| update.solid_mask_override.is_some());
+            let refresh_ocf = outcome
+                .update
+                .as_ref()
+                .is_some_and(ObjectUpdate::refreshes_ocf_like_cpp);
             let mut energy_died = false;
             // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply the
             // def change BEFORE the staged delta so a following
@@ -19376,6 +19435,9 @@ impl Engine {
                 || self.objects[index].state.base_graphics != previous_base_graphics
             {
                 self.update_solid_mask(index);
+            }
+            if refresh_ocf || energy_died {
+                self.refresh_object_ocf(index);
             }
         }
         Ok(retained)

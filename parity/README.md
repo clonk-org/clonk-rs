@@ -32,6 +32,7 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `action_swim_direction` | `src/C4ActionDirection.h`, called by DFA_SWIM/`SetDir` | SwimAccel facing changes, TurnAction two-axis fixed-position resync, and stale Swim phase ordering |
 | `action_callbacks` | `src/C4ActionCallbacks.h`, called by `C4Object::SetAction` | synchronous callback count and Start-before-End/Abort ordering |
 | `solid_mask_graphics` | `src/C4SolidMaskBitmap.h`, called by `C4SolidMask` | active/default graphics selection and transparent/solid mask sampling after `SetGraphics` |
+| `shake_objects` | complete `C4Game::ShakeObjects` + `C4Object::Fling` bodies | master-order gates, `Random(3)`/`Rnd3()` consumption, attachment material identity, and raw Fling fallback |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
 
 **Out of scope (Phase 2):** the C++ per-pixel collision/contact loop
@@ -93,6 +94,11 @@ scenario via the `RustEngineBridge` live shadow-diff — see "Phase 2" below.
   frame-184 CTWR Graphics2/SNKE contact: default graphics are transparent,
   Graphics2 is opaque. Rust runs that selection through a real mask bake and
   also tests cross-definition `SetGraphics` plus immediate remove/re-put.
+- `shake_objects` mechanically extracts and compiles the complete production
+  `C4Game::ShakeObjects` and `C4Object::Fling` bodies. Minimal object/action
+  stubs force the raw fallback while preserving the real selection and RNG
+  order; Rust drives the registered script host function over the same master
+  list and compares every resulting velocity, attachment, mobile, and cause.
 
 If a divergence is ever a *bug in the golden* rather than the Rust port, fix the
 C++ source and regenerate.
@@ -100,8 +106,8 @@ C++ source and regenerate.
 ## Usage
 
 ```sh
-# Verify (runs in CI as part of `cargo test --workspace`):
-cargo test -p lc-engine --lib parity_differential_matches_cpp_golden
+# Verify:
+cargo nextest run -p lc-engine -E 'test(parity_differential_matches_cpp_golden)'
 #   or, via the xtask wrapper:
 cargo xtask parity verify
 

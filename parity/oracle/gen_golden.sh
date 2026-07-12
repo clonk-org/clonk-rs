@@ -40,7 +40,25 @@ awk '
   p && /};/ { exit }
 ' "$src/Fixed.cpp" > "$gen/sine_table.cpp"
 
-# 3. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
+# 3. Mechanically lift the complete production ShakeObjects and Fling bodies.
+#    The standalone oracle supplies only the surrounding object-list/state
+#    scaffolding; gate order and raw fallback behavior execute byte-for-byte
+#    from src/ rather than from a hand transcription.
+awk '
+  /^void C4Game::ShakeObjects\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Game.cpp" > "$gen/shake_objects.inc"
+
+awk '
+  /^void C4Object::Fling\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_fling.inc"
+
+# 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;
 #    then run it to produce the golden JSON.
