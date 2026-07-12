@@ -158,6 +158,10 @@ pub struct StartupMainMenu {
     buttons: Vec<MenuButton>,
     pointer_position: Option<GuiPoint>,
     pressed_index: Option<usize>,
+    /// Focused button armed by Enter/Space. C++ sets `Button::fDown` on key
+    /// down and invokes the callback only on the matching key up
+    /// (C4GuiButton.cpp:112-127).
+    key_pressed: Option<(usize, KeyCode)>,
     /// Keyboard focus; the C++ dialog focuses the start button on first show
     /// (C4StartupMainDlg.cpp:305-310).
     selected_index: Option<usize>,
@@ -195,6 +199,7 @@ impl StartupMainMenu {
             buttons,
             pointer_position: None,
             pressed_index: None,
+            key_pressed: None,
             selected_index: Some(0),
             hover_index: None,
             layout: Vec::new(),
@@ -234,6 +239,7 @@ impl StartupMainMenu {
     pub fn pointer_left(&mut self) {
         self.pointer_position = None;
         self.pressed_index = None;
+        self.key_pressed = None;
         self.hover_index = None;
     }
 
@@ -249,6 +255,11 @@ impl StartupMainMenu {
                 if let Some(pressed) = self.pressed_index {
                     if self.buttons[pressed].item == item {
                         self.pressed_index = None;
+                    }
+                }
+                if let Some((pressed, _)) = self.key_pressed {
+                    if self.buttons[pressed].item == item {
+                        self.key_pressed = None;
                     }
                 }
             }
@@ -271,6 +282,7 @@ impl StartupMainMenu {
     }
 
     pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<MainMenuAction> {
+        self.key_pressed = None;
         if let Some(index) = self.hit_test(position) {
             if self.buttons[index].enabled {
                 self.pressed_index = Some(index);
@@ -298,12 +310,19 @@ impl StartupMainMenu {
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<MainMenuAction> {
         match key {
-            KeyCode::Up | KeyCode::Left => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Right => self.move_selection(1),
+            KeyCode::Up | KeyCode::Left => {
+                self.key_pressed = None;
+                self.move_selection(-1)
+            }
+            KeyCode::Down | KeyCode::Right => {
+                self.key_pressed = None;
+                self.move_selection(1)
+            }
             KeyCode::Enter | KeyCode::Space => {
+                self.pressed_index = None;
                 if let Some(index) = self.selected_index {
                     if self.buttons[index].enabled {
-                        return vec![MainMenuAction::Activate(self.buttons[index].item)];
+                        self.key_pressed = Some((index, key));
                     }
                 }
                 Vec::new()
@@ -312,8 +331,19 @@ impl StartupMainMenu {
         }
     }
 
-    pub fn handle_key_up(&mut self, _key: KeyCode) -> Vec<MainMenuAction> {
-        Vec::new()
+    pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<MainMenuAction> {
+        let Some((pressed_index, pressed_key)) = self.key_pressed else {
+            return Vec::new();
+        };
+        if key != pressed_key {
+            return Vec::new();
+        }
+        self.key_pressed = None;
+        if self.selected_index == Some(pressed_index) && self.buttons[pressed_index].enabled {
+            vec![MainMenuAction::Activate(self.buttons[pressed_index].item)]
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn render(&mut self, surface: &mut Surface, participants_label: &str) {
@@ -323,11 +353,14 @@ impl StartupMainMenu {
 
         // C++ C4StartupMainDlg draws the buttons directly over the loader
         // background — there is no panel backdrop or footer box.
+        let pressed_index = self
+            .pressed_index
+            .or_else(|| self.key_pressed.map(|(index, _)| index));
         for (index, rect) in self.layout.iter().enumerate() {
             let state = ButtonVisualState::from_indices(
                 index,
                 self.selected_index,
-                self.pressed_index,
+                pressed_index,
                 self.buttons[index].enabled,
             );
             let highlighted = self.buttons[index].enabled
@@ -591,7 +624,18 @@ impl ButtonVisualState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_graphics::PixelFormat;
+    use lc_graphics::{BitmapFont, PixelFormat};
+
+    fn main_menu() -> StartupMainMenu {
+        let mut menu = StartupMainMenu::new(Arc::new(BitmapFont::new()), None);
+        menu.resize(1280.0, 720.0);
+        menu
+    }
+
+    fn button_center(index: usize) -> GuiPoint {
+        let rect = main_menu_layout(1280, 720).buttons[index];
+        GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
+    }
 
     /// Builds a `w`x`h` image whose pixel at column x is gray value `10*(x+1)`.
     fn column_coded_image(w: u32, h: u32) -> crate::ImageData {
@@ -657,5 +701,95 @@ mod tests {
         // Trademark label anchor: right edge of the client rect.
         assert_eq!(layout.trademark_anchor_x, 1255);
         assert_eq!(layout.client.y + layout.client.h, 701);
+    }
+
+    #[test]
+    fn keyboard_activation_arms_on_down_and_fires_on_up_at_every_focus_position() {
+        // Button key-down only sets fDown; matching key-up invokes OnPress
+        // (C4GuiButton.cpp:112-127). Main-dialog arrows move focus and Enter is
+        // re-sent as Space down/up (C4StartupMainDlg.cpp:80-97,245-255).
+        let items = [
+            MainMenuItem::LocalGame,
+            MainMenuItem::NetworkGame,
+            MainMenuItem::PlayerSelection,
+            MainMenuItem::Options,
+            MainMenuItem::About,
+            MainMenuItem::Quit,
+        ];
+
+        for (index, item) in items.into_iter().enumerate() {
+            for key in [KeyCode::Enter, KeyCode::Space] {
+                let mut menu = main_menu();
+                for _ in 0..index {
+                    let _ = menu.handle_key_down(KeyCode::Down);
+                }
+
+                assert!(
+                    menu.handle_key_down(key).is_empty(),
+                    "{item:?} {key:?} down"
+                );
+                assert_eq!(menu.key_pressed, Some((index, key)));
+                assert_eq!(
+                    menu.handle_key_up(key),
+                    vec![MainMenuAction::Activate(item)],
+                    "{item:?} {key:?} up"
+                );
+                assert_eq!(menu.key_pressed, None);
+            }
+        }
+    }
+
+    #[test]
+    fn keyboard_activation_is_cancelled_when_focus_moves_or_input_leaves() {
+        let mut menu = main_menu();
+        assert!(menu.handle_key_down(KeyCode::Space).is_empty());
+        assert_eq!(
+            menu.handle_key_down(KeyCode::Down),
+            vec![MainMenuAction::SelectionChanged(MainMenuItem::NetworkGame)]
+        );
+        assert_eq!(menu.key_pressed, None);
+        assert!(menu.handle_key_up(KeyCode::Space).is_empty());
+
+        let mut menu = main_menu();
+        assert!(menu.handle_key_down(KeyCode::Enter).is_empty());
+        menu.pointer_left();
+        assert!(menu.handle_key_up(KeyCode::Enter).is_empty());
+    }
+
+    #[test]
+    fn pointer_activation_still_requires_release_on_the_pressed_button() {
+        let mut menu = main_menu();
+        let network = button_center(1);
+        let player = button_center(2);
+
+        assert!(menu.handle_pointer_down(network).is_empty());
+        assert!(menu.handle_pointer_up(player).is_empty());
+        assert!(menu.handle_pointer_down(network).is_empty());
+        assert_eq!(
+            menu.handle_pointer_up(network),
+            vec![MainMenuAction::Activate(MainMenuItem::NetworkGame)]
+        );
+    }
+
+    #[test]
+    fn changing_input_source_cancels_the_previous_press() {
+        let mut menu = main_menu();
+        let network = button_center(1);
+
+        assert!(menu.handle_pointer_down(network).is_empty());
+        assert!(menu.handle_key_down(KeyCode::Enter).is_empty());
+        assert!(menu.handle_pointer_up(network).is_empty());
+        assert_eq!(
+            menu.handle_key_up(KeyCode::Enter),
+            vec![MainMenuAction::Activate(MainMenuItem::LocalGame)]
+        );
+
+        assert!(menu.handle_key_down(KeyCode::Space).is_empty());
+        assert!(menu.handle_pointer_down(network).is_empty());
+        assert!(menu.handle_key_up(KeyCode::Space).is_empty());
+        assert_eq!(
+            menu.handle_pointer_up(network),
+            vec![MainMenuAction::Activate(MainMenuItem::NetworkGame)]
+        );
     }
 }
