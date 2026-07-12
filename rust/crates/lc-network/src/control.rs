@@ -82,16 +82,17 @@ struct ClientState {
 }
 
 impl ClientState {
-    fn register_packet(&mut self, packet: ControlPacket) -> (InsertStatus, Option<ControlPacket>) {
+    fn register_packet(&mut self, packet: ControlPacket) -> InsertStatus {
         let tick = packet.tick;
-        let previous = self.pending.insert(tick, packet);
-        let status = if previous.is_some() {
-            InsertStatus::Replaced
-        } else {
-            InsertStatus::Stored
-        };
-        self.highest_tick_seen = Some(self.highest_tick_seen.map_or(tick, |prev| prev.max(tick)));
-        (status, previous)
+        match self.pending.entry(tick) {
+            std::collections::btree_map::Entry::Occupied(_) => InsertStatus::Duplicate,
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(packet);
+                self.highest_tick_seen =
+                    Some(self.highest_tick_seen.map_or(tick, |prev| prev.max(tick)));
+                InsertStatus::Stored
+            }
+        }
     }
 }
 
@@ -144,7 +145,7 @@ impl ControlCoordinator {
             return Ok(ControlOutcome::stale());
         }
 
-        let (status, _previous) = state.register_packet(packet);
+        let status = state.register_packet(packet);
         let missing = self.compute_missing(client_id);
         let ready = self.collect_ready();
         self.enforce_backlog();
@@ -343,7 +344,7 @@ impl ControlOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertStatus {
     Stored,
-    Replaced,
+    Duplicate,
     Stale,
 }
 
@@ -475,7 +476,11 @@ mod tests {
     }
 
     #[test]
-    fn replaces_existing_packet_for_same_tick() {
+    fn duplicate_packet_for_same_tick_keeps_first_control() {
+        // C++ oracle: C4GameControlNetwork::HandleControl returns immediately
+        // when getCtrl(client, tick) already finds a packet
+        // (src/C4GameControlNetwork.cpp:517-523). Retransmission must never
+        // replace synchronized input that other peers may already have seen.
         let mut coord = ControlCoordinator::new(100);
         coord.register_client(1).unwrap();
         coord.register_client(2).unwrap();
@@ -484,8 +489,12 @@ mod tests {
         assert_eq!(out.status, InsertStatus::Stored);
 
         let out = coord.ingest(packet(1, 0, b"new")).unwrap();
-        assert_eq!(out.status, InsertStatus::Replaced);
+        assert_eq!(out.status, InsertStatus::Duplicate);
         assert!(out.ready.is_empty());
+
+        let out = coord.ingest(packet(2, 0, b"peer")).unwrap();
+        assert_eq!(out.ready.len(), 1);
+        assert_eq!(out.ready[0].packets()[0].payload(), b"old");
     }
 
     #[test]
