@@ -6,7 +6,7 @@ record of completed slices.
 ## Focus
 
 Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
-01–06; Tutorial 07 reaches BALN production. Finish exact tutorial
+01–07 and select Tutorial 08. Finish exact tutorial
 presentation/interaction before resuming Goldrush at its pinned frame-3327
 Decay/DoCon mismatch.
 
