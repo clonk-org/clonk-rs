@@ -910,6 +910,18 @@ impl GraphicsSystem {
         snapshot: &SimulationSnapshot,
         viewports: &[ViewportInput<'_>],
     ) -> Vec<EngineSurfaceSnapshot> {
+        self.render_frame_with_gamma(snapshot, viewports, None)
+    }
+
+    /// Structural seam for the C++ per-fragment gamma path. Public rendering
+    /// deliberately supplies `None` until the active/pending frame lifecycle
+    /// and fragment encoding land in later behavioral slices.
+    fn render_frame_with_gamma(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        viewports: &[ViewportInput<'_>],
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Vec<EngineSurfaceSnapshot> {
         self.active_viewports.clear();
         if let Some(background) = self.hud_graphics.background.as_ref() {
             tile_image_on_surface(&mut self.surface, background, 0, 0);
@@ -919,7 +931,13 @@ impl GraphicsSystem {
 
         let owner_colors = Self::collect_owner_colors(snapshot);
         let mut used_camera_keys = Vec::new();
-        self.render_viewports(snapshot, viewports, &owner_colors, &mut used_camera_keys);
+        self.render_viewports(
+            snapshot,
+            viewports,
+            &owner_colors,
+            &mut used_camera_keys,
+            gamma,
+        );
         let used_keys: HashSet<_> = used_camera_keys.into_iter().collect();
         self.camera_states.retain(|key, _| used_keys.contains(key));
 
@@ -934,6 +952,7 @@ impl GraphicsSystem {
         viewports: &[ViewportInput<'_>],
         owner_colors: &HashMap<i32, Color>,
         used_camera_keys: &mut Vec<CameraKey>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         if viewports.is_empty() {
             if let Some(object) = snapshot.objects.first() {
@@ -944,6 +963,7 @@ impl GraphicsSystem {
                     SurfaceRect::new(0, 0, self.surface_width, self.surface_height),
                     owner_colors,
                     used_camera_keys,
+                    gamma,
                 );
             }
             return;
@@ -951,7 +971,14 @@ impl GraphicsSystem {
 
         let layout = self.layout_viewports(viewports.len());
         for (input, rect) in viewports.iter().zip(layout.into_iter()) {
-            self.render_viewport(snapshot, input, rect, owner_colors, used_camera_keys);
+            self.render_viewport(
+                snapshot,
+                input,
+                rect,
+                owner_colors,
+                used_camera_keys,
+                gamma,
+            );
         }
     }
 
@@ -962,6 +989,7 @@ impl GraphicsSystem {
         rect: SurfaceRect,
         owner_colors: &HashMap<i32, Color>,
         used_camera_keys: &mut Vec<CameraKey>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         if rect.width == 0 || rect.height == 0 {
             return;
@@ -1069,7 +1097,7 @@ impl GraphicsSystem {
         let events = &snapshot.weather_events;
         let lighting = Self::lighting_factor(environment.settings.time_of_day);
 
-        self.draw_sky(snapshot.sky.as_ref(), environment, events, lighting);
+        self.draw_sky(snapshot.sky.as_ref(), environment, events, lighting, gamma);
         // C4D_Background objects live in Game.BackObjects and draw between
         // sky and landscape (C4Viewport.cpp:1051-1063).
         self.draw_objects(
@@ -1083,6 +1111,7 @@ impl GraphicsSystem {
             environment.ambient_temperature,
             snapshot.landscape.as_ref(),
             lighting,
+            gamma,
         );
         // C4Landscape::Draw presents the material-colored Surface32 once and
         // supplies a separate alpha-only liquid-animation mask to
@@ -1094,6 +1123,7 @@ impl GraphicsSystem {
                 environment.ambient_temperature,
                 snapshot.landscape.as_ref(),
                 lighting,
+                gamma,
             );
         }
         // C4Viewport draws sync-relevant C4PXS after the landscape and before
@@ -1410,9 +1440,10 @@ impl GraphicsSystem {
         environment: &EnvironmentFrame,
         events: &[WeatherEvent],
         lighting: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         if let Some(state) = self.sky.clone() {
-            self.render_configured_sky(&state, frame, events, lighting);
+            self.render_configured_sky(&state, frame, events, lighting, gamma);
         } else {
             let base = environment
                 .sky_color
@@ -1431,6 +1462,7 @@ impl GraphicsSystem {
         frame: Option<&SkyFrame>,
         events: &[WeatherEvent],
         lighting: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let settings = frame
             .map(|frame| &frame.settings)
@@ -1441,19 +1473,19 @@ impl GraphicsSystem {
             let tinted = Self::apply_lighting(base, lighting);
             self.surface.fill(tinted);
         } else if !settings.has_surface {
-            self.fill_sky_gradient(settings, lighting);
+            self.fill_sky_gradient(settings, lighting, gamma);
         } else {
             self.surface.fill(Color::opaque(0, 0, 0));
         }
 
         if settings.has_surface {
             if let Some(image) = state.image() {
-                self.tile_sky_image(image, settings, frame, lighting);
+                self.tile_sky_image(image, settings, frame, lighting, gamma);
             } else {
-                self.fill_sky_gradient(settings, lighting);
+                self.fill_sky_gradient(settings, lighting, gamma);
             }
         } else if settings.back_color.is_none() {
-            self.fill_sky_gradient(settings, lighting);
+            self.fill_sky_gradient(settings, lighting, gamma);
         }
 
         if events
@@ -1468,6 +1500,7 @@ impl GraphicsSystem {
         &mut self,
         settings: &SkySettings,
         lighting: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         // C4Sky::Draw without a surface fades from GetSkyFadeClr(TargetY)
         // to GetSkyFadeClr(TargetY+Hgt) (C4Sky.cpp:219-225): the fade spans
@@ -1484,7 +1517,7 @@ impl GraphicsSystem {
         let bottom = Self::sky_fade_color(settings, view_bottom, self.world_height);
         let top = Color::opaque(top.r, top.g, top.b);
         let bottom = Color::opaque(bottom.r, bottom.g, bottom.b);
-        self.fill_vertical_gradient(top, bottom, lighting);
+        self.fill_vertical_gradient(top, bottom, lighting, gamma);
     }
 
     /// C4Sky::GetSkyFadeClr (C4Sky.cpp:230-236): integer fade between
@@ -1505,7 +1538,13 @@ impl GraphicsSystem {
         )
     }
 
-    fn fill_vertical_gradient(&mut self, top: Color, bottom: Color, lighting: f32) {
+    fn fill_vertical_gradient(
+        &mut self,
+        top: Color,
+        bottom: Color,
+        lighting: f32,
+        _gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
         if self.surface_width == 0 || self.surface_height == 0 {
             return;
         }
@@ -1526,6 +1565,7 @@ impl GraphicsSystem {
         settings: &SkySettings,
         frame: Option<&SkyFrame>,
         lighting: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let width = image.width();
         let height = image.height();
@@ -1562,6 +1602,7 @@ impl GraphicsSystem {
                     y.round() as i32,
                     modulation,
                     lighting,
+                    gamma,
                 );
                 x += width_f;
             }
@@ -1576,6 +1617,7 @@ impl GraphicsSystem {
         dest_y: i32,
         modulation: Option<u32>,
         lighting: f32,
+        _gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let width = image.width();
         let height = image.height();
@@ -1877,7 +1919,11 @@ impl GraphicsSystem {
     /// the same composition C4Landscape::MapToSurface bakes into
     /// Surface32. Returns false when no plane/textures exist (legacy
     /// column painter takes over).
-    fn draw_ground_textured(&mut self, landscape: Option<&Landscape>) -> bool {
+    fn draw_ground_textured(
+        &mut self,
+        landscape: Option<&Landscape>,
+        _gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
         let Some(grid) = landscape.and_then(|landscape| landscape.pixel_grid()) else {
             return false;
         };
@@ -2023,8 +2069,9 @@ impl GraphicsSystem {
         ambient_temperature: i32,
         landscape: Option<&Landscape>,
         lighting: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) -> bool {
-        if self.draw_ground_textured(landscape) {
+        if self.draw_ground_textured(landscape, gamma) {
             return true;
         }
         let ground_color = Self::apply_lighting(
@@ -2059,6 +2106,7 @@ impl GraphicsSystem {
         ambient_temperature: i32,
         landscape: Option<&Landscape>,
         lighting: f32,
+        _gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let Some(landscape) = landscape else {
             return;
@@ -5057,6 +5105,36 @@ mod tests {
     }
 
     #[test]
+    fn gamma_render_seam_is_structural_until_fragment_encoding_lands() {
+        let snapshot = make_snapshot();
+        let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
+        let make_graphics = || {
+            GraphicsSystem::new(
+                320,
+                180,
+                150,
+                "Gamma Seam",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            )
+        };
+        let mut public_path = make_graphics();
+        let mut internal_path = make_graphics();
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x102030, 0x405060, 0x708090,
+        ]);
+
+        let public_atlas = public_path.render_frame(&snapshot, &viewports);
+        let internal_atlas =
+            internal_path.render_frame_with_gamma(&snapshot, &viewports, Some(&gamma));
+
+        assert_eq!(internal_path.surface().pixels(), public_path.surface().pixels());
+        assert_eq!(internal_atlas, public_atlas);
+    }
+
+    #[test]
     fn viewport_point_at_maps_screen_to_world() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
@@ -7708,7 +7786,7 @@ mod tests {
         graphics.set_material_textures(Arc::new(textures));
         graphics.set_material_render_info(Arc::new(materials));
 
-        assert!(graphics.draw_ground_textured(Some(&landscape)));
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
         assert_eq!(
             graphics.surface().get_pixel(0, 0),
             Some(Color::opaque(130, 9, 14)),
