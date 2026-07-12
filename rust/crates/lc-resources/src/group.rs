@@ -224,10 +224,13 @@ impl PackedGroup {
         let header = parse_header(&header_bytes)?;
 
         let mut entries: Vec<PackedEntry> = Vec::with_capacity(header.entry_count);
+        let mut next_entry_offset = 0;
         for _ in 0..header.entry_count {
             let mut entry_bytes = [0u8; GROUP_ENTRY_SIZE];
             reader.read_exact(&mut entry_bytes)?;
-            let entry = parse_entry(&entry_bytes)?;
+            let mut entry = parse_entry(&entry_bytes)?;
+            entry.offset = next_entry_offset;
+            next_entry_offset += entry.size;
             let entry_key = case_fold_group_path(&entry.relative_path);
             if let Some(existing) = entries
                 .iter()
@@ -408,13 +411,7 @@ fn parse_entry(bytes: &[u8]) -> Result<PackedEntry, GroupError> {
         )));
     }
     let _unused = cursor.read_i32::<LittleEndian>()?;
-    let offset = cursor.read_i32::<LittleEndian>()?;
-    if offset < 0 {
-        return Err(GroupError::InvalidGroup(format!(
-            "negative entry offset for {}",
-            name
-        )));
-    }
+    let _offset = cursor.read_i32::<LittleEndian>()?;
     let _time = cursor.read_u32::<LittleEndian>()?;
     let _has_crc = cursor.read_u8()? != 0;
     let _crc = cursor.read_u32::<LittleEndian>()?;
@@ -426,7 +423,7 @@ fn parse_entry(bytes: &[u8]) -> Result<PackedEntry, GroupError> {
         relative_path: normalize_path(Path::new(&name)),
         is_directory: child,
         size: size as u64,
-        offset: offset as u64,
+        offset: 0,
     })
 }
 
@@ -712,6 +709,29 @@ mod tests {
         assert_eq!(data, b"world");
         assert!(group.exists("hello.txt"));
         assert_eq!(group.maker(), Some(""));
+    }
+
+    #[test]
+    fn packed_group_reconstructs_entry_offsets_from_sizes() {
+        // C++ does not pass the serialized entry offset to AddEntry while
+        // opening a group; AddEntry rebuilds offsets in directory order from
+        // entry sizes (src/C4Group.cpp:784-792, 861-877).
+        let mut image = packed_group_image_with_entries(&[
+            ("first.txt", false, b"abc"),
+            ("second.txt", false, b"world"),
+        ]);
+        for (index, stored_offset) in [1234_i32, -567].into_iter().enumerate() {
+            let offset_field =
+                GROUP_HEADER_SIZE + index * GROUP_ENTRY_SIZE + 260 + 4 * std::mem::size_of::<i32>();
+            image[offset_field..offset_field + std::mem::size_of::<i32>()]
+                .copy_from_slice(&stored_offset.to_le_bytes());
+        }
+
+        let group =
+            Group::from_memory(PathBuf::from("test.c4group"), image).expect("valid packed group");
+
+        assert_eq!(group.read_file("first.txt").unwrap(), b"abc");
+        assert_eq!(group.read_file("second.txt").unwrap(), b"world");
     }
 
     #[test]
