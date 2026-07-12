@@ -6,11 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use lc_engine::{
     interpret_player_control_command, CommandKind, ControlButton, ControlCommand, ControlEvent,
-    PlayerControlData, SyncCheckPacket, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT,
-    COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN,
-    COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT,
-    COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE,
-    COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
+    JoinPlayerControlData, PlayerControlData, PlayerInfoControlData, SyncCheckPacket,
+    COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG,
+    COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER,
+    COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT, COM_MENU_SHOW_TEXT,
+    COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL,
+    COM_SPECIAL2, COM_THROW, COM_UP,
 };
 use lc_network::{
     connect_client, decode_control_packet, encode_control_packet, start_host, ClientConfig,
@@ -49,14 +50,29 @@ pub struct NetworkManager {
     local_client_id: ClientId,
 }
 
+#[cfg(test)]
+pub(crate) struct TestNetworkCommands {
+    command_rx: tokio_mpsc::Receiver<NetworkCommand>,
+}
+
+#[cfg(test)]
+impl TestNetworkCommands {
+    pub(crate) fn take_submitted_local(&mut self) -> Vec<(i32, ControlEvent, Tick)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitLocal { owner, event, tick } = command {
+                submitted.push((owner, event, tick));
+            }
+        }
+        submitted
+    }
+}
+
 #[derive(Debug)]
 pub enum NetworkEvent {
-    Control {
-        owner: i32,
-        event: ControlEvent,
-    },
-    SyncCheck {
-        packet: SyncCheckPacket,
+    ReadyTick {
+        tick: Tick,
+        controls: Vec<NetworkControl>,
     },
     PeerConnected {
         client_id: ClientId,
@@ -68,6 +84,17 @@ pub enum NetworkEvent {
         reason: Option<String>,
     },
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkControl {
+    PlayerInfo(PlayerInfoControlData),
+    JoinPlayer(JoinPlayerControlData),
+    Player {
+        owner: i32,
+        event: ControlEvent,
+    },
+    SyncCheck(SyncCheckPacket),
 }
 
 #[derive(Debug)]
@@ -243,6 +270,41 @@ impl NetworkManager {
 
     pub fn local_client_id(&self) -> ClientId {
         self.local_client_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stub() -> (Self, Sender<NetworkEvent>) {
+        let (command_tx, _command_rx) = tokio_mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::channel();
+        (
+            Self {
+                command_tx,
+                event_rx,
+                worker: None,
+                local_client_id: HOST_CLIENT_ID,
+            },
+            event_tx,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stub_with_commands() -> (
+        Self,
+        Sender<NetworkEvent>,
+        TestNetworkCommands,
+    ) {
+        let (command_tx, command_rx) = tokio_mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::channel();
+        (
+            Self {
+                command_tx,
+                event_rx,
+                worker: None,
+                local_client_id: HOST_CLIENT_ID,
+            },
+            event_tx,
+            TestNetworkCommands { command_rx },
+        )
     }
 }
 
@@ -562,36 +624,38 @@ fn handle_ready_packet(
 
 fn emit_frame_controls(
     frame: LegacyControlFrame,
-    local_owner: i32,
+    _local_owner: i32,
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
+    let tick = frame.tick;
+    let mut controls = Vec::new();
     for control in frame.controls {
         match control {
             lc_engine::ControlPacket::PlayerControl(data) => {
                 if let Some(event) = control_event_for_player_control(&data) {
-                    if data.player == local_owner {
-                        continue;
-                    }
-                    let _ = event_tx.send(NetworkEvent::Control {
+                    controls.push(NetworkControl::Player {
                         owner: data.player,
                         event,
                     });
                 }
             }
             lc_engine::ControlPacket::SyncCheck(packet) => {
-                let _ = event_tx.send(NetworkEvent::SyncCheck { packet });
+                controls.push(NetworkControl::SyncCheck(packet));
             }
-            // CID_JoinPlr/CID_PlrInfo (remote player joins): the engine's
-            // join pipeline consumes these in the shadow-diff runtime;
-            // lc-app's network session has no remote-join event yet —
-            // forwarding them (a join NetworkEvent driving
-            // Engine::join_player like ffi.rs handle_join_player) is the
-            // network-multiplayer join feature, not a control input.
-            lc_engine::ControlPacket::JoinPlayer(_)
-            | lc_engine::ControlPacket::PlayerInfo(_) => {}
+            lc_engine::ControlPacket::PlayerInfo(info) => {
+                controls.push(NetworkControl::PlayerInfo(info));
+            }
+            lc_engine::ControlPacket::JoinPlayer(join) => {
+                controls.push(NetworkControl::JoinPlayer(join));
+            }
             lc_engine::ControlPacket::Unknown { .. } => {}
         }
     }
+    // C4GameControl::Execute obtains one complete C4Control for ControlTick
+    // and executes it before simulation (src/C4GameControl.cpp:289-316).
+    // Retain the decoded order (including SyncCheck positions) and even an
+    // empty tick so "ready with no input" differs from "not ready".
+    let _ = event_tx.send(NetworkEvent::ReadyTick { tick, controls });
     Ok(())
 }
 
@@ -690,6 +754,123 @@ fn current_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sync_check(frame: i32) -> SyncCheckPacket {
+        SyncCheckPacket {
+            frame,
+            control_tick: frame,
+            random3: 0,
+            random_count: 0,
+            crew_positions_sum: 0,
+            pxs_count: 0,
+            mass_mover_index: 0,
+            object_count: 0,
+            object_enumeration_index: 0,
+            sector_shape_sum: 0,
+            by_client: 0,
+        }
+    }
+
+    #[test]
+    fn ready_frame_retains_tick_local_owner_and_decoded_order() {
+        // Network control is retrieved as one control-tick batch before it is
+        // executed (src/C4GameControl.cpp:289-316). The app event must not
+        // flatten tick or move SyncCheck out of decoded packet order.
+        let check = sync_check(17);
+        let frame = LegacyControlFrame {
+            client_id: HOST_CLIENT_ID,
+            tick: 17,
+            timestamp_ms: 99,
+            controls: vec![
+                control_packet_for_event(4, ControlEvent::Press(ControlButton::Right), 0)
+                    .expect("local control packet"),
+                lc_engine::ControlPacket::SyncCheck(check.clone()),
+                control_packet_for_event(9, ControlEvent::Press(ControlButton::Left), 1)
+                    .expect("remote control packet"),
+            ],
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        emit_frame_controls(frame, 4, &event_tx).expect("emit ready frame");
+
+        match event_rx.recv().expect("ready event") {
+            NetworkEvent::ReadyTick { tick, controls } => {
+                assert_eq!(tick, 17, "the aggregate control tick must be retained");
+                assert_eq!(
+                    controls,
+                    vec![
+                        NetworkControl::Player {
+                            owner: 4,
+                            event: ControlEvent::Press(ControlButton::Right),
+                        },
+                        NetworkControl::SyncCheck(check),
+                        NetworkControl::Player {
+                            owner: 9,
+                            event: ControlEvent::Press(ControlButton::Left),
+                        },
+                    ],
+                    "local, sync-check and remote controls stay in decoded order"
+                );
+            }
+            other => panic!("expected one ready tick, got {other:?}"),
+        }
+        assert!(
+            event_rx.try_recv().is_err(),
+            "one aggregate must produce one scheduling event"
+        );
+    }
+
+    #[test]
+    fn ready_frame_retains_admission_controls_in_decoded_order() {
+        // C4Control executes the same list order used by PreExecute, and the
+        // complete network control preserves each client's packet order
+        // (src/C4Control.cpp:73-109;
+        // src/C4GameControlNetwork.cpp:741-769).
+        let info = lc_engine::PlayerInfoControlData {
+            client_id: 3,
+            by_client: 4,
+            ..Default::default()
+        };
+        let join = lc_engine::JoinPlayerControlData {
+            at_client: 3,
+            info_id: 7,
+            by_client: 4,
+            ..Default::default()
+        };
+        let player = control_packet_for_event(7, ControlEvent::Press(ControlButton::Right), 4)
+            .expect("player control packet");
+        let frame = LegacyControlFrame {
+            client_id: HOST_CLIENT_ID,
+            tick: 23,
+            timestamp_ms: 0,
+            controls: vec![
+                lc_engine::ControlPacket::PlayerInfo(info.clone()),
+                player,
+                lc_engine::ControlPacket::JoinPlayer(join.clone()),
+            ],
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
+
+        let NetworkEvent::ReadyTick { tick, controls } =
+            event_rx.recv().expect("ready event")
+        else {
+            panic!("expected ready tick");
+        };
+        assert_eq!(tick, 23);
+        assert_eq!(
+            controls,
+            vec![
+                NetworkControl::PlayerInfo(info),
+                NetworkControl::Player {
+                    owner: 7,
+                    event: ControlEvent::Press(ControlButton::Right),
+                },
+                NetworkControl::JoinPlayer(join),
+            ]
+        );
+    }
 
     #[test]
     fn pointer_menu_control_preserves_the_cpp_data_slot() {

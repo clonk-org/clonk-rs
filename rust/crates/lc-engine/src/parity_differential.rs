@@ -70,6 +70,15 @@ fn u(v: &Value, key: &str) -> u64 {
 
 /// Assert two values are equal, panicking with a precise first-divergence report.
 fn expect_eq(section: &str, index: usize, field: &str, cpp: i64, rust: i64) {
+    if cpp != rust {
+        write_parity_diff_from_environment(
+            section,
+            index,
+            field,
+            serde_json::json!(cpp),
+            serde_json::json!(rust),
+        );
+    }
     assert_eq!(
         cpp, rust,
         "PARITY DIVERGENCE in `{section}` entry {index} field `{field}`: \
@@ -78,11 +87,98 @@ fn expect_eq(section: &str, index: usize, field: &str, cpp: i64, rust: i64) {
 }
 
 fn expect_eq_u64(section: &str, index: usize, field: &str, cpp: u64, rust: u64) {
+    if cpp != rust {
+        write_parity_diff_from_environment(
+            section,
+            index,
+            field,
+            serde_json::json!(cpp),
+            serde_json::json!(rust),
+        );
+    }
     assert_eq!(
         cpp, rust,
         "PARITY DIVERGENCE in `{section}` entry {index} field `{field}`: \
          C++ golden = {cpp}, Rust = {rust}"
     );
+}
+
+fn write_parity_diff_from_environment(
+    section: &str,
+    index: usize,
+    field: &str,
+    cpp: Value,
+    rust: Value,
+) {
+    let directory = std::env::var_os("LC_TEST_ARTIFACT_DIR")
+        .or_else(|| std::env::var_os("LC_DEV_CHECK_ARTIFACT_DIR"));
+    let Some(directory) = directory else {
+        return;
+    };
+    match write_parity_diff_artifact(
+        std::path::Path::new(&directory),
+        section,
+        index,
+        field,
+        cpp,
+        rust,
+    ) {
+        Ok(path) => eprintln!("C++/Rust parity diff: {}", path.display()),
+        Err(error) => eprintln!("failed to preserve C++/Rust parity diff: {error}"),
+    }
+}
+
+fn write_parity_diff_artifact(
+    directory: &std::path::Path,
+    section: &str,
+    index: usize,
+    field: &str,
+    cpp: Value,
+    rust: Value,
+) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(directory)?;
+    let path = directory.join("cpp-rust-diff.json");
+    let artifact = serde_json::json!({
+        "schema": "legacyclonk.cpp-rust-diff.v1",
+        "section": section,
+        "entry": index,
+        "field": field,
+        "cpp": cpp,
+        "rust": rust,
+        "golden": "parity/golden/parity_golden.json",
+        "reproduce": "cargo xtask parity verify",
+    });
+    let temporary = directory.join(format!(".cpp-rust-diff-{}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec_pretty(&artifact).map_err(std::io::Error::other)?;
+    std::fs::write(&temporary, bytes)?;
+    std::fs::rename(&temporary, &path)?;
+    Ok(path)
+}
+
+#[test]
+fn parity_divergence_artifact_is_structured_and_reproducible() {
+    let temp = tempfile::tempdir().expect("temporary artifact directory");
+    let path = write_parity_diff_artifact(
+        temp.path(),
+        "movement[gravity]",
+        7,
+        "fix_y",
+        serde_json::json!(65_536),
+        serde_json::json!(65_535),
+    )
+    .expect("parity artifact writes");
+    let artifact: Value =
+        serde_json::from_reader(std::fs::File::open(path).expect("parity artifact opens"))
+            .expect("parity artifact parses");
+
+    assert_eq!(artifact["schema"], "legacyclonk.cpp-rust-diff.v1");
+    assert_eq!(artifact["section"], "movement[gravity]");
+    assert_eq!(artifact["entry"], 7);
+    assert_eq!(artifact["field"], "fix_y");
+    assert_eq!(artifact["cpp"], 65_536);
+    assert_eq!(artifact["rust"], 65_535);
+    assert_eq!(artifact["golden"], "parity/golden/parity_golden.json");
+    assert_eq!(artifact["reproduce"], "cargo xtask parity verify");
 }
 
 /// Reconstruct the `script_value_convert` source value the oracle emitted for a

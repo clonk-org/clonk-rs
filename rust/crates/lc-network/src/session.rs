@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -10,15 +10,17 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
 
+use crate::legacy::{aggregate_control_packets_for_tick, validate_control_envelope};
 use crate::{
-    ClientId, ControlBacklog, ControlCoordinator, ControlDelivery, ControlMessage, ControlOutcome,
-    ControlPacket, MissingRange, ParticipantKind, ReadyBatch, ResyncScheduler, Tick,
-    TransportError,
+    aggregate_ready_batch, ClientId, ControlBacklog, ControlCoordinator, ControlDelivery,
+    ControlMessage, ControlOutcome, ControlPacket, MissingRange, ParticipantKind, ReadyBatch,
+    ResyncScheduler, Tick, TransportError,
 };
 
 const PROTOCOL_VERSION: u32 = 1;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT_BACKLOG_LIMIT: usize = 256;
+const HOST_CLIENT_ID: ClientId = 0;
 
 /// Broadcast identifier that mirrors the legacy `C4ClientIDAll` constant.
 pub const BROADCAST_CLIENT_ID: ClientId = u32::MAX;
@@ -406,8 +408,17 @@ async fn run_host(
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     let backlog_limit = config.backlog_limit;
+    let mut coordinator = ControlCoordinator::with_start_tick(backlog_limit, config.start_tick);
+    // The host is an active lockstep participant from session start. C++ keeps
+    // it in the ordered control-client list used by PackCompleteCtrl, which
+    // waits for every client at the requested tick
+    // (src/C4GameControlNetwork.cpp:741-769). Registering lazily on first input
+    // lets a client-first packet incorrectly complete a tick by itself.
+    coordinator
+        .register_client(HOST_CLIENT_ID)
+        .expect("new host coordinator must accept client ID 0");
     let mut state = HostState {
-        coordinator: ControlCoordinator::with_start_tick(backlog_limit, config.start_tick),
+        coordinator,
         backlog: ControlBacklog::new(backlog_limit),
         scheduler: ResyncScheduler::new(config.resync_cooldown),
         clients: BTreeMap::new(),
@@ -585,6 +596,19 @@ async fn handle_client_message(
 ) {
     match message {
         ControlMessage::Control(packet) => {
+            if packet.client_id() != client_id {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: Some(client_id),
+                        error: format!(
+                            "control packet claimed client {}, but arrived on client {client_id}'s connection",
+                            packet.client_id()
+                        ),
+                    })
+                    .await;
+                return;
+            }
             ingest_control(packet, state).await;
         }
         ControlMessage::Request { from_tick } => {
@@ -609,7 +633,9 @@ async fn handle_client_disconnected(
         .coordinator
         .remove_client(client_id)
         .unwrap_or_default();
-    state.backlog.remove_client(client_id);
+    // Completed controls are immutable history. C++ removes the client only
+    // from the future readiness set; its stored C4ClientIDAll packets remain
+    // available to HandleControlReq and runtime joins.
     state.scheduler.remove_client(client_id);
 
     let _ = state
@@ -618,13 +644,7 @@ async fn handle_client_disconnected(
         .await;
 
     for batch in ready_batches {
-        state.backlog.record_ready_batch(&batch);
-        let aggregated = aggregate_batch(&batch);
-        broadcast_control(&aggregated, state).await;
-        let _ = state
-            .event_tx
-            .send(HostEvent::Ready { packet: aggregated })
-            .await;
+        publish_ready_batch(batch, state).await;
     }
 
     if let Some(reason) = reason {
@@ -640,29 +660,23 @@ async fn handle_client_disconnected(
 
 async fn ingest_control(packet: ControlPacket, state: &mut HostState) {
     let client_id = packet.client_id();
-    if client_id != BROADCAST_CLIENT_ID {
-        if let Err(error) = state.coordination_register(client_id) {
-            let _ = state
-                .event_tx
-                .send(HostEvent::TransportError {
-                    client_id: Some(client_id),
-                    error: error.to_string(),
-                })
-                .await;
-            return;
-        }
+    // Validate everything PackCompleteCtrl needs before the coordinator
+    // consumes contributions and advances its tick. A malformed frame must
+    // not create a permanent hole in the lockstep stream.
+    if let Err(error) = validate_control_envelope(&packet) {
+        let _ = state
+            .event_tx
+            .send(HostEvent::TransportError {
+                client_id: Some(client_id),
+                error: format!("invalid control packet: {error}"),
+            })
+            .await;
+        return;
     }
-
     match state.coordinator.ingest(packet) {
         Ok(ControlOutcome { ready, missing, .. }) => {
             for batch in ready {
-                state.backlog.record_ready_batch(&batch);
-                let aggregated = aggregate_batch(&batch);
-                broadcast_control(&aggregated, state).await;
-                let _ = state
-                    .event_tx
-                    .send(HostEvent::Ready { packet: aggregated })
-                    .await;
+                publish_ready_batch(batch, state).await;
             }
             if !missing.is_empty() {
                 schedule_missing(missing, state);
@@ -701,11 +715,70 @@ async fn request_missing_controls(state: &mut HostState) {
 
 async fn fulfill_resync_request(client_id: ClientId, from_tick: Tick, state: &mut HostState) {
     let resend = state.backlog.fulfill_request(from_tick);
-    if let Some(client) = state.clients.get(&client_id) {
-        for packet in resend {
-            let _ = client.outbound.send(ControlMessage::Control(packet)).await;
+    let Some(outbound) = state
+        .clients
+        .get(&client_id)
+        .map(|client| client.outbound.clone())
+    else {
+        return;
+    };
+
+    let mut packets_by_tick = BTreeMap::<Tick, Vec<ControlPacket>>::new();
+    for packet in resend {
+        packets_by_tick
+            .entry(packet.tick())
+            .or_default()
+            .push(packet);
+    }
+    for (tick, packets) in packets_by_tick {
+        // A client requesting old host control needs the same C4ClientIDAll
+        // packet used during live play. C++ HandleControlReq sends the stored
+        // complete control packet for every contiguous tick
+        // (src/C4GameControlNetwork.cpp:531-544).
+        let aggregated = match aggregate_control_packets_for_tick(tick, &packets) {
+            Ok(packet) => packet,
+            Err(error) => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: Some(client_id),
+                        error: format!("failed to aggregate resync tick {tick}: {error}"),
+                    })
+                    .await;
+                return;
+            }
+        };
+        if outbound
+            .send(ControlMessage::Control(aggregated))
+            .await
+            .is_err()
+        {
+            return;
         }
     }
+}
+
+async fn publish_ready_batch(batch: ReadyBatch, state: &mut HostState) {
+    let aggregated = match aggregate_ready_batch(&batch) {
+        Ok(packet) => packet,
+        Err(error) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: None,
+                    error: format!("failed to aggregate ready tick {}: {error}", batch.tick()),
+                })
+                .await;
+            return;
+        }
+    };
+
+    state.backlog.record_ready_batch(&batch);
+    broadcast_control(&aggregated, state).await;
+    let _ = state
+        .event_tx
+        .send(HostEvent::Ready { packet: aggregated })
+        .await;
 }
 
 async fn broadcast_control(packet: &ControlPacket, state: &mut HostState) {
@@ -770,22 +843,6 @@ async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
         .await;
 }
 
-fn aggregate_packets_for_tick(packets: &[ControlPacket], tick: Tick) -> ControlPacket {
-    let mut payload = Vec::new();
-    let mut timestamp = 0;
-    for packet in packets {
-        payload.extend_from_slice(packet.payload());
-        timestamp = timestamp.max(packet.timestamp_ms());
-    }
-    ControlPacket::builder(BROADCAST_CLIENT_ID, tick)
-        .timestamp_ms(timestamp)
-        .payload(payload)
-}
-
-fn aggregate_batch(batch: &ReadyBatch) -> ControlPacket {
-    aggregate_packets_for_tick(batch.packets(), batch.tick())
-}
-
 async fn replay_backlog_to_client(
     backlog: &ControlBacklog,
     from_tick: Tick,
@@ -793,7 +850,12 @@ async fn replay_backlog_to_client(
 ) -> Result<(), String> {
     let replay = backlog.packets_from(from_tick);
     for (tick, packets) in replay {
-        let aggregated = aggregate_packets_for_tick(&packets, tick);
+        // Runtime join reuses the same complete-packet construction as live
+        // readiness; C++ retrieves/sends its stored C4ClientIDAll packet rather
+        // than concatenating serialized per-client frames
+        // (src/C4GameControlNetwork.cpp:531-544,741-777).
+        let aggregated = aggregate_control_packets_for_tick(tick, &packets)
+            .map_err(|error| format!("failed to aggregate backlog tick {tick}: {error}"))?;
         outbound
             .send(ControlMessage::Control(aggregated))
             .await
@@ -941,6 +1003,8 @@ async fn run_client_loop<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut backlog = ControlBacklog::new(CLIENT_BACKLOG_LIMIT);
+    let mut received_controls = BTreeSet::<(ClientId, Tick)>::new();
+    let mut highest_received_tick = None::<Tick>;
 
     'outer: loop {
         tokio::select! {
@@ -994,6 +1058,17 @@ async fn run_client_loop<S>(
             result = transport.read_message() => {
                 match result {
                     Ok(ControlMessage::Control(packet)) => {
+                        let key = (packet.client_id(), packet.tick());
+                        if !received_controls.insert(key) {
+                            continue;
+                        }
+                        highest_received_tick = Some(
+                            highest_received_tick.map_or(packet.tick(), |tick| tick.max(packet.tick())),
+                        );
+                        if let Some(highest) = highest_received_tick {
+                            let threshold = highest.saturating_sub(CLIENT_BACKLOG_LIMIT as Tick);
+                            received_controls.retain(|(_, tick)| *tick >= threshold);
+                        }
                         let _ = event_tx.send(ClientEvent::Ready { packet }).await;
                     }
                     Ok(ControlMessage::Packet { delivery, data }) => {
@@ -1035,7 +1110,10 @@ async fn run_client_loop<S>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ParticipantKind;
+    use crate::{
+        decode_control_packet, encode_control_packet, LegacyControlFrame, ParticipantKind,
+    };
+    use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData};
     use std::future::{pending, ready};
     use std::time::Duration;
     use tokio::io::duplex;
@@ -1098,7 +1176,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn host_emits_ready_for_single_client() {
+    async fn host_emits_one_decodable_ready_packet_for_host_and_client() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
@@ -1121,10 +1199,13 @@ mod tests {
         let mut client_events = client.take_event_receiver();
         drain_initial_exec_sync(&mut client_events).await;
 
-        let packet = ControlPacket::builder(1, 0)
-            .timestamp_ms(0)
-            .payload(vec![0x01, 0x02, 0x03]);
-        client.submit_control(packet).await.expect("submit control");
+        client
+            .submit_control(legacy_packet(1, 0, 0x12))
+            .await
+            .expect("submit client control");
+        host.submit_local_control(legacy_packet(0, 0, 0x34))
+            .await
+            .expect("submit host control");
 
         let mut events = host.take_event_receiver();
         let mut saw_join = false;
@@ -1140,7 +1221,8 @@ mod tests {
                     HostEvent::Ready { packet } => {
                         saw_ready = true;
                         assert_eq!(packet.tick(), 0);
-                        assert_eq!(packet.payload(), &[0x01, 0x02, 0x03]);
+                        assert_eq!(packet.client_id(), BROADCAST_CLIENT_ID);
+                        assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
                     }
                     _ => {}
                 }
@@ -1152,6 +1234,123 @@ mod tests {
 
         assert!(saw_join, "host did not report client join");
         assert!(saw_ready, "host did not emit ready packet");
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_rejects_a_client_control_that_claims_another_client_slot() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_client(
+            addr,
+            ClientConfig::new("spoof-check", ParticipantKind::Player),
+        )
+        .await
+        .expect("connect client");
+        let mut client_events = client.take_event_receiver();
+        drain_initial_exec_sync(&mut client_events).await;
+
+        client
+            .submit_control(legacy_packet(HOST_CLIENT_ID, 0, 0x66))
+            .await
+            .expect("submit spoofed host control");
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x11))
+            .await
+            .expect("submit real host control");
+        client
+            .submit_control(legacy_packet(client.client_id(), 0, 0x22))
+            .await
+            .expect("submit real client control");
+
+        let mut saw_rejection = false;
+        let ready = loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host event wait")
+            {
+                Some(HostEvent::TransportError {
+                    client_id: Some(rejected_id),
+                    error,
+                }) => {
+                    assert_eq!(rejected_id, client.client_id());
+                    assert!(error.contains("claimed client 0"));
+                    saw_rejection = true;
+                }
+                Some(HostEvent::Ready { packet }) => break packet,
+                Some(_) => continue,
+                None => panic!("host event stream ended before ready"),
+            }
+        };
+        assert!(saw_rejection, "spoofed contribution was not rejected");
+        assert_eq!(
+            control_commands(&ready),
+            vec![0x11, 0x22],
+            "the authenticated host slot must not be replaced by client data"
+        );
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn malformed_contribution_does_not_consume_the_synchronized_tick() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_client(
+            addr,
+            ClientConfig::new("validation-check", ParticipantKind::Player),
+        )
+        .await
+        .expect("connect client");
+        let mut client_events = client.take_event_receiver();
+        drain_initial_exec_sync(&mut client_events).await;
+
+        client
+            .submit_control(legacy_packet(client.client_id(), 0, 0x22))
+            .await
+            .expect("submit valid client control");
+        let valid_host = legacy_packet(HOST_CLIENT_ID, 0, 0x11);
+        let mut malformed_payload = valid_host.payload().to_vec();
+        *malformed_payload.last_mut().expect("control terminator") = 0x7f;
+        let malformed_host = ControlPacket::builder(HOST_CLIENT_ID, 0).payload(malformed_payload);
+        host.submit_local_control(malformed_host)
+            .await
+            .expect("submit malformed host control");
+        host.submit_local_control(valid_host)
+            .await
+            .expect("replace malformed host control");
+
+        let mut saw_validation_error = false;
+        let ready = loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host event wait")
+            {
+                Some(HostEvent::TransportError { error, .. }) => {
+                    assert!(error.contains("PID_NONE"));
+                    saw_validation_error = true;
+                }
+                Some(HostEvent::Ready { packet }) => break packet,
+                Some(_) => continue,
+                None => panic!("host event stream ended before ready"),
+            }
+        };
+        assert!(saw_validation_error, "malformed input was not diagnosed");
+        assert_eq!(control_commands(&ready), vec![0x11, 0x22]);
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
@@ -1181,13 +1380,12 @@ mod tests {
         let mut client_events = client.take_event_receiver();
         drain_initial_exec_sync(&mut client_events).await;
 
-        submit_control_pair(&mut host, &client, 0, vec![0xAA], vec![0x11]).await;
+        submit_control_pair(&mut host, &client, 0, 0xAA, 0x11).await;
 
         let first_host_ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(first_host_ready.tick(), 0);
 
-        let first_client_ready =
-            wait_for_client_ready(&mut client_events, EVENT_WAIT).await;
+        let first_client_ready = wait_for_client_ready(&mut client_events, EVENT_WAIT).await;
         assert_eq!(first_client_ready.tick(), 0);
 
         client.shutdown().await.expect("client shutdown");
@@ -1200,13 +1398,12 @@ mod tests {
         let mut client_beta_events = client_beta.take_event_receiver();
         drain_initial_exec_sync(&mut client_beta_events).await;
 
-        submit_control_pair(&mut host, &client_beta, 1, vec![0xBB], vec![0x22]).await;
+        submit_control_pair(&mut host, &client_beta, 1, 0xBB, 0x22).await;
 
         let second_host_ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(second_host_ready.tick(), 1);
 
-        let second_client_ready =
-            wait_for_client_ready(&mut client_beta_events, EVENT_WAIT).await;
+        let second_client_ready = wait_for_client_ready(&mut client_beta_events, EVENT_WAIT).await;
         assert_eq!(second_client_ready.tick(), 1);
 
         client_beta
@@ -1242,14 +1439,12 @@ mod tests {
         let mut client_events = client.take_event_receiver();
         drain_initial_exec_sync(&mut client_events).await;
 
-        submit_control_pair(&mut host, &client, 0, vec![0xA0], vec![0xB0]).await;
+        submit_control_pair(&mut host, &client, 0, 0xA0, 0xB0).await;
         let ready0 = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready0.tick(), 0);
-        assert_eq!(ready0.payload(), &[0xA0, 0xB0]);
+        assert_eq!(control_commands(&ready0), vec![0xA0, 0xB0]);
 
-        let host_packet = ControlPacket::builder(0, 1)
-            .timestamp_ms(0)
-            .payload(vec![0xC0]);
+        let host_packet = legacy_packet(0, 1, 0xC0);
         host.submit_local_control(host_packet)
             .await
             .expect("host submit control");
@@ -1259,7 +1454,7 @@ mod tests {
 
         let ready1 = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready1.tick(), 1);
-        assert_eq!(ready1.payload(), &[0xC0]);
+        assert_eq!(control_commands(&ready1), vec![0xC0]);
 
         host.shutdown().await.expect("host shutdown");
     }
@@ -1288,10 +1483,17 @@ mod tests {
         let mut alpha_events = client_alpha.take_event_receiver();
         drain_initial_exec_sync(&mut alpha_events).await;
 
-        submit_control_pair(&mut host, &client_alpha, 0, vec![0xA1], vec![0xB2]).await;
+        submit_control_pair(&mut host, &client_alpha, 0, 0xA1, 0xB2).await;
         let ready_packet = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready_packet.tick(), 0);
         let expected_payload = ready_packet.payload().to_vec();
+
+        // Completed controls stay available after their originating client
+        // departs. C++ stores the complete C4ClientIDAll packet and serves it
+        // from HandleControlReq without rewriting history when a client is
+        // removed (src/C4GameControlNetwork.cpp:531-544,615-629).
+        client_alpha.shutdown().await.expect("alpha shutdown");
+        wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
 
         let mut client_beta =
             connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
@@ -1328,11 +1530,10 @@ mod tests {
         );
         assert_eq!(backlog_packets[0].tick(), ready_packet.tick());
         assert_eq!(backlog_packets[0].payload(), expected_payload);
+        assert_eq!(backlog_packets[0].client_id(), BROADCAST_CLIENT_ID);
+        assert_eq!(control_commands(&backlog_packets[0]), vec![0xA1, 0xB2]);
 
         client_beta.shutdown().await.expect("beta shutdown");
-        wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
-
-        client_alpha.shutdown().await.expect("alpha shutdown");
         wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
 
         host.shutdown().await.expect("host shutdown");
@@ -1406,27 +1607,93 @@ mod tests {
         client_handle.await.expect("client loop exited");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_emits_a_complete_tick_only_once_when_host_retransmits_it() {
+        let (client_stream, host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_handle = tokio::spawn(super::run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let complete = legacy_packet(BROADCAST_CLIENT_ID, 5, 0x44);
+
+        host_transport
+            .send_message(ControlMessage::Control(complete.clone()))
+            .await
+            .expect("send complete tick");
+        host_transport
+            .send_message(ControlMessage::Control(complete.clone()))
+            .await
+            .expect("retransmit complete tick");
+
+        match timeout(EVENT_WAIT, event_rx.recv())
+            .await
+            .expect("ready wait")
+        {
+            Some(ClientEvent::Ready { packet }) => assert_eq!(packet, complete),
+            other => panic!("expected one ready event, got {other:?}"),
+        }
+        assert!(
+            timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .is_err(),
+            "a retransmitted complete packet must not execute twice"
+        );
+
+        shutdown_tx.send(()).ok();
+        client_handle.await.expect("client loop exited");
+    }
+
     async fn submit_control_pair(
         host: &mut HostHandle,
         client: &ClientHandle,
         tick: Tick,
-        host_payload: Vec<u8>,
-        client_payload: Vec<u8>,
+        host_command: i32,
+        client_command: i32,
     ) {
-        let host_packet = ControlPacket::builder(0, tick)
-            .timestamp_ms(0)
-            .payload(host_payload);
+        let host_packet = legacy_packet(0, tick, host_command);
         host.submit_local_control(host_packet)
             .await
             .expect("host submit control");
 
-        let client_packet = ControlPacket::builder(client.client_id(), tick)
-            .timestamp_ms(0)
-            .payload(client_payload);
+        let client_packet = legacy_packet(client.client_id(), tick, client_command);
         client
             .submit_control(client_packet)
             .await
             .expect("client submit control");
+    }
+
+    fn legacy_packet(client_id: ClientId, tick: Tick, command: i32) -> ControlPacket {
+        encode_control_packet(&LegacyControlFrame {
+            client_id,
+            tick,
+            timestamp_ms: 0,
+            controls: vec![EngineControlPacket::PlayerControl(PlayerControlData {
+                player: i32::try_from(client_id).unwrap_or(i32::MAX),
+                command,
+                data: command,
+                by_client: i32::try_from(client_id).unwrap_or(i32::MAX),
+            })],
+        })
+        .expect("test legacy control encodes")
+    }
+
+    fn control_commands(packet: &ControlPacket) -> Vec<i32> {
+        decode_control_packet(packet)
+            .expect("complete control decodes")
+            .controls
+            .into_iter()
+            .map(|control| match control {
+                EngineControlPacket::PlayerControl(control) => control.command,
+                other => panic!("expected player control, got {other:?}"),
+            })
+            .collect()
     }
 
     /// Consumes client events up to and including the initial exec sync that

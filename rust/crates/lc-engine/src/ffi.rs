@@ -3,7 +3,7 @@ use crate::rng::LcgRng;
 use crate::{
     control::{
         parse_control_ini, ControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
-        PlayerControlData,
+        JoinPlayerSource, LegacyCString, PlayerControlData,
     },
     ActionState, CommandDirection, CommandStackSnapshot, CrewRole, CrewSelectionState, Direction,
     DrawTransform, EffectState, Engine, EngineState, EnvironmentFrame, FloatVector2,
@@ -20,6 +20,17 @@ use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::ptr;
 use std::slice;
+
+#[cfg(unix)]
+fn legacy_filename_path(filename: &LegacyCString) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    PathBuf::from(std::ffi::OsString::from_vec(filename.as_bytes().to_vec()))
+}
+
+#[cfg(not(unix))]
+fn legacy_filename_path(filename: &LegacyCString) -> PathBuf {
+    PathBuf::from(filename.to_string_lossy().as_ref())
+}
 
 use crate::math::{itofix, C4Fixed, FixedVec2};
 
@@ -446,7 +457,7 @@ impl RuntimeHandle {
         // was built from, C4PlayerInfo::SetAsUserPlayer).
         let info = self.player_infos.get(&join.info_id).cloned();
         if let Some(info) = info.as_ref() {
-            if info.script_player || info.no_scenario_init {
+            if info.is_script_player() || info.no_scenario_init() {
                 // Script players skip ScenarioInit (C4Player.cpp:327-343);
                 // not ported yet.
                 tracing::warn!(
@@ -458,27 +469,28 @@ impl RuntimeHandle {
         }
 
         let file = {
-            let path = PathBuf::from(&join.filename);
+            let path = legacy_filename_path(&join.filename);
             if !join.filename.is_empty() && path.exists() {
                 crate::player_file::PlayerFile::load_from_path(&path)
                     .map_err(|error| format!("player file {} failed: {error}", path.display()))
                     .ok()
-            } else if !join.player_data.is_empty() {
-                lc_resources::Group::from_memory(
-                    PathBuf::from(&join.filename),
-                    join.player_data.clone(),
-                )
-                .and_then(|group| {
-                    crate::player_file::PlayerFile::load(&group)
-                        .map_err(|error| lc_resources::GroupError::InvalidGroup(error.to_string()))
-                })
-                .map_err(|error| {
-                    tracing::warn!(%error, "embedded PlrData failed to parse");
-                    error
-                })
-                .ok()
             } else {
-                None
+                match &join.source {
+                    JoinPlayerSource::Embedded(player_data) if !player_data.is_empty() => {
+                        lc_resources::Group::from_memory(path, player_data.clone())
+                            .and_then(|group| {
+                                crate::player_file::PlayerFile::load(&group).map_err(|error| {
+                                    lc_resources::GroupError::InvalidGroup(error.to_string())
+                                })
+                            })
+                            .map_err(|error| {
+                                tracing::warn!(%error, "embedded PlrData failed to parse");
+                                error
+                            })
+                            .ok()
+                    }
+                    JoinPlayerSource::Embedded(_) | JoinPlayerSource::Resource(_) => None,
+                }
             }
         };
         let (
@@ -516,7 +528,7 @@ impl RuntimeHandle {
 
         let name = info
             .as_ref()
-            .map(|info| info.name.clone())
+            .map(|info| info.name.to_string_lossy().into_owned())
             .filter(|name| !name.is_empty())
             .unwrap_or(file_name);
         let color_dw = info

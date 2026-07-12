@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "scenario": "Tutorial.c4f/Tutorial01.c4s",
+  "seed": 0,
+  "joins": [
+    {
+      "frame": 0,
+      "ordinal": 0,
+      "expected_owner": 0,
+      "name": "Replay idle",
+      "player_info_id": 0,
+      "score": 0,
+      "total_playing_time": 0,
+      "team": null,
+      "color_dw": 16711680,
+      "pref_color": 0,
+      "pref_position": 0,
+      "crew": [],
+      "control_style": true,
+      "auto_context_menu": true,
+      "startup_player_count": 1
+    }
+  ],
+  "inputs": [],
+  "render": {
+    "width": 640,
+    "height": 480,
+    "capture_frames": []
+  },
+  "stop_frame": 2,
+  "checkpoints": [
+    {
+      "frame": 0,
+      "snapshot_hash": "03a72cd3d9c1e027"
+    },
+    {
+      "frame": 2,
+      "snapshot_hash": "c653a8ac6e7e10f3"
+    }
+  ]
+}

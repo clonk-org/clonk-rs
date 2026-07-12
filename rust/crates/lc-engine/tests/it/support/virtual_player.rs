@@ -1,3 +1,4 @@
+use super::dev_feedback::{DevFeedbackCapture, ReplayInputV1, ScenarioReplayV1};
 use lc_engine::{
     Engine, EngineError, ObjectId, ObjectMenuState, COM_CURSOR_TOGGLE, COM_DIG, COM_DOWN, COM_LEFT,
     COM_RELEASE_OFFSET, COM_RIGHT, COM_THROW, COM_UP,
@@ -5,6 +6,7 @@ use lc_engine::{
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 const RECENT_STATE_LIMIT: usize = 6;
 const RECENT_ID_LIMIT: usize = 8;
@@ -20,6 +22,7 @@ const DOUBLE_CLICK_TICKS: u32 = 10;
 pub struct VirtualPlayer<'engine> {
     engine: &'engine mut Engine,
     owner: i32,
+    feedback: Option<DevFeedbackCapture>,
 }
 
 #[derive(Debug)]
@@ -37,6 +40,8 @@ pub enum VirtualPlayerError {
         max_ticks: u32,
         frame: u64,
         diagnostics: String,
+        artifacts: Option<PathBuf>,
+        artifact_warning: Option<String>,
     },
     MenuClosed {
         owner: i32,
@@ -80,11 +85,22 @@ impl fmt::Display for VirtualPlayerError {
                 max_ticks,
                 frame,
                 diagnostics,
-            } => write!(
-                formatter,
-                "timed out after {max_ticks} ticks waiting for `{milestone}` at frame {frame}; \
-                 {diagnostics}"
-            ),
+                artifacts,
+                artifact_warning,
+            } => {
+                write!(
+                    formatter,
+                    "timed out after {max_ticks} ticks waiting for `{milestone}` at frame {frame}; \
+                     {diagnostics}"
+                )?;
+                if let Some(path) = artifacts {
+                    write!(formatter, "; artifacts: {}", path.display())?;
+                }
+                if let Some(warning) = artifact_warning {
+                    write!(formatter, "; artifact capture failed: {warning}")?;
+                }
+                Ok(())
+            }
             Self::MenuClosed { owner, frame } => {
                 write!(
                     formatter,
@@ -125,9 +141,45 @@ impl From<EngineError> for VirtualPlayerError {
     }
 }
 
+impl VirtualPlayerError {
+    pub fn artifact_dir(&self) -> Option<&Path> {
+        match self {
+            Self::Timeout { artifacts, .. } => artifacts.as_deref(),
+            _ => None,
+        }
+    }
+}
+
 impl<'engine> VirtualPlayer<'engine> {
     pub fn new(engine: &'engine mut Engine, owner: i32) -> Self {
-        Self { engine, owner }
+        Self {
+            engine,
+            owner,
+            feedback: None,
+        }
+    }
+
+    /// Enable deterministic input recording and timeout artifact capture.
+    /// The ordinary constructor remains allocation-free for tests that do
+    /// not need replay forensics.
+    pub fn with_dev_feedback(
+        engine: &'engine mut Engine,
+        owner: i32,
+        replay: ScenarioReplayV1,
+        artifact_label: impl Into<String>,
+    ) -> Self {
+        let feedback = DevFeedbackCapture::new(replay, artifact_label, engine);
+        Self {
+            engine,
+            owner,
+            feedback: Some(feedback),
+        }
+    }
+
+    pub fn recorded_inputs(&self) -> Option<&[ReplayInputV1]> {
+        self.feedback
+            .as_ref()
+            .map(DevFeedbackCapture::recorded_inputs)
     }
 
     /// Read-only access for milestone predicates and assertions. The harness
@@ -156,6 +208,7 @@ impl<'engine> VirtualPlayer<'engine> {
     pub fn press(&mut self, control: u8) -> Result<(), VirtualPlayerError> {
         self.validate_control(control)?;
         self.engine.player_in_com(self.owner, control, 0)?;
+        self.record_input(control, 0);
         Ok(())
     }
 
@@ -165,6 +218,7 @@ impl<'engine> VirtualPlayer<'engine> {
         self.validate_control(control)?;
         self.engine
             .player_in_com(self.owner, control + COM_RELEASE_OFFSET, 0)?;
+        self.record_input(control + COM_RELEASE_OFFSET, 0);
         Ok(())
     }
 
@@ -184,7 +238,7 @@ impl<'engine> VirtualPlayer<'engine> {
 
     pub fn ticks(&mut self, count: u32) -> Result<(), VirtualPlayerError> {
         for _ in 0..count {
-            self.engine.tick()?;
+            self.tick_once()?;
         }
         Ok(())
     }
@@ -208,9 +262,19 @@ impl<'engine> VirtualPlayer<'engine> {
         reached: impl FnMut(&Engine) -> bool,
     ) -> Result<u32, VirtualPlayerError> {
         self.press(control)?;
-        let outcome = self.wait_until(milestone, max_ticks, reached);
+        let outcome = self.wait_until_without_artifacts(milestone.into(), max_ticks, reached);
         let release = self.release(control);
-        outcome.and_then(|elapsed| release.map(|()| elapsed))
+        match outcome {
+            Ok(elapsed) => release.map(|()| elapsed),
+            Err(mut error) => {
+                // Preserve the milestone failure as the primary result, just
+                // as before, but defer capture until the matching key-up has
+                // traversed `player_in_com` and entered the replay tape.
+                let _ = release;
+                self.capture_timeout_artifact(&mut error);
+                Err(error)
+            }
+        }
     }
 
     /// Tick until a read-only milestone is true, checking before the first
@@ -222,13 +286,28 @@ impl<'engine> VirtualPlayer<'engine> {
         mut reached: impl FnMut(&Engine) -> bool,
     ) -> Result<u32, VirtualPlayerError> {
         let milestone = milestone.into();
+        match self.wait_until_without_artifacts(milestone, max_ticks, &mut reached) {
+            Ok(elapsed) => Ok(elapsed),
+            Err(mut error) => {
+                self.capture_timeout_artifact(&mut error);
+                Err(error)
+            }
+        }
+    }
+
+    fn wait_until_without_artifacts(
+        &mut self,
+        milestone: String,
+        max_ticks: u32,
+        mut reached: impl FnMut(&Engine) -> bool,
+    ) -> Result<u32, VirtualPlayerError> {
         if reached(self.engine) {
             return Ok(0);
         }
         let mut recent = VecDeque::with_capacity(RECENT_STATE_LIMIT);
         self.remember_observable_state(&mut recent);
         for elapsed in 1..=max_ticks {
-            self.engine.tick()?;
+            self.tick_once()?;
             self.remember_observable_state(&mut recent);
             if reached(self.engine) {
                 return Ok(elapsed);
@@ -239,6 +318,8 @@ impl<'engine> VirtualPlayer<'engine> {
             max_ticks,
             frame: self.engine.frame(),
             diagnostics: self.timeout_diagnostics(recent),
+            artifacts: None,
+            artifact_warning: None,
         })
     }
 
@@ -350,6 +431,41 @@ impl<'engine> VirtualPlayer<'engine> {
             Ok(())
         } else {
             Err(VirtualPlayerError::InvalidControl { control })
+        }
+    }
+
+    fn record_input(&mut self, command: u8, data: i32) {
+        if let Some(feedback) = &mut self.feedback {
+            feedback.record_input(self.engine.frame(), self.owner, command, data);
+        }
+    }
+
+    fn tick_once(&mut self) -> Result<(), VirtualPlayerError> {
+        if let Some(feedback) = &mut self.feedback {
+            feedback.before_tick(self.engine);
+        }
+        self.engine.tick()?;
+        Ok(())
+    }
+
+    fn capture_timeout_artifact(&self, error: &mut VirtualPlayerError) {
+        let VirtualPlayerError::Timeout {
+            milestone,
+            max_ticks,
+            diagnostics,
+            artifacts,
+            artifact_warning,
+            ..
+        } = error
+        else {
+            return;
+        };
+        let Some(feedback) = &self.feedback else {
+            return;
+        };
+        match feedback.capture_timeout(self.engine, milestone, *max_ticks, diagnostics) {
+            Ok(path) => *artifacts = path,
+            Err(error) => *artifact_warning = Some(error.to_string()),
         }
     }
 

@@ -142,6 +142,11 @@ impl PlayerFile {
         let group = Group::open(path)?;
         Self::load(&group)
     }
+
+    pub fn load_from_bytes(path: std::path::PathBuf, data: Vec<u8>) -> Result<Self, ScenarioError> {
+        let group = Group::from_memory(path, data)?;
+        Self::load(&group)
+    }
 }
 
 /// `C4ObjectInfoList::Load` (C4ObjectInfoList.cpp:56-83): all `*.c4i`
@@ -349,5 +354,24 @@ mod tests {
         let player = PlayerFile::load_from_path(&root).expect("player file loads");
 
         assert!(player.pref_auto_context_menu);
+    }
+
+    #[test]
+    fn loads_cpp_packed_player_data_from_memory() {
+        // Remote C4ControlJoinPlayer saves its PlrData blob as a temporary
+        // .c4p and C4Player::Load opens that packed group
+        // (src/C4Control.cpp:731-744; src/C4Player.cpp:267-284,1089-1106).
+        let bytes = include_bytes!("../tests/fixtures/embedded_player.c4p").to_vec();
+
+        let player =
+            PlayerFile::load_from_bytes(std::path::PathBuf::from("embedded_player.c4p"), bytes)
+                .expect("C++-packed PlrData loads");
+
+        assert_eq!(player.name, "Embedded Tyler");
+        assert_eq!((player.score, player.total_playing_time), (42, 99));
+        assert_eq!((player.pref_color, player.pref_position), (3, 2));
+        assert_eq!(player.pref_color_dw, 1_122_867);
+        assert!(player.pref_control_style);
+        assert!(!player.pref_auto_context_menu);
     }
 }

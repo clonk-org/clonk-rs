@@ -47,30 +47,200 @@ pub struct PlayerControlData {
     pub by_client: i32,
 }
 
+/// NUL-terminated legacy wire string, stored without its terminator.
+///
+/// `StdCompilerBinRead::String` preserves arbitrary bytes through the first
+/// NUL (src/StdCompiler.cpp:194-210), so this type deliberately does not
+/// require UTF-8.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct LegacyCString {
+    bytes: Vec<u8>,
+}
+
+impl LegacyCString {
+    /// Construct a wire string body. Interior NUL would terminate the C++
+    /// value early and is therefore rejected.
+    pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
+        (!bytes.contains(&0)).then_some(Self { bytes })
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    pub fn to_str(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.bytes)
+    }
+
+    pub fn to_string_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.bytes)
+    }
+}
+
+pub const NETWORK_RESOURCE_TYPE_NULL: u8 = 0;
+pub const NETWORK_RESOURCE_DEFAULT_CHUNK_SIZE: u32 = 100 * 1024;
+
+/// Full synchronized `C4Network2ResCore` value
+/// (`src/C4Network2Res.h:58-94`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkResourceCore {
+    pub resource_type: u8,
+    pub id: i32,
+    pub derived_id: i32,
+    pub loadable: bool,
+    pub file_size: u32,
+    pub file_crc: u32,
+    pub chunk_size: u32,
+    pub contents_crc: u32,
+    pub file_sha: Option<[u8; 20]>,
+    pub filename: LegacyCString,
+    pub author: LegacyCString,
+}
+
+impl Default for NetworkResourceCore {
+    fn default() -> Self {
+        // C4Network2ResCore::C4Network2ResCore
+        // (src/C4Network2Res.cpp:75-80).
+        Self {
+            resource_type: NETWORK_RESOURCE_TYPE_NULL,
+            id: -1,
+            derived_id: -1,
+            loadable: false,
+            file_size: u32::MAX,
+            file_crc: u32::MAX,
+            chunk_size: NETWORK_RESOURCE_DEFAULT_CHUNK_SIZE,
+            contents_crc: u32::MAX,
+            file_sha: None,
+            filename: LegacyCString::default(),
+            author: LegacyCString::default(),
+        }
+    }
+}
+
+/// The one `ByRes`-selected payload branch serialized by
+/// `C4ControlJoinPlayer::CompileFunc` (`src/C4Control.cpp:852-863`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinPlayerSource {
+    Embedded(Vec<u8>),
+    Resource(NetworkResourceCore),
+}
+
 /// `C4ControlJoinPlayer` (CompileFunc at C4Control.cpp:852-863).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinPlayerControlData {
-    pub filename: String,
+    pub filename: LegacyCString,
     pub at_client: i32,
     pub info_id: i32,
-    pub by_res: bool,
-    /// The raw player file (`PlrData`, a StdBuf of the .c4p bytes) for
-    /// non-resource joins.
-    pub player_data: Vec<u8>,
+    pub source: JoinPlayerSource,
+    pub by_client: i32,
 }
 
-/// One `C4PlayerInfo` of a `C4ClientPlayerInfos`
-/// (C4PlayerInfo.cpp:177-268).
+impl Default for JoinPlayerControlData {
+    fn default() -> Self {
+        Self {
+            filename: LegacyCString::default(),
+            at_client: -1,
+            info_id: -1,
+            source: JoinPlayerSource::Embedded(Vec::new()),
+            by_client: -1,
+        }
+    }
+}
+
+pub const CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS: u32 = 1 << 0;
+pub const CLIENT_PLAYER_INFO_FLAG_UPDATED: u32 = 1 << 1;
+pub const CLIENT_PLAYER_INFO_FLAG_INITIAL: u32 = 1 << 2;
+
+pub const PLAYER_INFO_TYPE_NONE: u8 = 0;
+pub const PLAYER_INFO_TYPE_USER: u8 = 1;
+pub const PLAYER_INFO_TYPE_SCRIPT: u8 = 2;
+
+pub const PLAYER_INFO_FLAG_JOINED: u16 = 1 << 0;
+pub const PLAYER_INFO_FLAG_REMOVED: u16 = 1 << 2;
+pub const PLAYER_INFO_FLAG_HAS_RESOURCE: u16 = 1 << 3;
+pub const PLAYER_INFO_FLAG_IN_SCENARIO_FILE: u16 = 1 << 6;
+pub const PLAYER_INFO_FLAG_SAVEGAME_JOIN: u16 = 1 << 7;
+pub const PLAYER_INFO_FLAG_DISCONNECTED: u16 = 1 << 8;
+pub const PLAYER_INFO_FLAG_WON: u16 = 1 << 9;
+pub const PLAYER_INFO_FLAG_VOTED_OUT: u16 = 1 << 10;
+pub const PLAYER_INFO_FLAG_ATTRIBUTES_FIXED: u16 = 1 << 11;
+pub const PLAYER_INFO_FLAG_NO_SCENARIO_INIT: u16 = 1 << 12;
+pub const PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK: u16 = 1 << 13;
+pub const PLAYER_INFO_FLAG_INVISIBLE: u16 = 1 << 14;
+
+/// Complete synchronized `C4PlayerInfo` value serialized inside a
+/// `C4ClientPlayerInfos` (`src/C4PlayerInfo.cpp:177-268`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlPlayerInfoEntry {
+    pub name: LegacyCString,
+    pub forced_name: LegacyCString,
+    pub filename: LegacyCString,
+    pub flags: u16,
     pub id: i32,
-    pub name: String,
-    pub team: i32,
+    pub player_type: u8,
     pub color: u32,
-    /// `Type=Script` (C4PT_Script).
-    pub script_player: bool,
-    /// `NoScenarioInit` flag (PIF_NoScenarioInit).
-    pub no_scenario_init: bool,
+    pub original_color: u32,
+    pub savegame_player: i32,
+    pub team: i32,
+    pub auth_id: LegacyCString,
+    pub game_number: i32,
+    pub game_join_frame: i32,
+    pub game_part_frame: i32,
+    pub extra_data: [u8; 4],
+    pub league_account: LegacyCString,
+    pub league_score: i32,
+    pub league_rank: i32,
+    pub league_rank_symbol: i32,
+    pub league_projected_gain: i32,
+    pub clan_tag: LegacyCString,
+    pub league_performance: i32,
+    pub league_progress_data: LegacyCString,
+    pub resource: Option<NetworkResourceCore>,
+}
+
+impl ControlPlayerInfoEntry {
+    pub fn is_script_player(&self) -> bool {
+        self.player_type == PLAYER_INFO_TYPE_SCRIPT
+    }
+
+    pub fn no_scenario_init(&self) -> bool {
+        self.flags & PLAYER_INFO_FLAG_NO_SCENARIO_INIT != 0
+    }
+}
+
+impl Default for ControlPlayerInfoEntry {
+    fn default() -> Self {
+        Self {
+            name: LegacyCString::default(),
+            forced_name: LegacyCString::default(),
+            filename: LegacyCString::default(),
+            flags: 0,
+            id: 0,
+            player_type: PLAYER_INFO_TYPE_USER,
+            color: 0x00ff_ffff,
+            original_color: 0x00ff_ffff,
+            savegame_player: 0,
+            team: 0,
+            auth_id: LegacyCString::default(),
+            game_number: -1,
+            game_join_frame: -1,
+            game_part_frame: -1,
+            extra_data: *b"NONE",
+            league_account: LegacyCString::default(),
+            league_score: 0,
+            league_rank: 0,
+            league_rank_symbol: 0,
+            league_projected_gain: -1,
+            clan_tag: LegacyCString::default(),
+            league_performance: 0,
+            league_progress_data: LegacyCString::default(),
+            resource: None,
+        }
+    }
 }
 
 /// `C4ControlPlayerInfo` body (C4ClientPlayerInfos,
@@ -78,7 +248,20 @@ pub struct ControlPlayerInfoEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerInfoControlData {
     pub client_id: i32,
+    pub flags: u32,
     pub players: Vec<ControlPlayerInfoEntry>,
+    pub by_client: i32,
+}
+
+impl Default for PlayerInfoControlData {
+    fn default() -> Self {
+        Self {
+            client_id: -1,
+            flags: 0,
+            players: Vec::new(),
+            by_client: -1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,7 +548,8 @@ impl RawPacket {
 
         // Packet names come from `PktHandlingData` on the C++ side. The values we care about are
         // a small subset so far; everything else is recorded as `Unknown`.
-        const PID_NONE: u8 = 0x00;
+        // C4PacketType::PID_None (src/C4PacketBase.h).
+        const PID_NONE: u8 = 0xff;
         const CID_PLR_CONTROL: u8 = 0xA1;
 
         if id == PID_NONE {
@@ -385,17 +569,26 @@ impl RawPacket {
                 .get("ByRes")
                 .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
                 .unwrap_or(false);
+            if by_res {
+                return Err(ControlParseError::UnsupportedResourceJoin);
+            }
             let player_data = self
                 .fields
                 .get("PlrData")
                 .map(|value| parse_std_buf(value))
                 .unwrap_or_default();
+            let filename = LegacyCString::from_bytes(filename.into_bytes()).ok_or(
+                ControlParseError::InteriorNulString {
+                    field: "Filename".to_string(),
+                },
+            )?;
+            let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
             return Ok(Some(ControlPacket::JoinPlayer(JoinPlayerControlData {
                 filename,
                 at_client,
                 info_id,
-                by_res,
-                player_data,
+                source: JoinPlayerSource::Embedded(player_data),
+                by_client,
             })));
         }
 
@@ -417,31 +610,45 @@ impl RawPacket {
                 .sections
                 .iter()
                 .filter(|(name, _)| name.eq_ignore_ascii_case("Player"))
-                .map(|(_, fields)| {
-                    let int = |key: &str| -> i32 {
-                        field(fields, key)
-                            .and_then(|value| value.parse::<i64>().ok())
-                            .unwrap_or(0) as i32
-                    };
-                    ControlPlayerInfoEntry {
-                        id: int("ID"),
-                        name: field(fields, "Name").unwrap_or_default(),
-                        team: int("Team"),
-                        color: field(fields, "Color")
-                            .and_then(|value| value.parse::<i64>().ok())
-                            .unwrap_or(0) as u32,
-                        script_player: field(fields, "Type")
-                            .map(|value| value.eq_ignore_ascii_case("Script"))
-                            .unwrap_or(false),
-                        no_scenario_init: field(fields, "Flags")
-                            .map(|value| value.contains("NoScenarioInit"))
-                            .unwrap_or(false),
-                    }
-                })
-                .collect();
+                .map(
+                    |(_, fields)| -> Result<ControlPlayerInfoEntry, ControlParseError> {
+                        let int = |key: &str| -> i32 {
+                            field(fields, key)
+                                .and_then(|value| value.parse::<i64>().ok())
+                                .unwrap_or(0) as i32
+                        };
+                        let name = LegacyCString::from_bytes(
+                            field(fields, "Name").unwrap_or_default().into_bytes(),
+                        )
+                        .ok_or(ControlParseError::InteriorNulString {
+                            field: "Player.Name".to_string(),
+                        })?;
+                        let mut entry = ControlPlayerInfoEntry {
+                            name,
+                            id: int("ID"),
+                            team: int("Team"),
+                            color: field(fields, "Color")
+                                .and_then(|value| value.parse::<i64>().ok())
+                                .unwrap_or(0) as u32,
+                            player_type: field(fields, "Type")
+                                .filter(|value| value.eq_ignore_ascii_case("Script"))
+                                .map(|_| PLAYER_INFO_TYPE_SCRIPT)
+                                .unwrap_or(PLAYER_INFO_TYPE_USER),
+                            ..ControlPlayerInfoEntry::default()
+                        };
+                        if field(fields, "Flags")
+                            .is_some_and(|value| value.contains("NoScenarioInit"))
+                        {
+                            entry.flags |= PLAYER_INFO_FLAG_NO_SCENARIO_INIT;
+                        }
+                        Ok(entry)
+                    },
+                )
+                .collect::<Result<Vec<_>, _>>()?;
             return Ok(Some(ControlPacket::PlayerInfo(PlayerInfoControlData {
                 client_id,
                 players,
+                ..PlayerInfoControlData::default()
             })));
         }
 
@@ -483,6 +690,10 @@ pub enum ControlParseError {
     MissingField { field: String },
     #[error("field `{field}` contained invalid integer `{value}`")]
     InvalidIntegerField { field: String, value: String },
+    #[error("field `{field}` contained an interior NUL byte")]
+    InteriorNulString { field: String },
+    #[error("resource-backed JoinPlayer INI parsing is not implemented")]
+    UnsupportedResourceJoin,
 }
 
 /// Parse the `.ini` control payload emitted by the C++ runtime into structured packets.
@@ -748,6 +959,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn player_info_model_defaults_match_cpp_clear() {
+        // C4PlayerInfo::Clear and C4ClientPlayerInfos construction establish
+        // the synchronized state that CompileFunc serializes
+        // (src/C4PlayerInfo.cpp:35-54,177-268,357-359,601-633).
+        let player = ControlPlayerInfoEntry::default();
+        assert!(player.name.is_empty());
+        assert!(player.forced_name.is_empty());
+        assert!(player.filename.is_empty());
+        assert_eq!(player.flags, 0);
+        assert_eq!(player.id, 0);
+        assert_eq!(player.player_type, PLAYER_INFO_TYPE_USER);
+        assert_eq!(
+            (player.color, player.original_color),
+            (0x00ff_ffff, 0x00ff_ffff)
+        );
+        assert_eq!((player.savegame_player, player.team), (0, 0));
+        assert!(player.auth_id.is_empty());
+        assert_eq!(
+            (
+                player.game_number,
+                player.game_join_frame,
+                player.game_part_frame,
+            ),
+            (-1, -1, -1)
+        );
+        assert_eq!(player.extra_data, *b"NONE");
+        assert!(player.league_account.is_empty());
+        assert_eq!(
+            (
+                player.league_score,
+                player.league_rank,
+                player.league_rank_symbol,
+                player.league_projected_gain,
+                player.league_performance,
+            ),
+            (0, 0, 0, -1, 0)
+        );
+        assert!(player.clan_tag.is_empty());
+        assert!(player.league_progress_data.is_empty());
+        assert_eq!(player.resource, None);
+        assert!(!player.is_script_player());
+        assert!(!player.no_scenario_init());
+
+        let packet = PlayerInfoControlData::default();
+        assert_eq!(packet.client_id, -1);
+        assert_eq!(packet.flags, 0);
+        assert!(packet.players.is_empty());
+        assert_eq!(packet.by_client, -1);
+    }
+
+    #[test]
+    fn join_player_model_is_canonical_and_filename_is_byte_preserving() {
+        // C4ControlJoinPlayer stores exactly one ByRes-selected payload branch
+        // and StdCompiler binary strings retain bytes through their NUL
+        // terminator (src/C4Control.cpp:852-863;
+        // src/StdCompiler.cpp:113-121,194-210).
+        let join = JoinPlayerControlData {
+            filename: LegacyCString::from_bytes(b"P\x80.c4p".to_vec())
+                .expect("filename has no interior NUL"),
+            at_client: 2,
+            info_id: 9,
+            source: JoinPlayerSource::Embedded(vec![0xaa, 0xbb, 0xcc]),
+            by_client: 4,
+        };
+
+        assert_eq!(join.filename.as_bytes(), b"P\x80.c4p");
+        assert_eq!(
+            join.source,
+            JoinPlayerSource::Embedded(vec![0xaa, 0xbb, 0xcc])
+        );
+        assert_eq!(join.by_client, 4);
+    }
+
+    #[test]
     fn parses_player_control_packet() {
         let input = "\
 [Control]\r\n\
@@ -760,7 +1045,7 @@ mod tests {
       ByClient=1\r\n\
 \r\n\
   [IDPacket]\r\n\
-    ID=0\r\n";
+    ID=255\r\n";
 
         let packets = parse_control_ini(input).expect("parse control log");
         assert_eq!(
@@ -824,11 +1109,14 @@ mod tests {
         assert_eq!(packets.len(), 1);
         match &packets[0] {
             ControlPacket::JoinPlayer(join) => {
-                assert_eq!(join.filename, "Tyler.c4p");
+                assert_eq!(join.filename.to_str(), Ok("Tyler.c4p"));
                 assert_eq!(join.at_client, -1);
                 assert_eq!(join.info_id, 1);
-                assert!(!join.by_res);
-                assert_eq!(join.player_data, vec![b'a', b'b', 0x00, 0xff, b'c']);
+                assert_eq!(
+                    join.source,
+                    JoinPlayerSource::Embedded(vec![b'a', b'b', 0x00, 0xff, b'c'])
+                );
+                assert_eq!(join.by_client, 0);
             }
             other => panic!("expected JoinPlayer, got {other:?}"),
         }
@@ -870,14 +1158,14 @@ mod tests {
                 assert_eq!(info.client_id, 0);
                 assert_eq!(info.players.len(), 2);
                 assert_eq!(info.players[0].id, 1);
-                assert_eq!(info.players[0].name, "Tyler");
+                assert_eq!(info.players[0].name.to_str(), Ok("Tyler"));
                 assert_eq!(info.players[0].color, 15997440);
                 assert_eq!(info.players[0].team, 0);
-                assert!(!info.players[0].script_player);
+                assert!(!info.players[0].is_script_player());
                 assert_eq!(info.players[1].id, 2);
-                assert_eq!(info.players[1].name, "Rival");
+                assert_eq!(info.players[1].name.to_str(), Ok("Rival"));
                 assert_eq!(info.players[1].team, 7);
-                assert!(info.players[1].script_player);
+                assert!(info.players[1].is_script_player());
             }
             other => panic!("expected PlayerInfo, got {other:?}"),
         }
@@ -888,7 +1176,7 @@ mod tests {
         let input = "\
 [Control]\n\
   [IDPacket]\n\
-    ID=255\n\
+    ID=0\n\
     [Mystery]\n\
       Foo=\"bar\"\n";
 
@@ -896,7 +1184,7 @@ mod tests {
         assert_eq!(packets.len(), 1);
         match &packets[0] {
             ControlPacket::Unknown { id, name, fields } => {
-                assert_eq!(id.raw(), 255);
+                assert_eq!(id.raw(), 0);
                 assert_eq!(name.as_deref(), Some("Mystery"));
                 assert_eq!(fields.get("Foo").map(String::as_str), Some("bar"));
             }
