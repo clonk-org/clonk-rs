@@ -24,6 +24,12 @@
 //     used by `C4Object::SetAction`.
 //   * `C4SolidMaskBitmap.h` is the production active-graphics bitmap selection
 //     and transparency conversion used by `C4SolidMask`.
+//   * `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` are mechanically
+//     extracted in full; a minimal 7x7 Surface8/material scaffold records their
+//     exact scan order, material pre-counts, IFT writes, and RNG consumption.
+//   * The complete bottom-contact DFA_FLIGHT arm of `C4Object::ContactAction`
+//     and its Walk/Kneel/Flat helpers are mechanically extracted; a minimal
+//     object scaffold records the low-speed `Disabled` transition to FlatUp.
 //   * `Randomize3`/`Rnd3` are reproduced verbatim from `src/C4Random.cpp`
 //     (10 trivial lines around the real `Random()`); kept in sync via the
 //     provenance comment below.
@@ -31,6 +37,7 @@
 // Regenerate the golden with `parity/oracle/gen_golden.sh`.
 
 #include <cstdint>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <initializer_list>
@@ -64,6 +71,217 @@ int Rnd3()
     return FRndBuf3[FRndPtr3];
 }
 
+// --- BlastFree: exact production bodies ------------------------------------
+// gen_golden.sh extracts ClearPix, BlastFreePix, and BlastFree unchanged from
+// src/C4Landscape.cpp. This scaffold models only the fields/callees those
+// bodies touch. Material ids are Earth=0, Granite=1, Rock=2, Tunnel=3. The
+// texmap deliberately gives Rock and Tunnel duplicate slots: BlastShiftTo
+// names the second Rock texture, while ClearPix must use Tunnel's second,
+// DefaultMatTex slot rather than the first slot carrying that material.
+inline constexpr uint8_t IFT_Oracle = 0x80;
+inline constexpr int32_t C4MaxMaterial_Oracle = 125;
+inline constexpr int32_t MNone_OracleLandscape = -1;
+inline constexpr int32_t C4ID_None_Oracle = 0;
+inline constexpr int32_t Earth_Oracle = 0;
+inline constexpr int32_t Granite_Oracle = 1;
+inline constexpr int32_t Rock_Oracle = 2;
+inline constexpr int32_t Tunnel_Oracle = 3;
+inline constexpr uint8_t EarthPix_Oracle = 1;
+inline constexpr uint8_t GranitePix_Oracle = 2;
+inline constexpr uint8_t RockDefaultPix_Oracle = 3;
+inline constexpr uint8_t TunnelFirstPix_Oracle = 4;
+inline constexpr uint8_t RockShiftPix_Oracle = 5;
+inline constexpr uint8_t TunnelDefaultPix_Oracle = 6;
+
+struct C4MaterialOracle
+{
+    int32_t BlastFree{};
+    int32_t BlastShiftTo{};
+    int32_t Blast2Object{C4ID_None_Oracle};
+    int32_t Blast2ObjectRatio{};
+    int32_t Blast2PXSRatio{};
+    int32_t DefaultMatTex{};
+};
+
+struct C4MaterialMapOracle
+{
+    int32_t Num{};
+    C4MaterialOracle Map[C4MaxMaterial_Oracle]{};
+};
+
+struct C4PXSOracle
+{
+    void Cast(int32_t, int32_t, int32_t, int32_t, int32_t) {}
+};
+
+struct C4GameLandscapeOracle
+{
+    C4MaterialMapOracle Material;
+    C4PXSOracle PXS;
+    void BlastCastObjects(int32_t, void *, int32_t, int32_t, int32_t, int32_t) {}
+};
+
+static C4GameLandscapeOracle GameLandscapeOracle;
+
+class C4Landscape
+{
+public:
+    int32_t Width{7};
+    int32_t Height{7};
+    int32_t BlastMatCount[C4MaxMaterial_Oracle]{};
+    uint8_t Pixels[7 * 7]{};
+    int32_t Pix2Mat[256]{};
+
+    C4Landscape()
+    {
+        for (int32_t &material : Pix2Mat) material = MNone_OracleLandscape;
+        Pix2Mat[EarthPix_Oracle] = Pix2Mat[EarthPix_Oracle | IFT_Oracle] = Earth_Oracle;
+        Pix2Mat[GranitePix_Oracle] = Pix2Mat[GranitePix_Oracle | IFT_Oracle] = Granite_Oracle;
+        Pix2Mat[RockDefaultPix_Oracle] =
+            Pix2Mat[RockDefaultPix_Oracle | IFT_Oracle] = Rock_Oracle;
+        Pix2Mat[TunnelFirstPix_Oracle] =
+            Pix2Mat[TunnelFirstPix_Oracle | IFT_Oracle] = Tunnel_Oracle;
+        Pix2Mat[RockShiftPix_Oracle] =
+            Pix2Mat[RockShiftPix_Oracle | IFT_Oracle] = Rock_Oracle;
+        Pix2Mat[TunnelDefaultPix_Oracle] =
+            Pix2Mat[TunnelDefaultPix_Oracle | IFT_Oracle] = Tunnel_Oracle;
+    }
+
+    uint8_t GetPix(int32_t x, int32_t y) const
+    {
+        if (x < 0 || y < 0 || x >= Width || y >= Height) return 0;
+        return Pixels[y * Width + x];
+    }
+
+    int32_t GetMat(int32_t x, int32_t y) const
+    {
+        return Pix2Mat[GetPix(x, y)];
+    }
+
+    bool SetPix(int32_t x, int32_t y, uint8_t pixel)
+    {
+        if (x < 0 || y < 0 || x >= Width || y >= Height) return false;
+        Pixels[y * Width + x] = pixel;
+        return true;
+    }
+
+    void ClearBlastMatCount()
+    {
+        for (int32_t &count : BlastMatCount) count = 0;
+    }
+
+    void CheckInstabilityRange(int32_t, int32_t) {}
+
+    bool ClearPix(int32_t tx, int32_t ty);
+    int32_t BlastFreePix(int32_t tx, int32_t ty, int32_t grade, int32_t iBlastSize);
+    void BlastFree(int32_t tx, int32_t ty, int32_t rad, int32_t grade, int32_t iByPlayer);
+};
+
+#define IFT IFT_Oracle
+#define C4MaxMaterial C4MaxMaterial_Oracle
+#define C4ID_None C4ID_None_Oracle
+#define Game GameLandscapeOracle
+#define GBackIFT(x, y) (GetPix((x), (y)) & IFT_Oracle)
+inline bool MatValid(int32_t material)
+{
+    return material >= 0 && material < GameLandscapeOracle.Material.Num;
+}
+inline uint8_t MatTex2PixCol(int32_t texture) { return static_cast<uint8_t>(texture); }
+inline uint8_t Mat2PixColDefault(int32_t material)
+{
+    return static_cast<uint8_t>(GameLandscapeOracle.Material.Map[material].DefaultMatTex);
+}
+static int32_t MTunnel = Tunnel_Oracle;
+#include "landscape_clear_pix.inc"
+#include "landscape_blast_free_pix.inc"
+#include "landscape_blast_free.inc"
+#undef GBackIFT
+#undef Game
+#undef C4ID_None
+#undef C4MaxMaterial
+#undef IFT
+
+static void printBlastFreeCase()
+{
+    C4GameLandscapeOracle &game = GameLandscapeOracle;
+    game = C4GameLandscapeOracle{};
+    game.Material.Num = 4;
+    game.Material.Map[Earth_Oracle].BlastFree = 1;
+    game.Material.Map[Earth_Oracle].DefaultMatTex = EarthPix_Oracle;
+    game.Material.Map[Granite_Oracle].BlastShiftTo = RockShiftPix_Oracle;
+    game.Material.Map[Granite_Oracle].DefaultMatTex = GranitePix_Oracle;
+    game.Material.Map[Rock_Oracle].BlastFree = 1;
+    game.Material.Map[Rock_Oracle].DefaultMatTex = RockDefaultPix_Oracle;
+    game.Material.Map[Tunnel_Oracle].DefaultMatTex = TunnelDefaultPix_Oracle;
+
+    C4Landscape landscape;
+    for (int32_t y = 0; y < landscape.Height; ++y)
+        for (int32_t x = 0; x < landscape.Width; ++x)
+        {
+            uint8_t pixel = ((x + y) % 2 == 0) ? EarthPix_Oracle : GranitePix_Oracle;
+            if ((x + 2 * y) % 3 != 0) pixel |= IFT_Oracle;
+            landscape.Pixels[y * landscape.Width + x] = pixel;
+        }
+
+    uint8_t initial[7 * 7];
+    for (int32_t index = 0; index < 7 * 7; ++index) initial[index] = landscape.Pixels[index];
+
+    FixedRandom(2);
+    Randomize3();
+    const int32_t countBefore = RandomCount;
+    const uint32_t holdBefore = RandomHold;
+    const int32_t rnd3Before = FRndPtr3;
+    landscape.BlastFree(3, 3, 3, 1, 7);
+
+    printf("\"blast_free\":{\"seed\":2,\"width\":7,\"height\":7,"
+           "\"x\":3,\"y\":3,\"radius\":3,\"grade\":1,\"controller\":7,"
+           "\"material_bytes\":{\"earth\":%u,\"granite\":%u,"
+           "\"rock_default\":%u,\"tunnel_first\":%u,"
+           "\"rock_shift\":%u,\"tunnel_default\":%u},"
+           "\"initial_bytes\":[",
+           static_cast<unsigned int>(EarthPix_Oracle),
+           static_cast<unsigned int>(GranitePix_Oracle),
+           static_cast<unsigned int>(RockDefaultPix_Oracle),
+           static_cast<unsigned int>(TunnelFirstPix_Oracle),
+           static_cast<unsigned int>(RockShiftPix_Oracle),
+           static_cast<unsigned int>(TunnelDefaultPix_Oracle));
+    for (int32_t index = 0; index < 7 * 7; ++index)
+    {
+        if (index) printf(",");
+        printf("%u", static_cast<unsigned int>(initial[index]));
+    }
+    printf("],\"pre_counts\":{\"earth\":%d,\"granite\":%d,\"rock\":%d,\"tunnel\":%d},"
+           "\"rng_before\":{\"count\":%d,\"hold\":%u,\"rnd3_ptr\":%d},"
+           "\"rng_after\":{\"count\":%d,\"hold\":%u,\"rnd3_ptr\":%d},"
+           "\"final_bytes\":[",
+           landscape.BlastMatCount[Earth_Oracle], landscape.BlastMatCount[Granite_Oracle],
+           landscape.BlastMatCount[Rock_Oracle], landscape.BlastMatCount[Tunnel_Oracle],
+           countBefore, holdBefore, rnd3Before, RandomCount, RandomHold, FRndPtr3);
+    for (int32_t index = 0; index < 7 * 7; ++index)
+    {
+        if (index) printf(",");
+        printf("%u", static_cast<unsigned int>(landscape.Pixels[index]));
+    }
+
+    C4Landscape zeroRadiusLandscape;
+    zeroRadiusLandscape.Pixels[3 * zeroRadiusLandscape.Width + 3] =
+        EarthPix_Oracle | IFT_Oracle;
+    FixedRandom(17);
+    Randomize3();
+    const int32_t zeroCountBefore = RandomCount;
+    const uint32_t zeroHoldBefore = RandomHold;
+    zeroRadiusLandscape.BlastFree(3, 3, 0, 1, 7);
+    printf("],\"zero_radius\":{\"seed\":17,\"x\":3,\"y\":3,"
+           "\"initial_byte\":%u,\"pre_count\":%d,\"final_byte\":%u,"
+           "\"rng_before\":{\"count\":%d,\"hold\":%u},"
+           "\"rng_after\":{\"count\":%d,\"hold\":%u}}}",
+           static_cast<unsigned int>(EarthPix_Oracle | IFT_Oracle),
+           zeroRadiusLandscape.BlastMatCount[Earth_Oracle],
+           static_cast<unsigned int>(
+               zeroRadiusLandscape.Pixels[3 * zeroRadiusLandscape.Width + 3]),
+           zeroCountBefore, zeroHoldBefore, RandomCount, RandomHold);
+}
+
 // --- ShakeObjects + raw Fling: exact production bodies ----------------------
 // gen_golden.sh extracts the two method bodies unchanged from src/. Only the
 // minimal fields those methods touch are modeled here. Tumble/Jump return false
@@ -71,6 +289,10 @@ int Rnd3()
 inline constexpr int32_t C4D_Living_Oracle = 1 << 3;
 inline constexpr int32_t C4D_Object_Oracle = 1 << 4;
 inline constexpr int32_t MNone_Oracle = -1;
+inline constexpr int32_t ContactActionFlight_Oracle = 0;
+inline constexpr int32_t ContactActionFlatUp_Oracle = 1;
+inline constexpr int32_t ContactActionKneelDown_Oracle = 2;
+inline constexpr int32_t ContactActionWalk_Oracle = 3;
 int32_t MVehic = 1;
 
 inline bool MatVehicle(int32_t material) { return material == MVehic; }
@@ -93,6 +315,7 @@ struct C4Object
     struct ActionState
     {
         uint8_t t_attach{};
+        int32_t Dir{};
     } Action;
     struct ShapeState
     {
@@ -110,6 +333,7 @@ struct C4Object
     C4Fixed xdir{Fix0};
     C4Fixed ydir{Fix0};
     int32_t Mobile{};
+    int32_t ContactAction{ContactActionFlight_Oracle};
 
     void UpdatLastEnergyLossCause(int32_t cause)
     {
@@ -118,7 +342,42 @@ struct C4Object
     }
 
     void Fling(C4Fixed txdir, C4Fixed tydir, bool addSpeed, int32_t causedBy);
+
+    bool SetActionByName(const char *name)
+    {
+        const std::string_view action{name};
+        if (action == "FlatUp") ContactAction = ContactActionFlatUp_Oracle;
+        else if (action == "KneelDown") ContactAction = ContactActionKneelDown_Oracle;
+        else if (action == "Walk") ContactAction = ContactActionWalk_Oracle;
+        else return false;
+        return true;
+    }
+
+    void SetDir(int32_t dir) { Action.Dir = dir; }
+    void ContactActionBottomFlight(int32_t fDisabled);
 };
+
+// Exact source text generated from C4ObjectCom.cpp. Keeping the helpers exact
+// makes a successful gate observable as the real FlatUp action/velocity result.
+#include "object_action_walk.inc"
+#include "object_action_kneel.inc"
+#include "object_action_flat.inc"
+
+// Exact first DFA_FLIGHT arm from C4Object::ContactAction. The scaffold fixes
+// iProcedure to flight and supplies only the locals surrounding the extracted
+// switch arm; the production OR condition itself is compiled verbatim.
+#define DFA_FLIGHT 1
+void C4Object::ContactActionBottomFlight(int32_t fDisabled)
+{
+    C4Fixed last_xdir;
+    int32_t iProcedure = DFA_FLIGHT;
+    switch (iProcedure)
+    {
+#include "contact_action_bottom_flight.inc"
+    default: return;
+    }
+}
+#undef DFA_FLIGHT
 
 inline bool ObjectActionTumble(C4Object *, int32_t, C4Fixed, C4Fixed) { return false; }
 inline bool ObjectActionJump(C4Object *, C4Fixed, C4Fixed, bool) { return false; }
@@ -215,6 +474,40 @@ static void printShakeObjectsCase()
                objects[i].Controller);
     }
     printf("]}");
+}
+
+static void printContactActionBottomFlightCases()
+{
+    struct Row
+    {
+        const char *Name;
+        uint32_t Ocf;
+        int32_t Disabled;
+    };
+    const Row rows[] = {
+        {"low_speed_enabled", 0, 0},
+        {"low_speed_disabled", 0, 1},
+        {"hit_speed4_enabled", OCF_HitSpeed4, 0},
+    };
+
+    printf("\"contact_action_bottom_flight\":[");
+    for (std::size_t index = 0; index < sizeof(rows) / sizeof(rows[0]); ++index)
+    {
+        C4Object object;
+        object.Action.Dir = 1;
+        object.OCF = rows[index].Ocf;
+        object.xdir.val = 32768;
+        object.ydir.val = 6553;
+        object.ContactActionBottomFlight(rows[index].Disabled);
+        if (index) printf(",");
+        printf("{\"name\":\"%s\",\"ocf\":%u,\"disabled\":%d,"
+               "\"xdir_before\":32768,\"ydir_before\":6553,"
+               "\"action_after\":%d,\"direction_after\":%d,"
+               "\"xdir_after\":%d,\"ydir_after\":%d}",
+               rows[index].Name, rows[index].Ocf, rows[index].Disabled,
+               object.ContactAction, object.Action.Dir, object.xdir.val, object.ydir.val);
+    }
+    printf("]");
 }
 
 // --- tiny JSON helpers (avoid a JSON dependency in the oracle) ---------------
@@ -1000,7 +1293,17 @@ int main()
     printShakeObjectsCase();
     printf(",\n");
 
-    // 17. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 17. Exact C4Landscape::ClearPix / BlastFreePix / BlastFree scan,
+    //     pre-count, IFT-preserving mutation, and RNG order.
+    printBlastFreeCase();
+    printf(",\n");
+
+    // 18. Exact bottom DFA_FLIGHT ContactAction arm, especially the
+    //     low-speed `fDisabled` path into ObjectActionFlat / FlatUp.
+    printContactActionBottomFlightCases();
+    printf(",\n");
+
+    // 19. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");

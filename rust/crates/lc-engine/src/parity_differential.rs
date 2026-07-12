@@ -8,7 +8,8 @@
 //! `src/C4ScriptKiller.h`, `src/C4LandscapePath.h`, and
 //! `src/C4ActionDirection.h`, `src/C4ActionCallbacks.h`, and
 //! `src/C4SolidMaskBitmap.h`, plus complete `C4Game::ShakeObjects` and
-//! `C4Object::Fling` bodies) by
+//! `C4Object::Fling`, `C4Landscape::ClearPix`, `BlastFreePix`, and
+//! `BlastFree` bodies and the bottom-flight `C4Object::ContactAction` arm) by
 //! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
 //! the C++ oracle, not a Rust-vs-Rust regression.
 //!
@@ -23,13 +24,14 @@
 use lc_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue};
 use serde_json::Value;
 
-use crate::landscape::{Landscape, PixelGrid};
+use crate::landscape::{Landscape, LandscapeRasterState, PixelGrid};
 use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion};
 use crate::math::{
     fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed,
     FixedVec2,
 };
 use crate::rng::LcgRng;
+use crate::scenario::MapPixelClassifier;
 use crate::{
     ActionSpec, ActionState, CommandDirection, Definition, DefinitionRect, DefinitionSpriteImage,
     DefinitionTargetRect, Direction, Engine, ObjectBaseGraphics, ObjectStatus, ObjectUpdate,
@@ -698,6 +700,376 @@ fn parity_differential_matches_cpp_golden() {
                 i64::from(object.state.controller),
             );
         }
+    }
+
+    // 6c. C4Landscape::BlastFree (C4Landscape.cpp:881-888, 941-960,
+    // 1022-1062): the oracle mechanically compiles the complete ClearPix,
+    // BlastFreePix, and BlastFree bodies. A 7x7 authoritative Surface8 plane
+    // mixes Earth/Granite and IFT pixels; Earth clears to sky/Tunnel+IFT,
+    // Granite probabilistically shifts to Rock while preserving IFT. Compare
+    // the pre-mutation BlastMatCount, every final byte, and exact RNG state.
+    {
+        let case = &golden["blast_free"];
+        let library = lc_resources::MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            BlastFree=1
+
+            [Material Granite]
+            Name=Granite
+            Density=100
+            BlastShiftTo=Rock-Rough
+
+            [Material Rock]
+            Name=Rock
+            Density=100
+            BlastFree=1
+
+            [Material Tunnel]
+            Name=Tunnel
+            Density=0
+            TextureOverlay=Smooth2
+        "#,
+        )
+        .expect("BlastFree oracle materials parse");
+
+        let width = i(case, "width") as u32;
+        let height = i(case, "height") as u32;
+        let initial_bytes = case["initial_bytes"]
+            .as_array()
+            .expect("blast_free.initial_bytes is an array")
+            .iter()
+            .map(|byte| byte.as_u64().expect("pixel byte") as u8)
+            .collect::<Vec<_>>();
+        let mut densities = [0; 128];
+        densities[1] = 100;
+        densities[2] = 100;
+        densities[3] = 100;
+        densities[5] = 100;
+        let mut names = vec![None; 128];
+        names[1] = Some("Earth".to_string());
+        names[2] = Some("Granite".to_string());
+        names[3] = Some("Rock".to_string());
+        names[4] = Some("Tunnel".to_string());
+        names[5] = Some("Rock".to_string());
+        names[6] = Some("Tunnel".to_string());
+        let mut textures = vec![None; 128];
+        textures[1] = Some("Smooth".to_string());
+        textures[2] = Some("Smooth".to_string());
+        textures[3] = Some("Smooth".to_string());
+        textures[4] = Some("Rough".to_string());
+        textures[5] = Some("Rough".to_string());
+        textures[6] = Some("Smooth2".to_string());
+        let grid = PixelGrid::new(
+            width,
+            height,
+            initial_bytes,
+            densities.to_vec(),
+            names.clone(),
+            textures.clone(),
+        );
+
+        let classifier = MapPixelClassifier::from_slots_with_library(
+            densities,
+            names,
+            textures,
+            vec![None; 128],
+            library.clone(),
+            vec![
+                "Smooth".to_string(),
+                "Rough".to_string(),
+                "Smooth2".to_string(),
+            ],
+        );
+        let mut texmap = classifier.into_runtime_state();
+        texmap.set_default_material_entry("Earth", 1);
+        texmap.set_default_material_entry("Granite", 2);
+        texmap.set_default_material_entry("Rock", 3);
+        texmap.set_default_material_entry("Tunnel", 6);
+        let zero_texmap = texmap.clone();
+
+        let mut engine = Engine::with_seed(i(case, "seed") as u64);
+        engine.configure_materials_from_library(&library);
+        let mut landscape = Landscape::flat(width, height as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_raster_state(LandscapeRasterState::new(1, 0, texmap));
+        engine.set_landscape(landscape);
+
+        let rng_before = &case["rng_before"];
+        expect_eq(
+            "blast_free.rng_before",
+            0,
+            "count",
+            i(rng_before, "count"),
+            i64::from(engine.rng.count),
+        );
+        expect_eq_u64(
+            "blast_free.rng_before",
+            0,
+            "hold",
+            u(rng_before, "hold"),
+            u64::from(engine.rng.hold),
+        );
+        expect_eq(
+            "blast_free.rng_before",
+            0,
+            "rnd3_ptr",
+            i(rng_before, "rnd3_ptr"),
+            i64::from(engine.rng.rnd3_ptr()),
+        );
+
+        let result = engine
+            .blast_circle(
+                crate::Vector2::new(i(case, "x") as i32, i(case, "y") as i32),
+                i(case, "radius") as i32,
+                Some(i(case, "controller") as i32),
+            )
+            .expect("BlastFree oracle blast applies");
+
+        let counts = &case["pre_counts"];
+        for (index, name) in ["Earth", "Granite", "Rock", "Tunnel"]
+            .into_iter()
+            .enumerate()
+        {
+            let material = engine
+                .materials()
+                .id_of(name)
+                .unwrap_or_else(|| panic!("BlastFree oracle material `{name}` exists"));
+            let rust = result
+                .pixel_count_by_material
+                .get(&material)
+                .copied()
+                .unwrap_or_default();
+            expect_eq(
+                "blast_free.pre_counts",
+                index,
+                &name.to_ascii_lowercase(),
+                i(counts, &name.to_ascii_lowercase()),
+                i64::from(rust),
+            );
+        }
+
+        let expected_bytes = case["final_bytes"]
+            .as_array()
+            .expect("blast_free.final_bytes is an array");
+        let landscape = engine.landscape().expect("BlastFree landscape remains");
+        for (index, expected) in expected_bytes.iter().enumerate() {
+            let x = index as i32 % width as i32;
+            let y = index as i32 / width as i32;
+            expect_eq(
+                "blast_free.final_bytes",
+                index,
+                "byte",
+                expected.as_i64().expect("golden pixel byte"),
+                i64::from(
+                    landscape
+                        .grid_byte_at(x, y)
+                        .unwrap_or_else(|| panic!("BlastFree pixel ({x},{y}) exists")),
+                ),
+            );
+        }
+
+        let rng_after = &case["rng_after"];
+        expect_eq(
+            "blast_free.rng_after",
+            0,
+            "count",
+            i(rng_after, "count"),
+            i64::from(engine.rng.count),
+        );
+        expect_eq_u64(
+            "blast_free.rng_after",
+            0,
+            "hold",
+            u(rng_after, "hold"),
+            u64::from(engine.rng.hold),
+        );
+        expect_eq(
+            "blast_free.rng_after",
+            0,
+            "rnd3_ptr",
+            i(rng_after, "rnd3_ptr"),
+            i64::from(engine.rng.rnd3_ptr()),
+        );
+
+        let zero = &case["zero_radius"];
+        let zero_x = i(zero, "x") as i32;
+        let zero_y = i(zero, "y") as i32;
+        let mut zero_bytes = vec![0; width as usize * height as usize];
+        zero_bytes[zero_y as usize * width as usize + zero_x as usize] =
+            i(zero, "initial_byte") as u8;
+        let zero_grid = PixelGrid::new(
+            width,
+            height,
+            zero_bytes,
+            zero_texmap.densities.clone(),
+            zero_texmap.material_names.clone(),
+            zero_texmap.texture_names.clone(),
+        );
+        let mut zero_landscape = Landscape::flat(width, height as i32);
+        zero_landscape.set_pixel_grid(zero_grid);
+        zero_landscape.set_raster_state(LandscapeRasterState::new(1, 0, zero_texmap));
+        let mut zero_engine = Engine::with_seed(i(zero, "seed") as u64);
+        zero_engine.configure_materials_from_library(&library);
+        zero_engine.set_landscape(zero_landscape);
+
+        expect_eq(
+            "blast_free.zero_radius.rng_before",
+            0,
+            "count",
+            i(&zero["rng_before"], "count"),
+            i64::from(zero_engine.rng.count),
+        );
+        expect_eq_u64(
+            "blast_free.zero_radius.rng_before",
+            0,
+            "hold",
+            u(&zero["rng_before"], "hold"),
+            u64::from(zero_engine.rng.hold),
+        );
+        let zero_result = zero_engine
+            .blast_circle(crate::Vector2::new(zero_x, zero_y), 0, Some(7))
+            .expect("zero-radius BlastFree oracle blast applies");
+        let earth = zero_engine
+            .materials()
+            .id_of("Earth")
+            .expect("zero-radius oracle Earth exists");
+        expect_eq(
+            "blast_free.zero_radius",
+            0,
+            "pre_count",
+            i(zero, "pre_count"),
+            i64::from(
+                zero_result
+                    .pixel_count_by_material
+                    .get(&earth)
+                    .copied()
+                    .unwrap_or_default(),
+            ),
+        );
+        expect_eq(
+            "blast_free.zero_radius",
+            0,
+            "final_byte",
+            i(zero, "final_byte"),
+            i64::from(
+                zero_engine
+                    .landscape()
+                    .and_then(|landscape| landscape.grid_byte_at(zero_x, zero_y))
+                    .expect("zero-radius center pixel remains addressable"),
+            ),
+        );
+        expect_eq(
+            "blast_free.zero_radius.rng_after",
+            0,
+            "count",
+            i(&zero["rng_after"], "count"),
+            i64::from(zero_engine.rng.count),
+        );
+        expect_eq_u64(
+            "blast_free.zero_radius.rng_after",
+            0,
+            "hold",
+            u(&zero["rng_after"], "hold"),
+            u64::from(zero_engine.rng.hold),
+        );
+    }
+
+    // 6d. C4Object::ContactAction's bottom DFA_FLIGHT arm
+    // (C4Object.cpp:4336-4351). The C++ oracle mechanically compiles that
+    // complete switch arm and the real ObjectActionFlat helper. In particular,
+    // a low-speed action with ObjectDisabled=1 takes the same FlatUp path as
+    // OCF_HitSpeed4; a low-speed enabled action falls through to Walk.
+    for (index, case) in golden["contact_action_bottom_flight"]
+        .as_array()
+        .expect("contact_action_bottom_flight is an array")
+        .iter()
+        .enumerate()
+    {
+        let mut definition = Definition::from_script("CFLI", "Contact flight oracle", "#strict\n")
+            .expect("contact flight oracle compiles");
+        definition.configure_actions(
+            Some("Flight".to_string()),
+            HashMap::from([
+                (
+                    "Flight".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_disabled(i(case, "disabled") != 0),
+                ),
+                ("FlatUp".to_string(), ActionSpec::default()),
+                ("KneelDown".to_string(), ActionSpec::default()),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("contact flight oracle registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("CFLI")
+                    .with_action(ActionState::new("Flight"))
+                    .with_direction(Direction::Right)
+                    .with_fixed_velocity(FixedVec2::new(
+                        C4Fixed::from_raw(i(case, "xdir_before") as i32),
+                        C4Fixed::from_raw(i(case, "ydir_before") as i32),
+                    ))
+                    .with_category(CATEGORY_OBJECT)
+                    .with_loaded(true),
+            )
+            .expect("contact flight oracle object spawns");
+        let object_index = engine
+            .find_object_index(id)
+            .expect("contact flight oracle object exists");
+        engine.objects[object_index].state.ocf = i(case, "ocf") as u32;
+        let definition_id = engine.objects[object_index].definition_id.clone();
+        engine
+            .exec_contact_action(object_index, crate::CNAT_BOTTOM, &definition_id, &[])
+            .expect("bottom flight ContactAction executes");
+
+        let object = &engine.objects[object_index];
+        let action_after = match object.state.action.name.as_str() {
+            "Flight" => 0,
+            "FlatUp" => 1,
+            "KneelDown" => 2,
+            "Walk" => 3,
+            action => panic!("unexpected contact-flight action `{action}`"),
+        };
+        expect_eq(
+            "contact_action_bottom_flight",
+            index,
+            "action_after",
+            i(case, "action_after"),
+            action_after,
+        );
+        expect_eq(
+            "contact_action_bottom_flight",
+            index,
+            "direction_after",
+            i(case, "direction_after"),
+            i64::from(object.state.direction.to_script_value()),
+        );
+        expect_eq(
+            "contact_action_bottom_flight",
+            index,
+            "xdir_after",
+            i(case, "xdir_after"),
+            i64::from(object.fixed_velocity.x.val()),
+        );
+        expect_eq(
+            "contact_action_bottom_flight",
+            index,
+            "ydir_after",
+            i(case, "ydir_after"),
+            i64::from(object.fixed_velocity.y.val()),
+        );
     }
 
     // 7. Material corrosion execution RNG ordering.

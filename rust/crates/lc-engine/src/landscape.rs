@@ -244,6 +244,13 @@ impl PixelGrid {
             .map(|index| index as u8)
     }
 
+    fn name_for_material(&self, material: MaterialId) -> Option<&str> {
+        self.material_names
+            .iter()
+            .zip(&self.materials)
+            .find_map(|(name, slot)| (*slot == Some(material)).then_some(name.as_deref()).flatten())
+    }
+
     /// Any solid texmap byte (fallback fill when no material is known).
     fn any_solid_byte(&self) -> Option<u8> {
         self.densities
@@ -263,8 +270,8 @@ impl PixelGrid {
         self.set_byte(x, y, 0);
     }
 
-    /// The default tunnel byte (`Mat2PixColDefault(MTunnel)`): the first
-    /// texmap slot named Tunnel.
+    /// Fixture fallback for the default tunnel byte when no retained runtime
+    /// texture map exists.
     fn tunnel_byte(&self) -> u8 {
         self.material_names
             .iter()
@@ -279,11 +286,15 @@ impl PixelGrid {
     /// C4Landscape::ClearPix (C4Landscape.cpp:880-888): an IFT pixel
     /// clears to the tunnel background (+IFT); a surface pixel to sky.
     pub fn clear_pix(&mut self, x: i32, y: i32) {
+        self.clear_pix_with_tunnel(x, y, None);
+    }
+
+    fn clear_pix_with_tunnel(&mut self, x: i32, y: i32, tunnel_byte: Option<u8>) {
         let Some(byte) = self.byte_at(x, y) else {
             return;
         };
         if byte & 0x80 != 0 {
-            self.set_byte(x, y, self.tunnel_byte() | 0x80);
+            self.set_byte(x, y, tunnel_byte.unwrap_or_else(|| self.tunnel_byte()) | 0x80);
         } else {
             self.set_byte(x, y, 0);
         }
@@ -406,6 +417,32 @@ impl RuntimeTexMapState {
         self.materials
             .iter()
             .find(|material| material.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The already-cross-mapped result of `C4TextureMap::GetIndexMatTex`
+    /// (C4Texture.cpp:346-369). Scenario activation has allocated every
+    /// `BlastShiftTo` pair before simulation starts, so runtime mutation must
+    /// recover that exact slot rather than the first slot with the material.
+    pub(crate) fn resolved_index_mat_tex(&self, material_texture: &str) -> u8 {
+        if let Some((material, texture)) = material_texture.split_once('-') {
+            return self
+                .material_names
+                .iter()
+                .zip(&self.match_texture_names)
+                .enumerate()
+                .skip(1)
+                .take(C4M_MAX_TEX_INDEX - 1)
+                .find(|(_, (slot_material, slot_texture))| {
+                    slot_material
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(material))
+                        && slot_texture
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(texture))
+                })
+                .map_or(0, |(slot, _)| slot as u8);
+        }
+        self.default_material_entry(material_texture).unwrap_or(0)
     }
 
     /// C4TextureMap::GetIndex (C4Texture.cpp:319-345), relocated from the
@@ -923,7 +960,7 @@ impl Landscape {
         self.refresh_raster_columns(0..width);
     }
 
-    fn refresh_raster_columns(&mut self, columns: Range<usize>) {
+    pub(crate) fn refresh_raster_columns(&mut self, columns: Range<usize>) {
         let end = columns.end.min(self.surface.len());
         let start = columns.start.min(end);
         self.ensure_liquid_capacity();
@@ -1011,8 +1048,9 @@ impl Landscape {
                 .map(|material| material.dig_free())
                 .unwrap_or(false)
             {
+                let tunnel_byte = self.default_material_byte("Tunnel");
                 if let Some(grid) = self.pixels.as_mut() {
-                    grid.clear_pix(x, y);
+                    grid.clear_pix_with_tunnel(x, y, tunnel_byte);
                 }
             }
         }
@@ -1022,23 +1060,79 @@ impl Landscape {
     /// ClearPix on the grid (no diggable gate) — C4Landscape::ClearRect's
     /// per-pixel body (C4Landscape.cpp:2184-2194).
     pub fn clear_pix(&mut self, x: i32, y: i32) -> bool {
+        let tunnel_byte = self.default_material_byte("Tunnel");
         match self.pixels.as_mut() {
             Some(grid) => {
-                grid.clear_pix(x, y);
+                grid.clear_pix_with_tunnel(x, y, tunnel_byte);
                 true
             }
             None => false,
         }
     }
 
+    fn default_material_byte(&self, material: &str) -> Option<u8> {
+        self.raster_state
+            .as_ref()
+            .and_then(|state| state.texmap().default_material_entry(material))
+    }
+
+    fn default_material_byte_for_id(&self, material: MaterialId) -> Option<u8> {
+        match self.raster_state.as_ref() {
+            Some(state) => self
+                .pixels
+                .as_ref()
+                .and_then(|grid| grid.name_for_material(material))
+                .and_then(|name| state.texmap().default_material_entry(name)),
+            None => self
+                .pixels
+                .as_ref()
+                .and_then(|grid| grid.byte_for_material(material)),
+        }
+    }
+
+    /// Resolve a material's cross-mapped texmap byte. With retained scenario
+    /// state, an explicit `Material-Texture` must match that exact pair; the
+    /// fallback exists only for synthetic pixel-grid fixtures without a live
+    /// texture map.
+    pub fn material_texture_byte(
+        &self,
+        material_texture: &str,
+        fallback_material: MaterialId,
+    ) -> Option<u8> {
+        match self.raster_state.as_ref() {
+            Some(state) => {
+                let byte = state.texmap().resolved_index_mat_tex(material_texture);
+                (byte != 0).then_some(byte)
+            }
+            None => self
+                .pixels
+                .as_ref()
+                .and_then(|grid| grid.byte_for_material(fallback_material)),
+        }
+    }
+
+    /// `SetPix(..., MatTex2PixCol(...)+GBackIFT(...))` for an already-resolved
+    /// material-texture byte (C4Landscape.cpp:951).
+    pub fn insert_material_texture_pix(&mut self, x: i32, y: i32, byte: u8) -> bool {
+        let Some(grid) = self.pixels.as_mut() else {
+            return false;
+        };
+        let Some(current) = grid.byte_at(x, y) else {
+            return false;
+        };
+        grid.write_byte(x, y, byte | (current & 0x80));
+        true
+    }
+
     /// The InsertMaterial dead-material write (C4Landscape.cpp:1218):
     /// `SetPix(tx, ty, Mat2PixColDefault(mat) + GBackIFT(tx, ty))` — the
     /// material byte keeps the CURRENT pixel's IFT bit.
     pub fn insert_material_pix(&mut self, x: i32, y: i32, material: MaterialId) -> bool {
+        let byte = self.default_material_byte_for_id(material);
         let Some(grid) = self.pixels.as_mut() else {
             return false;
         };
-        let Some(byte) = grid.byte_for_material(material) else {
+        let Some(byte) = byte else {
             return false;
         };
         let Some(current) = grid.byte_at(x, y) else {
@@ -1052,7 +1146,8 @@ impl Landscape {
     /// writes. None/no-op without a pixel grid (fixture worlds keep the
     /// mask-rect overlay).
     pub fn grid_vehicle_byte(&self) -> Option<u8> {
-        self.pixels.as_ref().and_then(|grid| grid.vehicle_byte())
+        self.default_material_byte("Vehicle")
+            .or_else(|| self.pixels.as_ref().and_then(|grid| grid.vehicle_byte()))
     }
 
     pub fn grid_byte_at(&self, x: i32, y: i32) -> Option<u8> {
@@ -1761,7 +1856,7 @@ impl Landscape {
         materials: &MaterialSet,
     ) -> BlastResult {
         let mut result = BlastResult::default();
-        if radius <= 0 || self.surface.is_empty() || materials.is_empty() {
+        if radius < 0 || self.surface.is_empty() || materials.is_empty() {
             return result;
         }
 
@@ -2466,10 +2561,7 @@ impl Landscape {
         }
         let old = self.surface[index];
         self.surface[index] = target;
-        let fill = self
-            .pixels
-            .as_ref()
-            .and_then(|grid| grid.byte_for_material(material));
+        let fill = self.default_material_byte_for_id(material);
         self.grid_track_surface(index as i32, old, target, fill);
         self.solid_materials[index] = Some(material);
         true
@@ -3419,6 +3511,57 @@ mod tests {
         assert_eq!(state.map_seed(), 31337);
         assert_eq!(state.texmap().default_material_entry("earth"), Some(7));
         assert!(state.map_creator().is_none());
+    }
+
+    #[test]
+    fn insert_material_pix_uses_default_mattex_instead_of_first_material_slot() {
+        // InsertMaterial writes Mat2PixColDefault(mat), not the first texmap
+        // entry carrying that material (C4Landscape.cpp:1214-1219).
+        let rock = MaterialId::new(0).expect("first material id exists");
+        let mut densities = vec![0; 128];
+        densities[3] = 100;
+        densities[7] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[3] = Some("Rock".to_string());
+        material_names[7] = Some("Rock".to_string());
+        let mut texture_names = vec![None; 128];
+        texture_names[3] = Some("Rough".to_string());
+        texture_names[7] = Some("Smooth".to_string());
+        let grid = PixelGrid::new(
+            1,
+            1,
+            vec![0x80],
+            densities.clone(),
+            material_names.clone(),
+            texture_names.clone(),
+        );
+        let mut texmap = RuntimeTexMapState {
+            densities,
+            material_names,
+            texture_names: texture_names.clone(),
+            match_texture_names: texture_names,
+            shapes: vec![None; 128],
+            materials: vec![RuntimeTexMapMaterial {
+                name: "Rock".to_string(),
+                density: 100,
+                shape: crate::chunky::ChunkShape::Flat,
+            }],
+            texture_inventory: vec!["Rough".to_string(), "Smooth".to_string()],
+            default_material_entries: Vec::new(),
+        };
+        texmap.set_default_material_entry("Rock", 7);
+
+        let mut landscape = Landscape::flat(1, 1);
+        landscape.set_pixel_grid(grid);
+        landscape.resolve_grid_materials(|name| name.eq_ignore_ascii_case("Rock").then_some(rock));
+        landscape.set_raster_state(LandscapeRasterState::new(1, 0, texmap));
+
+        assert!(landscape.insert_material_pix(0, 0, rock));
+        assert_eq!(
+            landscape.grid_byte_at(0, 0),
+            Some(7 | 0x80),
+            "DefaultMatTex byte 7 and the current IFT bit must survive"
+        );
     }
 
     #[test]

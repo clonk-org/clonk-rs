@@ -570,6 +570,17 @@ impl Material {
         self.properties.blast_shift_to_target
     }
 
+    /// The complete `BlastShiftTo` material-texture specification. C++ keeps
+    /// this string until `C4MaterialMap::CrossMapMaterials` resolves the exact
+    /// texmap byte (C4Material.cpp:474-479); reducing it to a material id loses
+    /// texture identity when one material occupies multiple texmap slots.
+    pub fn blast_shift_to_spec(&self) -> Option<&str> {
+        self.definition
+            .value("blastshiftto")
+            .map(str::trim)
+            .filter(|spec| !spec.is_empty())
+    }
+
     pub fn blast_shift_to_clears(&self) -> bool {
         self.properties.blast_shift_to_clears
     }

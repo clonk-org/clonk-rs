@@ -6,7 +6,8 @@
 # production script-host helper (src/C4ScriptKiller.h), coarse landscape
 # traversal (src/C4LandscapePath.h), action-direction decisions
 # (src/C4ActionDirection.h), and active solid-mask bitmap sampling
-# (src/C4SolidMaskBitmap.h). The Rust side
+# (src/C4SolidMaskBitmap.h), complete landscape BlastFree methods, and the
+# bottom-flight C4Object::ContactAction arm. The Rust side
 # (rust/crates/lc-engine/src/parity_differential.rs) diffs against the committed
 # JSON, so this script only needs to run when the C++ primitives or oracle
 # coverage change.
@@ -40,10 +41,9 @@ awk '
   p && /};/ { exit }
 ' "$src/Fixed.cpp" > "$gen/sine_table.cpp"
 
-# 3. Mechanically lift the complete production ShakeObjects and Fling bodies.
-#    The standalone oracle supplies only the surrounding object-list/state
-#    scaffolding; gate order and raw fallback behavior execute byte-for-byte
-#    from src/ rather than from a hand transcription.
+# 3. Mechanically lift complete production method bodies. The standalone
+#    oracle supplies only their surrounding state scaffolding; branch/loop/RNG
+#    order executes byte-for-byte from src/ rather than from a transcription.
 awk '
   /^void C4Game::ShakeObjects\(/ { p = 1 }
   p { print }
@@ -57,6 +57,50 @@ awk '
   p && /^}$/ { found = 1; exit }
   END { if (!found) exit 1 }
 ' "$src/C4Object.cpp" > "$gen/object_fling.inc"
+
+# The first DFA_FLIGHT arm inside ContactAction is its bottom-contact path.
+# Keep the whole arm (through, but not including, DFA_SCALE) so the decisive
+# `(OCF_HitSpeed4 || fDisabled)` gate executes directly from production text.
+awk '
+  /^void C4Object::ContactAction\(\)/ { in_contact_action = 1 }
+  in_contact_action && /^[[:space:]]*case DFA_FLIGHT:/ && !p { p = 1 }
+  p && /^[[:space:]]*case DFA_SCALE:/ { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/contact_action_bottom_flight.inc"
+
+for helper_spec in "Walk walk" "Kneel kneel" "Flat flat"; do
+  set -- $helper_spec
+  helper="$1"
+  helper_lower="$2"
+  awk -v helper="$helper" '
+    $0 ~ "^bool ObjectAction" helper "\\(" { p = 1 }
+    p { print }
+    p && /^}$/ { found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$src/C4ObjectCom.cpp" > "$gen/object_action_${helper_lower}.inc"
+done
+
+awk '
+  /^bool C4Landscape::ClearPix\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/landscape_clear_pix.inc"
+
+awk '
+  /^int32_t C4Landscape::BlastFreePix\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/landscape_blast_free_pix.inc"
+
+awk '
+  /^void C4Landscape::BlastFree\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/landscape_blast_free.inc"
 
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/

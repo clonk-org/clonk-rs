@@ -33,13 +33,17 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `action_callbacks` | `src/C4ActionCallbacks.h`, called by `C4Object::SetAction` | synchronous callback count and Start-before-End/Abort ordering |
 | `solid_mask_graphics` | `src/C4SolidMaskBitmap.h`, called by `C4SolidMask` | active/default graphics selection and transparent/solid mask sampling after `SetGraphics` |
 | `shake_objects` | complete `C4Game::ShakeObjects` + `C4Object::Fling` bodies | master-order gates, `Random(3)`/`Rnd3()` consumption, attachment material identity, and raw Fling fallback |
+| `blast_free` | complete `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` bodies | exact circle scan, pre-mutation material counts, duplicate-slot BlastShiftTo/DefaultMatTex byte selection, IFT preservation, and RNG order |
+| `contact_action_bottom_flight` | complete bottom `DFA_FLIGHT` arm of `C4Object::ContactAction` + action helpers | the `(OCF_HitSpeed4 \|\| fDisabled)` FlatUp gate, including low-speed disabled actions |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
 
-**Out of scope (Phase 2):** the C++ per-pixel collision/contact loop
+**Out of scope (Phase 2):** the C++ per-pixel collision/contact *detection* loop
 (`C4Movement.cpp` `while (x != ctcox)` with `ContactCheck`/friction/redirection,
-item 4) and evolving landscape/material state beyond the coarse `_PathFree`
-query above. Validating those requires running the full C++ engine on a content
-scenario via the `RustEngineBridge` live shadow-diff — see "Phase 2" below.
+item 4) and evolving landscape/material state beyond the isolated `_PathFree`
+and `BlastFree` fixtures above. The isolated bottom-flight `ContactAction`
+transition after detection is covered. Validating the remaining loop requires
+running the full C++ engine on a content scenario via the `RustEngineBridge`
+live shadow-diff — see "Phase 2" below.
 
 ## How the oracle stays honest
 
@@ -99,6 +103,21 @@ scenario via the `RustEngineBridge` live shadow-diff — see "Phase 2" below.
   stubs force the raw fallback while preserving the real selection and RNG
   order; Rust drives the registered script host function over the same master
   list and compares every resulting velocity, attachment, mobile, and cause.
+- `blast_free` mechanically extracts and compiles the complete production
+  `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` bodies. A 7×7
+  Surface8 fixture mixes Earth and Granite with/without IFT; Granite shifts to
+  an explicit second Rock texture while Earth clears to sky or Tunnel's
+  second/default texture+IFT. Rust blasts an identical real
+  `PixelGrid` and compares pre-mutation `BlastMatCount`, every final byte, and
+  `RandomHold`/`RandomCount`/`FRndPtr3` before and after the scan. A second
+  mechanically extracted call pins the inclusive radius-zero center clear.
+- `contact_action_bottom_flight` mechanically extracts the complete first
+  `DFA_FLIGHT` switch arm from `C4Object::ContactAction` and the production
+  `ObjectActionWalk`, `ObjectActionKneel`, and `ObjectActionFlat` helpers. Its
+  three-case OR-gate matrix proves that low-speed `ObjectDisabled=1` reaches
+  FlatUp exactly like `OCF_HitSpeed4`, while enabled low-speed flight walks.
+  Rust drives the matching ActMaps through `Engine::exec_contact_action` and
+  compares action, direction, and raw fixed velocities.
 
 If a divergence is ever a *bug in the golden* rather than the Rust port, fix the
 C++ source and regenerate.

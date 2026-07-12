@@ -15691,9 +15691,6 @@ fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut x = value_to_i32(args.first().unwrap_or(&Value::Nil), "BlastFree", "x")?;
     let mut y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "BlastFree", "y")?;
     let level = value_to_i32(&args[2], "BlastFree", "level")?;
-    if level <= 0 {
-        return Ok(Value::Bool(false));
-    }
 
     let mut caused_by_plus_one = 0;
     if let Some(arg) = args.get(3) {
@@ -15715,20 +15712,18 @@ fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("BlastFree requires an active engine context"))?;
 
-        let mut controller = if caused_by_plus_one > 0 {
-            Some(caused_by_plus_one - 1)
+        let mut controller = if caused_by_plus_one != 0 {
+            Some(caused_by_plus_one.wrapping_sub(1))
         } else {
             None
         };
 
-        if caused_by_plus_one <= 0 {
+        if caused_by_plus_one == 0 {
             if let Some(object) = context.object_context() {
                 let position = object.effective_position();
                 x = x.saturating_add(position.x);
                 y = y.saturating_add(position.y);
-                if controller.is_none() {
-                    controller = Some(object.owner());
-                }
+                controller = Some(object.controller());
             }
         }
 
@@ -30503,7 +30498,8 @@ func Trigger(object pOther)
             None,
             &[],
             FULL_CON,
-        );
+        )
+        .with_controller(9);
         let (result, outcome) = with_effect_context(
             Some(object_context),
             &[],
@@ -30521,21 +30517,82 @@ func Trigger(object pOther)
             } => {
                 assert_eq!(*center, Vector2::new(8, 17));
                 assert_eq!(*radius, 6);
-                assert_eq!(*controller, Some(4));
+                // FnBlastFree defaults to the calling object's Controller,
+                // not its Owner (C4Script.cpp:2284-2294).
+                assert_eq!(*controller, Some(9));
             }
             other => panic!("unexpected landscape operation: {:?}", other),
         }
     }
 
     #[test]
-    fn blast_free_rejects_non_positive_level() {
+    fn blast_free_registers_zero_radius_like_cpp() {
+        // FnBlastFree has no positive-level gate; C4Landscape::BlastFree's
+        // inclusive loops visit the center once for radius zero
+        // (C4Script.cpp:2284-2294; C4Landscape.cpp:1022-1063).
         let args = [Value::Int(0), Value::Int(0), Value::Int(0)];
         let (result, outcome) = with_object_host_context(|| blast_free(&args));
-        assert_eq!(
-            result.expect("BlastFree handles zero level"),
-            Value::Bool(false)
+        assert_eq!(result.expect("BlastFree handles zero level"), Value::Bool(true));
+        assert!(matches!(
+            outcome.landscape.as_slice(),
+            [LandscapeOperation::BlastCircle {
+                center: Vector2 { x: 0, y: 0 },
+                radius: 0,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn blast_free_negative_cause_is_explicit_and_global() {
+        // Only caused_by_plus_one == 0 selects the caller-relative fallback.
+        // A negative explicit value remains global and maps to value-1
+        // (C4Script.cpp:2284-2294).
+        let object_context = HostObjectContext::new(
+            ObjectId::new(1),
+            None,
+            ObjectStatus::Normal,
+            100,
+            4,
+            Vector2::new(5, 10),
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            FULL_CON,
+        )
+        .with_controller(9);
+        let (result, outcome) = with_effect_context(
+            Some(object_context),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || {
+                blast_free(&[
+                    Value::Int(3),
+                    Value::Int(7),
+                    Value::Int(6),
+                    Value::Int(-2),
+                ])
+            },
         );
-        assert!(outcome.landscape.is_empty());
+        assert_eq!(result.expect("BlastFree succeeds"), Value::Bool(true));
+        assert!(matches!(
+            outcome.landscape.as_slice(),
+            [LandscapeOperation::BlastCircle {
+                center: Vector2 { x: 3, y: 7 },
+                radius: 6,
+                controller: Some(-3),
+            }]
+        ));
     }
 
     #[test]

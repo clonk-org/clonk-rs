@@ -335,6 +335,176 @@ mod tests {
     }
 
     #[test]
+    fn blast_circle_clears_only_the_exact_cpp_raster_pixels() {
+        // C4Landscape::BlastFree walks the r=2 circle pixel-by-pixel, and
+        // BlastFreePix calls ClearPix on each BlastFree material
+        // (C4Landscape.cpp:958-978, 1022-1063). ClearPix preserves IFT as
+        // Tunnel|IFT (C4Landscape.cpp:880-888); pixels outside that exact
+        // scan must remain untouched.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            BlastFree=1
+
+            [Material Tunnel]
+            Name=Tunnel
+            Density=0
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(7);
+        engine.set_materials(materials);
+
+        let mut densities = vec![0; 128];
+        densities[10] = 100;
+        let mut names = vec![None; 128];
+        names[10] = Some("Earth".to_owned());
+        names[20] = Some("Tunnel".to_owned());
+        let mut bytes = vec![10; 7 * 7];
+        bytes[3 * 7 + 3] |= 0x80;
+        let grid = landscape::PixelGrid::new(7, 7, bytes, densities, names, vec![None; 128]);
+        let mut world = Landscape::new(7, vec![0; 7]).expect("landscape builds");
+        world.set_world_height(7);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        let result = engine
+            .blast_circle(Vector2::new(3, 3), 2, None)
+            .expect("blast applies");
+
+        assert_eq!(result.pixel_count_by_material.get(&earth), Some(&10));
+        assert_eq!(result.removed_by_material.get(&earth), Some(&10));
+        let landscape = engine.landscape().expect("landscape remains set");
+        for (x, y) in [
+            (3, 1),
+            (2, 2),
+            (3, 2),
+            (1, 3),
+            (2, 3),
+            (4, 3),
+            (2, 4),
+            (3, 4),
+            (3, 5),
+        ] {
+            assert_eq!(
+                landscape.material_at(x, y),
+                None,
+                "BlastFree must clear in-circle pixel ({x}, {y})"
+            );
+        }
+        assert_eq!(
+            landscape.grid_byte_at(3, 3),
+            Some(20 | 0x80),
+            "ClearPix must retain the tunnel-background IFT byte"
+        );
+        assert_eq!(landscape.material_at(3, 0), Some(earth));
+        assert_eq!(landscape.material_at(3, 6), Some(earth));
+    }
+
+    #[test]
+    fn zero_radius_blast_clears_the_center_pixel() {
+        // The inclusive C4Landscape::BlastFree loops execute once at rad=0
+        // (C4Landscape.cpp:1028-1046), so BlastFreePix still clears center.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            BlastFree=1
+        "#,
+        )
+        .expect("material library parses");
+        let mut engine = Engine::with_seed(7);
+        engine.set_materials(MaterialSet::from_resource_library(&library));
+
+        let mut densities = vec![0; 2];
+        densities[1] = 100;
+        let names = vec![None, Some("Earth".to_owned())];
+        let grid = landscape::PixelGrid::new(
+            3,
+            3,
+            vec![1; 9],
+            densities,
+            names,
+            vec![None; 2],
+        );
+        let mut world = Landscape::new(3, vec![0; 3]).expect("landscape builds");
+        world.set_world_height(3);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        engine
+            .blast_circle(Vector2::new(1, 1), 0, None)
+            .expect("zero-radius blast applies");
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.material_at(1, 1)),
+            None
+        );
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.material_at(1, 0)),
+            engine.materials().id_of("Earth")
+        );
+    }
+
+    #[test]
+    fn invalid_sky_blast_shift_consumes_no_rng_and_keeps_the_pixel() {
+        // CrossMap resolves BlastShiftTo through GetIndexMatTex
+        // (C4Material.cpp:474-479). "Sky" is not a material, so resolution
+        // returns byte 0 (C4Texture.cpp:361-368); BlastFreePix's byte gate
+        // therefore skips both Random and SetPix (C4Landscape.cpp:947-953).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Granite]
+            Name=Granite
+            Density=100
+            BlastShiftTo=Sky
+        "#,
+        )
+        .expect("material library parses");
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(MaterialSet::from_resource_library(&library));
+
+        let grid = landscape::PixelGrid::new(
+            3,
+            3,
+            vec![1; 9],
+            vec![0, 100],
+            vec![None, Some("Granite".to_owned())],
+            vec![None; 2],
+        );
+        let mut world = Landscape::new(3, vec![0; 3]).expect("landscape builds");
+        world.set_world_height(3);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        let rng_before = (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr());
+        engine
+            .blast_circle(Vector2::new(1, 1), 0, None)
+            .expect("zero-radius blast applies");
+
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(1, 1)),
+            Some(1),
+            "unresolved BlastShiftTo byte 0 performs no landscape write"
+        );
+        assert_eq!(
+            (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()),
+            rng_before,
+            "unresolved BlastShiftTo byte 0 performs no Random draw"
+        );
+    }
+
+    #[test]
     fn blast_cast_fan_out_matches_the_cpp_evaluate_loop() -> Result<(), EngineError> {
         // C4Landscape::BlastFree evaluate loop (C4Landscape.cpp:1065-1079):
         // materials in INDEX order; within a material BlastCastObjects runs
@@ -30906,6 +31076,51 @@ public func Probe(object target) {
             .expect("target remains after refresh");
         assert_eq!(engine.objects[target_index].state.vertices.len(), 29);
         assert!(engine.objects[target_index].own_shape_vertices.is_none());
+    }
+
+    #[test]
+    fn disabled_flight_flats_on_low_speed_bottom_contact() {
+        // C4Object::ContactAction tries ObjectActionFlat when the current
+        // FLIGHT action is ObjectDisabled even without OCF_HitSpeed4
+        // (C4Object.cpp:4336-4340; C4ObjectCom.cpp:96-101).
+        let mut definition = simple_definition("FLAT");
+        definition.configure_actions(
+            Some("Jump".to_string()),
+            HashMap::from([
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_disabled(true),
+                ),
+                ("FlatUp".to_string(), ActionSpec::default()),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("FLAT")
+                    .with_action(ActionState::new("Jump"))
+                    .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
+                    .with_loaded(true),
+            )
+            .expect("object spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED4, 0);
+        let definition_id = engine.objects[idx].definition_id.clone();
+
+        engine
+            .exec_contact_action(idx, CNAT_BOTTOM, &definition_id, &[])
+            .expect("contact action applies");
+
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.action.name, "FlatUp");
+        assert_eq!(object.fixed_velocity, FixedVec2::ZERO);
+        assert_eq!(object.state.velocity, Vector2::ZERO);
     }
 
     #[test]

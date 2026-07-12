@@ -13521,38 +13521,157 @@ impl Engine {
         radius: i32,
         controller: Option<i32>,
     ) -> Option<BlastResult> {
-        if radius <= 0 {
+        if radius < 0 {
             return None;
         }
-        let result = {
-            let landscape = self.landscape.as_mut()?;
-            landscape.blast_circle(center, radius, &self.materials)
-        };
-        if !result.shift_candidates.is_empty() {
-            self.apply_blast_shifts(radius, &result);
-        }
-        // C4Landscape::BlastFree's per-pixel BlastFreePix ends in
-        // CheckInstabilityRange (C4Landscape.cpp:959-978) for EVERY pixel
-        // of the blast circle (:1056-1063), before the material-count
-        // evaluation (:1065-1079). The column blast above cannot interleave
-        // the probes with the clears, so they run as a post-pass in the
-        // C++ scan order (residual interleaving gap until blasting is
-        // per-pixel).
-        for ycnt in -radius..=radius {
-            let remaining =
-                i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
-            let lwdt = (remaining as f64).sqrt() as i32;
-            let dpy = center.y + ycnt;
-            for xcnt in -lwdt..lwdt + i32::from(lwdt == 0) {
-                self.check_instability_range(center.x + xcnt, dpy);
+        let has_pixel_grid = self.landscape.as_ref()?.pixel_grid().is_some();
+        let result = if has_pixel_grid {
+            self.blast_raster_circle(center, radius)
+        } else {
+            let result = {
+                let landscape = self.landscape.as_mut()?;
+                landscape.blast_circle(center, radius, &self.materials)
+            };
+            if !result.shift_candidates.is_empty() {
+                self.apply_blast_shifts(radius, &result);
             }
-        }
+            // Column-only fixture worlds cannot interleave their approximate
+            // clears with C++'s per-pixel instability probes. Retain the old
+            // post-pass for that synthetic fallback only.
+            for ycnt in -radius..=radius {
+                let remaining = i64::from(radius) * i64::from(radius)
+                    - i64::from(ycnt) * i64::from(ycnt);
+                let lwdt = (remaining as f64).sqrt() as i32;
+                let dpy = center.y + ycnt;
+                for xcnt in -lwdt..lwdt + i32::from(lwdt == 0) {
+                    self.check_instability_range(center.x + xcnt, dpy);
+                }
+            }
+            result
+        };
         // The evaluate loop keys on the PRE-blast BlastMatCount, not on
         // what was removed (C4Landscape.cpp:1065-1079).
         if !result.pixel_count_by_material.is_empty() {
             self.process_blast_reactions(center, controller, &result);
         }
         Some(result)
+    }
+
+    /// C4Landscape::BlastFree / BlastFreePix on the authoritative Surface8
+    /// plane (C4Landscape.cpp:941-960,1022-1063): count the complete circle
+    /// first, then revisit every pixel in the same order. BlastShiftTo draws
+    /// once PER source pixel, writes while retaining IFT, BlastFree clears
+    /// based on the original material, and instability is probed immediately.
+    fn blast_raster_circle(&mut self, center: Vector2, radius: i32) -> BlastResult {
+        let mut result = BlastResult::default();
+        for ycnt in -radius..=radius {
+            let remaining = i64::from(radius) * i64::from(radius)
+                - i64::from(ycnt) * i64::from(ycnt);
+            let lwdt = (remaining as f64).sqrt() as i32;
+            let y = center.y + ycnt;
+            for xcnt in -lwdt..lwdt + i32::from(lwdt == 0) {
+                let x = center.x + xcnt;
+                if let Some(material) = self
+                    .landscape
+                    .as_ref()
+                    .and_then(|landscape| landscape.material_at(x, y))
+                {
+                    *result
+                        .pixel_count_by_material
+                        .entry(material)
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+
+        let blast_size = compute_blast_size(radius);
+        let grade = compute_blast_grade(radius);
+        let shift_threshold = (blast_size * grade) / 6;
+        let mut changed_columns = HashSet::new();
+        for ycnt in -radius..=radius {
+            let remaining = i64::from(radius) * i64::from(radius)
+                - i64::from(ycnt) * i64::from(ycnt);
+            let lwdt = (remaining as f64).sqrt() as i32;
+            let y = center.y + ycnt;
+            for xcnt in -lwdt..lwdt + i32::from(lwdt == 0) {
+                let x = center.x + xcnt;
+                let material = self
+                    .landscape
+                    .as_ref()
+                    .and_then(|landscape| landscape.material_at(x, y));
+                if let Some(material) = material {
+                    let (blast_free, shift_spec, shift_target) = self
+                        .materials
+                        .get_by_id(material)
+                        .map(|entry| {
+                            (
+                                entry.blast_free(),
+                                entry.blast_shift_to_spec().map(str::to_owned),
+                                entry.blast_shift_to_target(),
+                            )
+                        })
+                        .unwrap_or((false, None, None));
+                    let shift_byte = shift_spec
+                        .as_deref()
+                        .zip(shift_target)
+                        .and_then(|(spec, fallback)| {
+                            self.landscape.as_ref().and_then(|landscape| {
+                                landscape.material_texture_byte(spec, fallback)
+                            })
+                        });
+                    if let Some(shift_byte) = shift_byte {
+                        let material_count = result
+                            .pixel_count_by_material
+                            .get(&material)
+                            .copied()
+                            .unwrap_or(0);
+                        if i64::from(self.rng.random(material_count)) < shift_threshold {
+                            let shifted = self.landscape.as_mut().is_some_and(|landscape| {
+                                landscape.insert_material_texture_pix(x, y, shift_byte)
+                            });
+                            if shifted {
+                                changed_columns.insert(x);
+                            }
+                        }
+                    }
+                    if blast_free
+                        && self
+                            .landscape
+                            .as_mut()
+                            .is_some_and(|landscape| landscape.clear_pix(x, y))
+                    {
+                        *result.removed_by_material.entry(material).or_insert(0) += 1;
+                        changed_columns.insert(x);
+                    }
+                }
+                self.check_instability_range(x, y);
+            }
+        }
+
+        if let Some((width, _)) = self
+            .landscape
+            .as_ref()
+            .and_then(Landscape::grid_dimensions)
+        {
+            let start = center.x.saturating_sub(radius).clamp(0, width) as usize;
+            let end = center
+                .x
+                .saturating_add(radius)
+                .saturating_add(1)
+                .clamp(0, width) as usize;
+            if let Some(landscape) = self.landscape.as_mut() {
+                landscape.refresh_raster_columns(start..end);
+                for x in start..end {
+                    let x = x as i32;
+                    if changed_columns.contains(&x) {
+                        if let Some(surface) = landscape.surface_height(x) {
+                            result.affected_columns.push((x, surface));
+                        }
+                    }
+                }
+            }
+        }
+        result
     }
 
     pub fn clear_landscape(&mut self) {
@@ -23616,6 +23735,7 @@ impl Engine {
             return Ok(());
         }
         let procedure = library.procedure_for_action(&action_name);
+        let action_disabled = library.disables_object(&action_name);
         let physical = self.object_physical(idx);
         let ocf = self.objects[idx].state.ocf;
         let com_dir = self.objects[idx].state.command_direction;
@@ -23637,7 +23757,7 @@ impl Engine {
                 ActionProcedure::Flight => {
                     if self.objects[idx].fixed_velocity.y >= C4Fixed::ZERO {
                         // FlatHit / HardHit / Walk
-                        if ocf & crate::ocf::HIT_SPEED4 != 0
+                        if (ocf & crate::ocf::HIT_SPEED4 != 0 || action_disabled)
                             && self.object_action_flat(idx, definition_id, direction)?
                         {
                             return Ok(());
@@ -30038,7 +30158,7 @@ impl Engine {
         radius: i32,
         controller: Option<i32>,
     ) {
-        if radius <= 0 {
+        if radius < 0 {
             return;
         }
         let _ = self.blast_circle(center, radius, controller);
