@@ -392,10 +392,7 @@ fn parse_entry(bytes: &[u8]) -> Result<PackedEntry, GroupError> {
     let mut cursor = Cursor::new(bytes);
     let mut name_bytes = [0u8; 260];
     cursor.read_exact(&mut name_bytes)?;
-    let name = c_string(&name_bytes);
-    if name.is_empty() {
-        return Err(GroupError::InvalidGroup("empty entry filename".into()));
-    }
+    let name = sanitize_group_entry_filename(c_string(&name_bytes));
     let _packed = cursor.read_i32::<LittleEndian>()?;
     let child = cursor.read_i32::<LittleEndian>()? != 0;
     let size = cursor.read_i32::<LittleEndian>()?;
@@ -431,6 +428,19 @@ fn parse_entry(bytes: &[u8]) -> Result<PackedEntry, GroupError> {
 fn c_string(buf: &[u8]) -> String {
     let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..nul]).trim().to_string()
+}
+
+fn sanitize_group_entry_filename(name: String) -> String {
+    if name.is_empty() {
+        return "empty".to_string();
+    }
+    name.chars()
+        .map(|character| match character {
+            '/' | '\\' | '*' | '?' | '<' | '>' | ';' | '|' | ':' => '_',
+            _ => character,
+        })
+        .collect::<String>()
+        .replace("..", "__")
 }
 
 /// On-disk C4Group files are gzip streams whose two magic bytes are
@@ -695,6 +705,37 @@ mod tests {
 
         assert!(group.exists("HELLO.TXT"));
         assert_eq!(group.read_file("Hello.Txt").unwrap(), b"world");
+    }
+
+    #[test]
+    fn packed_group_sanitizes_entry_filenames_like_cpp() {
+        // OpenRealGrpFile validates every directory entry with VAL_Filename
+        // (src/C4Group.cpp:784-793): separators become '_', ".." becomes
+        // "__", and '?' is prohibited (src/C4InputValidation.cpp:39-95).
+        let image = packed_group_image_with_entry("../bad?.txt", false, b"safe");
+        let group =
+            Group::from_memory(PathBuf::from("test.c4group"), image).expect("valid packed group");
+
+        assert_eq!(
+            group.entries().unwrap()[0].relative_path,
+            Path::new("___bad_.txt")
+        );
+        assert_eq!(group.read_file("___bad_.txt").unwrap(), b"safe");
+    }
+
+    #[test]
+    fn packed_group_renames_empty_entry_like_cpp() {
+        // VAL_Filename rewrites an empty string to "empty" and retains the
+        // entry (src/C4InputValidation.cpp:39-56).
+        let image = packed_group_image_with_entry("", false, b"data");
+        let group = Group::from_memory(PathBuf::from("test.c4group"), image)
+            .expect("empty source name is sanitized");
+
+        assert_eq!(
+            group.entries().unwrap()[0].relative_path,
+            Path::new("empty")
+        );
+        assert_eq!(group.read_file("empty").unwrap(), b"data");
     }
 
     #[test]
