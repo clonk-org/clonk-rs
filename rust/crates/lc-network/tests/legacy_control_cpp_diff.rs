@@ -114,4 +114,8 @@ fn minimal_player_info_matches_cpp_control_codec() {
     );
     assert_eq!(player.extra_data, *b"NONE");
     assert_eq!(player.resource, None);
+    assert_eq!(
+        encode_control_payload(&frame).expect("Rust re-encodes the C++ PlayerInfo control"),
+        cpp_bytes
+    );
 }

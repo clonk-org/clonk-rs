@@ -16,6 +16,7 @@ const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
 const MAX_VARINT_BYTES: usize = 5;
 const MAX_PLAYER_INFO_COUNT: i32 = 5_000;
+const PLAYER_INFO_SYNC_FLAGS: u16 = 0x7fcd;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LegacyControlError {
@@ -61,6 +62,10 @@ pub enum LegacyEncodeError {
     UnsupportedResourceJoin,
     #[error("embedded JoinPlayer data length {0} exceeds uint32")]
     PlayerDataTooLarge(usize),
+    #[error("resource-backed PlayerInfo entries are not supported yet")]
+    UnsupportedPlayerInfoResource,
+    #[error("PlayerInfo count {0} is outside the C++ range")]
+    PlayerInfoCountOutOfRange(usize),
     #[error("client id {0} exceeds supported range")]
     ClientIdOutOfRange(ClientId),
     #[error("control tick {0} exceeds supported range")]
@@ -561,6 +566,19 @@ fn append_raw_i32(buffer: &mut Vec<u8>, value: i32) {
     buffer.extend(value.to_ne_bytes());
 }
 
+fn append_raw_u32(buffer: &mut Vec<u8>, value: u32) {
+    buffer.extend(value.to_ne_bytes());
+}
+
+fn append_raw_u16(buffer: &mut Vec<u8>, value: u16) {
+    buffer.extend(value.to_ne_bytes());
+}
+
+fn append_c_string(buffer: &mut Vec<u8>, value: &LegacyCString) {
+    buffer.extend_from_slice(value.as_bytes());
+    buffer.push(0);
+}
+
 fn append_network_filename(buffer: &mut Vec<u8>, filename: &LegacyCString) {
     #[cfg(windows)]
     buffer.extend_from_slice(filename.as_bytes());
@@ -572,6 +590,65 @@ fn append_network_filename(buffer: &mut Vec<u8>, filename: &LegacyCString) {
             .map(|byte| if *byte == b'/' { b'\\' } else { *byte }),
     );
     buffer.push(0);
+}
+
+fn encode_player_info(
+    buffer: &mut Vec<u8>,
+    data: &PlayerInfoControlData,
+) -> Result<(), LegacyEncodeError> {
+    let player_count = i32::try_from(data.players.len())
+        .ok()
+        .filter(|count| *count <= MAX_PLAYER_INFO_COUNT)
+        .ok_or(LegacyEncodeError::PlayerInfoCountOutOfRange(
+            data.players.len(),
+        ))?;
+    if data.players.iter().any(|player| {
+        player.flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 || player.resource.is_some()
+    }) {
+        return Err(LegacyEncodeError::UnsupportedPlayerInfoResource);
+    }
+
+    buffer.push(CID_PLR_INFO);
+    append_raw_i32(buffer, data.client_id);
+    append_raw_u32(buffer, data.flags);
+    append_int32(buffer, player_count);
+    for player in &data.players {
+        encode_player_info_entry(buffer, player);
+    }
+    append_int32(buffer, data.by_client);
+    Ok(())
+}
+
+fn encode_player_info_entry(buffer: &mut Vec<u8>, player: &ControlPlayerInfoEntry) {
+    let flags = player.flags & PLAYER_INFO_SYNC_FLAGS;
+    append_c_string(buffer, &player.name);
+    append_c_string(buffer, &player.forced_name);
+    append_c_string(buffer, &player.filename);
+    append_raw_u16(buffer, flags);
+    append_raw_i32(buffer, player.id);
+    buffer.push(player.player_type);
+    append_raw_u32(buffer, player.color);
+    append_raw_u32(buffer, player.original_color);
+    append_int32(buffer, player.savegame_player);
+    append_int32(buffer, player.team);
+    append_c_string(buffer, &player.auth_id);
+    if flags & PLAYER_INFO_FLAG_JOINED != 0 {
+        append_raw_i32(buffer, player.game_number);
+        append_raw_i32(buffer, player.game_join_frame);
+    }
+    if flags & PLAYER_INFO_FLAG_REMOVED != 0 {
+        append_raw_i32(buffer, player.game_part_frame);
+    }
+    buffer.extend_from_slice(&player.extra_data);
+    buffer.push(0);
+    append_c_string(buffer, &player.league_account);
+    append_int32(buffer, player.league_score);
+    append_int32(buffer, player.league_rank);
+    append_int32(buffer, player.league_rank_symbol);
+    append_int32(buffer, player.league_projected_gain);
+    append_c_string(buffer, &player.clan_tag);
+    append_int32(buffer, player.league_performance);
+    append_c_string(buffer, &player.league_progress_data);
 }
 
 fn encode_join_player(
@@ -624,6 +701,7 @@ fn encode_controls(
 ) -> Result<(), LegacyEncodeError> {
     for control in controls {
         match control {
+            EngineControlPacket::PlayerInfo(data) => encode_player_info(buffer, data)?,
             EngineControlPacket::JoinPlayer(data) => encode_join_player(buffer, data)?,
             EngineControlPacket::PlayerControl(data) => encode_player_control(buffer, data),
             EngineControlPacket::SyncCheck(data) => encode_sync_check(buffer, data),
