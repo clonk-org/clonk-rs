@@ -1,44 +1,11 @@
-use std::env;
-use std::path::PathBuf;
-
-use lc_engine::scenario::LegacyDefinitionResolver;
+use crate::support::real_scenario::load_tutorial;
 use lc_engine::{
-    CommandDirection, Engine, JoinPlayerConfig, ObjectUpdate, Scenario, ScenarioError, Vector2,
-    COM_DOWN, COM_UP,
+    CommandDirection, Engine, JoinPlayerConfig, ObjectUpdate, Vector2, COM_DOWN,
+    COM_RELEASE_OFFSET, COM_UP,
 };
-use lc_resources::Group;
 
-struct ContentResolver {
-    root: PathBuf,
-}
-
-impl LegacyDefinitionResolver for ContentResolver {
-    fn resolve_definition_groups(
-        &self,
-        _scenario: &Group,
-        identifier: &str,
-    ) -> Result<Vec<Group>, ScenarioError> {
-        Group::open(self.root.join(identifier.replace('\\', "/")))
-            .map(|group| vec![group])
-            .map_err(ScenarioError::Resources)
-    }
-}
-
-fn load_tutorial02() -> (Engine, i32) {
-    let content = env::var_os("LC_CONTENT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../content"));
-    let scenario = Scenario::load_from_path_with(
-        content.join("Tutorial.c4f/Tutorial02.c4s"),
-        &ContentResolver {
-            root: content.clone(),
-        },
-    )
-    .unwrap_or_else(|error| panic!("Tutorial02 loads: {error}"));
-    let mut engine = Engine::with_seed(0);
-    scenario
-        .apply(&mut engine)
-        .unwrap_or_else(|error| panic!("Tutorial02 applies: {error}"));
+fn load_tutorial02(control_style: bool) -> (Engine, i32) {
+    let mut engine = load_tutorial(2, 0);
     let joined = engine
         .join_player(JoinPlayerConfig {
             name: "Tutorial 2 balloon platform".to_string(),
@@ -50,8 +17,8 @@ fn load_tutorial02() -> (Engine, i32) {
             pref_color: 0,
             pref_position: 0,
             crew: Vec::new(),
-            control_style: false,
-            auto_context_menu: false,
+            control_style,
+            auto_context_menu: control_style,
             startup_player_count: 1,
         })
         .unwrap_or_else(|error| panic!("Tutorial02 player joins: {error}"));
@@ -59,8 +26,8 @@ fn load_tutorial02() -> (Engine, i32) {
 }
 
 #[test]
-fn tutorial02_balloon_lift_keeps_the_pushing_clonk_on_its_platform() {
-    let (mut engine, player) = load_tutorial02();
+fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
+    let (mut engine, player) = load_tutorial02(true);
     let clonk = engine
         .crew_cursor(player)
         .expect("Tutorial02 joins one selected CLNK");
@@ -107,15 +74,12 @@ fn tutorial02_balloon_lift_keeps_the_pushing_clonk_on_its_platform() {
         None
     );
 
-    // A repeated classic Down becomes COM_Down_D and queues Grab; the
-    // completed Grab enters DFA_PUSH (C4Player.cpp:1522-1536;
-    // C4ObjectCom.cpp:247-259,573-588).
+    // Fresh players default to Jump'n'Run/AutoStop control. Its single held
+    // Down queues Grab, and the completed command enters DFA_PUSH
+    // (C4Player.cpp:1490-1554; C4ObjectCom.cpp:247-259,573-588).
     engine
         .player_in_com(player, COM_DOWN, 0)
-        .expect("first Down press");
-    engine
-        .player_in_com(player, COM_DOWN, 0)
-        .expect("second Down press");
+        .expect("held AutoStop Down press");
     for _ in 0..80 {
         if engine.object_snapshot(clonk).is_some_and(|object| {
             object.action.name == "Push" && object.action.target == Some(balloon.id)
@@ -128,12 +92,17 @@ fn tutorial02_balloon_lift_keeps_the_pushing_clonk_on_its_platform() {
     let balloon_before_lift = engine.object_snapshot(balloon.id).expect("BALN after Grab");
     assert_eq!(pushing.action.name, "Push");
     assert_eq!(pushing.action.target, Some(balloon.id));
+    let platform_delta_x = pushing.position.x - balloon_before_lift.position.x;
     let platform_delta_y = pushing.position.y - balloon_before_lift.position.y;
+    engine
+        .player_in_com(player, COM_DOWN + COM_RELEASE_OFFSET, 0)
+        .expect("AutoStop Down release after Grab");
 
     // While DFA_PUSH is active, the target receives Up first
-    // (C4Object.cpp:3520-3537). BALN::ControlUp selects COMD_Up, and its
-    // Float procedure accelerates upward. DFA_PUSH follows the target and
-    // sets CNAT_Bottom (C4Object.cpp:5058-5114). When BALN's DoMotion removes
+    // (C4Object.cpp:3520-3537). AutoStop's BALN::ControlUpdate selects
+    // COMD_Up, and its Float procedure accelerates upward
+    // (C4Object.cpp:3321-3338; Balloon.c4d/Script.c:60-78). DFA_PUSH follows
+    // the target and sets CNAT_Bottom (C4Object.cpp:5058-5114). When BALN's DoMotion removes
     // its solid mask, C++ backs up every object contacting that mask, then
     // Put moves each one by BALN's dx/dy before its own attachment pass
     // (C4Movement.cpp:121-126,443-445; C4SolidMask.cpp:178-195,276-305).
@@ -148,7 +117,13 @@ fn tutorial02_balloon_lift_keeps_the_pushing_clonk_on_its_platform() {
         CommandDirection::Up
     );
 
-    for lift_frame in 1..=60 {
+    for lift_frame in 1..=100 {
+        if engine
+            .object_snapshot(balloon.id)
+            .is_some_and(|object| object.position.y <= 275)
+        {
+            break;
+        }
         engine.tick().expect("controlled BALN lift frame");
         let clonk_now = engine.object_snapshot(clonk).expect("CLNK during lift");
         let balloon_now = engine
@@ -161,6 +136,12 @@ fn tutorial02_balloon_lift_keeps_the_pushing_clonk_on_its_platform() {
              clonk={clonk_now:?}, balloon={balloon_now:?}"
         );
         assert!(
+            (clonk_now.position.x - balloon_now.position.x - platform_delta_x).abs() <= 1,
+            "CLNK must remain horizontally attached to BALN's platform on lift frame \
+             {lift_frame}; initial delta={platform_delta_x}, clonk={clonk_now:?}, \
+             balloon={balloon_now:?}"
+        );
+        assert!(
             (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1,
             "CLNK must remain vertically attached to BALN's platform on lift frame \
              {lift_frame}; initial delta={platform_delta_y}, clonk={clonk_now:?}, \
@@ -170,8 +151,117 @@ fn tutorial02_balloon_lift_keeps_the_pushing_clonk_on_its_platform() {
 
     let balloon_after_lift = engine.object_snapshot(balloon.id).expect("lifted BALN");
     assert!(
-        balloon_after_lift.position.y < balloon_before_lift.position.y,
-        "BALN::ControlUp must move the platform upward"
+        balloon_after_lift.position.y < balloon_before_lift.position.y
+            && balloon_after_lift.position.y <= 275,
+        "BALN::ControlUp must move the attached platform into Tutorial02's flight corridor"
+    );
+
+    // AutoStop's Up release sends ControlUpdate(COMD_Stop). Wind2Float keeps
+    // applying horizontal wind in Stop, so every following frame exercises
+    // C4SolidMask's x/y attachment restore across multiple platform widths
+    // (C4Object.cpp:3321-3338; Balloon.c4d/Script.c:60-78,103-110;
+    // C4SolidMask.cpp:178-195,276-305).
+    engine
+        .player_in_com(player, COM_UP + COM_RELEASE_OFFSET, 0)
+        .expect("Up release after lift");
+    assert_eq!(
+        engine
+            .object_snapshot(balloon.id)
+            .expect("BALN after DownSingle")
+            .command_direction,
+        CommandDirection::Stop
+    );
+
+    let coast_start_x = engine
+        .object_snapshot(balloon.id)
+        .expect("BALN before lateral coast")
+        .position
+        .x;
+    for coast_frame in 1..=600 {
+        if engine
+            .object_snapshot(balloon.id)
+            .is_some_and(|object| (object.position.x - coast_start_x).abs() >= 64)
+        {
+            break;
+        }
+        engine.tick().expect("controlled BALN lateral coast frame");
+        let clonk_now = engine.object_snapshot(clonk).expect("CLNK during coast");
+        let balloon_now = engine
+            .object_snapshot(balloon.id)
+            .expect("BALN during coast");
+        assert_eq!(
+            (clonk_now.action.name.as_str(), clonk_now.action.target),
+            ("Push", Some(balloon.id)),
+            "DFA_PUSH must retain the moving BALN on coast frame {coast_frame}; \
+             clonk={clonk_now:?}, balloon={balloon_now:?}"
+        );
+        assert!(
+            (clonk_now.position.x - balloon_now.position.x).abs() < 18,
+            "CLNK must remain inside BALN's shipped 36px solid-mask platform on coast frame \
+             {coast_frame}; clonk={clonk_now:?}, balloon={balloon_now:?}"
+        );
+        assert!(
+            (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1,
+            "CLNK must retain its vertical BALN platform offset on coast frame \
+             {coast_frame}; initial delta={platform_delta_y}, clonk={clonk_now:?}, \
+             balloon={balloon_now:?}"
+        );
+    }
+    let balloon_after_coast = engine
+        .object_snapshot(balloon.id)
+        .expect("BALN after lateral coast");
+    assert!(
+        (balloon_after_coast.position.x - coast_start_x).abs() >= 64,
+        "real Tutorial02 wind must move BALN at least 64px laterally while the CLNK stays attached; \
+         start_x={coast_start_x}, balloon={balloon_after_coast:?}"
+    );
+
+    let descent_start_y = balloon_after_coast.position.y;
+    engine
+        .player_in_com(player, COM_DOWN, 0)
+        .expect("held AutoStop Down begins descent");
+    assert_eq!(
+        engine
+            .object_snapshot(balloon.id)
+            .expect("BALN after held Down")
+            .command_direction,
+        CommandDirection::Down
+    );
+    for descent_frame in 1..=30 {
+        engine.tick().expect("controlled BALN descent frame");
+        let clonk_now = engine
+            .object_snapshot(clonk)
+            .expect("CLNK during descent");
+        let balloon_now = engine
+            .object_snapshot(balloon.id)
+            .expect("BALN during descent");
+        assert_eq!(
+            (clonk_now.action.name.as_str(), clonk_now.action.target),
+            ("Push", Some(balloon.id)),
+            "DFA_PUSH must retain BALN on descent frame {descent_frame}"
+        );
+        assert!(
+            (clonk_now.position.x - balloon_now.position.x).abs() < 18
+                && (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1,
+            "CLNK must remain on BALN through descent frame {descent_frame}; \
+             clonk={clonk_now:?}, balloon={balloon_now:?}"
+        );
+    }
+    assert!(
+        engine
+            .object_snapshot(balloon.id)
+            .is_some_and(|object| object.position.y > descent_start_y),
+        "held AutoStop Down must lower the attached BALN"
+    );
+    engine
+        .player_in_com(player, COM_DOWN + COM_RELEASE_OFFSET, 0)
+        .expect("AutoStop Down release after descent");
+    assert_eq!(
+        engine
+            .object_snapshot(balloon.id)
+            .expect("BALN after descent release")
+            .command_direction,
+        CommandDirection::Stop
     );
 }
 
@@ -179,7 +269,7 @@ fn tutorial02_balloon_lift_keeps_the_pushing_clonk_on_its_platform() {
 fn tutorial02_open_bottom_removes_the_clonk_in_the_crossing_tick() {
     // Tutorial02 has BottomOpen=1. C4Object::ExecMovement removes an ordinary
     // object at y > GBackHgt in that same tick (src/C4Movement.cpp:598-617).
-    let (mut engine, player) = load_tutorial02();
+    let (mut engine, player) = load_tutorial02(true);
     let clonk = engine
         .crew_cursor(player)
         .expect("Tutorial02 joins one selected CLNK");
