@@ -113,6 +113,61 @@ fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag() {
 }
 
 #[test]
+fn dragon_rock_initialize_player_grants_both_plan_knowledge_sets() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+    let owner = join_local_player(&mut engine, "Dragon Rock knowledge parity");
+
+    // Dragon Rock calls WPPL->SetKnowledge(iPlr) and
+    // CPPL->SetKnowledge(iPlr) before continuing player initialization
+    // (Drachenfels.c4s/Script.c:63-103). Both shipped plan scripts use the
+    // two-argument SetPlrKnowledge(player, id) form throughout
+    // (Weapons/Plans/Script.c:10-65; Castle/Plans/Script.c:22-70).
+    // C4Aul pads the omitted third slot with nil, which converts to false,
+    // so FnSetPlrKnowledge validates the definition and grants count one
+    // (C4AulParse.cpp:2339-2345; C4Value.h:161,325-330;
+    // C4Script.cpp:2636-2650; C4IDList.cpp:85-103).
+    // The persisted result is the union with Scenario.txt's positive
+    // Player1 Knowledge entries. C4Player first ConsolidateValids that list
+    // (C4Player.cpp:697-706; C4IDList.cpp:175-184), and each plan grant also
+    // rejects an unloaded definition (C4Script.cpp:2646-2649). Thus PNON
+    // from Scenario.txt and CODH from WPPL are deliberately absent.
+    let expected = [
+        "ADM1", "ADM3", "ANVL", "ARCH", "ARMR", "ARWP", "AXE1", "BALN", "BANP",
+        "BARL", "BAS7", "BED1", "BLMP", "BOW1", "BRDG", "BRED", "BWRC", "CANN",
+        "CATA", "CHEM", "CLD1", "CNDL", "CNKT", "COKI", "CPAL", "CPEL", "CPH1",
+        "CPHC", "CPKT", "CPOF", "CPR1", "CPR2", "CPT1", "CPT2", "CPT3", "CPT4",
+        "CPTL", "CPTR", "CPW1", "CPW2", "CPWK", "CPWL", "CPWR", "DCO3", "DCO4",
+        "DOGH", "DPOT", "DRCK", "EFLN", "ELEV", "FARP", "FBMP", "FDRS", "FLNT",
+        "FNDR", "FRGE", "GUNP", "HUT1", "HUT2", "HUT3", "KSDL", "LANC", "LNKT",
+        "LORY", "OVEN", "PAL2", "PALS", "PFIR", "PHEA", "POWR", "PSTO", "PUMP",
+        "RSRC", "SAWM", "SFLN", "SHIE", "SHRC", "SLBT", "SPER", "SPRC", "STFN",
+        "SWOR", "SWRC", "TABL", "TENP", "TFLN", "THRN", "TWR2", "WDBR", "WGTW",
+        "WMIL", "WODC", "WRKS", "WTWR", "WZKP", "XARP", "XBOW",
+    ];
+    let player = engine.player(owner).expect("joined player remains live");
+    let mut actual = player
+        .knowledge()
+        .map(|definition| definition.as_str())
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+    assert_eq!(actual, expected, "both shipped plan sets persist exactly");
+
+    // The difficulty menu is created after both definition calls. Its
+    // presence proves InitializePlayer ran past every omitted remove flag
+    // instead of aborting at the original argument-count warning.
+    let (_, menu) = engine
+        .cursor_object_menu(owner)
+        .expect("InitializePlayer continues into the difficulty menu");
+    assert_eq!(
+        menu.items
+            .iter()
+            .map(|item| item.item_id.as_str())
+            .collect::<Vec<_>>(),
+        ["WIPF", "MONS"]
+    );
+}
+
+#[test]
 fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
     let owner = join_local_player(&mut engine, "Dragon Rock fog parity");
