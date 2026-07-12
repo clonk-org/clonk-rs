@@ -2103,6 +2103,12 @@ pub struct ObjectMenuItem {
     /// picture. The default preserves existing script-created menu state.
     #[serde(default, skip_serializing_if = "ObjectMenuSymbol::is_definition")]
     pub symbol: ObjectMenuSymbol,
+    /// Object whose `Picture2Facet` supplied this row's symbol during an
+    /// internal object-menu refill. This is presentation provenance, not
+    /// `C4MenuItem::Object`: Sell rows pass a null item object after copying
+    /// the representative's picture (C4ObjectMenu.cpp:246-271).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_object: Option<ObjectId>,
     /// Cached component requirements for `C4MN_Extra_Components` and its
     /// magic variants (`C4MenuItem`, C4Menu.h:91; C4Menu.cpp:92-97).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

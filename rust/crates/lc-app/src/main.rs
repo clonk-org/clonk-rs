@@ -10720,13 +10720,22 @@ impl GameApp {
                 .engine
                 .definition_picture_image(title_id)
                 .map(definition_menu_picture);
+            let item_definition_color = matches!(
+                menu.title_symbol,
+                lc_engine::ObjectMenuSymbol::Buy { .. }
+            )
+            .then(|| object_menu_buying_player_color(&self.snapshot, menu.command_object))
+            .unwrap_or(0);
             let item_icons = menu
                 .items
                 .iter()
                 .map(|item| {
-                    self.engine
-                        .definition_picture_image(&item.item_id)
-                        .map(definition_menu_picture)
+                    object_menu_item_picture(
+                        &self.engine,
+                        &self.snapshot,
+                        item,
+                        item_definition_color,
+                    )
                 })
                 .collect::<Vec<_>>();
             let selected_component_icons = usize::try_from(menu.selection)
@@ -13008,6 +13017,50 @@ fn inventory_object_picture(
     }
 
     Some(ImageData::new(width, height, composed.pixels().to_vec()))
+}
+
+fn object_menu_item_picture(
+    engine: &Engine,
+    snapshot: &SimulationSnapshot,
+    item: &lc_engine::ObjectMenuItem,
+    definition_color: u32,
+) -> Option<ImageData> {
+    match item.picture_object {
+        Some(object_id) => snapshot
+            .object(object_id)
+            .and_then(|object| inventory_object_picture(engine, object)),
+        None => engine
+            .definition_picture_image(&item.item_id)
+            .map(|image| {
+                if definition_color == 0 {
+                    definition_menu_picture(image)
+                } else {
+                    let width = image.width();
+                    let height = image.height();
+                    let pixels = inventory_picture_pixels(&image, definition_color);
+                    ImageData::new(width, height, pixels)
+                }
+            }),
+    }
+}
+
+fn object_menu_buying_player_color(
+    snapshot: &SimulationSnapshot,
+    command_object: Option<ObjectId>,
+) -> u32 {
+    command_object
+        .and_then(|object_id| snapshot.object(object_id))
+        .and_then(|object| {
+            snapshot
+                .players
+                .iter()
+                .find(|player| player.id == object.owner)
+        })
+        .and_then(|player| player.color)
+        .map(|color| {
+            u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+        })
+        .unwrap_or(0)
 }
 
 fn inventory_picture_pixels(
@@ -16027,6 +16080,28 @@ mod tests {
             assert_eq!(picture.pixels()[offset + channel], expected);
         }
         assert_eq!(picture.pixels()[offset + 3], source_pixels[offset + 3]);
+
+        // Buy row definition pictures use the buying player attached to the
+        // menu command object, not the base/title owner and not default blue
+        // (src/C4ObjectMenu.cpp:217-226; src/C4Def.cpp:1374-1378).
+        let buy_item = lc_engine::ObjectMenuItem {
+            caption: "Buy Flag".to_string(),
+            info_caption: String::new(),
+            command: String::new(),
+            command2: String::new(),
+            count: 1,
+            item_id: "FLAG".to_string(),
+            symbol: lc_engine::ObjectMenuSymbol::Definition,
+            picture_object: None,
+            components: Vec::new(),
+            selectable: true,
+            value: None,
+        };
+        let buy_color = object_menu_buying_player_color(&snapshot, Some(crew_id));
+        assert_eq!(buy_color, 0x00c0_2040);
+        let buy_picture = object_menu_item_picture(&engine, &snapshot, &buy_item, buy_color)
+            .expect("buy row picture");
+        assert_eq!(buy_picture.pixels(), picture.pixels());
     }
 
     #[test]
@@ -16105,6 +16180,27 @@ mod tests {
         assert_eq!((active_picture.width(), active_picture.height()), (64, 64));
         assert_ne!(idle_picture.pixels(), active_picture.pixels());
 
+        // C4ObjectMenu refills Sell/Get/Contents rows from the iterator's
+        // representative object via Picture2Facet, not from the bare item ID
+        // (src/C4ObjectMenu.cpp:246-264,286-313). The app must therefore use
+        // the same object-picture compositor as the inventory HUD.
+        let menu_item = lc_engine::ObjectMenuItem {
+            caption: "Get T-Flint".to_string(),
+            info_caption: String::new(),
+            command: String::new(),
+            command2: String::new(),
+            count: 1,
+            item_id: "TFLN".to_string(),
+            symbol: lc_engine::ObjectMenuSymbol::Definition,
+            picture_object: Some(active_id),
+            components: Vec::new(),
+            selectable: true,
+            value: None,
+        };
+        let menu_picture = object_menu_item_picture(&engine, &snapshot, &menu_item, 0)
+            .expect("menu row picture");
+        assert_eq!(menu_picture.pixels(), active_picture.pixels());
+
         // C4Object::Picture2Facet runs PrepareDrawing before drawing the
         // selected rect (src/C4Object.cpp:3138-3154); ColorMod therefore
         // modulates the inventory picture, not only the in-world sprite.
@@ -16174,6 +16270,25 @@ mod tests {
         object.graphics_overlays.push(picture_overlay);
         let picture = inventory_object_picture(&engine, &object).expect("picture composes");
         assert_eq!(picture.pixels(), &[0, 0, 0xff, 0xff]);
+
+        let object_id = object.id;
+        let snapshot = make_snapshot(vec![object], Vec::new());
+        let menu_item = lc_engine::ObjectMenuItem {
+            caption: "Overlay".to_string(),
+            info_caption: String::new(),
+            command: String::new(),
+            command2: String::new(),
+            count: 1,
+            item_id: "BASE".to_string(),
+            symbol: lc_engine::ObjectMenuSymbol::Definition,
+            picture_object: Some(object_id),
+            components: Vec::new(),
+            selectable: true,
+            value: None,
+        };
+        let menu_picture = object_menu_item_picture(&engine, &snapshot, &menu_item, 0)
+            .expect("menu picture composes the representative overlay");
+        assert_eq!(menu_picture.pixels(), picture.pixels());
     }
 
     #[test]
@@ -19865,6 +19980,7 @@ mod tests {
                     count: 12_345_678,
                     item_id: "NONE".to_string(),
                     symbol: lc_engine::ObjectMenuSymbol::default(),
+                    picture_object: None,
                     components: Vec::new(),
                     selectable: true,
                     value: None,
@@ -19877,6 +19993,7 @@ mod tests {
                     count: 12_345_678,
                     item_id: "NONE".to_string(),
                     symbol: lc_engine::ObjectMenuSymbol::default(),
+                    picture_object: None,
                     components: Vec::new(),
                     selectable: true,
                     value: None,

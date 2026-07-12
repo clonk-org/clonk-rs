@@ -3989,6 +3989,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         count,
         item_id: c4id_text_of(&item_id),
         symbol: crate::ObjectMenuSymbol::default(),
+        picture_object: None,
         components,
         selectable,
         value: own_value,

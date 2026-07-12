@@ -353,6 +353,7 @@ impl Engine {
             count: C4MN_ITEM_NO_COUNT,
             item_id,
             symbol,
+            picture_object: None,
             components: Vec::new(),
             selectable: true,
             value: None,
@@ -383,6 +384,7 @@ impl Engine {
                     count: C4MN_ITEM_NO_COUNT,
                     item_id: first_carried_definition,
                     symbol: crate::ObjectMenuSymbol::Put,
+                    picture_object: None,
                     components: Vec::new(),
                     selectable: true,
                     value: None,
@@ -464,6 +466,7 @@ impl Engine {
                 count: C4MN_ITEM_NO_COUNT,
                 item_id: image.to_owned(),
                 symbol: crate::ObjectMenuSymbol::Definition,
+                picture_object: None,
                 components: Vec::new(),
                 selectable: true,
                 value: None,
@@ -555,6 +558,7 @@ impl Engine {
             count: C4MN_ITEM_NO_COUNT,
             item_id: definition_id.clone(),
             symbol: crate::ObjectMenuSymbol::default(),
+            picture_object: None,
             components: Vec::new(),
             selectable: false,
             value: None,
@@ -1979,6 +1983,7 @@ impl Engine {
                     count,
                     item_id: definition_id,
                     symbol: crate::ObjectMenuSymbol::default(),
+                    picture_object: None,
                     components: Vec::new(),
                     selectable: true,
                     value: Some(definition.value()),
@@ -2065,8 +2070,36 @@ impl Engine {
                             )
                         })
                         .count();
+                // C4ObjectMenu prefers the first live fully-constructed
+                // same-ID object when the iterator's representative is
+                // incomplete and the two pictures concatenate. This changes
+                // the picture/primary command target, not piCount
+                // (C4ObjectMenu.cpp:182-199,252-271,292-321;
+                // C4ObjectList.cpp:271-281).
+                let representative = if eligible[current].1.ocf & crate::ocf::FULL_CON == 0 {
+                    contents
+                        .iter()
+                        .filter_map(|candidate| {
+                            let index = self.find_object_index(*candidate)?;
+                            let object = &self.objects[index];
+                            (!object.destroyed
+                                && object.state.status.is_active()
+                                && object.definition_id == chunk_definition
+                                && object.state.ocf & crate::ocf::FULL_CON != 0)
+                                .then(|| self.object_snapshot(*candidate))
+                                .flatten()
+                                .filter(|snapshot| {
+                                    self.can_concat_picture_with(snapshot, &eligible[current].1)
+                                })
+                                .map(|_| *candidate)
+                        })
+                        .next()
+                        .unwrap_or(eligible[current].0)
+                } else {
+                    eligible[current].0
+                };
                 groups.push((
-                    eligible[current].0,
+                    representative,
                     i32::try_from(count).unwrap_or(i32::MAX),
                 ));
             }
@@ -2188,6 +2221,7 @@ impl Engine {
                 count,
                 item_id: definition_id,
                 symbol: crate::ObjectMenuSymbol::default(),
+                picture_object: Some(item_id),
                 components: Vec::new(),
                 selectable: true,
                 value: Some(definition.value()),
@@ -2310,6 +2344,7 @@ impl Engine {
                 count,
                 item_id: definition_id,
                 symbol: crate::ObjectMenuSymbol::default(),
+                picture_object: Some(item_id),
                 components: Vec::new(),
                 selectable: true,
                 value: None,
@@ -5099,6 +5134,14 @@ protected func IsBuilt() { return GetCon() >= 100; }
             .all(|item| item.command2.contains(",2,0,,0,TFLN")));
         let ordered_flints = engine.object_snapshot(hut).expect("hut exists").contents;
         assert_eq!(ordered_flints.len(), 2);
+        assert_eq!(
+            sell.items
+                .iter()
+                .map(|item| item.picture_object)
+                .collect::<Vec<_>>(),
+            ordered_flints.iter().copied().map(Some).collect::<Vec<_>>(),
+            "C4ObjectMenu draws each row from the representative returned by C4ObjectListIterator (C4ObjectMenu.cpp:246-264; C4ObjectList.cpp:849-903)"
+        );
         for (row, object) in sell.items.iter().zip(&ordered_flints) {
             assert!(row
                 .command
@@ -5135,6 +5178,15 @@ protected func IsBuilt() { return GetCon() >= 100; }
                 .collect::<Vec<_>>(),
             vec![("TFLN", 1), ("TFLN", 1)]
         );
+        assert_eq!(
+            contents
+                .items
+                .iter()
+                .map(|item| item.picture_object)
+                .collect::<Vec<_>>(),
+            ordered_flints.iter().copied().map(Some).collect::<Vec<_>>(),
+            "C4ObjectMenu calls Picture2Facet on each Get/Contents representative (C4ObjectMenu.cpp:286-313)"
+        );
         assert!(contents.items.iter().all(|item| {
             item.command2.contains(&format!(
                 "SetCommand(this, \"Get\", , 2,0, Object({}), TFLN)",
@@ -5155,6 +5207,65 @@ protected func IsBuilt() { return GetCon() >= 100; }
                 .selection,
             1
         );
+    }
+
+    #[test]
+    fn sell_refill_prefers_a_full_construction_picture_representative() {
+        // After C4ObjectListIterator fixes the row count, C4ObjectMenu replaces
+        // an incomplete representative with the first full-construction object
+        // only when their pictures concatenate. The replacement supplies both
+        // Picture2Facet and the primary Sell command target; the count remains
+        // the original concat-group count (C4ObjectMenu.cpp:246-271).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        engine.register_definition(hut).expect("register hut");
+        let mut flint = Definition::from_script("TFLN", "T-Flint", "#strict\n")
+            .expect("flint compiles");
+        flint.set_category(crate::CATEGORY_OBJECT);
+        flint.set_value(15);
+        engine.register_definition(flint).expect("register flint");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        let full = engine
+            .spawn_object(SpawnConfig::new("TFLN").with_container(hut))
+            .expect("spawn full flint");
+        let incomplete = engine
+            .spawn_object(
+                SpawnConfig::new("TFLN")
+                    .with_construction(crate::FULL_CON / 2)
+                    .with_container(hut),
+            )
+            .expect("spawn incomplete flint");
+        assert_eq!(
+            engine.object_snapshot(hut).expect("hut exists").contents,
+            vec![incomplete, full],
+            "the incomplete object is the iterator's initial representative"
+        );
+
+        engine
+            .open_base_sell_menu(crew_index, hut_index)
+            .expect("open sell menu");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("sell menu opens");
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.items[0].count, 2);
+        assert_eq!(menu.items[0].picture_object, Some(full));
+        assert!(menu.items[0]
+            .command
+            .contains(&format!("Object({})", full.as_u64())));
     }
 
     #[test]
