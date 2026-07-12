@@ -25524,6 +25524,251 @@ mod tests {
         );
     }
 
+    #[test]
+    fn app_virtual_keyboard_opens_tutorial07_first_flint_mining_blast() {
+        // Script2..12 introduces the shipped CRYS/BALN/GOLD/FLNT route before
+        // handing control back at "Good luck!" (Tutorial07.c4s/Script.c:
+        // 36-90). From there every transition below enters through
+        // GameApp::handle_key with the fresh player's AutoStop bindings:
+        // S enters, X grabs/releases, D lowers ELEC, Z/C move, A throws, and F
+        // executes the Contents menu's secondary Get command. The FLNT Hit ->
+        // Explode(18) path must clear terrain, not merely spawn loose objects
+        // (C4ObjectCom.cpp:335-350; C4Menu.cpp:433-440,498-523;
+        // planet/System.c4g/Explode.c:10-22,58-65;
+        // C4Landscape.cpp:1022-1061).
+        let mut app = real_tutorial_app(7, "Tutorial 7 app virtual player");
+        let owner = app.local_owner;
+        let clonk = app
+            .engine
+            .crew_cursor(owner)
+            .expect("Tutorial07 starts with one cursor CLNK");
+        let hut =
+            app_object_with_definition(&app, "HUT3").expect("Tutorial07 creates the player's HUT3");
+        let player = app
+            .engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|player| player.id == owner)
+            .expect("Tutorial07 local player state");
+        assert!(
+            player.control.control_style,
+            "fresh app players use C++ AutoStopControl"
+        );
+
+        advance_app_until(
+            &mut app,
+            "Tutorial07 presents its final route prompt",
+            2_000,
+            |app| app_tutorial_message_contains(app, "Good luck"),
+        );
+        assert!(app
+            .engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| { object.container.is_none() && object.action.name == "Walk" }));
+
+        let context_identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
+            .expect("context identification deserializes");
+        let contents_identification = serde_json::from_value(serde_json::json!({ "Int": 18 }))
+            .expect("contents identification deserializes");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S enters Tutorial07 HUT3");
+        advance_app_until(&mut app, "Tutorial07 CLNK enters HUT3", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+        advance_app_until(&mut app, "HUT3 opens its context menu", 30, |app| {
+            app.engine
+                .cursor_object_menu(owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
+        app_navigate_object_menu_to(&mut app, "Contents", |item| item.caption == "Contents");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A opens Tutorial07 HUT3 Contents");
+        advance_app_until(&mut app, "HUT3 opens its real Contents menu", 30, |app| {
+            app.engine
+                .cursor_object_menu(owner)
+                .is_some_and(|(_, menu)| menu.identification == contents_identification)
+        });
+        app_navigate_object_menu_to(&mut app, "FLNT", |item| item.item_id == "FLNT");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::F)
+            .expect("physical F takes one Tutorial07 FLNT");
+        advance_app_until(&mut app, "C++ Get keeps one FLNT", 120, |app| {
+            app_object_contents_count(app, clonk, "FLNT") == 1
+                && app_object_contents_count(app, hut, "FLNT") == 1
+        });
+
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D closes HUT3 Contents");
+        advance_app_until(&mut app, "HUT3 restores its context menu", 30, |app| {
+            app.engine
+                .cursor_object_menu(owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
+        app_navigate_object_menu_to(&mut app, "Exit", |item| item.caption == "Exit");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A exits HUT3 with FLNT");
+        advance_app_until(&mut app, "FLNT-carrying CLNK exits HUT3", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container.is_none() && object.action.name == "Walk")
+        });
+
+        let elevator_case =
+            app_object_with_definition(&app, "ELEC").expect("Tutorial07 places a ready ELEC");
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "FLNT-carrying CLNK reaches ELEC",
+            100,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .zip(app.engine.object_snapshot(elevator_case))
+                    .is_some_and(|(clonk, elevator)| {
+                        (clonk.position.x - elevator.position.x).abs() <= 5
+                    })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs Tutorial07 ELEC");
+        advance_app_until(&mut app, "CLNK grabs Tutorial07 ELEC", 60, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(elevator_case)
+            })
+        });
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::D,
+            "ELEC lowers CLNK to Tutorial07 GOLD layer",
+            360,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.y >= 300)
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes ELEC release");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X releases ELEC");
+        }
+        advance_app_until(&mut app, "CLNK releases ELEC at GOLD layer", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "CLNK approaches Tutorial07 marked GOLD seam",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x <= 92)
+            },
+        );
+
+        let first_flint = app
+            .engine
+            .object_snapshot(clonk)
+            .and_then(|clonk| {
+                clonk.contents.into_iter().find(|item| {
+                    app.engine
+                        .object_snapshot(*item)
+                        .is_some_and(|item| item.definition_id == "FLNT")
+                })
+            })
+            .expect("first Tutorial07 FLNT is ready to throw");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A throws the first FLNT");
+        advance_app_until(&mut app, "first FLNT leaves CLNK inventory", 60, |app| {
+            app.engine
+                .object_snapshot(first_flint)
+                .is_none_or(|flint| flint.container != Some(clonk))
+        });
+
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("hold physical C to retreat from the first FLNT");
+        let mut detonation = None;
+        for _ in 0..180 {
+            let before = app.engine.object_snapshot(first_flint).and_then(|flint| {
+                app.engine
+                    .landscape()
+                    .cloned()
+                    .map(|landscape| (flint.position, landscape))
+            });
+            app.update().expect("advance first Tutorial07 FLNT fuse");
+            if let Some((center, before)) = before {
+                if app.engine.object_snapshot(first_flint).is_none() {
+                    detonation = app
+                        .engine
+                        .landscape()
+                        .cloned()
+                        .map(|after| (center, before, after));
+                    break;
+                }
+            }
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C after the first FLNT");
+        let (center, before, after) =
+            detonation.expect("physical app route observes first FLNT detonation");
+        assert!(
+            app.engine.object_snapshot(first_flint).is_none(),
+            "the real first FLNT is consumed by its explosion"
+        );
+        assert_eq!(
+            app.engine
+                .object_snapshot(clonk)
+                .expect("CLNK survives first FLNT")
+                .command_direction,
+            CommandDirection::Stop,
+            "AutoStop key-up stops the physical retreat"
+        );
+
+        let before_grid = before.pixel_grid().expect("pre-blast Tutorial07 Surface8");
+        let after_grid = after.pixel_grid().expect("post-blast Tutorial07 Surface8");
+        const FLINT_RADIUS: i32 = 18;
+        const DENSITY_SOLID: i32 = 50;
+        let mut changed_pixels = 0;
+        let mut removed_solid_pixels = 0;
+        for y_offset in -FLINT_RADIUS..=FLINT_RADIUS {
+            let line_width =
+                ((FLINT_RADIUS * FLINT_RADIUS - y_offset * y_offset) as f64).sqrt() as i32;
+            let y = center.y + y_offset;
+            for x_offset in -line_width..line_width + i32::from(line_width == 0) {
+                let x = center.x + x_offset;
+                changed_pixels +=
+                    usize::from(before_grid.byte_at(x, y) != after_grid.byte_at(x, y));
+                removed_solid_pixels += usize::from(
+                    before_grid.density_at(x, y).unwrap_or(0) >= DENSITY_SOLID
+                        && after_grid.density_at(x, y).unwrap_or(0) < DENSITY_SOLID,
+                );
+            }
+        }
+        assert!(after_grid.revision() > before_grid.revision());
+        assert!(
+            changed_pixels > 0 && removed_solid_pixels > 0,
+            "first app-driven FLNT opens terrain (changed={changed_pixels}, removed_solid={removed_solid_pixels})"
+        );
+    }
+
     fn two_item_script_menu(cursor: ObjectId) -> lc_engine::ObjectMenuState {
         lc_engine::ObjectMenuState {
             caption: "Choose".to_string(),
