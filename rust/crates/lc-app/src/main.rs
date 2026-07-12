@@ -392,11 +392,6 @@ impl NetworkTickGate {
         self.ready.entry(tick).or_insert(controls);
     }
 
-    fn take_exact(&mut self, expected_tick: Tick) -> Option<Vec<NetworkControl>> {
-        self.ready.retain(|queued_tick, _| *queued_tick >= expected_tick);
-        self.ready.remove(&expected_tick)
-    }
-
     fn take_exact_if_ready<F>(
         &mut self,
         expected_tick: Tick,
@@ -10332,7 +10327,7 @@ impl GameApp {
                     Ok(())
                 }
                 NetworkControl::JoinPlayer(join) => {
-                    self.apply_remote_embedded_join(join);
+                    self.apply_join_player_control(join);
                     Ok(())
                 }
                 NetworkControl::Player { owner, event } => {
@@ -10357,7 +10352,7 @@ impl GameApp {
         result
     }
 
-    fn apply_remote_embedded_join(&mut self, join: lc_engine::JoinPlayerControlData) {
+    fn apply_join_player_control(&mut self, join: lc_engine::JoinPlayerControlData) {
         let Some(info) = self.control_player_infos.get(join.info_id).cloned() else {
             tracing::warn!(info_id = join.info_id, "ignoring join for missing player info");
             return;
@@ -10440,7 +10435,10 @@ impl GameApp {
                     // before control/simulation (src/C4GameControl.cpp:262-265;
                     // src/C4Game.cpp:786-797). The decoded packet order is
                     // authoritative, including interleaved SyncCheck packets.
-                    let Some(controls) = self.network_ticks.take_exact(tick) else {
+                    let Some(controls) = self
+                        .network_ticks
+                        .take_exact_if_ready(tick, |_| true)
+                    else {
                         return Ok(());
                     };
                     self.apply_ready_controls(tick, controls)?;
