@@ -27164,15 +27164,201 @@ mod tests {
         );
     }
 
+    fn app_tutorial08_wipfs_in_lorry(app: &GameApp, lorry: ObjectId) -> usize {
+        app.engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .filter(|object| object.definition_id == "WIPF" && object.container == Some(lorry))
+            .count()
+    }
+
+    fn app_tutorial08_catch_and_load_one_wipf(
+        app: &mut GameApp,
+        clonk: ObjectId,
+        lorry: ObjectId,
+        delivery: usize,
+    ) -> ObjectId {
+        for key in [
+            VirtualKeyCode::Z,
+            VirtualKeyCode::C,
+            VirtualKeyCode::S,
+            VirtualKeyCode::X,
+        ] {
+            AppVirtualKeyboard::new(app)
+                .release(key)
+                .unwrap_or_else(|error| {
+                    panic!("clear physical {key:?} before WIPF {delivery}: {error}")
+                });
+        }
+        for _ in 0..12 {
+            app.update().expect("wait out WIPF sweep key buffer");
+        }
+
+        let mut search_key = if app
+            .engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.position.x < 400)
+        {
+            VirtualKeyCode::C
+        } else {
+            VirtualKeyCode::Z
+        };
+        AppVirtualKeyboard::new(app)
+            .press(search_key)
+            .unwrap_or_else(|error| {
+                panic!("physical direction starts WIPF {delivery} surface sweep: {error}")
+            });
+        for _ in 0..4_000 {
+            app.update().expect("advance Tutorial08 WIPF surface sweep");
+            if app
+                .engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| !object.contents.is_empty())
+            {
+                break;
+            }
+            let x = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("surface-searching CLNK remains observable")
+                .position
+                .x;
+            let next_key = if x <= 8 {
+                VirtualKeyCode::C
+            } else if x >= 790 {
+                VirtualKeyCode::Z
+            } else {
+                search_key
+            };
+            if next_key != search_key {
+                AppVirtualKeyboard::new(app)
+                    .release(search_key)
+                    .expect("release physical direction at surface boundary");
+                for _ in 0..12 {
+                    app.update().expect("wait out WIPF sweep turn buffer");
+                }
+                search_key = next_key;
+                AppVirtualKeyboard::new(app)
+                    .press(search_key)
+                    .expect("reverse physical direction for WIPF sweep");
+            }
+        }
+        AppVirtualKeyboard::new(app)
+            .release(search_key)
+            .expect("release physical direction after catching WIPF");
+        let caught_wipf = app
+            .engine
+            .object_snapshot(clonk)
+            .and_then(|object| object.contents.first().copied())
+            .unwrap_or_else(|| {
+                let free_wipfs = app
+                    .engine
+                    .snapshot()
+                    .objects
+                    .into_iter()
+                    .filter(|object| {
+                        object.definition_id == "WIPF" && object.container.is_none()
+                    })
+                    .collect::<Vec<_>>();
+                panic!(
+                    "physical surface sweep cannot catch WIPF {delivery}; clonk={:?}; free_wipfs={free_wipfs:?}",
+                    app.engine.object_snapshot(clonk)
+                )
+            });
+        assert_eq!(
+            app.engine
+                .object_snapshot(caught_wipf)
+                .expect("caught Tutorial08 object survives")
+                .definition_id,
+            "WIPF",
+            "caught surface object {delivery} is a WIPF"
+        );
+
+        for _ in 0..12 {
+            app.update().expect("wait out WIPF search key buffer");
+        }
+        let toward_lorry = app
+            .engine
+            .object_snapshot(clonk)
+            .zip(app.engine.object_snapshot(lorry))
+            .map(|(clonk, lorry)| {
+                if clonk.position.x < lorry.position.x {
+                    VirtualKeyCode::C
+                } else {
+                    VirtualKeyCode::Z
+                }
+            })
+            .expect("CLNK and LORY survive the WIPF search");
+        hold_app_key_until(
+            app,
+            toward_lorry,
+            &format!("WIPF {delivery}-carrying CLNK returns to LORY"),
+            1_200,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .zip(app.engine.object_snapshot(lorry))
+                    .is_some_and(|(clonk, lorry)| {
+                        (clonk.position.x - lorry.position.x).abs() <= 8
+                            && (clonk.position.y - lorry.position.y).abs() <= 18
+                    })
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes LORY grab");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X grabs LORY");
+        }
+        advance_app_until(app, "WIPF-carrying CLNK grabs LORY", 80, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(lorry)
+            })
+        });
+        AppVirtualKeyboard::new(app)
+            .tap(VirtualKeyCode::A)
+            .unwrap_or_else(|error| panic!("physical A loads WIPF {delivery} into LORY: {error}"));
+        advance_app_until(
+            app,
+            &format!("caught WIPF {delivery} enters LORY"),
+            60,
+            |app| {
+                app.engine
+                    .object_snapshot(caught_wipf)
+                    .is_some_and(|object| object.container == Some(lorry))
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes LORY release");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X releases LORY");
+        }
+        advance_app_until(app, "CLNK releases loaded LORY", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        caught_wipf
+    }
+
     #[test]
-    fn app_virtual_keyboard_loads_tutorial08_first_wipf_into_lorry() {
+    fn app_virtual_keyboard_delivers_tutorial08_surface_wipfs_to_hut() {
         // Tutorial08 starts the real scenario RNG animal placement, creates
-        // HUT3/LORY beside the player and asks for ten WIPFs. This first app
-        // slice catches one animal with ordinary Z/C walking, returns to LORY,
-        // grabs it with X/X and loads the carried WIPF with A. Every edge goes
-        // through GameApp::handle_key under the fresh AutoStop player; neither
-        // animal nor vehicle state is positioned by the test
-        // (Tutorial08.c4s/Script.c:18-69; C4Object.cpp:3682-3724).
+        // HUT3/LORY beside the player and asks for ten WIPFs. Ordinary Z/C
+        // walking sweeps the actual surface, X/X grabs/releases LORY, and A
+        // loads each carried animal. Every edge goes through GameApp::handle_key
+        // under the fresh AutoStop player; neither animal nor vehicle state is
+        // positioned by the test (Tutorial08.c4s/Script.c:18-69;
+        // C4Object.cpp:3682-3724; Wipf.c4d/Script.c:263-271;
+        // Lorry.c4d/Script.c:65-78).
         let mut app = real_tutorial_app(8, "Tutorial 8 app virtual player");
         let owner = app.local_owner;
         let clonk = app
@@ -27181,6 +27367,8 @@ mod tests {
             .expect("Tutorial08 starts with one cursor CLNK");
         let lorry =
             app_object_with_definition(&app, "LORY").expect("Tutorial08 creates LORY beside HUT3");
+        let hut =
+            app_object_with_definition(&app, "HUT3").expect("Tutorial08 creates the player's HUT3");
         assert!(
             app.engine
                 .player(owner)
@@ -27352,6 +27540,144 @@ mod tests {
                 .count(),
             1,
             "first physical Tutorial08 delivery leaves exactly one WIPF in LORY"
+        );
+        for delivery in 2..=6 {
+            let caught = app_tutorial08_catch_and_load_one_wipf(&mut app, clonk, lorry, delivery);
+            assert_eq!(
+                app.engine
+                    .object_snapshot(caught)
+                    .expect("delivered Tutorial08 WIPF survives in LORY")
+                    .container,
+                Some(lorry),
+                "physical delivery {delivery} loads its exact WIPF into LORY"
+            );
+            assert_eq!(
+                app_tutorial08_wipfs_in_lorry(&app, lorry),
+                delivery,
+                "physical delivery {delivery} grows LORY's WIPF stack exactly once"
+            );
+        }
+        assert_eq!(
+            app_tutorial08_wipfs_in_lorry(&app, lorry),
+            6,
+            "real default-seed surface sweep loads all six walkable WIPFs into LORY"
+        );
+
+        // C4Game::PlaceAnimal legitimately chose underground caves for the
+        // remaining default-seed animals; unlike the engine's seed-19 speed
+        // fixture, the app route must not relocate them. Deliver the six
+        // physically reachable WIPFs through LORY's ordinary Entrance first:
+        // Push aligns the vehicle with HUT3, S enters it, and LORY::Entrance
+        // calls HUT3::GrabContents (C4Game.cpp:3046-3105;
+        // Lorry.c4d/Script.c:80-91; C4Object.cpp:3682-3701).
+        let subterranean_wipfs = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .filter(|object| {
+                object.definition_id == "WIPF"
+                    && object.container.is_none()
+                    && object.position.y > 450
+            })
+            .count();
+        assert_eq!(
+            subterranean_wipfs, 3,
+            "default seed leaves three live WIPFs in underground caves"
+        );
+        for _ in 0..12 {
+            app.update().expect("wait out sixth LORY release buffer");
+        }
+        let toward_lorry = app
+            .engine
+            .object_snapshot(clonk)
+            .zip(app.engine.object_snapshot(lorry))
+            .map(|(clonk, lorry)| {
+                if clonk.position.x < lorry.position.x {
+                    VirtualKeyCode::C
+                } else {
+                    VirtualKeyCode::Z
+                }
+            })
+            .expect("CLNK and six-WIPF LORY remain observable");
+        hold_app_key_until(
+            &mut app,
+            toward_lorry,
+            "CLNK returns to six-WIPF LORY",
+            1_200,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .zip(app.engine.object_snapshot(lorry))
+                    .is_some_and(|(clonk, lorry)| {
+                        (clonk.position.x - lorry.position.x).abs() <= 8
+                            && (clonk.position.y - lorry.position.y).abs() <= 18
+                    })
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes loaded LORY grab");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X grabs loaded LORY");
+        }
+        advance_app_until(&mut app, "CLNK grabs six-WIPF LORY", 80, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(lorry)
+            })
+        });
+        let toward_hut = app
+            .engine
+            .object_snapshot(lorry)
+            .zip(app.engine.object_snapshot(hut))
+            .map(|(lorry, hut)| {
+                if lorry.position.x < hut.position.x + 10 {
+                    VirtualKeyCode::C
+                } else {
+                    VirtualKeyCode::Z
+                }
+            })
+            .expect("loaded LORY and HUT3 remain observable");
+        hold_app_key_until(
+            &mut app,
+            toward_hut,
+            "six-WIPF LORY aligns with HUT3 entrance",
+            600,
+            |app| {
+                app.engine
+                    .object_snapshot(lorry)
+                    .zip(app.engine.object_snapshot(hut))
+                    .is_some_and(|(lorry, hut)| {
+                        let dx = lorry.position.x - hut.position.x;
+                        let dy = lorry.position.y - hut.position.y;
+                        (2..19).contains(&dx) && (4..25).contains(&dy)
+                    })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S enters six-WIPF LORY into HUT3");
+        advance_app_until(&mut app, "loaded LORY enters HUT3", 80, |app| {
+            app.engine
+                .object_snapshot(lorry)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+        advance_app_until(&mut app, "LORY unloads six WIPFs into HUT3", 80, |app| {
+            app.engine
+                .snapshot()
+                .objects
+                .into_iter()
+                .filter(|object| object.definition_id == "WIPF" && object.container == Some(hut))
+                .count()
+                == 6
+        });
+        assert_eq!(
+            app_tutorial08_wipfs_in_lorry(&app, lorry),
+            0,
+            "LORY's C++ Entrance callback empties its surface WIPFs into HUT3"
         );
     }
 
