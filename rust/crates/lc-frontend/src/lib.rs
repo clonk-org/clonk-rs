@@ -5561,12 +5561,16 @@ fn rect_contains(rect: SurfaceRect, point: GuiPoint, tolerance: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
     use lc_engine::{
-        CommandStackSnapshot, EnvironmentFrame, Landscape, LiquidSegment, MaterialId, ObjectId,
-        ObjectVertex, PlayerState, RgbColor, Vector2,
+        CommandStackSnapshot, Engine, EnvironmentFrame, JoinPlayerConfig, Landscape,
+        LiquidSegment, MaterialId, ObjectId, ObjectUpdate, ObjectVertex, PlayerState, RgbColor,
+        Scenario, ScenarioError, SpawnConfig, Vector2,
     };
     use lc_graphics::{BitmapFont, PixelFormat};
+    use lc_resources::{Group, MaterialLibrary};
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     fn test_font() -> Arc<dyn TextFont> {
@@ -5700,6 +5704,127 @@ mod tests {
 
     fn empty_hud_graphics() -> Arc<HudGraphics> {
         Arc::new(HudGraphics::default())
+    }
+
+    struct RepositoryContentResolver {
+        root: PathBuf,
+    }
+
+    impl LegacyDefinitionResolver for RepositoryContentResolver {
+        fn resolve_definition_groups(
+            &self,
+            _scenario: &Group,
+            identifier: &str,
+        ) -> Result<Vec<Group>, ScenarioError> {
+            Group::open(self.root.join(identifier.replace('\\', "/")))
+                .map(|group| vec![group])
+                .map_err(ScenarioError::Resources)
+        }
+    }
+
+    /// Loads an installed tutorial through the same definition/material/system
+    /// prerequisites as the app. These tests deliberately render real engine
+    /// snapshots and real Graphics.png facets rather than reconstructed test
+    /// sprites.
+    fn load_repository_tutorial(number: u8) -> Engine {
+        let repository = test_support::repo_root();
+        let content = repository.join("content");
+        let scenario_path = content.join(format!("Tutorial.c4f/Tutorial{number:02}.c4s"));
+        let scenario = Scenario::load_from_path_with(
+            &scenario_path,
+            &RepositoryContentResolver {
+                root: content.clone(),
+            },
+        )
+        .unwrap_or_else(|error| panic!("scenario `{}` loads: {error}", scenario_path.display()));
+
+        let material_group = Group::open(content.join("Material.c4g"))
+            .expect("installed Material.c4g opens");
+        let materials =
+            MaterialLibrary::from_group(&material_group).expect("installed materials load");
+        let system_group =
+            Group::open(repository.join("planet/System.c4g")).expect("System.c4g opens");
+        let system_scripts = load_system_scripts(&system_group).expect("system scripts load");
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&materials);
+        engine.install_global_scripts(&system_scripts);
+        engine.set_standard_names(
+            system_group
+                .read_file("Names.txt")
+                .ok()
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+        );
+        scenario
+            .apply(&mut engine)
+            .unwrap_or_else(|error| panic!("scenario `{}` applies: {error}", scenario_path.display()));
+        engine
+    }
+
+    fn join_repository_player(engine: &mut Engine, name: &str) -> i32 {
+        engine
+            .join_player(JoinPlayerConfig {
+                name: name.to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff_00_00,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("repository tutorial player joins")
+            .number
+    }
+
+    fn real_elevator_sprites(engine: &Engine) -> Arc<HashMap<String, DefinitionSprite>> {
+        let mut sprites = HashMap::new();
+        for definition_id in ["ELEV", "ELEC"] {
+            let image = engine
+                .definition_sprite_image(definition_id, None)
+                .unwrap_or_else(|| panic!("{definition_id} has its real Graphics.png"));
+            let width = image.width();
+            let height = image.height();
+            let color_mask = image
+                .color_mask()
+                .map(|mask| ColorByOwnerMask::new(width, height, mask));
+            sprites.insert(
+                sprite_map_key(definition_id, None),
+                DefinitionSprite {
+                    image: ImageData::from_arc(width, height, image.into_pixels()),
+                    actions: engine
+                        .definition_action_graphics(definition_id)
+                        .unwrap_or_default(),
+                    color_mask,
+                    shape: engine.definition_shape_rect(definition_id),
+                    stretch_growth: engine.definition_stretch_growth(definition_id),
+                    top_face: engine.definition_top_face(definition_id),
+                },
+            );
+        }
+        Arc::new(sprites)
+    }
+
+    fn assert_surface_pixels_eq(actual: &Surface, expected: &Surface, context: &str) {
+        assert_eq!(actual.width(), expected.width(), "{context}: width");
+        assert_eq!(actual.height(), expected.height(), "{context}: height");
+        if let Some((index, (actual_pixel, expected_pixel))) = actual
+            .pixels()
+            .chunks_exact(4)
+            .zip(expected.pixels().chunks_exact(4))
+            .enumerate()
+            .find(|(_, (actual, expected))| actual != expected)
+        {
+            let x = index % actual.width() as usize;
+            let y = index / actual.width() as usize;
+            panic!(
+                "{context}: first mismatch at ({x}, {y}): actual={actual_pixel:?}, expected={expected_pixel:?}"
+            );
+        }
     }
 
     fn make_snapshot() -> SimulationSnapshot {
@@ -8785,6 +8910,342 @@ mod tests {
             graphics.surface().get_pixel(cable_x, cable_bottom),
             Some(standard_gamma_color(green)),
             "FacetTargetStretch must stop at the target shape's top edge"
+        );
+    }
+
+    #[test]
+    fn real_tutorial_elevator_facets_construction_and_live_frame_delta_match_cpp() {
+        // Real Tutorial05 starts ELEV at Con=80 with no case
+        // (Tutorial05/Script.c:30-34). C4Object::DrawFace exposes the bottom
+        // Con slice for construction graphics (src/C4Object.cpp:440-475), and
+        // UpdateFace installs a non-growth TopFace only at full con
+        // (src/C4Object.cpp:357-376).
+        let mut tutorial05 = load_repository_tutorial(5);
+        join_repository_player(&mut tutorial05, "real Tutorial05 elevator render");
+        let partial_snapshot = tutorial05.snapshot();
+        let partial = partial_snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "ELEV")
+            .expect("Tutorial05 creates its partial ELEV");
+        assert_eq!(partial.construction, 80_000);
+        assert!(
+            partial_snapshot
+                .objects
+                .iter()
+                .all(|object| object.definition_id != "ELEC"),
+            "ELEV Initialize creates ELEC only after completion"
+        );
+
+        let partial_sprites = real_elevator_sprites(&tutorial05);
+        let real_elev = partial_sprites
+            .get(&sprite_map_key("ELEV", None))
+            .expect("real ELEV sprite");
+        assert_eq!(real_elev.image.width(), 84);
+        assert_eq!(real_elev.image.height(), 56);
+        assert_eq!(
+            real_elev.shape,
+            Some(DefinitionRect::new(-14, -28, 28, 56))
+        );
+        assert_eq!(
+            real_elev.top_face,
+            Some(DefinitionTargetRect::new(28, 0, 28, 56, 0, 0))
+        );
+        assert!(!real_elev.stretch_growth);
+        assert!(real_elev.color_mask.is_none());
+
+        let partial_origin = Vector2::new(partial.position.x - 48, partial.position.y - 56);
+        let mut partial_graphics = GraphicsSystem::new(
+            96,
+            112,
+            112,
+            "real Tutorial05 partial ELEV",
+            test_font(),
+            Arc::clone(&partial_sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        partial_graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        partial_graphics.viewport_x = partial_origin.x as f32;
+        partial_graphics.viewport_y = partial_origin.y as f32;
+        partial_graphics.paint_object(
+            partial,
+            &partial_snapshot.objects,
+            1.0,
+            &HashMap::new(),
+            None,
+        );
+
+        let mut partial_expected = Surface::new(96, 112, PixelFormat::Rgba8888);
+        partial_expected.fill(Color::opaque(0, 0, 0));
+        // C++ construction display: source y=56*(100-80)/100=11,
+        // source/destination h=56*80/100=44; Jolt makes Shape.y=-22.
+        draw_image_region(
+            &mut partial_expected,
+            &GuiRect::new(
+                (partial.position.x - 14 - partial_origin.x) as f32,
+                (partial.position.y - 22 - partial_origin.y) as f32,
+                28.0,
+                44.0,
+            ),
+            &real_elev.image,
+            None,
+            &SourceRect::new(0, 11, 28, 44),
+            false,
+            None,
+            SpriteBlitState::normal(),
+            None,
+        );
+        assert_surface_pixels_eq(
+            partial_graphics.surface(),
+            &partial_expected,
+            "real Tutorial05 ELEV must render the exact C++ eighty-percent construction slice"
+        );
+        let before_top_face = partial_graphics.surface().clone();
+        partial_graphics.paint_object_top_face(partial, &HashMap::new(), None);
+        assert_surface_pixels_eq(
+            partial_graphics.surface(),
+            &before_top_face,
+            "an incomplete ELEV must not draw its full-con TopFace"
+        );
+
+        // Tutorial06 supplies the same real definitions and builds ELEV to
+        // completion. Spawn one through the real ELEV Initialize callback so
+        // SetAction("LiftCase", pCase) and SetObjectOrder run exactly as in
+        // Elevator/Script.c:10-15.
+        let mut tutorial06 = load_repository_tutorial(6);
+        let elevator_id = tutorial06
+            .spawn_object(
+                SpawnConfig::new("ELEV").with_position(Vector2::new(332, 148)),
+            )
+            .expect("real Tutorial06 ELEV spawns");
+        let first_snapshot = tutorial06.snapshot();
+        let elevator = first_snapshot
+            .object(elevator_id)
+            .expect("spawned ELEV is present");
+        assert_eq!(elevator.construction, FULL_CON);
+        assert_eq!(elevator.action.name, "LiftCase");
+        let case_id = elevator.action.target.expect("LiftCase targets real ELEC");
+        let first_case = first_snapshot.object(case_id).expect("ELEV creates ELEC");
+        assert_eq!(first_case.definition_id, "ELEC");
+        assert_eq!(
+            first_case.action.name, "Wait",
+            "ELEC Initialize selects its facet-less active action"
+        );
+        // CreateObject(ELEC, 0, +27) supplies the requested construction
+        // bottom. Initial DoCon then keeps that bottom fixed while changing
+        // ELEC's zero-con shape to its full 26px shape, moving its center up
+        // by Shape.Hgt+Shape.y=13 (src/C4Object.cpp:1428-1496).
+        assert_eq!(
+            first_case.position,
+            Vector2::new(elevator.position.x, elevator.position.y + 14)
+        );
+
+        let sprites = real_elevator_sprites(&tutorial06);
+        let elev_sprite = sprites
+            .get(&sprite_map_key("ELEV", None))
+            .expect("real Tutorial06 ELEV sprite");
+        let lift_case = elev_sprite
+            .actions
+            .get("LiftCase")
+            .expect("real ELEV LiftCase ActMap entry");
+        let cable_facet = lift_case.facet.as_ref().expect("LiftCase cable facet");
+        assert_eq!(
+            (
+                cable_facet.x,
+                cable_facet.y,
+                cable_facet.width,
+                cable_facet.height,
+                cable_facet.target_x,
+                cable_facet.target_y,
+            ),
+            (58, 5, 2, 4, 13, 0),
+            "the five-value C4TargetRect defaults FacetY to zero (src/C4Rect.cpp:80-84)"
+        );
+        assert!(lift_case.facet_base);
+        assert!(lift_case.facet_target_stretch);
+
+        let case_sprite = sprites
+            .get(&sprite_map_key("ELEC", None))
+            .expect("real Tutorial06 ELEC sprite");
+        assert_eq!(case_sprite.image.width(), 24);
+        assert_eq!(case_sprite.image.height(), 28);
+        assert_eq!(
+            case_sprite.shape,
+            Some(DefinitionRect::new(-12, -13, 24, 26))
+        );
+        assert_eq!(
+            case_sprite.top_face,
+            Some(DefinitionTargetRect::new(0, 0, 24, 26, 0, 0))
+        );
+        assert!(case_sprite.color_mask.is_none());
+
+        let origin = Vector2::new(elevator.position.x - 48, elevator.position.y - 48);
+        let render_elevator_base_and_cable = |snapshot: &SimulationSnapshot| {
+            let elevator = snapshot.object(elevator_id).expect("ELEV remains live");
+            let mut graphics = GraphicsSystem::new(
+                96,
+                128,
+                128,
+                "real Tutorial06 ELEV cable",
+                test_font(),
+                Arc::clone(&sprites),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+            graphics.viewport_x = origin.x as f32;
+            graphics.viewport_y = origin.y as f32;
+            graphics.paint_object(
+                elevator,
+                &snapshot.objects,
+                1.0,
+                &HashMap::new(),
+                None,
+            );
+            graphics.surface().clone()
+        };
+        let expected_elevator_base_and_cable = |snapshot: &SimulationSnapshot| {
+            let elevator = snapshot.object(elevator_id).expect("ELEV remains live");
+            let case = snapshot.object(case_id).expect("ELEC remains live");
+            let mut expected = Surface::new(96, 128, PixelFormat::Rgba8888);
+            expected.fill(Color::opaque(0, 0, 0));
+            draw_image_region(
+                &mut expected,
+                &GuiRect::new(
+                    (elevator.position.x - 14 - origin.x) as f32,
+                    (elevator.position.y - 28 - origin.y) as f32,
+                    28.0,
+                    56.0,
+                ),
+                &elev_sprite.image,
+                None,
+                &SourceRect::new(0, 0, 28, 56),
+                false,
+                None,
+                SpriteBlitState::normal(),
+                None,
+            );
+            // C4Object::Draw computes the live target every draw:
+            // height=(Target.y+Target.Shape.y)-(y+Shape.y+FacetY)
+            // (src/C4Object.cpp:2426-2438), then DrawX stretches the declared
+            // 2x4 source (src/C4Facet.cpp:296-303).
+            let cable_top = elevator.position.y - 28 + cable_facet.target_y;
+            let case_top = case.position.y - 13;
+            draw_image_region(
+                &mut expected,
+                &GuiRect::new(
+                    (elevator.position.x - 14 + cable_facet.target_x - origin.x) as f32,
+                    (cable_top - origin.y) as f32,
+                    cable_facet.width as f32,
+                    (case_top - cable_top) as f32,
+                ),
+                &elev_sprite.image,
+                None,
+                &SourceRect::new(
+                    cable_facet.x,
+                    cable_facet.y,
+                    cable_facet.width,
+                    cable_facet.height,
+                ),
+                false,
+                None,
+                SpriteBlitState::normal(),
+                None,
+            );
+            expected
+        };
+        let render_case = |snapshot: &SimulationSnapshot| {
+            let case = snapshot.object(case_id).expect("ELEC remains live");
+            let mut graphics = GraphicsSystem::new(
+                96,
+                128,
+                128,
+                "real Tutorial06 ELEC carriage",
+                test_font(),
+                Arc::clone(&sprites),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+            graphics.viewport_x = origin.x as f32;
+            graphics.viewport_y = origin.y as f32;
+            graphics.paint_object(case, &snapshot.objects, 1.0, &HashMap::new(), None);
+            graphics.paint_object_top_face(case, &HashMap::new(), None);
+            graphics.surface().clone()
+        };
+        let expected_case = |snapshot: &SimulationSnapshot| {
+            let case = snapshot.object(case_id).expect("ELEC remains live");
+            let mut expected = Surface::new(96, 128, PixelFormat::Rgba8888);
+            expected.fill(Color::opaque(0, 0, 0));
+            // Wait is active but has neither FacetBase nor Facet, so the
+            // C4Object::Draw base pass draws nothing (src/C4Object.cpp:
+            // 2419-2496). The full carriage is this one DrawTopFace blit in
+            // the second object-list pass (src/C4ObjectList.cpp:387-396;
+            // src/C4Object.cpp:2617-2670).
+            draw_image_region(
+                &mut expected,
+                &GuiRect::new(
+                    (case.position.x - 12 - origin.x) as f32,
+                    (case.position.y - 13 - origin.y) as f32,
+                    24.0,
+                    26.0,
+                ),
+                &case_sprite.image,
+                None,
+                &SourceRect::new(0, 0, 24, 26),
+                false,
+                None,
+                SpriteBlitState::normal(),
+                None,
+            );
+            expected
+        };
+
+        let first_cable = render_elevator_base_and_cable(&first_snapshot);
+        assert_surface_pixels_eq(
+            &first_cable,
+            &expected_elevator_base_and_cable(&first_snapshot),
+            "real LiftCase must use the shipped cable facet and live ELEC top"
+        );
+        let first_carriage = render_case(&first_snapshot);
+        assert_surface_pixels_eq(
+            &first_carriage,
+            &expected_case(&first_snapshot),
+            "real ELEC full-con TopFace must render the carriage"
+        );
+        assert!(
+            first_carriage
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel != [0, 0, 0, 255]),
+            "regression guard: a missing ELEC carriage must fail visibly"
+        );
+
+        let moved_position = Vector2::new(first_case.position.x, first_case.position.y + 1);
+        tutorial06
+            .apply_object_update(case_id, ObjectUpdate::new().with_position(moved_position))
+            .expect("move real ELEC by one live simulation pixel");
+        let second_snapshot = tutorial06.tick().expect("next Tutorial06 frame");
+        assert_eq!(second_snapshot.frame, first_snapshot.frame + 1);
+        let second_case = second_snapshot.object(case_id).expect("moved ELEC survives");
+        assert_eq!(second_case.position, moved_position);
+
+        let second_cable = render_elevator_base_and_cable(&second_snapshot);
+        assert_surface_pixels_eq(
+            &second_cable,
+            &expected_elevator_base_and_cable(&second_snapshot),
+            "the cable endpoint must follow the live case by one frame pixel"
+        );
+        let second_carriage = render_case(&second_snapshot);
+        assert_surface_pixels_eq(
+            &second_carriage,
+            &expected_case(&second_snapshot),
+            "the rendered carriage must follow the live case without lag or quantization"
+        );
+        assert!(
+            first_carriage.pixels() != second_carriage.pixels(),
+            "consecutive snapshots one pixel apart must produce distinct carriage placement"
         );
     }
 

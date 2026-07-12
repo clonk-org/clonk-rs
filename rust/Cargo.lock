@@ -1901,6 +1901,7 @@ dependencies = [
  "lc-engine",
  "lc-graphics",
  "lc-gui",
+ "lc-resources",
  "serde_json",
 ]
 
