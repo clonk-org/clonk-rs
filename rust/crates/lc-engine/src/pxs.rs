@@ -31,6 +31,9 @@ pub struct Pxs {
 pub struct PxsSystem {
     chunks: Vec<Option<Vec<Option<Pxs>>>>,
     chunk_counts: Vec<usize>,
+    /// `C4PXSSystem::Count`: number of occupied slots encountered by the
+    /// latest Execute pass, including pixels that deactivated while running.
+    execute_count: usize,
 }
 
 impl PxsSystem {
@@ -115,9 +118,29 @@ impl PxsSystem {
         }
     }
 
-    /// Live PXS count (recomputed each `C4PXSSystem::Execute`, C4PXS.cpp:215).
+    /// Current live-slot count (`iChunkPXS` summed across chunks), distinct
+    /// from C++'s per-Execute public `Count` ledger.
     pub fn count(&self) -> usize {
         self.chunk_counts.iter().sum()
+    }
+
+    /// `C4PXSSystem::Count` as observed by `C4ControlSyncCheck::Set` after
+    /// the frame's Execute pass (C4PXS.cpp:212-234; C4Control.cpp:453).
+    pub fn execute_count(&self) -> usize {
+        self.execute_count
+    }
+
+    pub(crate) fn begin_execute(&mut self) {
+        self.execute_count = 0;
+    }
+
+    pub(crate) fn note_executed(&mut self) {
+        self.execute_count = self.execute_count.saturating_add(1);
+    }
+
+    /// `C4PXSSystem::Synchronize` (C4PXS.cpp:401-404).
+    pub(crate) fn synchronize(&mut self) {
+        self.execute_count = 0;
     }
 
     /// Slot accessors for the engine-driven execute loop. The engine walks
@@ -217,6 +240,7 @@ impl PxsSystem {
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.chunk_counts.clear();
+        self.execute_count = 0;
     }
 }
 

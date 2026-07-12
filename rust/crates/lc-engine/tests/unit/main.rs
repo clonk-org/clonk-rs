@@ -1096,6 +1096,51 @@ mod tests {
     }
 
     #[test]
+    fn sync_check_pxs_count_includes_pixels_that_deactivate_during_execute() {
+        // C4PXSSystem::Execute resets Count, then increments it AFTER every
+        // live slot's Execute call (C4PXS.cpp:212-234). A PXS that deactivates
+        // during that call is therefore absent from storage but still present
+        // in C4ControlSyncCheck::PXSCount for this frame (C4Control.cpp:453).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Sand]
+            Name=Sand
+            Density=25
+            Friction=10
+            "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let sand = materials.id_of("Sand").expect("sand exists");
+        let mut engine = Engine::with_seed(83);
+        engine.set_materials(materials);
+
+        // With no landscape GBackWdt/GBackHgt are zero, so this valid PXS
+        // deactivates in C4PXS::Execute's out-of-bounds check.
+        assert!(engine.pxs_system.create(
+            sand,
+            math::C4Fixed::ZERO,
+            math::C4Fixed::ZERO,
+            math::C4Fixed::ZERO,
+            math::C4Fixed::ZERO,
+        ));
+        engine.tick_pxs();
+        assert_eq!(engine.pxs_system.iter().count(), 0, "pixel deactivated");
+        assert_eq!(
+            engine.sync_check(0).pxs_count,
+            1,
+            "Count records the executed slot even though it died"
+        );
+
+        engine.tick_pxs();
+        assert_eq!(
+            engine.sync_check(0).pxs_count,
+            0,
+            "the next Execute resets Count before scanning an empty system"
+        );
+    }
+
+    #[test]
     fn incinerate_burn_turn_to_and_contents_ejection_match_cpp() -> Result<(), EngineError> {
         // fxFireStart (C4Effect.cpp:579-594): BurnTurnTo changes the
         // definition when fire is caused; contents are ejected at the
