@@ -10346,16 +10346,28 @@ impl GameApp {
             tracing::warn!(info_id = join.info_id, "ignoring join for missing player info");
             return;
         };
-        let resolved = match lc_engine::resolve_remote_embedded_player_data(&join, &info) {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                tracing::warn!(info_id = join.info_id, %error, "failed to resolve embedded join");
-                return;
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        let player_file = if local_client_id == Some(join.by_client) {
+            let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
+            match PlayerFile::load_from_path(&path) {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load local player file");
+                    return;
+                }
             }
-        };
-        let player_file = match resolved {
-            lc_engine::RemoteEmbeddedPlayerData::PlayerFile(file) => Some(file),
-            lc_engine::RemoteEmbeddedPlayerData::ScriptWithoutFile => None,
+        } else {
+            match lc_engine::resolve_remote_embedded_player_data(&join, &info) {
+                Ok(lc_engine::RemoteEmbeddedPlayerData::PlayerFile(file)) => Some(file),
+                Ok(lc_engine::RemoteEmbeddedPlayerData::ScriptWithoutFile) => None,
+                Err(error) => {
+                    tracing::warn!(info_id = join.info_id, %error, "failed to resolve embedded join");
+                    return;
+                }
+            }
         };
         let startup_player_count =
             i32::try_from(self.control_player_infos.player_count().max(1)).unwrap_or(i32::MAX);
@@ -20472,6 +20484,61 @@ mod tests {
             .find(|player| player.player_info_id == 7)
             .expect("embedded player joined before the simulation tick");
         assert_eq!(joined.name, "Network Tyler");
+        assert_eq!((joined.score, joined.total_playing_time), (42, 99));
+    }
+
+    #[test]
+    fn locally_authored_join_uses_filename_instead_of_embedded_data() {
+        // LocalControl is selected solely by ByClient and loads Filename
+        // before the embedded/resource branches (src/C4Control.cpp:43-46,
+        // 726-744).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.engine.set_network_game(true);
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let player_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lc-engine/tests/fixtures/embedded_player.c4p"
+        );
+        let info = lc_engine::ControlPlayerInfoEntry {
+            name: lc_engine::LegacyCString::from_bytes(b"Local Tyler".to_vec())
+                .expect("valid legacy name"),
+            id: 8,
+            ..Default::default()
+        };
+        let join = lc_engine::JoinPlayerControlData {
+            filename: lc_engine::LegacyCString::from_bytes(player_path.as_bytes().to_vec())
+                .expect("valid legacy filename"),
+            at_client: 0,
+            info_id: 8,
+            source: lc_engine::JoinPlayerSource::Embedded(vec![0, 0]),
+            by_client: 0,
+        };
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![
+                    NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
+                        client_id: 0,
+                        players: vec![info],
+                        by_client: 0,
+                        ..Default::default()
+                    }),
+                    NetworkControl::JoinPlayer(join),
+                ],
+            })
+            .expect("queue locally authored join");
+
+        app.update().expect("execute local join tick");
+
+        let joined = app
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.player_info_id == 8)
+            .expect("local filename player joined");
+        assert_eq!(joined.name, "Local Tyler");
         assert_eq!((joined.score, joined.total_playing_time), (42, 99));
     }
 
