@@ -1,6 +1,8 @@
 use lc_engine::{
-    ControlPacket as EngineControlPacket, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
-    PlayerControlData, SyncCheckPacket,
+    ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
+    JoinPlayerSource, LegacyCString, PlayerControlData, PlayerInfoControlData, SyncCheckPacket,
+    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
+    PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
 
 use crate::{ClientId, ControlPacket, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
@@ -8,10 +10,12 @@ use crate::{ClientId, ControlPacket, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
 // C4PacketType::PID_None (src/C4PacketBase.h). Binary C4PacketList values
 // terminate with a default C4IDPacket carrying this byte.
 const PID_NONE: u8 = 0xff;
+const CID_PLR_INFO: u8 = 0x80 | 0x10;
 const CID_JOIN_PLR: u8 = 0x80 | 0x11;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
 const MAX_VARINT_BYTES: usize = 5;
+const MAX_PLAYER_INFO_COUNT: i32 = 5_000;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LegacyControlError {
@@ -25,6 +29,10 @@ pub enum LegacyControlError {
     UnsupportedPacket(u8),
     #[error("resource-backed JoinPlayer controls are not supported yet")]
     UnsupportedResourceJoin,
+    #[error("resource-backed PlayerInfo entries are not supported yet")]
+    UnsupportedPlayerInfoResource,
+    #[error("PlayerInfo count {0} is outside the C++ range")]
+    PlayerInfoCountOutOfRange(i32),
     #[error("control payload contained negative client id {0}")]
     NegativeClientId(i32),
     #[error("control payload contained negative tick {0}")]
@@ -212,6 +220,7 @@ fn decode_control_list(
             break;
         }
         match id {
+            CID_PLR_INFO => controls.push(decode_player_info(reader)?),
             CID_JOIN_PLR => controls.push(decode_join_player(reader)?),
             CID_PLR_CONTROL => controls.push(decode_player_control(reader)?),
             CID_SYNC_CHECK => controls.push(decode_sync_check(reader)?),
@@ -219,6 +228,93 @@ fn decode_control_list(
         }
     }
     Ok(controls)
+}
+
+fn decode_player_info(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    let client_id = reader.read_raw_i32()?;
+    let flags = reader.read_raw_u32()?;
+    let player_count = reader.read_int32()?;
+    if !(0..=MAX_PLAYER_INFO_COUNT).contains(&player_count) {
+        return Err(LegacyControlError::PlayerInfoCountOutOfRange(player_count));
+    }
+    let players = (0..player_count)
+        .map(|_| decode_player_info_entry(reader))
+        .collect::<Result<Vec<_>, _>>()?;
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::PlayerInfo(PlayerInfoControlData {
+        client_id,
+        flags,
+        players,
+        by_client,
+    }))
+}
+
+fn decode_player_info_entry(
+    reader: &mut Reader<'_>,
+) -> Result<ControlPlayerInfoEntry, LegacyControlError> {
+    let name = reader.read_c_string()?;
+    let forced_name = reader.read_c_string()?;
+    let filename = reader.read_c_string()?;
+    let mut flags = reader.read_raw_u16()?;
+    let id = reader.read_raw_i32()?;
+    let player_type = reader.read_u8()?;
+    if player_type != PLAYER_INFO_TYPE_SCRIPT {
+        flags &= !PLAYER_INFO_FLAG_INVISIBLE;
+    }
+    let color = reader.read_raw_u32()?;
+    let original_color = reader.read_raw_u32()?;
+    let savegame_player = reader.read_int32()?;
+    let team = reader.read_int32()?;
+    let auth_id = reader.read_c_string()?;
+    let (game_number, game_join_frame) = if flags & PLAYER_INFO_FLAG_JOINED != 0 {
+        (reader.read_raw_i32()?, reader.read_raw_i32()?)
+    } else {
+        (-1, -1)
+    };
+    let game_part_frame = if flags & PLAYER_INFO_FLAG_REMOVED != 0 {
+        reader.read_raw_i32()?
+    } else {
+        -1
+    };
+    let extra_data = reader.read_c4_id()?;
+    let league_account = reader.read_c_string()?;
+    let league_score = reader.read_int32()?;
+    let league_rank = reader.read_int32()?;
+    let league_rank_symbol = reader.read_int32()?;
+    let league_projected_gain = reader.read_int32()?;
+    let clan_tag = reader.read_c_string()?;
+    let league_performance = reader.read_int32()?;
+    let league_progress_data = reader.read_c_string()?;
+    if flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 {
+        return Err(LegacyControlError::UnsupportedPlayerInfoResource);
+    }
+
+    Ok(ControlPlayerInfoEntry {
+        name,
+        forced_name,
+        filename,
+        flags,
+        id,
+        player_type,
+        color,
+        original_color,
+        savegame_player,
+        team,
+        auth_id,
+        game_number,
+        game_join_frame,
+        game_part_frame,
+        extra_data,
+        league_account,
+        league_score,
+        league_rank,
+        league_rank_symbol,
+        league_projected_gain,
+        clan_tag,
+        league_performance,
+        league_progress_data,
+        resource: None,
+    })
 }
 
 fn decode_join_player(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
@@ -362,6 +458,11 @@ impl<'a> Reader<'a> {
         Err(LegacyControlError::VarintOverflow)
     }
 
+    fn read_c4_id(&mut self) -> Result<[u8; 4], LegacyControlError> {
+        let value = self.read_c_string()?;
+        Ok(value.as_bytes().try_into().unwrap_or(*b"NONE"))
+    }
+
     fn read_int32(&mut self) -> Result<i32, LegacyControlError> {
         let mut tmp = self.read_u8()? as i32;
         let mut bytes_read = 1;
@@ -402,6 +503,22 @@ impl<'a> Reader<'a> {
             .ok_or(LegacyControlError::UnexpectedEof)?;
         self.offset = end;
         Ok(i32::from_ne_bytes(bytes))
+    }
+
+    fn read_raw_u32(&mut self) -> Result<u32, LegacyControlError> {
+        let bytes = self.read_bytes(size_of::<u32>())?;
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| LegacyControlError::UnexpectedEof)?;
+        Ok(u32::from_ne_bytes(bytes))
+    }
+
+    fn read_raw_u16(&mut self) -> Result<u16, LegacyControlError> {
+        let bytes = self.read_bytes(size_of::<u16>())?;
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| LegacyControlError::UnexpectedEof)?;
+        Ok(u16::from_ne_bytes(bytes))
     }
 }
 
