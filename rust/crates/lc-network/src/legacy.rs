@@ -58,8 +58,8 @@ pub enum LegacyEncodeError {
     UnsupportedPacket,
     #[error("embedded JoinPlayer data length {0} exceeds uint32")]
     PlayerDataTooLarge(usize),
-    #[error("resource-backed PlayerInfo entries are not supported yet")]
-    UnsupportedPlayerInfoResource,
+    #[error("PlayerInfo entry {0} has HasResource set without a resource core")]
+    MissingPlayerInfoResource(i32),
     #[error("PlayerInfo count {0} is outside the C++ range")]
     PlayerInfoCountOutOfRange(usize),
     #[error("client id {0} exceeds supported range")]
@@ -663,10 +663,10 @@ fn encode_player_info(
         .ok_or(LegacyEncodeError::PlayerInfoCountOutOfRange(
             data.players.len(),
         ))?;
-    if data.players.iter().any(|player| {
-        player.flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 || player.resource.is_some()
+    if let Some(player) = data.players.iter().find(|player| {
+        player.flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 && player.resource.is_none()
     }) {
-        return Err(LegacyEncodeError::UnsupportedPlayerInfoResource);
+        return Err(LegacyEncodeError::MissingPlayerInfoResource(player.id));
     }
 
     buffer.push(CID_PLR_INFO);
@@ -674,13 +674,16 @@ fn encode_player_info(
     append_raw_u32(buffer, data.flags);
     append_int32(buffer, player_count);
     for player in &data.players {
-        encode_player_info_entry(buffer, player);
+        encode_player_info_entry(buffer, player)?;
     }
     append_int32(buffer, data.by_client);
     Ok(())
 }
 
-fn encode_player_info_entry(buffer: &mut Vec<u8>, player: &ControlPlayerInfoEntry) {
+fn encode_player_info_entry(
+    buffer: &mut Vec<u8>,
+    player: &ControlPlayerInfoEntry,
+) -> Result<(), LegacyEncodeError> {
     let flags = player.flags & PLAYER_INFO_SYNC_FLAGS;
     append_c_string(buffer, &player.name);
     append_c_string(buffer, &player.forced_name);
@@ -710,6 +713,14 @@ fn encode_player_info_entry(buffer: &mut Vec<u8>, player: &ControlPlayerInfoEntr
     append_c_string(buffer, &player.clan_tag);
     append_int32(buffer, player.league_performance);
     append_c_string(buffer, &player.league_progress_data);
+    if flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 {
+        let resource = player
+            .resource
+            .as_ref()
+            .ok_or(LegacyEncodeError::MissingPlayerInfoResource(player.id))?;
+        encode_network_resource_core(buffer, resource);
+    }
+    Ok(())
 }
 
 fn encode_join_player(
