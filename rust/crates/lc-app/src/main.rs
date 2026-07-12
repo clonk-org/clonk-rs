@@ -21585,6 +21585,207 @@ mod tests {
             Some(serde_json::json!({ "Object": hill_cata.as_u64() })),
             "SetArrowToObj must identify Tutorial05's real right-hill CATA"
         );
+
+        // Script66-83 requires that same right-hill CLNK to grab hill_cata,
+        // face it toward the cabin, load the exact collected object, and
+        // fling it into FindObject's [0,220)x[0,140) cabin-hill rectangle
+        // before it asks for the constructor selection
+        // (content/Tutorial.c4f/Tutorial05.c4s/Script.c:178-228).
+        // Keep turning, loading, held-X tension and firing on the physical
+        // app route; CATA turns while pushed, admits the pushed crew's
+        // carried object, advances Ready through AimUpdate, and ejects that
+        // contained object from Fire
+        // (content/Objects.c4d/Vehicles.c4d/Catapult.c4d/Script.c:39-77,121-163).
+        let hill_cata_x = app
+            .engine
+            .object_snapshot(hill_cata)
+            .expect("right-hill CATA survives collection")
+            .position
+            .x;
+        let catapult_clonk_x = app
+            .engine
+            .object_snapshot(catapult_clonk)
+            .expect("right-hill CLNK survives collection")
+            .position
+            .x;
+        let reach_hill_cata = if hill_cata_x < catapult_clonk_x {
+            VirtualKeyCode::Z
+        } else {
+            VirtualKeyCode::C
+        };
+        hold_app_key_until(
+            &mut app,
+            reach_hill_cata,
+            "the WOOD-carrying right-hill CLNK reaches CATA",
+            180,
+            |app| {
+                app.engine
+                    .object_snapshot(catapult_clonk)
+                    .zip(app.engine.object_snapshot(hill_cata))
+                    .is_some_and(|(clonk, cata)| {
+                        clonk.action.name == "Walk"
+                            && (clonk.position.x - cata.position.x).abs() <= 12
+                    })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs the right-hill CATA");
+        advance_app_until(
+            &mut app,
+            "the right-hill CLNK grabs its real CATA",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(catapult_clonk)
+                    .is_some_and(|object| {
+                        object.action.name == "Push" && object.action.target == Some(hill_cata)
+                    })
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 evaluates the right-hill CATA direction",
+            300,
+            |app| {
+                app_tutorial_message_contains(app, "Turn the catapult around")
+                    || app_tutorial_message_contains(app, "load the catapult")
+            },
+        );
+        if app
+            .engine
+            .object_snapshot(hill_cata)
+            .is_some_and(|object| object.direction != Direction::Left)
+        {
+            hold_app_key_until(
+                &mut app,
+                VirtualKeyCode::Z,
+                "pushing left turns the right-hill CATA toward the cabin",
+                40,
+                |app| {
+                    app.engine
+                        .object_snapshot(hill_cata)
+                        .is_some_and(|object| object.direction == Direction::Left)
+                },
+            );
+        }
+        assert_eq!(
+            app.engine
+                .object_snapshot(hill_cata)
+                .expect("right-hill CATA survives turning")
+                .direction,
+            Direction::Left,
+            "the pushed right-hill CATA must face the cabin before loading"
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 asks the right-hill CLNK to load CATA",
+            300,
+            |app| app_tutorial_message_contains(app, "load the catapult"),
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A loads the exact WOOD into the right-hill CATA");
+        advance_app_until(
+            &mut app,
+            "the exact valley WOOD enters the right-hill CATA",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(wood)
+                    .is_some_and(|object| object.container == Some(hill_cata))
+            },
+        );
+        assert_eq!(
+            app_object_contents_count(&app, hill_cata, "WOOD"),
+            1,
+            "the right-hill CATA must contain the original valley WOOD exactly once"
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 asks for the shot toward the cabin",
+            300,
+            |app| app_tutorial_message_contains(app, "Fling the material"),
+        );
+
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::X)
+            .expect("hold physical X to tension the right-hill CATA");
+        advance_app_until(
+            &mut app,
+            "right-hill CATA reaches Ready phase six",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(hill_cata)
+                    .is_some_and(|object| object.action.name == "Ready" && object.action.phase == 6)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::X)
+            .expect("release physical X at full right-hill CATA tension");
+        let tensioned = app
+            .engine
+            .object_snapshot(hill_cata)
+            .expect("right-hill CATA survives tension release");
+        assert_eq!(
+            (tensioned.action.name.as_str(), tensioned.action.phase),
+            ("Ready", 6)
+        );
+        assert!(
+            tensioned
+                .effects
+                .iter()
+                .all(|effect| effect.name != "IntJnRAim"),
+            "physical X release must cancel the right-hill CATA aim timer"
+        );
+
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A fires the fully tensioned right-hill CATA");
+        assert_eq!(
+            app.engine
+                .object_snapshot(hill_cata)
+                .expect("right-hill CATA survives firing")
+                .action
+                .name,
+            "Fire"
+        );
+        advance_app_until(
+            &mut app,
+            "the right-hill CATA flings the same WOOD to the cabin hill",
+            400,
+            |app| {
+                app.engine.object_snapshot(wood).is_some_and(|object| {
+                    object.container.is_none()
+                        && (0..220).contains(&object.position.x)
+                        && (0..140).contains(&object.position.y)
+                })
+            },
+        );
+        let delivered = app
+            .engine
+            .object_snapshot(wood)
+            .expect("twice-flung valley WOOD survives delivery");
+        assert!(delivered.container.is_none());
+        assert!((0..220).contains(&delivered.position.x));
+        assert!((0..140).contains(&delivered.position.y));
+
+        advance_app_until(
+            &mut app,
+            "Tutorial05 Script83 asks for the constructor CLNK",
+            300,
+            |app| app_tutorial_message_contains(app, "switch back to the clonk near the cabin"),
+        );
+        assert_eq!(
+            app.snapshot
+                .script_globals
+                .named
+                .get("arrow_target")
+                .and_then(|value| serde_json::to_value(value).ok()),
+            Some(serde_json::json!({ "Object": constructor.as_u64() })),
+            "Script83 must target Tutorial05's constructor CLNK"
+        );
     }
 
     #[test]
