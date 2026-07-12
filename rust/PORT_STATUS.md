@@ -5,11 +5,10 @@ record of completed slices.
 
 ## Focus
 
-Tutorial virtual-play passes 01–03, 05–06, and 08–10. Tutorial 04 is blocked
-while scaling beside ELEC; 07 is blocked while grabbing ELEC with GOLD. App
-routes complete 01–03 and reach Tutorial 04's ELEV construction. Finish all
-tutorial behavior and presentation before resuming Goldrush at its pinned
-frame-3327 Decay/DoCon mismatch.
+Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
+01–03 and reach Tutorial 04's ELEV construction. Finish exact tutorial
+presentation/interaction before resuming Goldrush at its pinned frame-3327
+Decay/DoCon mismatch.
 
 ## Gates
 
