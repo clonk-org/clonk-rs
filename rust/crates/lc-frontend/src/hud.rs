@@ -91,8 +91,7 @@ impl HudFont<'_> {
         self.draw_with_gamma(surface, x, y, text, color, align, None);
     }
 
-    /// Structural seam for the in-game `CStdDDraw::TextOut` gamma path.
-    /// The option remains unused until the HUD fragment behavioral slice.
+    /// In-game `CStdDDraw::TextOut` with the active per-fragment gamma ramp.
     pub(crate) fn draw_with_gamma(
         &self,
         surface: &mut Surface,
@@ -101,10 +100,10 @@ impl HudFont<'_> {
         text: &str,
         color: Color,
         align: TextAlign,
-        _gamma: Option<&GammaRamp>,
+        gamma: Option<&GammaRamp>,
     ) {
         match self {
-            HudFont::Clonk(font) => font.draw(
+            HudFont::Clonk(font) => font.draw_with_gamma(
                 surface,
                 x,
                 y,
@@ -112,6 +111,7 @@ impl HudFont<'_> {
                 [color.r, color.g, color.b, color.a],
                 align,
                 false,
+                gamma,
             ),
             HudFont::Fallback(font) => {
                 let width = self.text_width(text);
@@ -120,28 +120,75 @@ impl HudFont<'_> {
                     TextAlign::Center => x - width / 2,
                     TextAlign::Right => x - width,
                 };
-                font.draw_text(
-                    surface,
-                    origin as f32,
-                    y as f32,
-                    text,
-                    FALLBACK_FONT_SIZE,
-                    color,
-                );
+                if let Some(gamma) = gamma {
+                    draw_fallback_text_with_gamma(
+                        *font,
+                        surface,
+                        origin as f32,
+                        y as f32,
+                        text,
+                        color,
+                        gamma,
+                    );
+                } else {
+                    font.draw_text(
+                        surface,
+                        origin as f32,
+                        y as f32,
+                        text,
+                        FALLBACK_FONT_SIZE,
+                        color,
+                    );
+                }
             }
         }
     }
 }
 
-/// Structural seams for the three HUD fragment primitives. They deliberately
-/// keep forwarding `None` until the behavioral HUD slice, so threading a live
-/// ramp cannot change pixels in this commit.
+fn draw_fallback_text_with_gamma(
+    font: &dyn TextFont,
+    surface: &mut Surface,
+    origin_x: f32,
+    origin_y: f32,
+    text: &str,
+    color: Color,
+    gamma: &GammaRamp,
+) {
+    // TextFont exposes drawing rather than glyph coverage. Rasterize an alpha
+    // mask with the same font first, then gamma-sample the unpremultiplied text
+    // colour before applying that coverage to the real framebuffer.
+    let mut mask = Surface::new(surface.width(), surface.height(), surface.format());
+    font.draw_text(
+        &mut mask,
+        origin_x,
+        origin_y,
+        text,
+        FALLBACK_FONT_SIZE,
+        Color::new(255, 255, 255, color.a),
+    );
+    for y in 0..surface.height() {
+        for x in 0..surface.width() {
+            let Some(coverage) = mask.get_pixel(x, y).map(|pixel| pixel.a) else {
+                continue;
+            };
+            if coverage == 0 {
+                continue;
+            }
+            let destination = surface.get_pixel(x, y).unwrap_or_default();
+            let source = Color::new(color.r, color.g, color.b, coverage);
+            let blended = crate::gamma_blend_fragment_over(source, destination, gamma);
+            let _ = surface.set_pixel(x, y, blended);
+        }
+    }
+}
+
 fn fill_hud_rect(
     surface: &mut Surface,
     rect: &lc_gui::Rect,
     color: Color,
-    _gamma: Option<&GammaRamp>,
+    gamma: Option<&GammaRamp>,
 ) {
+    let color = gamma.map_or(color, |gamma| crate::gamma_encode_fragment(color, gamma));
     fill_rect(surface, rect, color);
 }
 
@@ -155,10 +202,10 @@ fn draw_hud_image_strip(
     src_y: u32,
     src_w: u32,
     src_h: u32,
-    _gamma: Option<&GammaRamp>,
+    gamma: Option<&GammaRamp>,
 ) {
     draw_image_strip(
-        surface, dest_x, dest_y, image, src_x, src_y, src_w, src_h, None,
+        surface, dest_x, dest_y, image, src_x, src_y, src_w, src_h, gamma,
     );
 }
 
@@ -166,9 +213,9 @@ fn draw_hud_image_bilinear(
     surface: &mut Surface,
     rect: &lc_gui::Rect,
     image: &ImageData,
-    _gamma: Option<&GammaRamp>,
+    gamma: Option<&GammaRamp>,
 ) {
-    draw_image_bilinear(surface, rect, image, None);
+    draw_image_bilinear(surface, rect, image, gamma);
 }
 
 /// `{:02}:{:02}:{:02}` of `Game.Time` (C4UpperBoard::Execute,
@@ -761,7 +808,7 @@ fn draw_scaled_region(
     image: &ImageData,
     src: SurfaceRect,
     dest: SurfaceRect,
-    _gamma: Option<&GammaRamp>,
+    gamma: Option<&GammaRamp>,
 ) {
     if src.width == 0 || src.height == 0 || dest.width == 0 || dest.height == 0 {
         return;
@@ -787,7 +834,17 @@ fn draw_scaled_region(
             if tx < 0 || ty < 0 {
                 continue;
             }
-            let _ = if color.a == 255 {
+            let _ = if let Some(gamma) = gamma {
+                let destination = surface
+                    .get_pixel(tx as u32, ty as u32)
+                    .unwrap_or_default();
+                let blended = if color.a == 255 {
+                    crate::gamma_encode_fragment(color, gamma)
+                } else {
+                    crate::gamma_blend_fragment_over(color, destination, gamma)
+                };
+                surface.set_pixel(tx as u32, ty as u32, blended)
+            } else if color.a == 255 {
                 surface.set_pixel(tx as u32, ty as u32, color)
             } else {
                 surface.blend_pixel(tx as u32, ty as u32, color)
@@ -2114,48 +2171,134 @@ mod tests {
     }
 
     #[test]
-    fn hud_gamma_leaf_seams_are_structural_until_fragment_encoding_lands() {
+    fn hud_image_leaves_gamma_sample_before_translucent_blending() {
+        let mut target = surface(12, 2);
+        target.fill(Color::opaque(200, 200, 200));
+        let source = Color::new(64, 128, 192, 128);
+        let image = solid_image(1, 1, [source.r, source.g, source.b, source.a]);
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+
+        fill_hud_rect(
+            &mut target,
+            &lc_gui::Rect::new(0.0, 0.0, 2.0, 2.0),
+            Color::opaque(source.r, source.g, source.b),
+            Some(&gamma),
+        );
+        draw_hud_image_strip(&mut target, 3, 0, &image, 0, 0, 1, 1, Some(&gamma));
+        draw_hud_image_bilinear(
+            &mut target,
+            &lc_gui::Rect::new(6.0, 0.0, 1.0, 1.0),
+            &image,
+            Some(&gamma),
+        );
+        draw_scaled_region(
+            &mut target,
+            &image,
+            SurfaceRect::new(0, 0, 1, 1),
+            SurfaceRect::new(9, 0, 1, 1),
+            Some(&gamma),
+        );
+
+        assert_eq!(
+            target.get_pixel(0, 0),
+            Some(Color::new(50, 100, 150, 255))
+        );
+        let expected = Some(Color::new(125, 150, 175, 255));
+        for x in [3, 6, 9] {
+            assert_eq!(target.get_pixel(x, 0), expected, "HUD leaf at x={x}");
+        }
+    }
+
+    #[test]
+    fn hud_clonk_and_fallback_text_use_independent_gamma_channels() {
         let gamma = lc_graphics::GammaRamp::from_control_points([
             0x102030, 0x405060, 0x708090,
         ]);
-        let render = |gamma: Option<&lc_graphics::GammaRamp>| {
-            let mut target = surface(32, 24);
-            let image = solid_image(2, 2, [64, 128, 192, 128]);
-            let font = bitmap_font();
-            let font = HudFont::Fallback(&font);
+        let encoded = [17, 33, 49, 255];
 
-            fill_hud_rect(
+        let mut fallback_surface = surface(24, 16);
+        fallback_surface.fill(Color::opaque(200, 200, 200));
+        let fallback = bitmap_font();
+        HudFont::Fallback(&fallback).draw_with_gamma(
+            &mut fallback_surface,
+            0,
+            0,
+            "X",
+            Color::opaque(0, 0, 0),
+            TextAlign::Left,
+            Some(&gamma),
+        );
+        assert!(fallback_surface
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel == encoded));
+
+        let mut clonk = lc_graphics::clonk_font::ClonkFont::new(1);
+        clonk.add_glyph(
+            'X',
+            lc_graphics::clonk_font::GlyphCell {
+                width: 1,
+                pixels: vec![Color::opaque(255, 255, 255), Color::transparent()],
+            },
+        );
+        let mut clonk_surface = surface(2, 2);
+        clonk_surface.fill(Color::opaque(200, 200, 200));
+        HudFont::Clonk(&clonk).draw_with_gamma(
+            &mut clonk_surface,
+            0,
+            0,
+            "X",
+            Color::opaque(0, 0, 0),
+            TextAlign::Left,
+            Some(&gamma),
+        );
+        assert_eq!(clonk_surface.get_pixel(0, 0), Some(Color::new(17, 33, 49, 255)));
+    }
+
+    #[test]
+    fn tutorial_six_controls_compose_with_the_scenario_gamma() {
+        // Tutorial06/Script.c:23-24 selects top controls 3..8 with labels;
+        // Initialize applies the grey 0/100/200 gamma curve at Script.c:13.
+        let controls = "___345678_   345678 __________";
+        let show_control = controls
+            .bytes()
+            .enumerate()
+            .filter(|(_, byte)| !matches!(byte, b'_' | b' '))
+            .fold(0i32, |mask, (position, _)| mask | (1i32 << position));
+        let hud = HudGraphics {
+            control: Some(crate::test_support::load_graphics_png("Control.png")),
+            ..HudGraphics::default()
+        };
+        let fonts = crate::test_support::endeavour_font_set();
+        let labels = ["Z", "S", "X", "C", "A", "D", "Q", "W", "E", "R"]
+            .map(str::to_string);
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+        let render = |gamma| {
+            let mut target = surface(320, 240);
+            target.fill(Color::opaque(200, 200, 200));
+            draw_player_controls_with_gamma(
                 &mut target,
-                &lc_gui::Rect::new(0.0, 0.0, 4.0, 4.0),
-                Color::new(32, 64, 96, 128),
-                gamma,
-            );
-            draw_hud_image_strip(&mut target, 5, 0, &image, 0, 0, 2, 2, gamma);
-            draw_hud_image_bilinear(
-                &mut target,
-                &lc_gui::Rect::new(8.0, 0.0, 4.0, 4.0),
-                &image,
-                gamma,
-            );
-            draw_scaled_region(
-                &mut target,
-                &image,
-                SurfaceRect::new(0, 0, 2, 2),
-                SurfaceRect::new(13, 0, 4, 4),
-                gamma,
-            );
-            font.draw_with_gamma(
-                &mut target,
+                &HudFont::Clonk(&fonts.text),
+                &HudFont::Clonk(&fonts.mini),
+                &hud,
+                SurfaceRect::new(0, 0, 320, 240),
+                show_control,
+                1,
                 0,
-                8,
-                "HUD",
-                Color::opaque(64, 128, 192),
-                TextAlign::Left,
+                &labels,
+                0,
                 gamma,
             );
-            target.pixels().to_vec()
+            target.snapshot().checksum()
         };
 
-        assert_eq!(render(Some(&gamma)), render(None));
+        assert_eq!(
+            (render(None), render(Some(&gamma))),
+            (727_770_473, 366_450_976)
+        );
     }
 }

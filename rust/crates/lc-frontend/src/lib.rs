@@ -3918,7 +3918,7 @@ fn tile_image_on_surface(
     image: &ImageData,
     origin_x: i32,
     origin_y: i32,
-    _gamma: Option<&lc_graphics::GammaRamp>,
+    gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     let image_width = image.width() as usize;
     let image_height = image.height() as usize;
@@ -3948,8 +3948,26 @@ fn tile_image_on_surface(
             let copy_width = (image_width - source_x).min(surface_width - destination_x);
             let source_start = source_x * 4;
             let destination_start = destination_x * 4;
-            destination_row[destination_start..destination_start + copy_width * 4]
-                .copy_from_slice(&source_row[source_start..source_start + copy_width * 4]);
+            if let Some(gamma) = gamma {
+                for pixel in 0..copy_width {
+                    let source = source_start + pixel * 4;
+                    let destination = destination_start + pixel * 4;
+                    let encoded = gamma_encode_fragment(
+                        Color::new(
+                            source_row[source],
+                            source_row[source + 1],
+                            source_row[source + 2],
+                            source_row[source + 3],
+                        ),
+                        gamma,
+                    );
+                    destination_row[destination..destination + 4]
+                        .copy_from_slice(&[encoded.r, encoded.g, encoded.b, encoded.a]);
+                }
+            } else {
+                destination_row[destination_start..destination_start + copy_width * 4]
+                    .copy_from_slice(&source_row[source_start..source_start + copy_width * 4]);
+            }
             destination_x += copy_width;
             source_x = 0;
         }
@@ -5361,13 +5379,12 @@ mod tests {
     }
 
     #[test]
-    fn tiled_viewport_background_gamma_seam_is_structural() {
+    fn tiled_viewport_background_gamma_encodes_raw_translucent_texels() {
         // The back-buffer and small-world border use fctBackground through
         // BlitSurfaceTile (C4GraphicsSystem.cpp:290; C4Viewport.cpp:1033-1036).
-        // This structural slice only carries the ramp to that terminal leaf.
         let image = ImageData::new(1, 1, vec![64, 128, 192, 128]);
         let gamma = lc_graphics::GammaRamp::from_control_points([
-            0x102030, 0x405060, 0x708090,
+            0x000000, 0x646464, 0xc8c8c8,
         ]);
         let render = |gamma: Option<&lc_graphics::GammaRamp>| {
             let mut surface = Surface::new(3, 2, PixelFormat::Rgba8888);
@@ -5376,7 +5393,12 @@ mod tests {
             surface.pixels().to_vec()
         };
 
-        assert_eq!(render(Some(&gamma)), render(None));
+        assert!(render(Some(&gamma))
+            .chunks_exact(4)
+            .all(|pixel| pixel == [50, 100, 150, 128]));
+        assert!(render(None)
+            .chunks_exact(4)
+            .all(|pixel| pixel == [64, 128, 192, 128]));
     }
 
     #[test]
