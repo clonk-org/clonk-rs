@@ -8767,9 +8767,11 @@ impl EnvironmentContext {
         self.queue_season_gamma_control();
     }
 
-    fn ambient_temperature(&self) -> i32 {
-        let settings = self.settings.borrow();
-        settings.ambient_temperature(self.frame)
+    /// C4Weather::GetTemperature returns the mutable Weather.Temperature
+    /// field verbatim (C4Weather.cpp:173-176). Climate only influences that
+    /// field during Init/Execute; it is not added again at script read time.
+    fn temperature(&self) -> i32 {
+        self.settings.borrow().temperature
     }
 
     fn set_climate(&self, climate: i32) {
@@ -11435,7 +11437,7 @@ fn get_temperature(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_ref()
             .ok_or_else(|| RuntimeError::new("GetTemperature requires an active engine context"))?
             .clone();
-        Ok(Value::Int(context.ambient_temperature()))
+        Ok(Value::Int(context.temperature()))
     })
 }
 

@@ -14551,6 +14551,57 @@ func Activate(inMat, inLength, inStrength)
     }
 
     #[test]
+    fn get_temperature_returns_weather_temperature_after_init_and_season_drift() {
+        // C4Weather::Init assigns Temperature = Climate after evaluating the
+        // scenario climate (C4Weather.cpp:43-45). C4Weather::Execute then
+        // moves that one Temperature field toward the seasonal target on
+        // Tick35 (:87-93), and FnGetTemperature returns it verbatim through
+        // C4Weather::GetTemperature (:173-176). Climate is not added again.
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "WTMP",
+                    "Weather temperature probe",
+                    "func ReadTemperature() { return(GetTemperature()); }",
+                )
+                .expect("temperature probe compiles"),
+            )
+            .expect("temperature probe registers");
+        let mut init = fixed_weather_init(0, 0, "Water");
+        init.season = lc_engine::scenario::LegacyC4SVal::new(0, 0, 0, 100);
+        init.climate = lc_engine::scenario::LegacyC4SVal::new(30, 0, 0, 100);
+        engine
+            .apply_weather_init(&init)
+            .expect("weather init applies");
+        let probe = engine
+            .spawn_object(SpawnConfig::new("WTMP"))
+            .expect("temperature probe spawns");
+        let probe_index = engine.find_object_index(probe).expect("probe exists");
+
+        assert_eq!(engine.environment().climate, 20);
+        assert_eq!(engine.environment().temperature, 20);
+        assert_eq!(
+            engine
+                .call_object_function(probe_index, "ReadTemperature", Vec::new())
+                .expect("GetTemperature succeeds after weather init"),
+            Value::Int(20)
+        );
+
+        for _ in 0..35 {
+            engine.tick().expect("weather tick succeeds");
+        }
+        assert_eq!(engine.environment().temperature, 19);
+        let probe_index = engine.find_object_index(probe).expect("probe remains");
+        assert_eq!(
+            engine
+                .call_object_function(probe_index, "ReadTemperature", Vec::new())
+                .expect("GetTemperature succeeds after seasonal drift"),
+            Value::Int(19)
+        );
+    }
+
+    #[test]
     fn weather_init_launches_cpp_precipitation_objects_in_draw_order() {
         // C4Weather::Init evaluates Rain once as a gate, then for every
         // min(GBackWdt/500, 5) cloud draws Random(320), Random(GBackWdt),
