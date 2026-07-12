@@ -10,7 +10,7 @@ use lc_frontend::{
     CommandImage, CommandOverlayIcon, GuiPoint,
 };
 use lc_graphics::clonk_font::TextAlign;
-use lc_graphics::{Color, GammaRamp, Rect, Surface, TextFont};
+use lc_graphics::{Color, GammaRamp, PixelFormat, Rect, Surface, TextFont};
 use lc_gui::ImageData;
 
 use crate::ingame_menu::{
@@ -282,6 +282,25 @@ pub(crate) fn definition_menu_picture(image: DefinitionPictureImage) -> ImageDat
     let mut pixels = pixels.to_vec();
     apply_default_menu_owner_color(&mut pixels, &mask);
     ImageData::new(width, height, pixels)
+}
+
+fn precompose_definition_menu_title_icon(icon: &ImageData) -> ImageData {
+    // CreateMenu first draws the definition into a square C4SymbolSize facet;
+    // WoodenLabel later scales that square facet into the title bar. Keeping
+    // both stages matters for non-square definition pictures such as CLNK
+    // (C4Script.cpp:1420-1450; C4Def.cpp:813-837;
+    // C4GuiLabels.cpp:168-208).
+    let side = CLASSIC_ITEM_SIZE as u32;
+    let mut symbol = Surface::new(side, side, PixelFormat::Rgba8888);
+    draw_image_region_aspect(
+        &mut symbol,
+        icon,
+        Rect::new(0, 0, icon.width(), icon.height()),
+        Rect::new(0, 0, side, side),
+        false,
+        None,
+    );
+    ImageData::new(side, side, symbol.pixels().to_vec())
 }
 
 fn command_image_for_menu_symbol(
@@ -559,10 +578,11 @@ fn render_engine_normal_menu(
     }
     let icon_indent = if menu.title_symbol == ObjectMenuSymbol::Definition {
         title_icon.map_or(0, |icon| {
+            let icon = precompose_definition_menu_title_icon(icon);
             let side = (title_height - 2) as u32;
             draw_image_region_aspect(
                 surface,
-                icon,
+                &icon,
                 Rect::new(0, 0, icon.width(), icon.height()),
                 Rect::new(x + 1, y + 1, side, side),
                 false,
@@ -1921,11 +1941,82 @@ fn draw_border(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&G
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
     use lc_engine::{
-        CommandStackSnapshot, Definition, Engine, MovementProfile, ObjectSnapshot, ObjectStatus,
-        PlayerConfig, SpawnConfig, Vector2,
+        CommandStackSnapshot, Definition, Engine, JoinPlayerConfig, MovementProfile,
+        ObjectSnapshot, ObjectStatus, PlayerConfig, Scenario, ScenarioError, SpawnConfig, Vector2,
     };
+    use lc_resources::{Group, MaterialLibrary};
     use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    struct RepositoryContentResolver {
+        root: PathBuf,
+    }
+
+    impl LegacyDefinitionResolver for RepositoryContentResolver {
+        fn resolve_definition_groups(
+            &self,
+            _scenario: &Group,
+            identifier: &str,
+        ) -> Result<Vec<Group>, ScenarioError> {
+            Group::open(self.root.join(identifier.replace('\\', "/")))
+                .map(|group| vec![group])
+                .map_err(ScenarioError::Resources)
+        }
+    }
+
+    fn repository_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    }
+
+    fn load_repository_dragon_rock() -> (Engine, i32) {
+        let repository = repository_root();
+        let content = repository.join("content");
+        let scenario_path = content.join("Fantasy.c4f/Drachenfels.c4s");
+        let scenario = Scenario::load_from_path_with(
+            &scenario_path,
+            &RepositoryContentResolver {
+                root: content.clone(),
+            },
+        )
+        .unwrap_or_else(|error| panic!("scenario `{}` loads: {error}", scenario_path.display()));
+        let material_group =
+            Group::open(content.join("Material.c4g")).expect("installed Material.c4g opens");
+        let materials =
+            MaterialLibrary::from_group(&material_group).expect("installed materials load");
+        let system_group =
+            Group::open(repository.join("planet/System.c4g")).expect("System.c4g opens");
+        let system_scripts = load_system_scripts(&system_group).expect("system scripts load");
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&materials);
+        engine.install_global_scripts(&system_scripts);
+        engine.set_standard_names(
+            system_group
+                .read_file("Names.txt")
+                .ok()
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+        );
+        scenario.apply(&mut engine).expect("Dragon Rock applies");
+        let owner = engine
+            .join_player(JoinPlayerConfig {
+                name: "Dragon Rock menu parity".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff_00_00,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("Dragon Rock player joins")
+            .number;
+        (engine, owner)
+    }
 
     fn make_object(id: u64, definition: &str) -> ObjectSnapshot {
         ObjectSnapshot {
@@ -3019,5 +3110,255 @@ mod tests {
         apply_default_menu_owner_color(&mut pixels, &[136, 0]);
         assert_eq!(&pixels[..4], &[0, 0, 136, 255]);
         assert_eq!(&pixels[4..], &[100, 50, 10, 255]);
+    }
+
+    #[test]
+    fn real_dragon_rock_choice_menus_match_cpp_geometry_assets_and_timing() {
+        let (mut engine, owner) = load_repository_dragon_rock();
+        let (crew, difficulty) = engine
+            .cursor_object_menu(owner)
+            .map(|(crew, menu)| (crew, menu.clone()))
+            .expect("Dragon Rock difficulty menu");
+        assert_eq!(difficulty.caption, "Select difficulty");
+        assert_eq!(difficulty.symbol_id, "WIPF");
+        assert_eq!(difficulty.title_symbol, ObjectMenuSymbol::Definition);
+        assert_eq!(difficulty.style, 0);
+        assert!(!difficulty.permanent);
+        assert_eq!(difficulty.extra, ObjectMenuExtra::None);
+        assert_eq!(difficulty.selection, 0);
+        assert!(difficulty.user_menu);
+        assert_eq!(difficulty.command_object, Some(crew));
+        assert_eq!(difficulty.columns, 5);
+        assert_eq!(difficulty.lines, 0);
+        assert_eq!(engine_script_menu_title(&difficulty), "Difficulty: Normal");
+        assert_eq!(
+            difficulty
+                .items
+                .iter()
+                .map(|item| (
+                    item.item_id.as_str(),
+                    item.caption.as_str(),
+                    item.info_caption.as_str(),
+                    item.command.as_str(),
+                    item.command2.as_str(),
+                    item.count,
+                    item.symbol,
+                    item.selectable,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "WIPF",
+                    "Difficulty: Normal",
+                    "Each player receives a flag.",
+                    "SetDifficulty(1)",
+                    "SetDifficulty(1)",
+                    MENU_ITEM_NO_COUNT,
+                    ObjectMenuSymbol::Definition,
+                    true,
+                ),
+                (
+                    "MONS",
+                    "Difficulty: Hard",
+                    "Players start without flags.",
+                    "SetDifficulty(2)",
+                    "SetDifficulty(2)",
+                    MENU_ITEM_NO_COUNT,
+                    ObjectMenuSymbol::Definition,
+                    true,
+                ),
+            ]
+        );
+
+        engine
+            .player_in_com(owner, lc_engine::COM_THROW, 0)
+            .expect("choose normal difficulty");
+        let (_, character_knight) = engine
+            .cursor_object_menu(owner)
+            .map(|(crew, menu)| (crew, menu.clone()))
+            .expect("Dragon Rock character menu");
+        assert_eq!(character_knight.caption, "Choose character");
+        assert_eq!(character_knight.symbol_id, "CLNK");
+        assert_eq!(character_knight.title_symbol, ObjectMenuSymbol::Definition);
+        assert_eq!(character_knight.style, 0);
+        assert_eq!(character_knight.selection, 0);
+        assert_eq!(character_knight.columns, 5);
+        assert_eq!(character_knight.lines, 0);
+        assert_eq!(
+            engine_script_menu_title(&character_knight),
+            "Character: Knight"
+        );
+        assert_eq!(
+            character_knight
+                .items
+                .iter()
+                .map(|item| (
+                    item.item_id.as_str(),
+                    item.caption.as_str(),
+                    item.info_caption.as_str(),
+                    item.command.as_str(),
+                    item.command2.as_str(),
+                    item.count,
+                    item.symbol,
+                    item.selectable,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "KNIG",
+                    "Character: Knight",
+                    "Play as Knight.",
+                    "Redefine3(KNIG)",
+                    "Redefine3(KNIG)",
+                    MENU_ITEM_NO_COUNT,
+                    ObjectMenuSymbol::Definition,
+                    true,
+                ),
+                (
+                    "MAGE",
+                    "Character: Mage",
+                    "Play as Mage.",
+                    "Redefine3(MAGE)",
+                    "Redefine3(MAGE)",
+                    MENU_ITEM_NO_COUNT,
+                    ObjectMenuSymbol::Definition,
+                    true,
+                ),
+            ]
+        );
+        engine
+            .player_in_com(owner, lc_engine::COM_RIGHT, 0)
+            .expect("select mage");
+        let (_, character_mage) = engine
+            .cursor_object_menu(owner)
+            .map(|(crew, menu)| (crew, menu.clone()))
+            .expect("Dragon Rock mage selection");
+        assert_eq!(character_mage.selection, 1);
+        assert_eq!(engine_script_menu_title(&character_mage), "Character: Mage");
+
+        let picture_snapshot = |id: &str| {
+            let picture = definition_menu_picture(
+                engine
+                    .definition_picture_image(id)
+                    .unwrap_or_else(|| panic!("{id} picture")),
+            );
+            let mut surface =
+                Surface::new(picture.width(), picture.height(), PixelFormat::Rgba8888);
+            surface.pixels_mut().copy_from_slice(picture.pixels());
+            surface.snapshot().to_string()
+        };
+        assert_eq!(
+            ["WIPF", "MONS", "CLNK", "KNIG", "MAGE"].map(picture_snapshot),
+            [
+                "64x64#0f36f937",
+                "64x64#63682839",
+                "32x40#18bfbe70",
+                "32x40#48394885",
+                "32x40#7c20b47c",
+            ]
+        );
+
+        let graphics_resource = lc_resources::graphics::GraphicsResource::open(
+            repository_root().join("planet/Graphics.c4g"),
+        )
+        .expect("Graphics.c4g opens");
+        let image = |name: &str| {
+            let image = graphics_resource
+                .load_image(name)
+                .unwrap_or_else(|error| panic!("{name} loads: {error}"));
+            ImageData::new(image.width(), image.height(), image.pixels().to_vec())
+        };
+        let font_bytes = std::fs::read(repository_root().join("planet/System.c4g/Endeavour.ttf"))
+            .expect("Endeavour.ttf reads");
+        let fonts =
+            lc_frontend::clonk_fonts::build_font_set(&font_bytes).expect("Endeavour fonts build");
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Clonk(&fonts.text);
+        let tiny = HudFont::Clonk(&fonts.mini);
+        let gfx = IngameMenuGraphics {
+            control: Some(image("Control.png")),
+            caption_bar: Some(image("GUICaption.png")),
+            show_commands: true,
+            show_command_keys: true,
+            throw_key: "A".to_string(),
+            special2_key: "F".to_string(),
+            dig_key: "D".to_string(),
+            ..IngameMenuGraphics::default()
+        };
+        let gamma_points = engine
+            .snapshot()
+            .environment
+            .gamma
+            .combined_control_points();
+        assert_eq!(gamma_points, [0x000000, 0x808080, 0xffffff]);
+        let gamma = GammaRamp::from_control_points(gamma_points);
+        let expected_layout = EngineScriptMenuLayout {
+            bounds: Rect::new(391, 369, 179, 76),
+            title: Rect::new(391, 369, 179, 23),
+            client_x: 393,
+            client_y: 392,
+            columns: 5,
+            lines: 1,
+            item_width: 35,
+            item_height: 35,
+            first_index: 0,
+            visible: 5,
+        };
+        assert_eq!(
+            engine_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &difficulty, true),
+            expected_layout
+        );
+        assert_eq!(
+            engine_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &character_knight, true,),
+            expected_layout
+        );
+
+        let render = |menu: &lc_engine::ObjectMenuState, time_on_selection: u32| {
+            let title_icon = engine
+                .definition_picture_image(&menu.symbol_id)
+                .map(definition_menu_picture);
+            let item_icons = menu
+                .items
+                .iter()
+                .map(|item| {
+                    engine
+                        .definition_picture_image(&item.item_id)
+                        .map(definition_menu_picture)
+                })
+                .collect::<Vec<_>>();
+            let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+            surface.fill(Color::opaque(12, 24, 40));
+            render_engine_script_menu_with_gamma(
+                &mut surface,
+                Rect::new(0, 0, 640, 480),
+                &font,
+                &fallback,
+                Some(&tiny),
+                menu,
+                &gfx,
+                title_icon.as_ref(),
+                &item_icons,
+                &[],
+                false,
+                time_on_selection,
+                Some(&gamma),
+            );
+            surface
+        };
+        let difficulty_1 = render(&difficulty, 1);
+        let difficulty_89 = render(&difficulty, 89);
+        let difficulty_90 = render(&difficulty, 90);
+        let character_knight_1 = render(&character_knight, 1);
+        let character_mage_1 = render(&character_mage, 1);
+        let character_mage_90 = render(&character_mage, 90);
+        assert_eq!(difficulty_1.snapshot().to_string(), "640x480#285ae675");
+        assert_eq!(difficulty_89.snapshot(), difficulty_1.snapshot());
+        assert_eq!(difficulty_90.snapshot().to_string(), "640x480#8e8c2f59");
+        assert_eq!(
+            character_knight_1.snapshot().to_string(),
+            "640x480#030eec81"
+        );
+        assert_eq!(character_mage_1.snapshot().to_string(), "640x480#46d7873c");
+        assert_eq!(character_mage_90.snapshot().to_string(), "640x480#d7b88dd2");
     }
 }
