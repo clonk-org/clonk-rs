@@ -6,16 +6,16 @@ record of completed slices.
 ## Focus
 
 Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
-01–03 and 05, reach Tutorial 04's replacement-flint objective, and open
-Tutorial 06's earthquake pit. Finish exact tutorial presentation/interaction
-before resuming Goldrush at its pinned frame-3327 Decay/DoCon mismatch.
+01–05 and open Tutorial 06's earthquake pit. Finish exact tutorial
+presentation/interaction before resuming Goldrush at its pinned frame-3327
+Decay/DoCon mismatch.
 
 ## Gates
 
 ```sh
 cargo nextest run -p lc-engine -E 'test(/^(real_tutorial(0[1-9]|10)_(virtual_play|route)|real_tutorial02_balloon_platform)::/)'
 cargo nextest run -p lc-engine -E 'test(/^virtual_player_harness::/)'
-cargo nextest run -p lc-app -E 'test(/app_virtual_keyboard_(completes_real_tutorial0[1-3]|withdraws_tutorial04|flings_tutorial05|collects_tutorial06)/)'
+cargo nextest run -p lc-app -E 'test(/app_virtual_keyboard_(completes_real_tutorial0[1-3]|completes_tutorial04|flings_tutorial05|collects_tutorial06)/)'
 cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask engine-snapshots verify
