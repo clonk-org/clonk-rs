@@ -119,3 +119,62 @@ fn minimal_player_info_matches_cpp_control_codec() {
         cpp_bytes
     );
 }
+
+#[test]
+#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
+fn resource_join_player_matches_cpp_control_codec() {
+    // C4ControlJoinPlayer selects C4Network2ResCore when ByRes is true;
+    // loadable cores conditionally carry file size/CRC/chunk fields
+    // (src/C4Control.cpp:852-863; src/C4Network2Res.cpp:114-143).
+    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
+        .map(PathBuf::from)
+        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/join_player_resource.ini")
+        .canonicalize()
+        .expect("C++ control fixture exists");
+    let output = std::env::temp_dir().join(format!(
+        "legacyclonk-control-codec-resource-join-{}.bin",
+        std::process::id()
+    ));
+
+    let result = Command::new(oracle)
+        .args(["--control-codec-oracle", "4", "7"])
+        .arg(fixture)
+        .arg(&output)
+        .output()
+        .expect("C++ control codec oracle starts");
+    assert!(
+        result.status.success(),
+        "C++ oracle failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
+    let _ = fs::remove_file(&output);
+
+    let frame = decode_control_payload(&cpp_bytes).expect("Rust decodes live C++ bytes");
+    let [EngineControlPacket::JoinPlayer(join)] = frame.controls.as_slice() else {
+        panic!("expected one JoinPlayer control, got {:?}", frame.controls);
+    };
+    let JoinPlayerSource::Resource(resource) = &join.source else {
+        panic!("expected resource-backed join, got {:?}", join.source);
+    };
+    assert_eq!((join.at_client, join.info_id, join.by_client), (2, 9, 4));
+    assert_eq!(
+        (resource.resource_type, resource.id, resource.derived_id),
+        (3, 17, -1)
+    );
+    assert!(resource.loadable);
+    assert_eq!(
+        (
+            resource.file_size,
+            resource.file_crc,
+            resource.chunk_size,
+            resource.contents_crc,
+        ),
+        (1234, 0x1234_5678, 1024, 0x9abc_def0)
+    );
+    assert_eq!(resource.file_sha, None);
+    assert_eq!(resource.filename.as_bytes(), b"Players/Tyler.c4p");
+    assert_eq!(resource.author.as_bytes(), b"Host/Tyler");
+}

@@ -1,8 +1,8 @@
 use lc_engine::{
     ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
-    JoinPlayerSource, LegacyCString, PlayerControlData, PlayerInfoControlData, SyncCheckPacket,
-    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
-    PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
+    JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData, PlayerInfoControlData,
+    SyncCheckPacket, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
+    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
 
 use crate::{ClientId, ControlPacket, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
@@ -28,8 +28,8 @@ pub enum LegacyControlError {
     VarintOverflow,
     #[error("control packet {0:#x} is not supported yet")]
     UnsupportedPacket(u8),
-    #[error("resource-backed JoinPlayer controls are not supported yet")]
-    UnsupportedResourceJoin,
+    #[error("resource-backed JoinPlayer controls with SHA data are not supported yet")]
+    UnsupportedResourceSha,
     #[error("resource-backed PlayerInfo entries are not supported yet")]
     UnsupportedPlayerInfoResource,
     #[error("PlayerInfo count {0} is outside the C++ range")]
@@ -327,18 +327,19 @@ fn decode_join_player(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Le
     let at_client = reader.read_int32()?;
     let info_id = reader.read_int32()?;
     let by_resource = reader.read_u8()? != 0;
-    if by_resource {
-        return Err(LegacyControlError::UnsupportedResourceJoin);
-    }
-    let player_data_len = reader.read_uint32()? as usize;
-    let player_data = reader.read_bytes(player_data_len)?.to_vec();
+    let source = if by_resource {
+        JoinPlayerSource::Resource(reader.read_network_resource_core()?)
+    } else {
+        let player_data_len = reader.read_uint32()? as usize;
+        JoinPlayerSource::Embedded(reader.read_bytes(player_data_len)?.to_vec())
+    };
     let by_client = reader.read_int32()?;
 
     Ok(EngineControlPacket::JoinPlayer(JoinPlayerControlData {
         filename,
         at_client,
         info_id,
-        source: JoinPlayerSource::Embedded(player_data),
+        source,
         by_client,
     }))
 }
@@ -449,6 +450,43 @@ impl<'a> Reader<'a> {
             .map(|byte| if *byte == b'\\' { b'/' } else { *byte })
             .collect();
         LegacyCString::from_bytes(native).ok_or(LegacyControlError::UnexpectedEof)
+    }
+
+    fn read_network_resource_core(&mut self) -> Result<NetworkResourceCore, LegacyControlError> {
+        let resource_type = self.read_u8()?;
+        let id = self.read_raw_i32()?;
+        let derived_id = self.read_raw_i32()?;
+        let loadable = self.read_u8()? != 0;
+        let defaults = NetworkResourceCore::default();
+        let (file_size, file_crc, chunk_size) = if loadable {
+            (
+                self.read_raw_u32()?,
+                self.read_raw_u32()?,
+                self.read_raw_u32()?,
+            )
+        } else {
+            (defaults.file_size, defaults.file_crc, defaults.chunk_size)
+        };
+        let contents_crc = self.read_raw_u32()?;
+        if self.read_uint32()? != 0 {
+            return Err(LegacyControlError::UnsupportedResourceSha);
+        }
+        let filename = self.read_network_filename()?;
+        let author = self.read_network_filename()?;
+
+        Ok(NetworkResourceCore {
+            resource_type,
+            id,
+            derived_id,
+            loadable,
+            file_size,
+            file_crc,
+            chunk_size,
+            contents_crc,
+            file_sha: None,
+            filename,
+            author,
+        })
     }
 
     fn read_uint32(&mut self) -> Result<u32, LegacyControlError> {
