@@ -14402,6 +14402,20 @@ mod tests {
             .map(|object| object.id)
     }
 
+    fn app_object_with_definition_near_x(
+        app: &GameApp,
+        definition: &str,
+        expected_x: i32,
+    ) -> Option<ObjectId> {
+        app.engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .filter(|object| object.definition_id == definition)
+            .min_by_key(|object| (object.position.x - expected_x).abs())
+            .map(|object| object.id)
+    }
+
     fn app_clonk_carries(app: &GameApp, clonk: ObjectId, definition: &str) -> bool {
         app.engine.object_snapshot(clonk).is_some_and(|clonk| {
             clonk.contents.iter().any(|item| {
@@ -20938,6 +20952,208 @@ mod tests {
             app_clonk_carries(&app, clonk, "TFLN"),
             "CLNK must exit with exactly one usable replacement TFLN"
         );
+    }
+
+    #[test]
+    fn app_virtual_keyboard_flings_tutorial05_wood_to_the_right_hill() {
+        // Tutorial05's first material relay selects the valley CLNK, collects
+        // its real WOOD, loads the real valley CATA, tensions it and fires to
+        // Script63's right-hill rectangle
+        // (content/Tutorial.c4f/Tutorial05.c4s/Script.c:32-44,67-157).
+        // Keep the complete route behind GameApp::handle_key: C++ cycles
+        // crew on CursorRight, forwards pushed-object controls, and turns
+        // held Jump'n'Run Down into CATA's eight-frame AimUpdate timer
+        // (src/C4Player.cpp:1261-1275,1453-1473,1490-1553;
+        // src/C4Object.cpp:3321-3337,3520-3567;
+        // content/Objects.c4d/Vehicles.c4d/Catapult.c4d/Script.c:39-77,121-147;
+        // planet/System.c4g/JumpAndRun.c:53-119).
+        let mut app = real_tutorial_app(5, "Tutorial 5 app virtual player");
+        let constructor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("Tutorial05 starts on the constructor CLNK");
+        let elevator =
+            app_object_with_definition(&app, "ELEV").expect("Tutorial05 creates its partial ELEV");
+        let valley_cata = app_object_with_definition_near_x(&app, "CATA", 240)
+            .expect("Tutorial05 creates the valley CATA");
+        let wood = app_object_with_definition_near_x(&app, "WOOD", 280)
+            .expect("Tutorial05 creates the valley WOOD");
+
+        advance_app_until(
+            &mut app,
+            "Tutorial05 teaches selection after ELEV stalls",
+            800,
+            |app| {
+                app_tutorial_message_contains(app, "'select right'")
+                    && app
+                        .engine
+                        .object_snapshot(elevator)
+                        .is_some_and(|object| object.construction == 80_000)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E selects the valley CLNK");
+        let valley = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("Tutorial05 has a valley CLNK");
+        assert_ne!(valley, constructor);
+        assert!(
+            app.engine.object_snapshot(valley).is_some_and(|object| {
+                (200..300).contains(&object.position.x) && object.position.y >= 350
+            }),
+            "physical CursorRight must select Tutorial05's real valley CLNK"
+        );
+
+        advance_app_until(
+            &mut app,
+            "Tutorial05 asks the valley CLNK to collect material",
+            240,
+            |app| app_tutorial_message_contains(app, "collect either the wood or the metal"),
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "the valley CLNK naturally collects WOOD",
+            160,
+            |app| app_clonk_carries(app, valley, "WOOD"),
+        );
+        assert_eq!(
+            app.engine
+                .object_snapshot(wood)
+                .expect("collected valley WOOD survives")
+                .container,
+            Some(valley)
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 points to the valley CATA",
+            240,
+            |app| app_tutorial_message_contains(app, "stand in front of the catapult"),
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "the WOOD-carrying valley CLNK reaches CATA",
+            160,
+            |app| {
+                app.engine
+                    .object_snapshot(valley)
+                    .zip(app.engine.object_snapshot(valley_cata))
+                    .is_some_and(|(clonk, cata)| {
+                        clonk.action.name == "Walk"
+                            && (clonk.position.x - cata.position.x).abs() <= 12
+                    })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs the valley CATA");
+        advance_app_until(&mut app, "the valley CLNK grabs the real CATA", 80, |app| {
+            app.engine.object_snapshot(valley).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(valley_cata)
+            })
+        });
+
+        advance_app_until(
+            &mut app,
+            "Tutorial05 asks the valley CLNK to load CATA",
+            300,
+            |app| app_tutorial_message_contains(app, "Press 'throw' to load the catapult"),
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A loads valley WOOD into CATA");
+        advance_app_until(&mut app, "WOOD enters the real valley CATA", 80, |app| {
+            app.engine
+                .object_snapshot(wood)
+                .is_some_and(|object| object.container == Some(valley_cata))
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial05 asks for full CATA tension",
+            300,
+            |app| app_tutorial_message_contains(app, "fully tensioned"),
+        );
+
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::X)
+            .expect("hold physical X to tension CATA");
+        advance_app_until(&mut app, "valley CATA reaches Ready phase six", 80, |app| {
+            app.engine
+                .object_snapshot(valley_cata)
+                .is_some_and(|object| object.action.name == "Ready" && object.action.phase == 6)
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::X)
+            .expect("release physical X at full CATA tension");
+        let tensioned = app
+            .engine
+            .object_snapshot(valley_cata)
+            .expect("valley CATA survives tension release");
+        assert_eq!(
+            (tensioned.action.name.as_str(), tensioned.action.phase),
+            ("Ready", 6)
+        );
+        assert!(
+            tensioned
+                .effects
+                .iter()
+                .all(|effect| effect.name != "IntJnRAim"),
+            "physical X release must cancel CATA's aim timer without losing phase six"
+        );
+
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A fires the fully tensioned CATA");
+        assert_eq!(
+            app.engine
+                .object_snapshot(valley_cata)
+                .expect("valley CATA survives firing")
+                .action
+                .name,
+            "Fire"
+        );
+        advance_app_until(
+            &mut app,
+            "real valley CATA flings WOOD to the right hill",
+            400,
+            |app| {
+                app.engine.object_snapshot(wood).is_some_and(|object| {
+                    object.container.is_none()
+                        && (460..640).contains(&object.position.x)
+                        && (150..290).contains(&object.position.y)
+                })
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 advances to the right-hill CLNK",
+            300,
+            |app| app_tutorial_message_contains(app, "switch to the clonk on the right hill"),
+        );
+        advance_app_until(
+            &mut app,
+            "flung valley WOOD lands on the right hill",
+            300,
+            |app| {
+                app.engine.object_snapshot(wood).is_some_and(|object| {
+                    object.container.is_none()
+                        && !object.mobile
+                        && (460..640).contains(&object.position.x)
+                        && (150..290).contains(&object.position.y)
+                })
+            },
+        );
+        let landed = app
+            .engine
+            .object_snapshot(wood)
+            .expect("flung valley WOOD survives on the right hill");
+        assert!(landed.container.is_none());
+        assert!((460..640).contains(&landed.position.x));
+        assert!((150..290).contains(&landed.position.y));
+        assert!(!landed.mobile, "right-hill WOOD must finish its flight");
     }
 
     fn two_item_script_menu(cursor: ObjectId) -> lc_engine::ObjectMenuState {
