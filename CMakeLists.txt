@@ -675,6 +675,16 @@ if (USE_TESTS)
 			WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/rust"
 		)
 		set_tests_properties(rust_engine_snapshots PROPERTIES RUN_SERIAL TRUE)
+		add_test(
+			NAME rust_control_codec_differential
+			COMMAND ${CMAKE_COMMAND} -E env
+				"LC_CPP_CONTROL_ORACLE=$<TARGET_FILE:clonk>"
+				cargo test --manifest-path "${CMAKE_SOURCE_DIR}/rust/Cargo.toml"
+					-p lc-network --test legacy_control_cpp_diff
+					-- --ignored --exact embedded_join_player_matches_cpp_control_codec
+			WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+		)
+		set_tests_properties(rust_control_codec_differential PROPERTIES RUN_SERIAL TRUE)
 	endif ()
 endif ()
 

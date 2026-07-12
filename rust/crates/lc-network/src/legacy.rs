@@ -1,10 +1,14 @@
-use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData, SyncCheckPacket};
+use lc_engine::{
+    ControlPacket as EngineControlPacket, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
+    PlayerControlData, SyncCheckPacket,
+};
 
 use crate::{ClientId, ControlPacket, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
 
 // C4PacketType::PID_None (src/C4PacketBase.h). Binary C4PacketList values
 // terminate with a default C4IDPacket carrying this byte.
 const PID_NONE: u8 = 0xff;
+const CID_JOIN_PLR: u8 = 0x80 | 0x11;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
 const MAX_VARINT_BYTES: usize = 5;
@@ -19,6 +23,8 @@ pub enum LegacyControlError {
     VarintOverflow,
     #[error("control packet {0:#x} is not supported yet")]
     UnsupportedPacket(u8),
+    #[error("resource-backed JoinPlayer controls are not supported yet")]
+    UnsupportedResourceJoin,
     #[error("control payload contained negative client id {0}")]
     NegativeClientId(i32),
     #[error("control payload contained negative tick {0}")]
@@ -202,12 +208,34 @@ fn decode_control_list(
             break;
         }
         match id {
+            CID_JOIN_PLR => controls.push(decode_join_player(reader)?),
             CID_PLR_CONTROL => controls.push(decode_player_control(reader)?),
             CID_SYNC_CHECK => controls.push(decode_sync_check(reader)?),
             other => return Err(LegacyControlError::UnsupportedPacket(other)),
         }
     }
     Ok(controls)
+}
+
+fn decode_join_player(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    let filename = reader.read_c_string()?;
+    let at_client = reader.read_int32()?;
+    let info_id = reader.read_int32()?;
+    let by_resource = reader.read_u8()? != 0;
+    if by_resource {
+        return Err(LegacyControlError::UnsupportedResourceJoin);
+    }
+    let player_data_len = reader.read_uint32()? as usize;
+    let player_data = reader.read_bytes(player_data_len)?.to_vec();
+    let by_client = reader.read_int32()?;
+
+    Ok(EngineControlPacket::JoinPlayer(JoinPlayerControlData {
+        filename,
+        at_client,
+        info_id,
+        source: JoinPlayerSource::Embedded(player_data),
+        by_client,
+    }))
 }
 
 fn decode_player_control(
@@ -273,6 +301,45 @@ impl<'a> Reader<'a> {
         let byte = self.data[self.offset];
         self.offset += 1;
         Ok(byte)
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], LegacyControlError> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or(LegacyControlError::UnexpectedEof)?;
+        let bytes = self
+            .data
+            .get(self.offset..end)
+            .ok_or(LegacyControlError::UnexpectedEof)?;
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn read_c_string(&mut self) -> Result<LegacyCString, LegacyControlError> {
+        let remaining = self
+            .data
+            .get(self.offset..)
+            .ok_or(LegacyControlError::UnexpectedEof)?;
+        let len = remaining
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or(LegacyControlError::UnexpectedEof)?;
+        let bytes = self.read_bytes(len)?.to_vec();
+        self.read_u8()?;
+        LegacyCString::from_bytes(bytes).ok_or(LegacyControlError::UnexpectedEof)
+    }
+
+    fn read_uint32(&mut self) -> Result<u32, LegacyControlError> {
+        let mut value = 0u32;
+        for shift in (0..32).step_by(7).take(MAX_VARINT_BYTES) {
+            let byte = self.read_u8()?;
+            value |= u32::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+        }
+        Err(LegacyControlError::VarintOverflow)
     }
 
     fn read_int32(&mut self) -> Result<i32, LegacyControlError> {
@@ -505,6 +572,38 @@ mod tests {
                 assert_eq!(data.by_client, 2);
             }
             other => panic!("unexpected control packet: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_cpp_embedded_join_player_bytes() {
+        // C4ControlJoinPlayer writes Filename, packed AtClient/InfoID, the
+        // raw ByRes bool, embedded StdBuf, and packed ByClient in that order;
+        // the containing C4PacketList then writes PID_None (0xff)
+        // (src/C4Control.cpp:852-863; src/StdBuf.cpp:86-100;
+        // src/C4Packet2.cpp:193-220,298-335).
+        let payload = vec![
+            0x04, 0x40, 0x00, 0x91, b'P', 0x80, 0x00, 0xff, 0x40, 0x00, 0x00, 0x03, 0xaa, 0x00,
+            0xcc, 0x04, 0xff,
+        ];
+
+        let frame = decode_control_payload(&payload).expect("C++ JoinPlayer bytes decode");
+
+        assert_eq!(frame.client_id, 4);
+        assert_eq!(frame.tick, 64);
+        assert_eq!(frame.controls.len(), 1);
+        match &frame.controls[0] {
+            EngineControlPacket::JoinPlayer(join) => {
+                assert_eq!(join.filename.as_bytes(), b"P\x80");
+                assert_eq!(join.at_client, -1);
+                assert_eq!(join.info_id, 64);
+                assert_eq!(
+                    join.source,
+                    lc_engine::JoinPlayerSource::Embedded(vec![0xaa, 0x00, 0xcc])
+                );
+                assert_eq!(join.by_client, 4);
+            }
+            other => panic!("expected JoinPlayer, got {other:?}"),
         }
     }
 
