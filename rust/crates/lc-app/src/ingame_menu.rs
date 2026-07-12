@@ -2003,4 +2003,30 @@ mod tests {
         assert_eq!((pixel.r, pixel.g, pixel.b), (0xc8, 0x00, 0x00));
     }
 
+    #[test]
+    fn tutorial_seven_gamma_encodes_the_ingame_menu_selection_fragment() {
+        // C4GraphicsSystem draws C4GUI before applying a pending ramp at the
+        // tail of Execute (C4GraphicsSystem.cpp:167-199). Tutorial07's active
+        // ramp therefore samples the CRed selection fragment emitted by
+        // C4MenuItem::DrawElement (C4Menu.cpp:152-154).
+        use lc_graphics::BitmapFont;
+
+        let menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let font_backend = BitmapFont::new();
+        let font = HudFont::Fallback(&font_backend);
+        let gfx = IngameMenuGraphics::default();
+        let mut surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
+        let area = Rect::new(0, 0, 640, 480);
+        let gamma = crate::tutorial_seven_gamma();
+        menu.render_with_gamma(&mut surface, area, &font, None, &gfx, Some(&gamma));
+
+        let layout = menu.layout(area, &font, &gfx);
+        let probe_x = (layout.bounds.x + MN_FRAME_WIDTH + 2) as u32;
+        let probe_y = (layout.bounds.y + layout.title_height + layout.item_height / 2) as u32;
+        assert_eq!(
+            surface.get_pixel(probe_x, probe_y),
+            Some(crate::tutorial_seven_gamma_color(SELECTION_COLOR)),
+        );
+    }
+
 }

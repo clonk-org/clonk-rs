@@ -1451,6 +1451,33 @@ mod tests {
     }
 
     #[test]
+    fn tutorial_seven_gamma_encodes_the_game_over_button_fragment() {
+        // C4GUI::Screen renders the evaluation dialog before the gamma latch
+        // at the end of C4GraphicsSystem::Execute (C4GraphicsSystem.cpp:
+        // 187-199), so even fallback solid GUI fragments use Tutorial07's
+        // already-active scenario ramp.
+        let state = GameOverState::new(
+            "Tutorial 7".to_string(),
+            vec![entry(1, "Player", GameOverOutcome::Victory, true)],
+        );
+        let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
+        let gamma = crate::tutorial_seven_gamma();
+        state.render_with_gamma(
+            &mut surface,
+            &lc_graphics::BitmapFont::new(),
+            None,
+            Some(&gamma),
+        );
+
+        let selected = state.button_rects(surface.width(), surface.height())[0];
+        let probe = (selected.x as u32 + 2, selected.y as u32 + 2);
+        assert_eq!(
+            surface.get_pixel(probe.0, probe.1),
+            Some(crate::tutorial_seven_gamma_color(BUTTON_SELECTED_COLOR)),
+        );
+    }
+
+    #[test]
     fn classic_resources_carry_cpp_evaluation_icon_sheets() {
         // C4GoalDisplay uses GUIIcons for Ico_Star, while evaluation player
         // rows use GraphicsResource Player and Score facets

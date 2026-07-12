@@ -94,9 +94,9 @@ use lc_resources::{
 use menu_controls::map_menu_control_event;
 use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
 use object_menu::{
-    definition_menu_picture, engine_script_menu_pointer_target, render_engine_script_menu,
-    EngineScriptMenuPointerTarget, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
-    ObjectMenuState,
+    definition_menu_picture, engine_script_menu_pointer_target,
+    render_engine_script_menu_with_gamma, EngineScriptMenuPointerTarget, ObjectMenuAction,
+    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
@@ -123,6 +123,31 @@ const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
+
+#[cfg(test)]
+fn tutorial_seven_gamma() -> lc_graphics::GammaRamp {
+    // The regression must track the shipped scenario rather than a synthetic
+    // approximation (Tutorial07.c4s/Script.c:12).
+    let script = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../content/Tutorial.c4f/Tutorial07.c4s/Script.c"
+    ));
+    assert!(script.contains("SetGamma(RGB(0,0,0),RGB(100,128,100),RGB(200,255,200))"));
+    lc_graphics::GammaRamp::from_control_points([0x000000, 0x648064, 0xc8ffc8])
+}
+
+#[cfg(test)]
+fn tutorial_seven_gamma_color(color: Color) -> Color {
+    use lc_graphics::gamma::GammaChannel;
+
+    let gamma = tutorial_seven_gamma();
+    Color::new(
+        gamma.encode_channel(GammaChannel::Red, color.r),
+        gamma.encode_channel(GammaChannel::Green, color.g),
+        gamma.encode_channel(GammaChannel::Blue, color.b),
+        color.a,
+    )
+}
 const BACK_ENTRY_TITLE: &str = "← Back";
 const SAVE_DIR_NAME: &str = "Savegames";
 const QUICK_SAVE_FILE: &str = "quicksave.lcsave";
@@ -10722,6 +10747,13 @@ impl GameApp {
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
         let viewports = collect_viewport_inputs(&self.snapshot, self.local_owner, self.focus_id);
+        // Capture CStdDDraw's installed ramp before render_frame latches any
+        // runtime SetGamma controls for the next pass. C++ draws every GUI
+        // overlay below with this same pre-latch ramp
+        // (C4GraphicsSystem.cpp:160-199).
+        let frame_gamma = self
+            .graphics
+            .active_gamma_ramp(&self.snapshot.environment.gamma);
         if let Some(_focus) = self.focus_snapshot.as_ref() {
             let startup_hint_owner = self.show_startup_hint.then_some(self.local_owner);
             let mut players = collect_player_overlays(
@@ -10781,7 +10813,13 @@ impl GameApp {
         } else if !viewports.is_empty() {
             self.graphics.render_frame(&self.snapshot, &viewports);
         } else {
-            self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
+            let bounds = self.graphics.surface().bounds();
+            lc_frontend::draw_color_rect(
+                self.graphics.surface_mut(),
+                bounds,
+                Color::opaque(12, 24, 40),
+                Some(&frame_gamma),
+            );
         }
 
         let script_menu = self
@@ -10901,7 +10939,7 @@ impl GameApp {
                     Rect::new(0, 0, surface.width(), surface.height())
                 });
                 let surface = self.graphics.surface_mut();
-                render_engine_script_menu(
+                render_engine_script_menu_with_gamma(
                     surface,
                     area,
                     &font,
@@ -10914,6 +10952,7 @@ impl GameApp {
                     &selected_component_icons,
                     self.mouse_control,
                     script_menu_time,
+                    Some(&frame_gamma),
                 );
             }
         }
@@ -10922,13 +10961,13 @@ impl GameApp {
             let font = self.assets.font_arc();
             {
                 let surface = self.graphics.surface_mut();
-                browser.render(surface, font.as_ref());
+                browser.render_with_gamma(surface, font.as_ref(), Some(&frame_gamma));
             }
         } else if let Some(menu) = self.object_menu.as_ref() {
             let font = self.assets.font_arc();
             {
                 let surface = self.graphics.surface_mut();
-                menu.render(surface, font.as_ref());
+                menu.render_with_gamma(surface, font.as_ref(), Some(&frame_gamma));
             }
         } else if self.ingame_menu.is_some() {
             let fonts = self.assets.clonk_fonts.clone();
@@ -10951,16 +10990,28 @@ impl GameApp {
                     .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
                 let surface = self.graphics.surface_mut();
                 let area = Rect::new(0, 0, surface.width(), surface.height());
-                menu.render(surface, area, &font, tiny.as_ref(), gfx);
+                menu.render_with_gamma(
+                    surface,
+                    area,
+                    &font,
+                    tiny.as_ref(),
+                    gfx,
+                    Some(&frame_gamma),
+                );
             }
         }
 
-        self.draw_messages();
+        self.draw_messages(&frame_gamma);
 
         if let Some(dialog) = self.game_over_dialog.as_ref() {
             let font = self.assets.font_arc();
             let classic = self.assets.game_over_classic_resources();
-            dialog.render(self.graphics.surface_mut(), font.as_ref(), classic);
+            dialog.render_with_gamma(
+                self.graphics.surface_mut(),
+                font.as_ref(),
+                classic,
+                Some(&frame_gamma),
+            );
         }
 
         let surface = self.graphics.surface();
@@ -10987,7 +11038,7 @@ impl GameApp {
             .map(|(line, _)| line.clone())
     }
 
-    fn draw_messages(&mut self) {
+    fn draw_messages(&mut self, gamma: &lc_graphics::GammaRamp) {
         if self.snapshot.hud.messages.is_empty() {
             return;
         }
@@ -11284,14 +11335,14 @@ impl GameApp {
                             )
                         };
 
-                    Self::fill_rect(surface, rect, frame_background);
+                    lc_frontend::draw_color_rect(surface, rect, frame_background, Some(gamma));
                     let border = Color::new(
                         message.base_color.r.saturating_add(24),
                         message.base_color.g.saturating_add(24),
                         message.base_color.b.saturating_add(24),
                         255,
                     );
-                    Self::draw_border(surface, rect, border);
+                    Self::draw_border_with_gamma(surface, rect, border, gamma);
 
                     if message.portrait_requested {
                         let portrait_rect = Rect::new(
@@ -11301,7 +11352,7 @@ impl GameApp {
                             PORTRAIT_SIZE as u32,
                         );
                         if let Some(portrait) = message.portrait.as_ref() {
-                            draw_image(
+                            lc_frontend::draw_image_with_gamma(
                                 surface,
                                 &GuiRect::new(
                                     portrait_rect.x as f32,
@@ -11310,6 +11361,7 @@ impl GameApp {
                                     portrait_rect.height as f32,
                                 ),
                                 portrait,
+                                Some(gamma),
                             );
                         }
                     }
@@ -11325,13 +11377,15 @@ impl GameApp {
                         };
                         let mut cursor_x = text_base_x + line_offset;
                         for segment in &line.segments {
-                            font_ref.draw_text(
+                            lc_frontend::draw_text_with_gamma(
+                                font_ref,
                                 surface,
                                 cursor_x,
                                 text_y,
                                 &segment.text,
                                 FONT_SIZE,
                                 segment.color,
+                                Some(gamma),
                             );
                             cursor_x += segment.width;
                         }
@@ -11358,13 +11412,15 @@ impl GameApp {
                         };
                         let mut cursor_x = text_base_x + line_offset;
                         for segment in &line.segments {
-                            font_ref.draw_text(
+                            lc_frontend::draw_text_with_gamma(
+                                font_ref,
                                 surface,
                                 cursor_x,
                                 text_y,
                                 &segment.text,
                                 FONT_SIZE,
                                 segment.color,
+                                Some(gamma),
                             );
                             cursor_x += segment.width;
                         }
@@ -11404,6 +11460,25 @@ impl GameApp {
         Self::fill_rect(surface, bottom, color);
         Self::fill_rect(surface, left, color);
         Self::fill_rect(surface, right, color);
+    }
+
+    fn draw_border_with_gamma(
+        surface: &mut Surface,
+        rect: Rect,
+        color: Color,
+        gamma: &lc_graphics::GammaRamp,
+    ) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        for edge in [
+            Rect::new(rect.x, rect.y, rect.width, 1),
+            Rect::new(rect.x, rect.y + rect.height as i32 - 1, rect.width, 1),
+            Rect::new(rect.x, rect.y, 1, rect.height),
+            Rect::new(rect.x + rect.width as i32 - 1, rect.y, 1, rect.height),
+        ] {
+            lc_frontend::draw_color_rect(surface, edge, color, Some(gamma));
+        }
     }
 
     fn start_recording_for(&mut self, scenario: &FrontendScenario) {
@@ -16671,6 +16746,46 @@ mod tests {
             message_horizontal_alignment(FLAG_RIGHT, true),
             HorizontalAlignment::Left,
             "portrait frame position must not change the default text alignment"
+        );
+    }
+
+    #[test]
+    fn tutorial_seven_gamma_encodes_a_post_viewport_message_fragment() {
+        // C4GameMessageList is drawn after the viewports and before the
+        // pending gamma controls are installed (C4GraphicsSystem.cpp:
+        // 160-199). Freeze one opaque frame-border fragment against the
+        // shipped Tutorial07 ramp, then verify the standard pending ramp is
+        // visible only on the following pass.
+        let mut app = new_running_sandbox_app();
+        let mut active = app.snapshot.environment.gamma;
+        active.set_ramp(0, [0x000000, 0x648064, 0xc8ffc8]);
+        app.graphics.apply_gamma_now(&active);
+        app.snapshot.hud.messages = vec![lc_engine::MessageSnapshot {
+            id: 1,
+            kind: MessageKind::Global,
+            lines: vec![String::new()],
+            target: None,
+            player: None,
+            offset: Vector2::new(100, 70),
+            color: 0xff20_3040,
+            flags: 0,
+            width: None,
+            decoration: Some("frame".to_string()),
+            portrait: None,
+        }];
+
+        let border = Color::opaque(0x20 + 24, 0x30 + 24, 0x40 + 24);
+        let mut frame = vec![0; 320 * 200 * 4];
+        app.render(&mut frame).expect("render active Tutorial07 gamma");
+        assert_eq!(
+            app.graphics.surface().get_pixel(100, 70),
+            Some(tutorial_seven_gamma_color(border)),
+        );
+        app.render(&mut frame).expect("render latched standard gamma");
+        assert_eq!(
+            app.graphics.surface().get_pixel(100, 70),
+            Some(border),
+            "the pending ramp must latch only after the complete overlay pass",
         );
     }
 
