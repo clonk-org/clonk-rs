@@ -3,8 +3,8 @@
 use std::error::Error;
 
 use lc_engine::{
-    CommandDirection, Direction, Engine, JoinPlayerConfig, ObjectId, COM_DIG, COM_DOWN, COM_LEFT,
-    COM_RIGHT, COM_SPECIAL2, COM_THROW, COM_UP,
+    CommandDirection, Direction, Engine, JoinPlayerConfig, Landscape, ObjectId, Vector2, COM_DIG,
+    COM_DOWN, COM_LEFT, COM_RIGHT, COM_SPECIAL2, COM_THROW, COM_UP,
 };
 use crate::support::real_scenario::load_tutorial;
 use crate::support::virtual_player::VirtualPlayer;
@@ -87,14 +87,22 @@ fn player_wealth(engine: &Engine, owner: i32) -> i32 {
         .map_or(0, |player| player.wealth)
 }
 
-fn climb_right_out_of_blast_pocket(
+struct DetonationTransition {
+    center: Vector2,
+    before: Landscape,
+    after: Landscape,
+}
+
+fn climb_right_out_of_blast_pocket_observing(
     player: &mut VirtualPlayer<'_>,
     clonk: ObjectId,
     target_x: i32,
     milestone: &str,
-) -> Result<(), Box<dyn Error>> {
+    tracked_flint: Option<ObjectId>,
+) -> Result<Option<DetonationTransition>, Box<dyn Error>> {
     player.press(COM_RIGHT)?;
     let mut previous_action = String::new();
+    let mut detonation = None;
     for _ in 0..300 {
         let clonk_now = player
             .engine()
@@ -114,7 +122,32 @@ fn climb_right_out_of_blast_pocket(
             player.tap(COM_UP)?;
         }
         previous_action = action;
+        let before_detonation = tracked_flint
+            .filter(|_| detonation.is_none())
+            .and_then(|flint| {
+                player.engine().object_snapshot(flint).and_then(|object| {
+                    player
+                        .engine()
+                        .landscape()
+                        .cloned()
+                        .map(|landscape| (flint, object.position, landscape))
+                })
+            });
         player.ticks(1)?;
+        if let Some((flint, center, before)) = before_detonation {
+            if player.engine().object_snapshot(flint).is_none() {
+                let after = player
+                    .engine()
+                    .landscape()
+                    .cloned()
+                    .expect("Tutorial07 retains its landscape during FLNT detonation");
+                detonation = Some(DetonationTransition {
+                    center,
+                    before,
+                    after,
+                });
+            }
+        }
     }
     player.release(COM_RIGHT)?;
     player.assert_milestone(milestone, |engine| {
@@ -122,7 +155,16 @@ fn climb_right_out_of_blast_pocket(
             .object_snapshot(clonk)
             .is_some_and(|object| object.position.x >= target_x)
     })?;
-    Ok(())
+    Ok(detonation)
+}
+
+fn climb_right_out_of_blast_pocket(
+    player: &mut VirtualPlayer<'_>,
+    clonk: ObjectId,
+    target_x: i32,
+    milestone: &str,
+) -> Result<(), Box<dyn Error>> {
+    climb_right_out_of_blast_pocket_observing(player, clonk, target_x, milestone, None).map(drop)
 }
 
 fn return_to_hut(
@@ -531,18 +573,74 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     // two real FLNT objects for opening it (Tutorial07.c4s/Script.c:61-78).
     // Vanilla CLNK rejects a second nonspecial object, so the two blasts need
     // two ordinary HUT3/elevator trips (Clonk.c4d/Script.c:738-763).
+    let first_flint = player
+        .engine()
+        .object_snapshot(clonk)
+        .and_then(|clonk| {
+            clonk.contents.into_iter().find(|item| {
+                player
+                    .engine()
+                    .object_snapshot(*item)
+                    .is_some_and(|item| item.definition_id == "FLNT")
+            })
+        })
+        .expect("the first Tutorial07 FLNT is ready to throw");
     player.tap(COM_THROW)?;
     player.wait_until(
         "the first FLNT leaves the Clonk's inventory",
         60,
         |engine| clonk_contents_count(engine, clonk, "FLNT") == 0,
     )?;
-    climb_right_out_of_blast_pocket(
+    let detonation = climb_right_out_of_blast_pocket_observing(
         &mut player,
         clonk,
         120,
         "the Clonk retreats from the first FLNT blast",
-    )?;
+        Some(first_flint),
+    )?
+    .expect("the physical retreat observes the first FLNT detonation tick");
+    assert!(
+        player.engine().object_snapshot(first_flint).is_none(),
+        "the first Tutorial07 FLNT detonates during the physical retreat"
+    );
+    let before_grid = detonation
+        .before
+        .pixel_grid()
+        .expect("Tutorial07 pre-blast Surface8");
+    let after_grid = detonation
+        .after
+        .pixel_grid()
+        .expect("Tutorial07 post-blast Surface8");
+    const C4M_SOLID: i32 = 50; // DensitySolid, C4Material.h:200.
+    const FLNT_BLAST_RADIUS: i32 = 18;
+    let mut changed_pixels = 0;
+    let mut removed_solid_pixels = 0;
+    for y_offset in -FLNT_BLAST_RADIUS..=FLNT_BLAST_RADIUS {
+        let line_width =
+            ((FLNT_BLAST_RADIUS * FLNT_BLAST_RADIUS - y_offset * y_offset) as f64).sqrt() as i32;
+        let y = detonation.center.y + y_offset;
+        for x_offset in -line_width..line_width + i32::from(line_width == 0) {
+            let x = detonation.center.x + x_offset;
+            changed_pixels += usize::from(before_grid.byte_at(x, y) != after_grid.byte_at(x, y));
+            removed_solid_pixels += usize::from(
+                before_grid.density_at(x, y).unwrap_or(0) >= C4M_SOLID
+                    && after_grid.density_at(x, y).unwrap_or(0) < C4M_SOLID,
+            );
+        }
+    }
+    // FLNT Hit -> Explode(18) -> DoExplosion -> BlastFree follows the real
+    // physical control path. C++ clears each BlastFree material pixel before
+    // evaluating Blast2Object/PXS casts (Explode.c:10-22,58-65;
+    // C4Landscape.cpp:1022-1061), so spawned GOLD without a terrain delta is
+    // not a valid outcome.
+    assert!(
+        after_grid.revision() > before_grid.revision(),
+        "the real FLNT blast must invalidate the rendered landscape cache"
+    );
+    assert!(
+        changed_pixels > 0 && removed_solid_pixels > 0,
+        "the real FLNT blast must change and clear terrain inside its radius (changed={changed_pixels}, removed_solid={removed_solid_pixels})"
+    );
     return_to_hut(
         &mut player,
         clonk,
