@@ -15854,7 +15854,7 @@ fn fallback_without_context(query: LandscapeQuery) -> bool {
 
 fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
     // C++ pads missing script args with zero (FnGetMaterial(x, y),
-    // C4Script.cpp:2222-2226): GetMaterial() probes the object center.
+    // C4Script.cpp:2216-2220): GetMaterial() probes the object center.
     let local_x = match args.first() {
         None | Some(Value::Nil) => 0,
         Some(value) => value_to_i32(value, "GetMaterial", "x")?,
@@ -15881,7 +15881,10 @@ fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let material = context
             .landscape_ref()
-            .and_then(|landscape| landscape.material_at(global_x, global_y));
+            // FnGetMaterial -> GBackMat -> Landscape.GetMat includes the
+            // GetPix sky/MCVehic border mapping (C4Script.cpp:2216-2220;
+            // C4Wrappers.h:164-167; C4Landscape.h:144-175).
+            .and_then(|landscape| landscape.border_material_at(global_x, global_y));
         let result = material
             .map(|material_id| material_id.index() as i32)
             .unwrap_or(MATERIAL_NONE);
@@ -30338,7 +30341,8 @@ func Trigger(object pOther)
     #[test]
     fn get_material_reports_solid_material_from_landscape() {
         let material = crate::MaterialId::new(3).expect("material id");
-        let landscape = Landscape::flat_with_material(32, 10, Some(material));
+        let mut landscape = Landscape::flat_with_material(32, 10, Some(material));
+        landscape.set_world_height(20);
         let world = HostWorldContext::with_landscape(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
@@ -30362,7 +30366,8 @@ func Trigger(object pOther)
     #[test]
     fn get_material_applies_object_relative_coordinates() {
         let material = crate::MaterialId::new(2).expect("material id");
-        let landscape = Landscape::flat_with_material(24, 12, Some(material));
+        let mut landscape = Landscape::flat_with_material(24, 12, Some(material));
+        landscape.set_world_height(20);
         let world = HostWorldContext::with_landscape(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
@@ -30402,6 +30407,41 @@ func Trigger(object pOther)
             result.expect("GetMaterial with object succeeds"),
             Value::Int(material.index() as i32)
         );
+    }
+
+    #[test]
+    fn get_material_honours_vehicle_and_sky_borders_like_cpp() {
+        // C++ oracle: FnGetMaterial -> GBackMat -> Landscape.GetMat, whose
+        // GetPix maps closed borders to MCVehic and open borders to sky
+        // (src/C4Script.cpp:2216-2220; src/C4Wrappers.h:164-167;
+        // src/C4Landscape.h:144-175).
+        let earth = crate::MaterialId::new(2).expect("earth id");
+        let vehicle = crate::MaterialId::new(5).expect("vehicle id");
+        let mut landscape = Landscape::flat_with_material(10, 5, Some(earth));
+        landscape.set_world_height(20);
+        landscape.set_vehicle_material(Some(vehicle));
+        landscape.set_border_open(8, 0, false, false);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let query = |x, y| {
+            let (result, _) = with_effect_context(None, &[], world.clone(), 1, || {
+                get_material(&[Value::Int(x), Value::Int(y)])
+            });
+            result.expect("GetMaterial border query succeeds")
+        };
+
+        assert_eq!(query(4, 20), Value::Int(vehicle.index() as i32));
+        assert_eq!(query(4, -1), Value::Int(vehicle.index() as i32));
+        assert_eq!(query(-1, 8), Value::Int(vehicle.index() as i32));
+        assert_eq!(query(-1, 7), Value::Int(MATERIAL_NONE));
     }
 
     fn draw_material_quad_world() -> HostWorldContext {
