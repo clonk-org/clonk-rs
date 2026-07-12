@@ -58,8 +58,8 @@ pub enum LegacyControlError {
 pub enum LegacyEncodeError {
     #[error("control packet variant is not supported yet")]
     UnsupportedPacket,
-    #[error("resource-backed JoinPlayer controls are not supported yet")]
-    UnsupportedResourceJoin,
+    #[error("resource-backed JoinPlayer controls with SHA data are not supported yet")]
+    UnsupportedResourceSha,
     #[error("embedded JoinPlayer data length {0} exceeds uint32")]
     PlayerDataTooLarge(usize),
     #[error("resource-backed PlayerInfo entries are not supported yet")]
@@ -693,21 +693,58 @@ fn encode_join_player(
     buffer: &mut Vec<u8>,
     data: &JoinPlayerControlData,
 ) -> Result<(), LegacyEncodeError> {
-    let JoinPlayerSource::Embedded(player_data) = &data.source else {
-        return Err(LegacyEncodeError::UnsupportedResourceJoin);
+    enum PreparedSource<'a> {
+        Embedded(&'a [u8], u32),
+        Resource(&'a NetworkResourceCore),
+    }
+
+    let source = match &data.source {
+        JoinPlayerSource::Embedded(player_data) => PreparedSource::Embedded(
+            player_data,
+            u32::try_from(player_data.len())
+                .map_err(|_| LegacyEncodeError::PlayerDataTooLarge(player_data.len()))?,
+        ),
+        JoinPlayerSource::Resource(resource) => {
+            if resource.file_sha.is_some() {
+                return Err(LegacyEncodeError::UnsupportedResourceSha);
+            }
+            PreparedSource::Resource(resource)
+        }
     };
-    let player_data_len = u32::try_from(player_data.len())
-        .map_err(|_| LegacyEncodeError::PlayerDataTooLarge(player_data.len()))?;
 
     buffer.push(CID_JOIN_PLR);
     append_network_filename(buffer, &data.filename);
     append_int32(buffer, data.at_client);
     append_int32(buffer, data.info_id);
-    buffer.push(0);
-    append_uint32(buffer, player_data_len);
-    buffer.extend_from_slice(player_data);
+    match source {
+        PreparedSource::Embedded(player_data, player_data_len) => {
+            buffer.push(0);
+            append_uint32(buffer, player_data_len);
+            buffer.extend_from_slice(player_data);
+        }
+        PreparedSource::Resource(resource) => {
+            buffer.push(1);
+            encode_network_resource_core(buffer, resource);
+        }
+    }
     append_int32(buffer, data.by_client);
     Ok(())
+}
+
+fn encode_network_resource_core(buffer: &mut Vec<u8>, resource: &NetworkResourceCore) {
+    buffer.push(resource.resource_type);
+    append_raw_i32(buffer, resource.id);
+    append_raw_i32(buffer, resource.derived_id);
+    buffer.push(u8::from(resource.loadable));
+    if resource.loadable {
+        append_raw_u32(buffer, resource.file_size);
+        append_raw_u32(buffer, resource.file_crc);
+        append_raw_u32(buffer, resource.chunk_size);
+    }
+    append_raw_u32(buffer, resource.contents_crc);
+    append_uint32(buffer, 0);
+    append_network_filename(buffer, &resource.filename);
+    append_network_filename(buffer, &resource.author);
 }
 
 fn encode_player_control(buffer: &mut Vec<u8>, data: &PlayerControlData) {

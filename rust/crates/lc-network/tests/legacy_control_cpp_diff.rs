@@ -177,4 +177,8 @@ fn resource_join_player_matches_cpp_control_codec() {
     assert_eq!(resource.file_sha, None);
     assert_eq!(resource.filename.as_bytes(), b"Players/Tyler.c4p");
     assert_eq!(resource.author.as_bytes(), b"Host/Tyler");
+    assert_eq!(
+        encode_control_payload(&frame).expect("Rust re-encodes the C++ resource control"),
+        cpp_bytes
+    );
 }
