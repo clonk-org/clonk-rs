@@ -9283,6 +9283,73 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn object_local_restore_maps_values_to_current_definition_names() {
+        // C++ oracle: LocalNamed first compiles the saved names into a
+        // temporary C4ValueMapNames, then C4Object::CompileFunc switches to
+        // Def->Script.LocalNamed. OnNameListChanged copies values by name,
+        // so removed declarations disappear and reordered names keep their
+        // values (src/C4ValueMap.cpp:163-195,236-293;
+        // src/C4Object.cpp:2815,2858-2865).
+        let old_script = r#"
+        local kept, obsolete;
+        func Seed() {
+            kept = 17;
+            obsolete = 23;
+            Local(2) = 31;
+        }
+        "#;
+        let new_script = r#"
+        local added, kept;
+        func Read() { return [kept, added, Local(2)]; }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("HOLD", "Holder", old_script)
+                    .expect("old holder compiles"),
+            )
+            .expect("old holder registers");
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD"))
+            .expect("holder spawns");
+        let holder_idx = engine.find_object_index(holder).expect("holder exists");
+        engine
+            .call_object_function(holder_idx, "Seed", Vec::new())
+            .expect("locals seed");
+        let state = engine.capture_state();
+
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(
+                Definition::from_script("HOLD", "Holder", new_script)
+                    .expect("new holder compiles"),
+            )
+            .expect("new holder registers");
+        restored.restore_state(&state).expect("state restores");
+
+        let local_vars = &restored
+            .object_snapshot(holder)
+            .expect("holder restores")
+            .local_vars;
+        assert_eq!(local_vars.get("kept"), Some(&Value::Int(17)));
+        assert_eq!(local_vars.get("__local_2"), Some(&Value::Int(31)));
+        assert!(
+            !local_vars.contains_key("obsolete"),
+            "a saved name absent from Def->Script.LocalNamed is dropped"
+        );
+        let holder_idx = restored
+            .find_object_index(holder)
+            .expect("holder restores");
+        assert_eq!(
+            restored
+                .call_object_function(holder_idx, "Read", Vec::new())
+                .expect("remapped locals read"),
+            Value::Array(vec![Value::Int(17), Value::Nil, Value::Int(31)])
+        );
+    }
+
+    #[test]
     fn effect_restore_denumerates_command_targets_and_variables() {
         // C++ oracle: C4Effect::DenumeratePointers resolves the command target
         // and recursively denumerates EffectVars (src/C4Effect.cpp:186-198).
