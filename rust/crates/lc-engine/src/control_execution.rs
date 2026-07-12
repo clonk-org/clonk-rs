@@ -130,21 +130,28 @@ pub fn prepare_join_player_config(
             info_id: input.info.id,
         });
     }
-    if input.info.is_script_player() {
-        return Err(PrepareJoinPlayerError::UnsupportedScriptPlayer {
-            info_id: input.info.id,
-        });
-    }
     if input.info.no_scenario_init() {
         return Err(PrepareJoinPlayerError::UnsupportedNoScenarioInit {
             info_id: input.info.id,
         });
     }
-    let file = input
-        .player_file
-        .ok_or(PrepareJoinPlayerError::MissingPlayerData {
+    let script_defaults =
+        (input.player_file.is_none() && input.info.is_script_player()).then(|| PlayerFile {
+            name: "Neuling".to_string(),
+            score: 0,
+            total_playing_time: 0,
+            pref_color: 0,
+            pref_color_dw: 0xff,
+            pref_position: 0,
+            pref_control_style: false,
+            pref_auto_context_menu: false,
+            crew: Vec::new(),
+        });
+    let file = input.player_file.or(script_defaults.as_ref()).ok_or(
+        PrepareJoinPlayerError::MissingPlayerData {
             info_id: input.info.id,
-        })?;
+        },
+    )?;
     let name = [
         &input.info.league_account,
         &input.info.forced_name,
@@ -290,6 +297,43 @@ mod tests {
                 startup_player_count: 2,
             }
         );
+    }
+
+    #[test]
+    fn script_player_without_file_prepares_cpp_core_defaults() {
+        // C4Player::Init permits a missing core file only for script players;
+        // C4PlayerInfoCore defaults remain in force before PlayerInfo supplies
+        // name/team/color (src/C4Player.cpp:256-284;
+        // src/C4InfoCore.cpp:66-85).
+        let info = ControlPlayerInfoEntry {
+            name: crate::LegacyCString::from_bytes(b"Script Tyler".to_vec())
+                .expect("valid legacy name"),
+            id: 9,
+            player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
+            color: 0x0044_5566,
+            ..Default::default()
+        };
+        let join = JoinPlayerControlData {
+            info_id: 9,
+            ..Default::default()
+        };
+
+        let config = prepare_join_player_config(JoinPlayerPreparation {
+            join: &join,
+            info: &info,
+            player_file: None,
+            startup_player_count: 1,
+        })
+        .expect("script player prepares without a file");
+
+        assert_eq!(config.name, "Script Tyler");
+        assert_eq!(config.player_info_id, 9);
+        assert_eq!((config.score, config.total_playing_time), (0, 0));
+        assert_eq!(config.color_dw, 0x0044_5566);
+        assert_eq!((config.pref_color, config.pref_position), (0, 0));
+        assert!(config.crew.is_empty());
+        assert!(!config.control_style);
+        assert!(!config.auto_context_menu);
     }
 
     #[test]
