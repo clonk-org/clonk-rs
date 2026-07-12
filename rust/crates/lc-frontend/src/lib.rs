@@ -65,6 +65,11 @@ const MAGIC_PHYSICAL_FACTOR: i32 = 1_000;
 const MATERIAL_OVERLAY_EXACT: i32 = 1;
 const MATERIAL_OVERLAY_HUGE_ZOOM: i32 = 4;
 const MATERIAL_OVERLAY_MONOCHROME: i32 = 8;
+/// `C4GFXBLIT_ADDITIVE` (src/C4Surface.h:40).
+const C4GFXBLIT_ADDITIVE: u32 = 1;
+/// `C4GFXBLIT_PARENT` is an exact overlay sentinel, not a combinable flag
+/// (src/C4DefGraphics.cpp:762-768).
+const C4GFXBLIT_PARENT: u32 = 256;
 
 /// Presentation fields from one C4MaterialCore. Colors and alpha retain the
 /// C++ arrays verbatim: three RGB triplets and two sets of three transparency
@@ -1328,6 +1333,7 @@ impl GraphicsSystem {
                     &source,
                     false,
                     None,
+                    0,
                     gamma,
                 );
             }
@@ -2364,6 +2370,7 @@ impl GraphicsSystem {
             self.viewport_zoom.max(MIN_VIEWPORT_ZOOM),
             0.0,
             object.draw_transform,
+            object.blit_mode,
             gamma,
         );
     }
@@ -2635,6 +2642,7 @@ impl GraphicsSystem {
                 zoom,
                 0.0,
                 None,
+                object.blit_mode,
                 gamma,
             );
             return;
@@ -2676,6 +2684,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             transform,
+            object.blit_mode,
             gamma,
         );
     }
@@ -2739,6 +2748,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             transform,
+            object.blit_mode,
             gamma,
         );
     }
@@ -2763,6 +2773,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        blit_mode: u32,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let (mut dest_x, mut dest_y, mut dest_w, mut dest_h) = dest;
@@ -2832,6 +2843,7 @@ impl GraphicsSystem {
                 &source,
                 flip,
                 owner_color,
+                blit_mode,
                 gamma,
             );
         } else {
@@ -2855,6 +2867,7 @@ impl GraphicsSystem {
                 flip,
                 owner_color,
                 rotation_degrees,
+                blit_mode,
                 gamma,
             );
         }
@@ -2872,6 +2885,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        blit_mode: u32,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) -> bool {
         let Some(graphics) = sprite.actions.get(action_name) else {
@@ -2979,6 +2993,7 @@ impl GraphicsSystem {
                 &source_rect,
                 final_flipped,
                 owner_color,
+                blit_mode,
                 gamma,
             );
         } else {
@@ -2994,6 +3009,7 @@ impl GraphicsSystem {
                 final_flipped,
                 owner_color,
                 rotation_degrees,
+                blit_mode,
                 gamma,
             );
         }
@@ -3015,6 +3031,13 @@ impl GraphicsSystem {
             return;
         }
         for overlay in &object.graphics_overlays {
+            // Parent is a sentinel tested by equality in C++; any ordinary
+            // mode, including combinations that carry bit 1, remains local.
+            let blit_mode = if overlay.blit_mode == C4GFXBLIT_PARENT {
+                object.blit_mode
+            } else {
+                overlay.blit_mode
+            };
             let combined_transform = match (base_transform, overlay.transform) {
                 (Some(base), Some(local)) => Some(base.combined(local)),
                 (Some(base), None) => Some(base),
@@ -3031,6 +3054,7 @@ impl GraphicsSystem {
                     zoom,
                     rotation_degrees,
                     combined_transform,
+                    blit_mode,
                     gamma,
                 ),
                 GraphicsOverlayMode::Base => self.draw_overlay_base(
@@ -3042,6 +3066,7 @@ impl GraphicsSystem {
                     zoom,
                     rotation_degrees,
                     combined_transform,
+                    blit_mode,
                     gamma,
                 ),
                 _ => {}
@@ -3059,6 +3084,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        blit_mode: u32,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let definition_id = overlay
@@ -3105,6 +3131,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             transform,
+            blit_mode,
             gamma,
         );
     }
@@ -3119,6 +3146,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        blit_mode: u32,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let definition_id = overlay
@@ -3206,6 +3234,7 @@ impl GraphicsSystem {
                 &source_rect,
                 flip_x,
                 owner_color,
+                blit_mode,
                 gamma,
             );
         } else {
@@ -3221,6 +3250,7 @@ impl GraphicsSystem {
                 flip_x,
                 owner_color,
                 rotation_degrees,
+                blit_mode,
                 gamma,
             );
         }
@@ -3363,6 +3393,7 @@ impl GraphicsSystem {
             &source,
             false,
             None,
+            0,
             gamma,
         );
 
@@ -4386,6 +4417,7 @@ fn draw_image_region(
     source: &SourceRect,
     flip_x: bool,
     owner_color: Option<Color>,
+    blit_mode: u32,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
@@ -4468,20 +4500,27 @@ fn draw_image_region(
                 continue;
             }
 
-            let blended = match (color.a, gamma) {
-                (255, Some(gamma)) => gamma_encode_fragment(color, gamma),
-                (255, None) => color,
-                (_, Some(gamma)) => {
-                    let background = surface
-                        .get_pixel(target_x as u32, target_y as u32)
-                        .unwrap_or_default();
-                    gamma_blend_fragment_over(color, background, gamma)
-                }
-                (_, None) => {
-                    let background = surface
-                        .get_pixel(target_x as u32, target_y as u32)
-                        .unwrap_or_default();
-                    blend_colors(color, background)
+            let blended = if blit_mode & C4GFXBLIT_ADDITIVE != 0 {
+                let background = surface
+                    .get_pixel(target_x as u32, target_y as u32)
+                    .unwrap_or_default();
+                blend_fragment_additive(color, background, gamma)
+            } else {
+                match (color.a, gamma) {
+                    (255, Some(gamma)) => gamma_encode_fragment(color, gamma),
+                    (255, None) => color,
+                    (_, Some(gamma)) => {
+                        let background = surface
+                            .get_pixel(target_x as u32, target_y as u32)
+                            .unwrap_or_default();
+                        gamma_blend_fragment_over(color, background, gamma)
+                    }
+                    (_, None) => {
+                        let background = surface
+                            .get_pixel(target_x as u32, target_y as u32)
+                            .unwrap_or_default();
+                        blend_colors(color, background)
+                    }
                 }
             };
 
@@ -4502,6 +4541,7 @@ fn draw_image_region_rotated(
     flip_x: bool,
     owner_color: Option<Color>,
     rotation_degrees: f32,
+    blit_mode: u32,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     if dest_width <= 0.0 || dest_height <= 0.0 {
@@ -4629,7 +4669,10 @@ fn draw_image_region_rotated(
                 continue;
             }
 
-            if let Some(gamma) = gamma {
+            if blit_mode & C4GFXBLIT_ADDITIVE != 0 {
+                let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
+                color = blend_fragment_additive(color, background, gamma);
+            } else if let Some(gamma) = gamma {
                 if color.a == 255 {
                     color = gamma_encode_fragment(color, gamma);
                 } else {
@@ -5045,6 +5088,46 @@ fn gamma_blend_fragment_over(
             destination.b,
         ),
         blend_color_over(source, destination).a,
+    )
+}
+
+/// Textured `C4GFXBLIT_ADDITIVE`: owner/source modulation and the optional
+/// R16 lookup have already selected the source fragment, then StdGL combines
+/// it as `destination + source * source_alpha` and preserves framebuffer
+/// alpha. C++ stores texture alpha as transparency and therefore spells the
+/// equivalent source factor `GL_ONE_MINUS_SRC_ALPHA` (src/StdGL.cpp:1320-1324).
+fn blend_fragment_additive(
+    source: Color,
+    destination: Color,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) -> Color {
+    if source.a == 0 {
+        return destination;
+    }
+    let alpha = f32::from(source.a) / 255.0;
+    let add = |channel, source: u8, destination: u8| {
+        store_channel(
+            f32::from(destination)
+                + sample_channel(gamma, channel, f32::from(source)) * alpha,
+        )
+    };
+    Color::new(
+        add(
+            lc_graphics::gamma::GammaChannel::Red,
+            source.r,
+            destination.r,
+        ),
+        add(
+            lc_graphics::gamma::GammaChannel::Green,
+            source.g,
+            destination.g,
+        ),
+        add(
+            lc_graphics::gamma::GammaChannel::Blue,
+            source.b,
+            destination.b,
+        ),
+        destination.a,
     )
 }
 
@@ -5519,6 +5602,252 @@ mod tests {
         assert_eq!(
             graphics.surface().get_pixel(0, 0),
             Some(Color::new(1, 1, 1, 255))
+        );
+    }
+
+    #[test]
+    fn object_additive_bit_covers_base_action_and_top_face_after_gamma() {
+        // C4Object::Draw brackets its base/action facet with PrepareDrawing
+        // (C4Object.cpp:2410-2416,2498-2499), and DrawTopFace brackets the
+        // separate top pass the same way (C4Object.cpp:2648-2672). Bit 1 is
+        // additive even alongside C4GFXBLIT_CUSTOM (C4Surface.h:38-49).
+        let source = Color::new(64, 128, 192, 128);
+        let mut sprites = HashMap::new();
+        sprites.insert(
+            sprite_map_key("BaseAdd", None),
+            DefinitionSprite {
+                image: ImageData::new(1, 1, vec![source.r, source.g, source.b, source.a]),
+                actions: HashMap::new(),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                stretch_growth: false,
+                top_face: None,
+            },
+        );
+        sprites.insert(
+            sprite_map_key("ActionAdd", None),
+            DefinitionSprite {
+                image: ImageData::new(1, 1, vec![source.r, source.g, source.b, source.a]),
+                actions: HashMap::from([(
+                    "Active".to_string(),
+                    DefinitionActionGraphics {
+                        facet: Some(lc_engine::DefinitionActionFacet {
+                            x: 0,
+                            y: 0,
+                            width: 1,
+                            height: 1,
+                            target_x: 0,
+                            target_y: 0,
+                        }),
+                        length: Some(1),
+                        ..DefinitionActionGraphics::default()
+                    },
+                )]),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                stretch_growth: false,
+                top_face: None,
+            },
+        );
+        sprites.insert(
+            sprite_map_key("TopAdd", None),
+            DefinitionSprite {
+                image: ImageData::new(
+                    2,
+                    1,
+                    vec![0, 0, 0, 0, source.r, source.g, source.b, source.a],
+                ),
+                actions: HashMap::new(),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                stretch_growth: false,
+                top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
+            },
+        );
+
+        let template = make_snapshot().objects.remove(0);
+        let make_object = |id, definition_id: &str, x, action: &str, blit_mode| {
+            let mut object = template.clone();
+            object.id = ObjectId::new(id);
+            object.definition_id = definition_id.to_string();
+            object.position = Vector2::new(x, 1);
+            object.action = lc_engine::ActionState::new(action);
+            object.blit_mode = blit_mode;
+            object.crew_member = false;
+            object
+        };
+        let objects = vec![
+            make_object(1, "BaseAdd", 1, "Idle", 129),
+            make_object(2, "ActionAdd", 3, "Active", 129),
+            make_object(3, "TopAdd", 5, "Idle", 129),
+            make_object(4, "BaseAdd", 7, "Idle", 0),
+        ];
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+        let mut graphics = GraphicsSystem::new(
+            9,
+            3,
+            3,
+            "Object additive",
+            test_font(),
+            Arc::new(sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(200, 200, 200));
+
+        graphics.draw_objects(
+            &objects,
+            &[],
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            Some(&gamma),
+        );
+
+        let additive = Some(Color::opaque(225, 250, 255));
+        for (label, x) in [("base", 1), ("action", 3), ("top", 5)] {
+            assert_eq!(graphics.surface().get_pixel(x, 1), additive, "{label}");
+        }
+        assert_eq!(
+            graphics.surface().get_pixel(7, 1),
+            Some(Color::opaque(125, 150, 175)),
+            "normal mode must remain source-alpha over"
+        );
+    }
+
+    #[test]
+    fn graphics_overlay_additive_and_exact_parent_mode_preserve_owner_modulation() {
+        // C4GraphicsOverlay::Draw uses its own mode, except exact
+        // C4GFXBLIT_PARENT, which calls the parent object's PrepareDrawing
+        // (C4DefGraphics.cpp:753-768,824-831). ColorByOwner modulation happens
+        // before the selected framebuffer blend (StdDDraw2.cpp:769-777).
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(1, 1);
+        object.blit_mode = 1;
+        let source = Color::new(10, 20, 30, 128);
+        let owner = Color::opaque(100, 120, 140);
+        let sprite = DefinitionSprite {
+            image: ImageData::new(1, 1, vec![source.r, source.g, source.b, source.a]),
+            actions: HashMap::new(),
+            color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([255]))),
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let render = |object_mode, overlay_mode| {
+            let mut object = object.clone();
+            object.blit_mode = object_mode;
+            object.graphics_overlays = vec![ObjectGraphicsOverlay::new(
+                1,
+                GraphicsOverlayMode::Base,
+            )
+            .with_definition(Some("OverlayAdd".to_string()))
+            .with_blit_mode(overlay_mode)];
+            let mut graphics = GraphicsSystem::new(
+                3,
+                3,
+                3,
+                "Overlay additive",
+                test_font(),
+                Arc::new(HashMap::from([(
+                    sprite_map_key("OverlayAdd", None),
+                    sprite.clone(),
+                )])),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(Color::opaque(20, 30, 40));
+            graphics.draw_object_overlays(
+                &object,
+                Some(owner),
+                1.0,
+                1.0,
+                1.0,
+                0.0,
+                None,
+                None,
+            );
+            graphics.surface().get_pixel(1, 1)
+        };
+
+        let additive = Some(Color::opaque(70, 90, 110));
+        assert_eq!(render(0, 1), additive, "explicit overlay additive");
+        assert_eq!(render(1, 256), additive, "exact parent inheritance");
+        assert_eq!(
+            render(1, 0),
+            Some(Color::opaque(60, 75, 90)),
+            "explicit normal overlay must override an additive parent"
+        );
+    }
+
+    #[test]
+    fn shipped_star_definition_uses_additive_action_graphics() {
+        // The real STAR definition declares BlitMode=1 and its Appear action
+        // uses ten 3x3 frames. Phase four's opaque centre is grey 184.
+        let definition = crate::test_support::repo_root()
+            .join("content/Objects.c4d/Environment.c4d/Stars.c4d/Star.c4d");
+        let def_core = std::fs::read_to_string(definition.join("DefCore.txt"))
+            .expect("read shipped STAR DefCore");
+        assert!(def_core.lines().any(|line| line.trim() == "BlitMode=1"));
+        let rgba = image::open(definition.join("Graphics.png"))
+            .expect("decode shipped STAR graphics")
+            .into_rgba8();
+        let (width, height) = rgba.dimensions();
+        let sprite = DefinitionSprite {
+            image: ImageData::new(width, height, rgba.into_raw()),
+            actions: HashMap::from([(
+                "Appear".to_string(),
+                DefinitionActionGraphics {
+                    facet: Some(lc_engine::DefinitionActionFacet {
+                        x: 0,
+                        y: 0,
+                        width: 3,
+                        height: 3,
+                        target_x: 0,
+                        target_y: 0,
+                    }),
+                    length: Some(10),
+                    ..DefinitionActionGraphics::default()
+                },
+            )]),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut star = make_snapshot().objects.remove(0);
+        star.definition_id = "STAR".to_string();
+        star.position = Vector2::new(5, 5);
+        star.action = lc_engine::ActionState::new("Appear");
+        star.action.phase = 4;
+        star.blit_mode = 1;
+        star.crew_member = false;
+        let mut graphics = GraphicsSystem::new(
+            10,
+            10,
+            10,
+            "Shipped STAR additive",
+            test_font(),
+            Arc::new(HashMap::from([(sprite_map_key("STAR", None), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(50, 60, 70));
+
+        graphics.draw_objects(
+            &[star],
+            &[],
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(4, 4),
+            Some(Color::opaque(234, 244, 254))
         );
     }
 
