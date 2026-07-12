@@ -23,6 +23,7 @@ mod startup_menu;
 mod startup_options;
 
 use lc_engine::{
+    math::{fixtoi, itofix, C4Fixed},
     DefinitionActionGraphics, DefinitionId, DefinitionRect, DefinitionTargetRect, Direction,
     DrawTransform,
     EnvironmentFrame, EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape,
@@ -56,9 +57,10 @@ const MIN_VIEWPORT_ZOOM: f32 = 0.125;
 const MAX_VIEWPORT_ZOOM: f32 = 4.0;
 /// `C4ViewportScrollBorder` (src/C4Constants.h:95).
 const VIEWPORT_SCROLL_BORDER: i32 = 40;
-const CAMERA_SMOOTHING_ALPHA: f32 = 0.2;
-const CAMERA_SNAP_THRESHOLD: f32 = 1.0;
-const CAMERA_JUMP_THRESHOLD: f32 = 256.0;
+/// `Config.General.ScrollSmooth` (src/C4Config.cpp:386). The C++ viewport
+/// clamps the configured value to 1..=50 at the point of use.
+const DEFAULT_SCROLL_SMOOTH: i32 = 4;
+const CAMERA_UNINITIALIZED: i32 = -31_337;
 const PICK_TOLERANCE: f32 = 6.0;
 /// `MagicPhysicalFactor` (src/C4Object.h:81).
 const MAGIC_PHYSICAL_FACTOR: i32 = 1_000;
@@ -530,60 +532,160 @@ impl SourceRect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CameraKey {
     owner: i32,
-    focus: ObjectId,
+    /// C4Viewport owns its smoothing state. A focus/ViewCursor change does
+    /// not create a new viewport, so the stable per-owner slot is the key.
+    slot: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct CameraState {
-    x: f32,
-    y: f32,
-    zoom: f32,
-    initialized: bool,
+    d_view_x: C4Fixed,
+    d_view_y: C4Fixed,
+    view_x: i32,
+    view_y: i32,
+    view_width: i32,
+    view_height: i32,
 }
 
 impl CameraState {
-    fn new(x: f32, y: f32, zoom: f32) -> Self {
+    /// `CreateViewport` calls `CenterPosition` after setting the output size,
+    /// while dViewX/Y retain C4Viewport's negative initialization sentinel.
+    fn new(world_width: i32, world_height: i32, view_width: i32, view_height: i32) -> Self {
         Self {
-            x,
-            y,
-            zoom,
-            initialized: false,
+            d_view_x: itofix(CAMERA_UNINITIALIZED),
+            d_view_y: itofix(CAMERA_UNINITIALIZED),
+            view_x: (world_width - view_width) / 2,
+            view_y: (world_height - view_height) / 2,
+            view_width,
+            view_height,
         }
     }
 
     fn update(
         &mut self,
-        target_x: f32,
-        target_y: f32,
-        zoom: f32,
-        min_x: f32,
-        max_x: f32,
-        min_y: f32,
-        max_y: f32,
-    ) -> (f32, f32) {
-        if !self.initialized || (self.zoom - zoom).abs() > 0.01 {
-            self.x = target_x;
-            self.y = target_y;
-            self.initialized = true;
+        center_x: i32,
+        center_y: i32,
+        view_width: i32,
+        view_height: i32,
+        world_width: i32,
+        world_height: i32,
+        scroll_border: i32,
+        scroll_smooth: i32,
+    ) -> (i32, i32) {
+        // SetOutputSize keeps the previous visible center. It adjusts the
+        // integer ViewX/Y but deliberately does not rewrite dViewX/Y.
+        self.resize_output(view_width, view_height);
+
+        let scroll_range = (view_width / 10).min(view_height / 10);
+        let target_x = classic_camera_target_axis(
+            self.view_x,
+            center_x,
+            view_width,
+            world_width,
+            scroll_range,
+            scroll_border,
+        );
+        let target_y = classic_camera_target_axis(
+            self.view_y,
+            center_y,
+            view_height,
+            world_height,
+            scroll_range,
+            scroll_border,
+        );
+        let divisor = scroll_smooth.clamp(1, 50);
+
+        // C4Viewport uses the sign of both fixed coordinates as its coupled
+        // initialization test. This also means a negative border position
+        // takes the snap branch on every graphics pass.
+        if self.d_view_x >= 0 && self.d_view_y >= 0 {
+            self.d_view_x += (itofix(target_x) - self.d_view_x) / divisor;
+            self.d_view_y += (itofix(target_y) - self.d_view_y) / divisor;
+            self.view_x = fixtoi(self.d_view_x);
+            self.view_y = fixtoi(self.d_view_y);
         } else {
-            self.x = smooth_value(self.x, target_x);
-            self.y = smooth_value(self.y, target_y);
+            self.view_x = target_x;
+            self.view_y = target_y;
+            self.d_view_x = itofix(target_x);
+            self.d_view_y = itofix(target_y);
         }
 
-        self.zoom = zoom;
-        self.x = self.x.clamp(min_x, max_x);
-        self.y = self.y.clamp(min_y, max_y);
-        (self.x, self.y)
+        (self.view_x, self.view_y)
+    }
+
+    fn resize_output(&mut self, view_width: i32, view_height: i32) {
+        if self.view_width != view_width {
+            self.view_x += (self.view_width - view_width) / 2;
+            self.view_width = view_width;
+        }
+        if self.view_height != view_height {
+            self.view_y += (self.view_height - view_height) / 2;
+            self.view_height = view_height;
+        }
+    }
+
+    /// No-owner fullscreen viewports are not player-locked. Without an
+    /// explicit FreeScroll input they retain their centered position, and
+    /// UpdateViewPosition hard-clamps large worlds while centering small ones.
+    fn no_owner_position(
+        &mut self,
+        view_width: i32,
+        view_height: i32,
+        world_width: i32,
+        world_height: i32,
+    ) -> (i32, i32) {
+        self.resize_output(view_width, view_height);
+        if world_width < view_width {
+            self.view_x = (world_width - view_width) / 2;
+        } else {
+            self.view_x = self.view_x.clamp(0, world_width - view_width);
+        }
+        if world_height < view_height {
+            self.view_y = (world_height - view_height) / 2;
+        } else {
+            self.view_y = self.view_y.clamp(0, world_height - view_height);
+        }
+        (self.view_x, self.view_y)
     }
 }
 
-fn smooth_value(current: f32, target: f32) -> f32 {
-    let delta = target - current;
-    if delta.abs() <= CAMERA_SNAP_THRESHOLD || delta.abs() >= CAMERA_JUMP_THRESHOLD {
-        target
-    } else {
-        current + delta * CAMERA_SMOOTHING_ALPHA
+/// C4Viewport::AdjustPosition's per-axis dead-zone and progressive edge
+/// bounds (src/C4Viewport.cpp:1165-1201). Inputs and the result are whole
+/// world pixels; the 16.16 filter is applied afterwards.
+fn classic_camera_target_axis(
+    current_view: i32,
+    center: i32,
+    view_extent: i32,
+    world_extent: i32,
+    scroll_range: i32,
+    scroll_border: i32,
+) -> i32 {
+    let mut extra_bound = 0;
+    if center < scroll_border {
+        extra_bound = (scroll_border - center).min(scroll_border);
+    } else if center >= world_extent - scroll_border {
+        extra_bound = (center - world_extent).min(0) + scroll_border;
     }
+    extra_bound = extra_bound.max((view_extent - world_extent) / 2 + 1);
+
+    let desired = center - view_extent / 2;
+    let target = current_view.clamp(desired - scroll_range, desired + scroll_range);
+    let min_view = -extra_bound;
+    let max_view = world_extent - view_extent + extra_bound;
+    if min_view <= max_view {
+        target.clamp(min_view, max_view)
+    } else {
+        // The oversized-world rule above normally prevents an inverted
+        // range. Keep the centered C++ fallback for defensive malformed
+        // dimensions rather than panicking in `i32::clamp`.
+        (world_extent - view_extent) / 2
+    }
+}
+
+fn scaled_camera_border(border: i32, zoom: f32, output_extent: u32) -> u32 {
+    (border.max(0) as f32 * zoom)
+        .round()
+        .clamp(0.0, output_extent as f32) as u32
 }
 
 #[derive(Debug, Clone, Default)]
@@ -829,6 +931,9 @@ pub struct GraphicsSystem {
     hud_graphics: Arc<HudGraphics>,
     active_viewports: Vec<ActiveViewport>,
     camera_states: HashMap<CameraKey, CameraState>,
+    /// C4ConfigGeneral::ScrollSmooth. Config plumbing lives above the
+    /// frontend; retain the exact C++ default and clamp at use meanwhile.
+    scroll_smooth: i32,
     sky: Option<SkyRenderState>,
     /// Material texture pngs by lowercase texture name — the landscape
     /// plane samples them per pixel (C++ builds Surface32 from the same
@@ -883,6 +988,7 @@ impl GraphicsSystem {
             hud_graphics,
             active_viewports: Vec::new(),
             camera_states: HashMap::new(),
+            scroll_smooth: DEFAULT_SCROLL_SMOOTH,
             sky: None,
             material_textures: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),
@@ -922,6 +1028,12 @@ impl GraphicsSystem {
 
     pub fn set_sky(&mut self, sky: Option<SkyRenderState>) {
         self.sky = sky;
+    }
+
+    /// Set `Config.General.ScrollSmooth` for subsequent viewport renders.
+    /// C++ stores the raw value and clamps it to 1..=50 in AdjustPosition.
+    pub fn set_scroll_smooth(&mut self, scroll_smooth: i32) {
+        self.scroll_smooth = scroll_smooth;
     }
 
     pub fn hud_graphics(&self) -> Arc<HudGraphics> {
@@ -1066,16 +1178,7 @@ impl GraphicsSystem {
         }
 
         let owner_colors = Self::collect_owner_colors(snapshot);
-        let mut used_camera_keys = Vec::new();
-        self.render_viewports(
-            snapshot,
-            viewports,
-            &owner_colors,
-            &mut used_camera_keys,
-            gamma,
-        );
-        let used_keys: HashSet<_> = used_camera_keys.into_iter().collect();
-        self.camera_states.retain(|key, _| used_keys.contains(key));
+        self.render_viewports(snapshot, viewports, &owner_colors, gamma);
 
         self.draw_hud(snapshot.frame, gamma);
 
@@ -1087,7 +1190,6 @@ impl GraphicsSystem {
         snapshot: &SimulationSnapshot,
         viewports: &[ViewportInput<'_>],
         owner_colors: &HashMap<i32, Color>,
-        used_camera_keys: &mut Vec<CameraKey>,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         if viewports.is_empty() {
@@ -1096,9 +1198,9 @@ impl GraphicsSystem {
                 self.render_viewport(
                     snapshot,
                     &default,
+                    0,
                     SurfaceRect::new(0, 0, self.surface_width, self.surface_height),
                     owner_colors,
-                    used_camera_keys,
                     gamma,
                 );
             }
@@ -1106,15 +1208,12 @@ impl GraphicsSystem {
         }
 
         let layout = self.layout_viewports(viewports.len());
+        let mut owner_slots = HashMap::<i32, usize>::new();
         for (input, rect) in viewports.iter().zip(layout.into_iter()) {
-            self.render_viewport(
-                snapshot,
-                input,
-                rect,
-                owner_colors,
-                used_camera_keys,
-                gamma,
-            );
+            let slot = owner_slots.entry(input.owner).or_default();
+            let camera_slot = *slot;
+            *slot += 1;
+            self.render_viewport(snapshot, input, camera_slot, rect, owner_colors, gamma);
         }
     }
 
@@ -1122,9 +1221,9 @@ impl GraphicsSystem {
         &mut self,
         snapshot: &SimulationSnapshot,
         input: &ViewportInput<'_>,
+        camera_slot: usize,
         rect: SurfaceRect,
         owner_colors: &HashMap<i32, Color>,
-        used_camera_keys: &mut Vec<CameraKey>,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         if rect.width == 0 || rect.height == 0 {
@@ -1155,69 +1254,64 @@ impl GraphicsSystem {
         self.surface_height = rect.height;
 
         let zoom = input.zoom.clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
-        let world_width = if self.world_width > 0 {
-            self.world_width as f32
-        } else {
-            rect.width.max(1) as f32 / zoom
-        };
-        let world_height = if self.world_height > 0 {
-            self.world_height as f32
-        } else {
-            rect.height.max(1) as f32 / zoom
-        };
-
-        let mut visible_world_width = (rect.width as f32 / zoom).max(1.0);
-        let mut visible_world_height = (rect.height as f32 / zoom).max(1.0);
-
-        if visible_world_width > world_width && world_width > 0.0 {
-            visible_world_width = world_width;
-        }
-        if visible_world_height > world_height && world_height > 0.0 {
-            visible_world_height = world_height;
-        }
-
-        let content_width = (visible_world_width * zoom)
-            .round()
-            .clamp(1.0, rect.width as f32) as u32;
-        let content_height = (visible_world_height * zoom)
-            .round()
-            .clamp(1.0, rect.height as f32) as u32;
-
-        let offset_x = ((rect.width as i32 - content_width as i32) / 2).max(0);
-        let offset_y = ((rect.height as i32 - content_height as i32) / 2).max(0);
-
-        let target = input.center;
-        let target_x = target.x as f32;
-        let target_y = target.y as f32;
-
-        let desired_origin_x = target_x - visible_world_width / 2.0;
-        let desired_origin_y = target_y - visible_world_height / 2.0;
-
-        let max_origin_x = (world_width - visible_world_width).max(0.0);
-        let max_origin_y = (world_height - visible_world_height).max(0.0);
-
-        let clamped_origin_x = desired_origin_x.clamp(0.0, max_origin_x);
-        let clamped_origin_y = desired_origin_y.clamp(0.0, max_origin_y);
+        let world_width = self.world_width.max(1);
+        let world_height = self.world_height.max(1);
+        // C4Application::SetResolution converts physical output to the
+        // logical viewport with ceilf(physical/scale) before SetOutputSize.
+        let view_width = ((rect.width as f32 / zoom).ceil() as i32).max(1);
+        let view_height = ((rect.height as f32 / zoom).ceil() as i32).max(1);
 
         let key = CameraKey {
             owner: input.owner,
-            focus: input.focus.id,
+            slot: camera_slot,
         };
 
-        let state = self
-            .camera_states
-            .entry(key)
-            .or_insert_with(|| CameraState::new(clamped_origin_x, clamped_origin_y, zoom));
-        let (origin_x, origin_y) = state.update(
-            clamped_origin_x,
-            clamped_origin_y,
-            zoom,
-            0.0,
-            max_origin_x,
-            0.0,
-            max_origin_y,
-        );
-        used_camera_keys.push(key);
+        let state = self.camera_states.entry(key).or_insert_with(|| {
+            CameraState::new(world_width, world_height, view_width, view_height)
+        });
+        let (view_x, view_y) = if input.owner == OWNER_NONE {
+            state.no_owner_position(view_width, view_height, world_width, world_height)
+        } else {
+            state.update(
+                input.center.x,
+                input.center.y,
+                view_width,
+                view_height,
+                world_width,
+                world_height,
+                VIEWPORT_SCROLL_BORDER,
+                self.scroll_smooth,
+            )
+        };
+        // C4Viewport keeps the full ViewWdt/Hgt and clips landscape drawing
+        // around any out-of-map portion. Preserve the existing Rust
+        // letterbox representation by turning those portions into tiled
+        // margins and drawing only the in-world content surface.
+        let border_left = (-view_x).max(0).min(view_width);
+        let border_top = (-view_y).max(0).min(view_height);
+        let border_right = (view_width - world_width + view_x)
+            .max(0)
+            .min(view_width - border_left);
+        let border_bottom = (view_height - world_height + view_y)
+            .max(0)
+            .min(view_height - border_top);
+
+        let offset_x = scaled_camera_border(border_left, zoom, rect.width) as i32;
+        let offset_y = scaled_camera_border(border_top, zoom, rect.height) as i32;
+        let right_pixels = scaled_camera_border(border_right, zoom, rect.width);
+        let bottom_pixels = scaled_camera_border(border_bottom, zoom, rect.height);
+        let content_width = rect
+            .width
+            .saturating_sub(offset_x as u32)
+            .saturating_sub(right_pixels)
+            .max(1);
+        let content_height = rect
+            .height
+            .saturating_sub(offset_y as u32)
+            .saturating_sub(bottom_pixels)
+            .max(1);
+        let origin_x = (view_x + border_left) as f32;
+        let origin_y = (view_y + border_top) as f32;
 
         self.viewport_x = origin_x;
         self.viewport_y = origin_y;
@@ -7191,6 +7285,347 @@ mod tests {
         assert!(viewport_y > 0);
     }
 
+    fn initialized_camera(view_x: i32, view_y: i32, width: i32, height: i32) -> CameraState {
+        CameraState {
+            d_view_x: itofix(view_x),
+            d_view_y: itofix(view_y),
+            view_x,
+            view_y,
+            view_width: width,
+            view_height: height,
+        }
+    }
+
+    #[test]
+    fn camera_smoothing_uses_cpp_fixed_divisor_four_sequence() {
+        // C4Viewport.cpp:1203-1206 retains the 16.16 residue and projects
+        // each graphics pass with fixtoi. A 0 -> 100 target therefore does
+        // not follow the old f32 alpha-0.2 sequence (20,36,48.8).
+        let mut camera = initialized_camera(0, 0, 100, 1);
+        let mut visible = Vec::new();
+        for _ in 0..3 {
+            visible.push(
+                camera
+                    .update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, 4)
+                    .0,
+            );
+        }
+        assert_eq!(visible, vec![25, 44, 58]);
+    }
+
+    #[test]
+    fn camera_smoothing_has_no_small_or_jump_snap_thresholds() {
+        let mut one_pixel = initialized_camera(0, 0, 100, 1);
+        let mut one_pixel_visible = Vec::new();
+        for _ in 0..3 {
+            one_pixel_visible.push(
+                one_pixel
+                    .update(51, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, 4)
+                    .0,
+            );
+        }
+        assert_eq!(one_pixel_visible, vec![0, 0, 1]);
+
+        let mut jump = initialized_camera(0, 0, 100, 1);
+        assert_eq!(
+            jump.update(450, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, 4)
+                .0,
+            100,
+            "a 400px target delta is quartered rather than snapped"
+        );
+    }
+
+    #[test]
+    fn camera_scroll_smooth_is_clamped_like_cpp_config() {
+        let mut zero = initialized_camera(0, 0, 100, 1);
+        assert_eq!(
+            zero.update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, 0)
+                .0,
+            100,
+            "ScrollSmooth=0 clamps to divisor one"
+        );
+
+        let mut huge = initialized_camera(0, 0, 100, 1);
+        assert_eq!(
+            huge.update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, 500)
+                .0,
+            2,
+            "ScrollSmooth values above 50 clamp to divisor 50"
+        );
+    }
+
+    #[test]
+    fn camera_dead_zone_delays_slow_elevator_follow_per_render() {
+        // With a 100x80 viewport the shared range is 8px. The focus can move
+        // eight pixels without changing the target. At nine pixels the target
+        // advances to 451, whose fixed projection remains 450 for two more
+        // graphics passes before rounding to 451 on the third.
+        let mut camera = initialized_camera(450, 460, 100, 80);
+        assert_eq!(
+            camera
+                .update(508, 500, 100, 80, 1_000, 1_000, VIEWPORT_SCROLL_BORDER, 4)
+                .0,
+            450
+        );
+        let repeated = (0..3)
+            .map(|_| {
+                camera
+                    .update(509, 500, 100, 80, 1_000, 1_000, VIEWPORT_SCROLL_BORDER, 4)
+                    .0
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(repeated, vec![450, 450, 451]);
+    }
+
+    #[test]
+    fn camera_edge_bounds_progress_through_the_cpp_scroll_border() {
+        let first_view = |center_x| {
+            let mut camera = CameraState::new(500, 500, 100, 80);
+            camera
+                .update(
+                    center_x,
+                    250,
+                    100,
+                    80,
+                    500,
+                    500,
+                    VIEWPORT_SCROLL_BORDER,
+                    DEFAULT_SCROLL_SMOOTH,
+                )
+                .0
+        };
+        assert_eq!(first_view(0), -40);
+        assert_eq!(first_view(20), -20);
+        assert_eq!(first_view(40), 0);
+
+        // The negative dViewX makes C++ take the coupled initialization
+        // branch on the next pass, snapping both axes to their new targets.
+        let mut camera = CameraState::new(500, 500, 100, 80);
+        assert_eq!(
+            camera
+                .update(0, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, 4)
+                .0,
+            -40
+        );
+        assert_eq!(
+            camera
+                .update(100, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, 4)
+                .0,
+            42
+        );
+    }
+
+    fn camera_world_snapshot() -> SimulationSnapshot {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(500, 500);
+        snapshot.landscape = Some(Landscape::flat(1_000, 1_000));
+        snapshot
+    }
+
+    #[test]
+    fn camera_state_survives_focus_changes_in_the_same_viewport_slot() {
+        let mut snapshot = camera_world_snapshot();
+        let mut second = snapshot.objects[0].clone();
+        second.id = ObjectId::new(2);
+        second.position = Vector2::new(900, 500);
+        snapshot.objects.push(second);
+        let mut graphics = GraphicsSystem::new(
+            100,
+            80,
+            80,
+            "Camera focus",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                0,
+                Vector2::new(500, 500),
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                0,
+                Vector2::new(900, 500),
+                1.0,
+                &snapshot.objects[1],
+            )],
+        );
+
+        let camera = graphics
+            .camera_states
+            .get(&CameraKey { owner: 0, slot: 0 })
+            .expect("stable viewport camera");
+        assert_eq!(camera.view_x, 548);
+        assert_eq!(graphics.active_viewports[0].viewport_x, 548.0);
+    }
+
+    #[test]
+    fn camera_state_survives_a_render_where_the_viewport_is_absent() {
+        let mut snapshot = camera_world_snapshot();
+        let mut second = snapshot.objects[0].clone();
+        second.id = ObjectId::new(2);
+        second.position = Vector2::new(900, 500);
+        snapshot.objects.push(second);
+        let mut graphics = GraphicsSystem::new(
+            100,
+            80,
+            80,
+            "Camera absence",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                0,
+                Vector2::new(500, 500),
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+
+        let mut absent = snapshot.clone();
+        absent.objects.clear();
+        graphics.render_frame(&absent, &[]);
+
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                0,
+                Vector2::new(900, 500),
+                1.0,
+                &snapshot.objects[1],
+            )],
+        );
+        assert_eq!(
+            graphics
+                .camera_states
+                .get(&CameraKey { owner: 0, slot: 0 })
+                .expect("camera retained across missed draw")
+                .view_x,
+            548
+        );
+    }
+
+    #[test]
+    fn camera_edge_border_remains_tiled_outside_world_content() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(0, 250);
+        snapshot.landscape = Some(Landscape::flat(500, 500));
+        let background_color = Color::opaque(73, 41, 19);
+        let background = ImageData::new(
+            1,
+            1,
+            vec![
+                background_color.r,
+                background_color.g,
+                background_color.b,
+                background_color.a,
+            ],
+        );
+        let mut graphics = GraphicsSystem::new(
+            100,
+            80,
+            80,
+            "Camera border",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            Arc::new(HudGraphics {
+                background: Some(background),
+                ..HudGraphics::default()
+            }),
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::from_focus(&snapshot.objects[0])],
+        );
+
+        let camera = graphics
+            .camera_states
+            .get(&CameraKey { owner: 0, slot: 0 })
+            .expect("camera state");
+        assert_eq!(camera.view_x, -40);
+        assert_eq!(graphics.active_viewports[0].content_rect.x, 40);
+        assert_eq!(graphics.active_viewports[0].content_rect.width, 60);
+        assert_eq!(graphics.surface().get_pixel(0, 0), Some(background_color));
+        assert_ne!(
+            graphics.surface().get_pixel(40, 0),
+            Some(background_color),
+            "in-world sky starts after the tiled border"
+        );
+    }
+
+    #[test]
+    fn no_owner_viewport_stays_centered_without_free_scroll_input() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].owner = OWNER_NONE;
+        snapshot.objects[0].position = Vector2::new(0, 0);
+        snapshot.landscape = Some(Landscape::flat(500, 500));
+        let mut graphics = GraphicsSystem::new(
+            100,
+            80,
+            80,
+            "Observer",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::from_focus(&snapshot.objects[0])],
+        );
+        let camera = graphics
+            .camera_states
+            .get(&CameraKey {
+                owner: OWNER_NONE,
+                slot: 0,
+            })
+            .expect("no-owner camera");
+        assert_eq!((camera.view_x, camera.view_y), (200, 210));
+    }
+
+    #[test]
+    fn viewport_zoom_uses_cpp_ceil_extent_without_resetting_fixed_state() {
+        let snapshot = camera_world_snapshot();
+        let mut graphics = GraphicsSystem::new(
+            100,
+            80,
+            80,
+            "Camera scale",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                0,
+                Vector2::new(500, 500),
+                1.5,
+                &snapshot.objects[0],
+            )],
+        );
+        let camera = graphics
+            .camera_states
+            .get(&CameraKey { owner: 0, slot: 0 })
+            .expect("scaled camera");
+        assert_eq!((camera.view_width, camera.view_height), (67, 54));
+        assert_ne!(camera.d_view_x, itofix(CAMERA_UNINITIALIZED));
+    }
+
     #[test]
     fn viewport_clamps_to_world_height() {
         let mut snapshot = make_snapshot();
@@ -7229,7 +7664,11 @@ mod tests {
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
         let (_, bottom_view) = graphics.viewport();
-        assert_eq!(bottom_view, 360 - 180);
+        assert_eq!(
+            bottom_view,
+            360 - 180 + VIEWPORT_SCROLL_BORDER,
+            "a focus at the raw map bottom exposes C++'s 40px scroll border"
+        );
     }
 
     #[test]
@@ -8663,6 +9102,7 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.environment.settings.time_of_day = 0; // full daylight
         snapshot.landscape = None;
+        snapshot.objects[0].position = Vector2::new(60, 40);
 
         let settings = lc_engine::SkySettings {
             fade_top: RgbColor::new(200, 16, 16),
@@ -8999,7 +9439,12 @@ mod tests {
         graphics.set_material_textures(Arc::new(textures));
         graphics.set_material_render_info(Arc::new(materials));
 
-        let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
+        let viewports = vec![ViewportInput::new(
+            0,
+            Vector2::ZERO,
+            1.0,
+            &snapshot.objects[0],
+        )];
         graphics.render_frame(&snapshot, &viewports);
 
         assert_eq!(
