@@ -457,7 +457,7 @@ impl RuntimeHandle {
         // was built from, C4PlayerInfo::SetAsUserPlayer).
         let info = self.player_infos.get(&join.info_id).cloned();
         if let Some(info) = info.as_ref() {
-            if info.script_player || info.no_scenario_init {
+            if info.is_script_player() || info.no_scenario_init() {
                 // Script players skip ScenarioInit (C4Player.cpp:327-343);
                 // not ported yet.
                 tracing::warn!(
@@ -528,7 +528,7 @@ impl RuntimeHandle {
 
         let name = info
             .as_ref()
-            .map(|info| info.name.clone())
+            .map(|info| info.name.to_string_lossy().into_owned())
             .filter(|name| !name.is_empty())
             .unwrap_or(file_name);
         let color_dw = info

@@ -151,18 +151,96 @@ impl Default for JoinPlayerControlData {
     }
 }
 
-/// One `C4PlayerInfo` of a `C4ClientPlayerInfos`
-/// (C4PlayerInfo.cpp:177-268).
+pub const CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS: u32 = 1 << 0;
+pub const CLIENT_PLAYER_INFO_FLAG_UPDATED: u32 = 1 << 1;
+pub const CLIENT_PLAYER_INFO_FLAG_INITIAL: u32 = 1 << 2;
+
+pub const PLAYER_INFO_TYPE_NONE: u8 = 0;
+pub const PLAYER_INFO_TYPE_USER: u8 = 1;
+pub const PLAYER_INFO_TYPE_SCRIPT: u8 = 2;
+
+pub const PLAYER_INFO_FLAG_JOINED: u16 = 1 << 0;
+pub const PLAYER_INFO_FLAG_REMOVED: u16 = 1 << 2;
+pub const PLAYER_INFO_FLAG_HAS_RESOURCE: u16 = 1 << 3;
+pub const PLAYER_INFO_FLAG_IN_SCENARIO_FILE: u16 = 1 << 6;
+pub const PLAYER_INFO_FLAG_SAVEGAME_JOIN: u16 = 1 << 7;
+pub const PLAYER_INFO_FLAG_DISCONNECTED: u16 = 1 << 8;
+pub const PLAYER_INFO_FLAG_WON: u16 = 1 << 9;
+pub const PLAYER_INFO_FLAG_VOTED_OUT: u16 = 1 << 10;
+pub const PLAYER_INFO_FLAG_ATTRIBUTES_FIXED: u16 = 1 << 11;
+pub const PLAYER_INFO_FLAG_NO_SCENARIO_INIT: u16 = 1 << 12;
+pub const PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK: u16 = 1 << 13;
+pub const PLAYER_INFO_FLAG_INVISIBLE: u16 = 1 << 14;
+
+/// Complete synchronized `C4PlayerInfo` value serialized inside a
+/// `C4ClientPlayerInfos` (`src/C4PlayerInfo.cpp:177-268`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlPlayerInfoEntry {
+    pub name: LegacyCString,
+    pub forced_name: LegacyCString,
+    pub filename: LegacyCString,
+    pub flags: u16,
     pub id: i32,
-    pub name: String,
-    pub team: i32,
+    pub player_type: u8,
     pub color: u32,
-    /// `Type=Script` (C4PT_Script).
-    pub script_player: bool,
-    /// `NoScenarioInit` flag (PIF_NoScenarioInit).
-    pub no_scenario_init: bool,
+    pub original_color: u32,
+    pub savegame_player: i32,
+    pub team: i32,
+    pub auth_id: LegacyCString,
+    pub game_number: i32,
+    pub game_join_frame: i32,
+    pub game_part_frame: i32,
+    pub extra_data: [u8; 4],
+    pub league_account: LegacyCString,
+    pub league_score: i32,
+    pub league_rank: i32,
+    pub league_rank_symbol: i32,
+    pub league_projected_gain: i32,
+    pub clan_tag: LegacyCString,
+    pub league_performance: i32,
+    pub league_progress_data: LegacyCString,
+    pub resource: Option<NetworkResourceCore>,
+}
+
+impl ControlPlayerInfoEntry {
+    pub fn is_script_player(&self) -> bool {
+        self.player_type == PLAYER_INFO_TYPE_SCRIPT
+    }
+
+    pub fn no_scenario_init(&self) -> bool {
+        self.flags & PLAYER_INFO_FLAG_NO_SCENARIO_INIT != 0
+    }
+}
+
+impl Default for ControlPlayerInfoEntry {
+    fn default() -> Self {
+        Self {
+            name: LegacyCString::default(),
+            forced_name: LegacyCString::default(),
+            filename: LegacyCString::default(),
+            flags: 0,
+            id: 0,
+            player_type: PLAYER_INFO_TYPE_USER,
+            color: 0x00ff_ffff,
+            original_color: 0x00ff_ffff,
+            savegame_player: 0,
+            team: 0,
+            auth_id: LegacyCString::default(),
+            game_number: -1,
+            game_join_frame: -1,
+            game_part_frame: -1,
+            extra_data: *b"NONE",
+            league_account: LegacyCString::default(),
+            league_score: 0,
+            league_rank: 0,
+            league_rank_symbol: 0,
+            league_projected_gain: -1,
+            clan_tag: LegacyCString::default(),
+            league_performance: 0,
+            league_progress_data: LegacyCString::default(),
+            resource: None,
+        }
+    }
 }
 
 /// `C4ControlPlayerInfo` body (C4ClientPlayerInfos,
@@ -170,7 +248,20 @@ pub struct ControlPlayerInfoEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerInfoControlData {
     pub client_id: i32,
+    pub flags: u32,
     pub players: Vec<ControlPlayerInfoEntry>,
+    pub by_client: i32,
+}
+
+impl Default for PlayerInfoControlData {
+    fn default() -> Self {
+        Self {
+            client_id: -1,
+            flags: 0,
+            players: Vec::new(),
+            by_client: -1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -519,31 +610,45 @@ impl RawPacket {
                 .sections
                 .iter()
                 .filter(|(name, _)| name.eq_ignore_ascii_case("Player"))
-                .map(|(_, fields)| {
-                    let int = |key: &str| -> i32 {
-                        field(fields, key)
-                            .and_then(|value| value.parse::<i64>().ok())
-                            .unwrap_or(0) as i32
-                    };
-                    ControlPlayerInfoEntry {
-                        id: int("ID"),
-                        name: field(fields, "Name").unwrap_or_default(),
-                        team: int("Team"),
-                        color: field(fields, "Color")
-                            .and_then(|value| value.parse::<i64>().ok())
-                            .unwrap_or(0) as u32,
-                        script_player: field(fields, "Type")
-                            .map(|value| value.eq_ignore_ascii_case("Script"))
-                            .unwrap_or(false),
-                        no_scenario_init: field(fields, "Flags")
-                            .map(|value| value.contains("NoScenarioInit"))
-                            .unwrap_or(false),
-                    }
-                })
-                .collect();
+                .map(
+                    |(_, fields)| -> Result<ControlPlayerInfoEntry, ControlParseError> {
+                        let int = |key: &str| -> i32 {
+                            field(fields, key)
+                                .and_then(|value| value.parse::<i64>().ok())
+                                .unwrap_or(0) as i32
+                        };
+                        let name = LegacyCString::from_bytes(
+                            field(fields, "Name").unwrap_or_default().into_bytes(),
+                        )
+                        .ok_or(ControlParseError::InteriorNulString {
+                            field: "Player.Name".to_string(),
+                        })?;
+                        let mut entry = ControlPlayerInfoEntry {
+                            name,
+                            id: int("ID"),
+                            team: int("Team"),
+                            color: field(fields, "Color")
+                                .and_then(|value| value.parse::<i64>().ok())
+                                .unwrap_or(0) as u32,
+                            player_type: field(fields, "Type")
+                                .filter(|value| value.eq_ignore_ascii_case("Script"))
+                                .map(|_| PLAYER_INFO_TYPE_SCRIPT)
+                                .unwrap_or(PLAYER_INFO_TYPE_USER),
+                            ..ControlPlayerInfoEntry::default()
+                        };
+                        if field(fields, "Flags")
+                            .is_some_and(|value| value.contains("NoScenarioInit"))
+                        {
+                            entry.flags |= PLAYER_INFO_FLAG_NO_SCENARIO_INIT;
+                        }
+                        Ok(entry)
+                    },
+                )
+                .collect::<Result<Vec<_>, _>>()?;
             return Ok(Some(ControlPacket::PlayerInfo(PlayerInfoControlData {
                 client_id,
                 players,
+                ..PlayerInfoControlData::default()
             })));
         }
 
@@ -854,6 +959,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn player_info_model_defaults_match_cpp_clear() {
+        // C4PlayerInfo::Clear and C4ClientPlayerInfos construction establish
+        // the synchronized state that CompileFunc serializes
+        // (src/C4PlayerInfo.cpp:35-54,177-268,357-359,601-633).
+        let player = ControlPlayerInfoEntry::default();
+        assert!(player.name.is_empty());
+        assert!(player.forced_name.is_empty());
+        assert!(player.filename.is_empty());
+        assert_eq!(player.flags, 0);
+        assert_eq!(player.id, 0);
+        assert_eq!(player.player_type, PLAYER_INFO_TYPE_USER);
+        assert_eq!(
+            (player.color, player.original_color),
+            (0x00ff_ffff, 0x00ff_ffff)
+        );
+        assert_eq!((player.savegame_player, player.team), (0, 0));
+        assert!(player.auth_id.is_empty());
+        assert_eq!(
+            (
+                player.game_number,
+                player.game_join_frame,
+                player.game_part_frame,
+            ),
+            (-1, -1, -1)
+        );
+        assert_eq!(player.extra_data, *b"NONE");
+        assert!(player.league_account.is_empty());
+        assert_eq!(
+            (
+                player.league_score,
+                player.league_rank,
+                player.league_rank_symbol,
+                player.league_projected_gain,
+                player.league_performance,
+            ),
+            (0, 0, 0, -1, 0)
+        );
+        assert!(player.clan_tag.is_empty());
+        assert!(player.league_progress_data.is_empty());
+        assert_eq!(player.resource, None);
+        assert!(!player.is_script_player());
+        assert!(!player.no_scenario_init());
+
+        let packet = PlayerInfoControlData::default();
+        assert_eq!(packet.client_id, -1);
+        assert_eq!(packet.flags, 0);
+        assert!(packet.players.is_empty());
+        assert_eq!(packet.by_client, -1);
+    }
+
+    #[test]
     fn join_player_model_is_canonical_and_filename_is_byte_preserving() {
         // C4ControlJoinPlayer stores exactly one ByRes-selected payload branch
         // and StdCompiler binary strings retain bytes through their NUL
@@ -1002,14 +1158,14 @@ mod tests {
                 assert_eq!(info.client_id, 0);
                 assert_eq!(info.players.len(), 2);
                 assert_eq!(info.players[0].id, 1);
-                assert_eq!(info.players[0].name, "Tyler");
+                assert_eq!(info.players[0].name.to_str(), Ok("Tyler"));
                 assert_eq!(info.players[0].color, 15997440);
                 assert_eq!(info.players[0].team, 0);
-                assert!(!info.players[0].script_player);
+                assert!(!info.players[0].is_script_player());
                 assert_eq!(info.players[1].id, 2);
-                assert_eq!(info.players[1].name, "Rival");
+                assert_eq!(info.players[1].name.to_str(), Ok("Rival"));
                 assert_eq!(info.players[1].team, 7);
-                assert!(info.players[1].script_player);
+                assert!(info.players[1].is_script_player());
             }
             other => panic!("expected PlayerInfo, got {other:?}"),
         }
