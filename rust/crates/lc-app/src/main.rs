@@ -25899,7 +25899,7 @@ mod tests {
     }
 
     #[test]
-    fn app_virtual_keyboard_reaches_tutorial07_home_cave_by_sailboat() {
+    fn app_virtual_keyboard_completes_real_tutorial07_route() {
         // Script2..12 introduces the shipped CRYS/BALN/GOLD/FLNT route before
         // handing control back at "Good luck!" (Tutorial07.c4s/Script.c:
         // 36-90). From there every transition below enters through
@@ -27058,6 +27058,109 @@ mod tests {
                 .container,
             Some(clonk),
             "CRYS remains in CLNK inventory on reaching the home cave"
+        );
+
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "CRYS-carrying CLNK reaches the home blast-pocket wall",
+            160,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x <= 70)
+            },
+        );
+        app_tutorial07_return_to_hut(
+            &mut app,
+            clonk,
+            elevator_case,
+            hut,
+            "CRYS-carrying CLNK",
+            None,
+        );
+
+        // Script18 unwraps CRYS through CLNK into HUT3. Use HUT3's ordinary
+        // context Put and Sell menus; Script19 fulfills SCRG only after the
+        // selected sale removes the exact objective object
+        // (Tutorial07.c4s/Script.c:113-127).
+        advance_app_until(
+            &mut app,
+            "Tutorial07 asks the player to sell CRYS",
+            240,
+            |app| app_tutorial_message_contains(app, "Sell the crystal"),
+        );
+        advance_app_until(&mut app, "HUT3 opens context for carried CRYS", 30, |app| {
+            app.engine
+                .cursor_object_menu(owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
+        app_navigate_object_menu_to(&mut app, "Put", |item| item.caption == "Put");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A transfers CRYS through HUT3 context Put");
+        advance_app_until(
+            &mut app,
+            "context Put transfers CRYS into HUT3",
+            40,
+            |app| {
+                app.engine
+                    .object_snapshot(crystal)
+                    .is_some_and(|object| object.container == Some(hut))
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "HUT3 restores context after putting CRYS",
+            30,
+            |app| {
+                app.engine
+                    .cursor_object_menu(owner)
+                    .is_some_and(|(_, menu)| menu.identification == context_identification)
+            },
+        );
+        app_navigate_object_menu_to(&mut app, "Sell", |item| item.caption == "Sell");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A opens HUT3 Sell menu");
+        let sell_identification = serde_json::from_value(serde_json::json!({ "Int": 5 }))
+            .expect("sell identification deserializes");
+        advance_app_until(&mut app, "HUT3 opens its real Sell menu", 30, |app| {
+            app.engine
+                .cursor_object_menu(owner)
+                .is_some_and(|(_, menu)| menu.identification == sell_identification)
+        });
+        app_navigate_object_menu_to(&mut app, "CRYS", |item| item.item_id == "CRYS");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A sells the objective CRYS");
+        advance_app_until(&mut app, "selling CRYS removes the objective", 60, |app| {
+            app.engine.object_snapshot(crystal).is_none()
+        });
+        advance_app_until(&mut app, "Tutorial07 selects Tutorial08", 320, |app| {
+            app.engine.next_mission().path == r"Tutorial.c4f\Tutorial08.c4s"
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial07 fulfilled goal reaches GameOver",
+            320,
+            |app| app.snapshot.game_over && app.game_over_dialog.is_some(),
+        );
+        assert!(
+            app.snapshot
+                .round_results
+                .fulfilled_goals
+                .iter()
+                .any(|goal| goal == "SCRG"),
+            "Tutorial07 records its fulfilled SCRG goal"
+        );
+        assert_eq!(
+            app.engine.next_mission().path,
+            r"Tutorial.c4f\Tutorial08.c4s"
+        );
+        assert!(
+            app.engine.object_snapshot(crystal).is_none(),
+            "Tutorial07 CRYS is sold before SCRG fulfillment"
         );
     }
 
