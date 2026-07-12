@@ -9,6 +9,7 @@ mod action_build;
 mod action_procedure;
 mod engine_snapshots;
 mod flight_movement;
+mod get_inventory;
 mod hangle_movement;
 mod legacy_scenario_loading;
 mod manifest_definitions;

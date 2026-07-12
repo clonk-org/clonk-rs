@@ -10290,6 +10290,23 @@ enum AppendScriptSource {
     Definition(DefinitionId),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectEnterOutcome {
+    Entered,
+    RejectedEntrance,
+    RejectedCollect,
+    Removed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GetEnterOutcome {
+    Entered,
+    Retry,
+    Completed,
+    Failed,
+}
+
 pub struct Engine {
     #[doc(hidden)] pub definitions: HashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
@@ -29096,21 +29113,35 @@ impl Engine {
         object_id: ObjectId,
         target_id: ObjectId,
     ) -> Result<bool, EngineError> {
+        self.try_object_enter_with_reject_collect(object_id, target_id, false)
+            .map(|outcome| outcome == ObjectEnterOutcome::Entered)
+    }
+
+    /// The ordered core of C4Object::Enter. `query_reject_collect` is the
+    /// non-null `pfRejectCollect` pointer used by Get/Put/Collect; ordinary
+    /// C4CMD_Enter deliberately passes no pointer and therefore skips that
+    /// collector veto (C4Object.cpp:1566-1591; C4Command.cpp:600-605).
+    fn try_object_enter_with_reject_collect(
+        &mut self,
+        object_id: ObjectId,
+        target_id: ObjectId,
+        query_reject_collect: bool,
+    ) -> Result<ObjectEnterOutcome, EngineError> {
         if object_id == target_id {
-            return Ok(false);
+            return Ok(ObjectEnterOutcome::Failed);
         }
         let Some(object_index) = self.find_object_index(object_id) else {
-            return Ok(false);
+            return Ok(ObjectEnterOutcome::Failed);
         };
         let Some(target_index) = self.find_object_index(target_id) else {
-            return Ok(false);
+            return Ok(ObjectEnterOutcome::Failed);
         };
         if self.objects[object_index].destroyed
             || !self.objects[object_index].state.status.is_active()
             || self.objects[target_index].destroyed
             || !self.objects[target_index].state.status.is_active()
         {
-            return Ok(false);
+            return Ok(ObjectEnterOutcome::Failed);
         }
 
         // RejectEntrance belongs to the ENTERING object and runs before
@@ -29122,31 +29153,70 @@ impl Engine {
         ))?
         .is_some_and(|value| value.as_bool());
         if rejected {
-            return Ok(false);
+            return Ok(ObjectEnterOutcome::RejectedEntrance);
         }
 
         let Some(object_index) = self.find_object_index(object_id) else {
-            return Ok(false);
+            return Ok(ObjectEnterOutcome::Removed);
         };
         let Some(target_index) = self.find_object_index(target_id) else {
-            return Ok(false);
+            return Ok(ObjectEnterOutcome::Failed);
         };
         if self.objects[object_index].destroyed
             || !self.objects[object_index].state.status.is_active()
-            || self.objects[target_index].destroyed
+        {
+            return Ok(ObjectEnterOutcome::Removed);
+        }
+        if self.objects[target_index].destroyed
             || !self.objects[target_index].state.status.is_active()
         {
-            return Ok(false);
+            return Ok(ObjectEnterOutcome::Failed);
         }
         let mut container = self.objects[target_index].state.container;
         let mut seen = HashSet::new();
         while let Some(container_id) = container {
             if container_id == object_id || !seen.insert(container_id) {
-                return Ok(false);
+                return Ok(ObjectEnterOutcome::Failed);
             }
             container = self
                 .find_object_index(container_id)
                 .and_then(|index| self.objects[index].state.container);
+        }
+
+        if query_reject_collect {
+            // C4Object::Enter queries the COLLECTOR after RejectEntrance
+            // and cycle validation, with (entering definition, entering
+            // object), before Exit or any containment mutation
+            // (C4Object.cpp:1582-1591).
+            let definition_id = self.objects[object_index].definition_id.clone();
+            let rejected = tolerate_script_error(self.call_object_function(
+                target_index,
+                "RejectCollect",
+                vec![
+                    Value::C4Id(definition_id.as_str().to_string()),
+                    object_reference_value(object_id),
+                ],
+            ))?
+            .is_some_and(|value| value.as_bool());
+            let Some(object_index) = self.find_object_index(object_id) else {
+                return Ok(ObjectEnterOutcome::Removed);
+            };
+            let Some(target_index) = self.find_object_index(target_id) else {
+                return Ok(ObjectEnterOutcome::Failed);
+            };
+            if self.objects[object_index].destroyed
+                || !self.objects[object_index].state.status.is_active()
+            {
+                return Ok(ObjectEnterOutcome::Removed);
+            }
+            if self.objects[target_index].destroyed
+                || !self.objects[target_index].state.status.is_active()
+            {
+                return Ok(ObjectEnterOutcome::Failed);
+            }
+            if rejected {
+                return Ok(ObjectEnterOutcome::RejectedCollect);
+            }
         }
 
         // A transfer is an actual Exit first. Ejection precedes Departure;
@@ -29172,10 +29242,10 @@ impl Engine {
         }
 
         let Some(object_index) = self.find_object_index(object_id) else {
-            return Ok(false);
+            return Ok(ObjectEnterOutcome::Removed);
         };
         let Some(target_index) = self.find_object_index(target_id) else {
-            return Ok(false);
+            return Ok(ObjectEnterOutcome::Failed);
         };
         if self.objects[object_index].state.container.is_some()
             || self.objects[object_index].destroyed
@@ -29183,7 +29253,7 @@ impl Engine {
             || self.objects[target_index].destroyed
             || !self.objects[target_index].state.status.is_active()
         {
-            return Ok(false);
+            return Ok(ObjectEnterOutcome::Failed);
         }
 
         self.apply_container_change(object_id, None, Some(target_id), false)?;
@@ -29212,7 +29282,200 @@ impl Engine {
                 }
             }
         }
+        Ok(ObjectEnterOutcome::Entered)
+    }
+
+    /// ObjectComPut's synchronous transfer. Unlike ordinary C4CMD_Enter,
+    /// it supplies the RejectCollect pointer, then fires Put/Collection
+    /// only after a successful Enter (C4ObjectCom.cpp:591-622).
+    fn try_object_com_put(
+        &mut self,
+        actor_id: ObjectId,
+        target_id: ObjectId,
+        object_id: ObjectId,
+    ) -> Result<bool, EngineError> {
+        let Some(actor_index) = self.find_object_index(actor_id) else {
+            return Ok(false);
+        };
+        let Some(target_index) = self.find_object_index(target_id) else {
+            return Ok(false);
+        };
+        if !self.objects[actor_index].state.contents.contains(&object_id) {
+            return Ok(false);
+        }
+        if self.objects[actor_index].state.container != Some(target_id)
+            && self
+                .definitions
+                .get(&self.objects[target_index].definition_id)
+                .is_none_or(|definition| definition.grab_put_get() & GRAB_PUT_GET_PUT == 0)
+        {
+            return Ok(false);
+        }
+        if self.objects[target_index].state.ocf & ocf::FULL_CON == 0 {
+            return Ok(false);
+        }
+        let collection_limit = self
+            .definitions
+            .get(&self.objects[target_index].definition_id)
+            .and_then(Definition::collection_limit);
+        if collection_limit.is_some_and(|limit| {
+            self.objects[target_index].state.contents.len() >= limit as usize
+        }) {
+            return Ok(false);
+        }
+
+        if self.try_object_enter_with_reject_collect(object_id, target_id, true)?
+            != ObjectEnterOutcome::Entered
+        {
+            return Ok(false);
+        }
+        if let Some(actor_index) = self.find_object_index(actor_id) {
+            let _ = tolerate_script_error(self.call_object_function(
+                actor_index,
+                "Put",
+                Vec::new(),
+            ))?;
+        }
+        if let Some(target_index) = self.find_object_index(target_id) {
+            let _ = tolerate_script_error(self.call_object_function(
+                target_index,
+                "Collection",
+                vec![object_reference_value(object_id), Value::Bool(true)],
+            ))?;
+        }
         Ok(true)
+    }
+
+    /// C4Object::PutAwayUnusedObject, with the Tutorial04-critical direct
+    /// put into the actor's containing HUT2 and the same command fallbacks
+    /// for failed contained/outside puts (C4Object.cpp:5853-5891).
+    fn put_away_unused_object(
+        &mut self,
+        actor_id: ObjectId,
+        object_to_make_room_for: ObjectId,
+    ) -> Result<bool, EngineError> {
+        let Some(actor_index) = self.find_object_index(actor_id) else {
+            return Ok(false);
+        };
+        let custom_selector = self
+            .definitions
+            .get(&self.objects[actor_index].definition_id)
+            .is_some_and(|definition| definition.has_function("GetObject2Drop"));
+        let unused = if custom_selector {
+            let definition_id = self.objects[actor_index].definition_id.clone();
+            let selected = tolerate_script_error(self.call_object_function(
+                actor_index,
+                "GetObject2Drop",
+                vec![object_reference_value(object_to_make_room_for)],
+            ))?;
+            selected
+                .map(|value| {
+                    value_to_object_reference(
+                        definition_id.as_str(),
+                        "GetObject2Drop",
+                        "result",
+                        value,
+                    )
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            self.objects[actor_index].state.contents.last().copied()
+        };
+        let Some(unused) = unused else {
+            return Ok(false);
+        };
+
+        let (procedure, action_target, contained) = {
+            let actor = &self.objects[actor_index];
+            let procedure = self
+                .definitions
+                .get(&actor.definition_id)
+                .map(|definition| {
+                    definition
+                        .action_library()
+                        .procedure_for_action(&actor.state.action.name)
+                })
+                .unwrap_or_default();
+            (procedure, actor.state.action.target, actor.state.container)
+        };
+        if procedure == ActionProcedure::Push {
+            if let Some(target) = action_target {
+                if self.try_object_com_put(actor_id, target, unused)? {
+                    return Ok(true);
+                }
+            }
+        }
+        if let Some(container_id) = contained {
+            if self.try_object_com_put(actor_id, container_id, unused)? {
+                return Ok(true);
+            }
+            if let Some(actor_index) = self.find_object_index(actor_id) {
+                self.objects[actor_index].apply_command_operations([
+                    CommandOperation::PushFront(
+                        CommandRequest::new(CommandId::Drop)
+                            .with_target(Some(unused))
+                            .with_mode(CommandMode::Sub),
+                    ),
+                    CommandOperation::PushFront(
+                        CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Sub),
+                    ),
+                ]);
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+
+        if let Some(actor_index) = self.find_object_index(actor_id) {
+            self.objects[actor_index].apply_command_operations([CommandOperation::PushFront(
+                CommandRequest::new(CommandId::Drop)
+                    .with_target(Some(unused))
+                    .with_mode(CommandMode::Sub),
+            )]);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// C4Command::GetTryEnter's outcome-sensitive wrapper. RejectCollect
+    /// makes room and returns to the same live Get command; a successful
+    /// contained pickup fires CLNK's Get callback (C4Command.cpp:1092-1126).
+    fn try_get_object_enter(
+        &mut self,
+        actor_id: ObjectId,
+        object_id: ObjectId,
+    ) -> Result<GetEnterOutcome, EngineError> {
+        let was_contained = self
+            .find_object_index(object_id)
+            .is_some_and(|index| self.objects[index].state.container.is_some());
+        match self.try_object_enter_with_reject_collect(object_id, actor_id, true)? {
+            ObjectEnterOutcome::Entered => {
+                if self.find_object_index(object_id).is_none() {
+                    return Ok(GetEnterOutcome::Completed);
+                }
+                if was_contained {
+                    if let Some(actor_index) = self.find_object_index(actor_id) {
+                        let _ = tolerate_script_error(self.call_object_function(
+                            actor_index,
+                            "Get",
+                            vec![object_reference_value(object_id)],
+                        ))?;
+                    }
+                }
+                Ok(GetEnterOutcome::Entered)
+            }
+            ObjectEnterOutcome::RejectedCollect => {
+                if self.put_away_unused_object(actor_id, object_id)? {
+                    Ok(GetEnterOutcome::Retry)
+                } else {
+                    Ok(GetEnterOutcome::Failed)
+                }
+            }
+            ObjectEnterOutcome::Removed => Ok(GetEnterOutcome::Completed),
+            ObjectEnterOutcome::RejectedEntrance | ObjectEnterOutcome::Failed => {
+                Ok(GetEnterOutcome::Failed)
+            }
+        }
     }
 
     /// ObjectActionThrow (C4ObjectCom.cpp:120-137): resolve the physical
@@ -29355,6 +29618,18 @@ impl Engine {
                 // (C4Command.cpp:600-605).
                 let _ = self.try_object_enter(object_id, container_id)?;
             }
+            CommandEvent::GetObject {
+                actor_id,
+                object_id,
+            } => match self.try_get_object_enter(actor_id, object_id)? {
+                GetEnterOutcome::Entered | GetEnterOutcome::Retry => {}
+                GetEnterOutcome::Completed => {
+                    self.complete_command(actor_id, CommandId::Get)?;
+                }
+                GetEnterOutcome::Failed => {
+                    self.fail_command(actor_id, CommandId::Get)?;
+                }
+            },
             CommandEvent::ThrowObject {
                 actor_id,
                 object_id,

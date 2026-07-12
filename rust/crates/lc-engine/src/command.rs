@@ -1573,15 +1573,17 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
         assert_eq!(result.events.len(), 1);
 
         match &result.events[0] {
-            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+            CommandEvent::GetObject {
+                actor_id: event_actor,
+                object_id,
+            } => {
+                assert_eq!(*event_actor, actor_id);
                 assert_eq!(*object_id, target_id);
-                assert_eq!(update.container, Some(Some(actor_id)));
-                assert_eq!(update.position, Some(actor_snapshot.position));
             }
             other => panic!("unexpected event: {:?}", other),
         }
@@ -1640,11 +1642,11 @@ mod tests {
 
         let result = state.step(&ctx);
 
-        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.status, CommandStatus::Running);
         assert!(result.events.iter().any(|event| matches!(
             event,
-            CommandEvent::ApplyObjectUpdate { object_id, update }
-                if *object_id == item_id && update.container == Some(Some(actor_id))
+            CommandEvent::GetObject { actor_id: event_actor, object_id }
+                if *event_actor == actor_id && *object_id == item_id
         )));
     }
 
@@ -8240,6 +8242,13 @@ pub enum CommandEvent {
         object_id: ObjectId,
         container_id: ObjectId,
     },
+    /// C4Command::GetTryEnter must observe both Enter vetoes and may need
+    /// to put away an existing inventory object before retrying the SAME
+    /// target/count (C4Command.cpp:1092-1126).
+    GetObject {
+        actor_id: ObjectId,
+        object_id: ObjectId,
+    },
     /// ObjectComThrow -> ObjectActionThrow is one ordered operation: the
     /// action transition must succeed before Random(360) and C4Object::Exit
     /// run (C4ObjectCom.cpp:120-137).
@@ -11878,25 +11887,14 @@ impl GetState {
         update: Option<ObjectUpdate>,
     ) -> CommandStepResult {
         let update = self.ensure_stop(ctx, update);
-        let mut transfer_update = ObjectUpdate::new();
-        transfer_update.container = Some(Some(ctx.object.id));
-        transfer_update.position = Some(ctx.position);
-        transfer_update.velocity = Some(Vector2::ZERO);
-
-        let events = vec![CommandEvent::ApplyObjectUpdate {
+        // Do not decrement `remaining` here. C++ only observes a successful
+        // collection on the NEXT Get evaluation (Target->Contained == cObj,
+        // C4Command.cpp:1154-1165). A RejectCollect/PutAway retry therefore
+        // retains both Target and Tx exactly.
+        CommandStepResult::running(update).with_events(vec![CommandEvent::GetObject {
+            actor_id: ctx.object.id,
             object_id: target_id,
-            update: transfer_update,
-        }];
-
-        if self.remaining > 1 {
-            self.remaining -= 1;
-            self.target = None;
-            self.grab_requested = false;
-            self.enter_requested = false;
-            return CommandStepResult::running(update).with_events(events);
-        }
-
-        CommandStepResult::completed(update).with_events(events)
+        }])
     }
 
     fn handle_container_target(
