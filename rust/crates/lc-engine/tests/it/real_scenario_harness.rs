@@ -2,6 +2,7 @@
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{EffectVarValue, ObjectId, COM_RIGHT, COM_THROW};
+use lc_script::Value;
 
 #[test]
 fn tutorial_harness_boots_the_installed_cpp_global_script_layer() {
@@ -205,5 +206,93 @@ fn dragon_rock_objects_keep_their_multidirectional_action_rows() {
             .unwrap_or_else(|| panic!("{definition}::{action} action loads"));
         assert_eq!(graphics.directions, directions);
         assert_eq!(graphics.flip_dir, flip_dir);
+    }
+}
+
+#[test]
+fn dragon_rock_objects_restore_serialized_c4id_named_locals() {
+    let engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+
+    // GetC4VID assigns uppercase `I` to C4V_C4ID (C4Value.cpp:368-410).
+    // C4Value::CompileFunc persists the ID's signed 32-bit payload verbatim
+    // (C4Value.cpp:717-766), and C4ID converts that payload to its four
+    // little-endian text bytes (C4Id.cpp:26-52). These are IDs—not integer or
+    // object-reference locals—so definition lookup must not gate restoration.
+    for (number, definition) in [
+        (1758, "MAGE"),
+        (1781, "SCRL"),
+        (3714, "SCRL"),
+        (5064, "SCRL"),
+    ] {
+        let object = engine
+            .object_snapshot(ObjectId::new(number))
+            .unwrap_or_else(|| panic!("Dragon Rock object #{number} loads"));
+        assert_eq!(object.definition_id, definition);
+        assert!(object.status.is_active(), "object #{number} is live");
+    }
+
+    for (number, local, id) in [
+        (1758, "idLastSpell", "EH69"),
+        (1781, "idSpell", "MFBL"),
+        (3714, "idSpell", "ELX2"),
+        (5064, "idSpell", "MFRB"),
+        (4410, "idLastSpell", "_MWP"),
+        (3886, "idShield", "SHIE"),
+        (3883, "idShield", "SHIE"),
+        (3818, "idShield", "SHIE"),
+        (2541, "idShield", "SHIE"),
+        (2555, "idShield", "SHIE"),
+        (1128, "idShield", "SHIE"),
+        (1128, "ai_idFirstEncounterCB", "BAND"),
+        (1779, "idSpell", "XCRS"),
+        (1780, "idSpell", "XCRS"),
+    ] {
+        let object = engine
+            .object_snapshot(ObjectId::new(number))
+            .unwrap_or_else(|| panic!("Dragon Rock object #{number} loads"));
+        assert_eq!(
+            object.local_vars.get(local),
+            Some(&Value::C4Id(id.to_string())),
+            "object #{number} local {local}"
+        );
+    }
+
+    // C4Value arrays recurse through the same compiler and retain their
+    // declared order/size (C4Value.cpp:801-805). Cover every Dragon Rock
+    // ai_aSpells array that generated the original per-element warnings.
+    for (number, ids) in [
+        (
+            3893,
+            &[
+                "GGHG", "GZ9Z", "ABLA", "MBOT", "MBLS", "MFRB", "MFBL", "FRFS",
+                "MBRG", "EH69", "CMFG",
+            ][..],
+        ),
+        (
+            4410,
+            &["GZ9Z", "CMFG", "MFFW", "MBRG", "EH69", "EXTG", "ELX2"][..],
+        ),
+        (
+            2550,
+            &[
+                "CMFG", "MFFW", "ABLA", "MBRG", "EXTG", "MGHL", "MLGT", "ETFL",
+                "MFRB", "MDBT", "MFBL", "RUND", "MBLS", "CPAN", "CFAL", "MGBW",
+                "MICS", "ELX1", "GZ9Z",
+            ][..],
+        ),
+    ] {
+        let object = engine
+            .object_snapshot(ObjectId::new(number))
+            .unwrap_or_else(|| panic!("Dragon Rock spellcaster #{number} loads"));
+        let expected = Value::Array(
+            ids.iter()
+                .map(|id| Value::C4Id((*id).to_string()))
+                .collect(),
+        );
+        assert_eq!(
+            object.local_vars.get("ai_aSpells"),
+            Some(&expected),
+            "object #{number} spell order"
+        );
     }
 }
