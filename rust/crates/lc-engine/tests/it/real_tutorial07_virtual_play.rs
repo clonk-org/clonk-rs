@@ -55,9 +55,9 @@ fn object_menu_identification(engine: &Engine, owner: i32) -> Option<lc_script::
         .map(|(_, menu)| menu.identification.clone())
 }
 
-fn clonk_contents_count(engine: &Engine, clonk: ObjectId, definition: &str) -> usize {
-    engine.object_snapshot(clonk).map_or(0, |clonk| {
-        clonk
+fn object_contents_count(engine: &Engine, container: ObjectId, definition: &str) -> usize {
+    engine.object_snapshot(container).map_or(0, |container| {
+        container
             .contents
             .iter()
             .filter(|item| {
@@ -67,6 +67,10 @@ fn clonk_contents_count(engine: &Engine, clonk: ObjectId, definition: &str) -> u
             })
             .count()
     })
+}
+
+fn clonk_contents_count(engine: &Engine, clonk: ObjectId, definition: &str) -> usize {
+    object_contents_count(engine, clonk, definition)
 }
 
 fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
@@ -121,24 +125,25 @@ fn climb_right_out_of_blast_pocket(
     Ok(())
 }
 
-fn carry_gold_to_hut(
+fn return_to_hut(
     player: &mut VirtualPlayer<'_>,
     clonk: ObjectId,
     elevator_case: ObjectId,
     hut: ObjectId,
     owner: i32,
-    target_wealth: i32,
+    subject: &str,
+    target_wealth: Option<i32>,
 ) -> Result<(), Box<dyn Error>> {
     climb_right_out_of_blast_pocket(
         player,
         clonk,
         105,
-        "the GOLD-carrying Clonk climbs out of the blast pocket",
+        &format!("{subject} climbs out of the blast pocket"),
     )?;
     player.wait_out_double_click()?;
     player.hold_until(
         COM_DOWN,
-        "the GOLD-carrying Clonk descends beside ELEC",
+        format!("{subject} descends beside ELEC"),
         160,
         |engine| {
             engine
@@ -164,10 +169,10 @@ fn carry_gold_to_hut(
                 COM_LEFT
             }
         })
-        .expect("the Clonk and ELEC survive the GOLD return");
+        .expect("the Clonk and ELEC survive the HUT3 return");
     player.hold_until(
         align_control,
-        "the GOLD-carrying Clonk aligns with ELEC",
+        format!("{subject} aligns with ELEC"),
         80,
         |engine| {
             engine
@@ -178,15 +183,25 @@ fn carry_gold_to_hut(
                 })
         },
     )?;
-    player.tap(COM_DOWN)?;
-    player.wait_until("the GOLD-carrying Clonk grabs ELEC", 60, |engine| {
+    player.wait_until(format!("{subject} lands beside ELEC"), 80, |engine| {
+        engine
+            .object_snapshot(clonk)
+            .zip(engine.object_snapshot(elevator_case))
+            .is_some_and(|(clonk, elevator_case)| {
+                clonk.action.name == "Walk"
+                    && (clonk.position.x - elevator_case.position.x).abs() <= 5
+            })
+    })?;
+    // A fresh elevator grab is DownDouble in C++ (C4ObjectCom.cpp:573-589).
+    player.double_tap(COM_DOWN)?;
+    player.wait_until(format!("{subject} grabs ELEC"), 60, |engine| {
         engine.object_snapshot(clonk).is_some_and(|object| {
             object.action.name == "Push" && object.action.target == Some(elevator_case)
         })
     })?;
     player.hold_until(
         COM_UP,
-        format!("ELEC raises GOLD toward wealth {target_wealth}"),
+        format!("ELEC raises {subject} to the surface"),
         360,
         |engine| {
             engine
@@ -206,7 +221,7 @@ fn carry_gold_to_hut(
         let clonk_now = player
             .engine()
             .object_snapshot(clonk)
-            .expect("the GOLD-carrying Clonk survives the surface lip");
+            .expect("the returning Clonk survives the surface lip");
         if clonk_now.position.x <= 70 {
             break;
         }
@@ -224,22 +239,19 @@ fn carry_gold_to_hut(
         player.ticks(1)?;
     }
     player.release(COM_LEFT)?;
-    player.assert_milestone(
-        "the GOLD-carrying Clonk crosses the surface lip",
-        |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.x <= 70)
-        },
-    )?;
-    player.wait_until("the GOLD-carrying Clonk lands beside HUT3", 120, |engine| {
+    player.assert_milestone(format!("{subject} crosses the surface lip"), |engine| {
+        engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.position.x <= 70)
+    })?;
+    player.wait_until(format!("{subject} lands beside HUT3"), 120, |engine| {
         engine
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Walk")
     })?;
     player.hold_until(
         COM_RIGHT,
-        "the GOLD-carrying Clonk steps into HUT3's entrance",
+        format!("{subject} steps into HUT3's entrance"),
         80,
         |engine| {
             engine
@@ -248,20 +260,22 @@ fn carry_gold_to_hut(
         },
     )?;
     player.tap(COM_UP)?;
-    player.wait_until("the GOLD-carrying Clonk enters HUT3", 60, |engine| {
+    player.wait_until(format!("{subject} enters HUT3"), 60, |engine| {
         engine
             .object_snapshot(clonk)
             .is_some_and(|object| object.container == Some(hut))
     })?;
-    player.wait_until(
-        format!("HUT3 auto-sells GOLD to reach wealth {target_wealth}"),
-        80,
-        |engine| player_wealth(engine, owner) >= target_wealth,
-    )?;
+    if let Some(target_wealth) = target_wealth {
+        player.wait_until(
+            format!("HUT3 auto-sells GOLD to reach wealth {target_wealth}"),
+            80,
+            |engine| player_wealth(engine, owner) >= target_wealth,
+        )?;
+    }
     Ok(())
 }
 
-fn return_from_hut_and_collect_gold(
+fn exit_hut_and_descend_to_gold_seam(
     player: &mut VirtualPlayer<'_>,
     clonk: ObjectId,
     elevator_case: ObjectId,
@@ -363,22 +377,36 @@ fn return_from_hut_and_collect_gold(
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Walk")
     })?;
+    Ok(())
+}
+
+fn return_from_hut_and_collect_gold(
+    player: &mut VirtualPlayer<'_>,
+    clonk: ObjectId,
+    elevator_case: ObjectId,
+    hut: ObjectId,
+    owner: i32,
+) -> Result<(), Box<dyn Error>> {
+    exit_hut_and_descend_to_gold_seam(player, clonk, elevator_case, hut, owner)?;
     player.hold_until(
         COM_RIGHT,
-        "the empty Clonk takes a run-up beside the GOLD seam",
-        80,
+        "the empty Clonk sweeps the far side of the GOLD seam",
+        160,
         |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.x >= 120)
+            clonk_carries(engine, clonk, "GOLD")
+                || engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x >= 165)
         },
     )?;
-    player.hold_until(
-        COM_LEFT,
-        "the Clonk naturally collects another GOLD chunk",
-        180,
-        |engine| clonk_carries(engine, clonk, "GOLD"),
-    )?;
+    if !clonk_carries(player.engine(), clonk, "GOLD") {
+        player.hold_until(
+            COM_LEFT,
+            "the Clonk naturally collects another GOLD chunk",
+            180,
+            |engine| clonk_carries(engine, clonk, "GOLD"),
+        )?;
+    }
     Ok(())
 }
 
@@ -434,8 +462,9 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         .expect("Tutorial07 HUT3 contains FLNT");
     player.menu_navigate_to_index(flint_index)?;
     player.tap(COM_SPECIAL2)?;
-    player.wait_until("the Clonk takes both Tutorial07 flints", 120, |engine| {
-        clonk_contents_count(engine, clonk, "FLNT") == 2
+    player.wait_until("C++ Get keeps one Tutorial07 flint", 120, |engine| {
+        clonk_contents_count(engine, clonk, "FLNT") == 1
+            && object_contents_count(engine, hut, "FLNT") == 1
     })?;
 
     player.menu_close()?;
@@ -499,38 +528,12 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         },
     )?;
     // Script8 points to the GOLD seam at (72,315), and the tutorial gives
-    // exactly two real FLNT objects for opening it (Script.c:61-78). Throwing
-    // uses the ordinary inventory command; the explosion must excavate and
-    // materialize GOLD through the engine's normal landscape path.
+    // two real FLNT objects for opening it (Tutorial07.c4s/Script.c:61-78).
+    // Vanilla CLNK rejects a second nonspecial object, so the two blasts need
+    // two ordinary HUT3/elevator trips (Clonk.c4d/Script.c:738-763).
     player.tap(COM_THROW)?;
     player.wait_until(
         "the first FLNT leaves the Clonk's inventory",
-        60,
-        |engine| clonk_contents_count(engine, clonk, "FLNT") == 1,
-    )?;
-    player.hold_until(
-        COM_RIGHT,
-        "the Clonk retreats from the first FLNT blast",
-        100,
-        |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.x >= 120)
-        },
-    )?;
-    player.hold_until(
-        COM_LEFT,
-        "the Clonk approaches the seam for the second FLNT",
-        120,
-        |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.x <= 92)
-        },
-    )?;
-    player.tap(COM_THROW)?;
-    player.wait_until(
-        "the second FLNT leaves the Clonk's inventory",
         60,
         |engine| clonk_contents_count(engine, clonk, "FLNT") == 0,
     )?;
@@ -538,9 +541,124 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         &mut player,
         clonk,
         120,
+        "the Clonk retreats from the first FLNT blast",
+    )?;
+    return_to_hut(
+        &mut player,
+        clonk,
+        elevator_case,
+        hut,
+        owner,
+        "the Clonk after the first FLNT blast",
+        None,
+    )?;
+    player.wait_until("HUT3 opens context for the second FLNT", 30, |engine| {
+        object_menu_identification(engine, owner) == Some(lc_script::Value::Int(14))
+    })?;
+    player.menu_navigate_to_caption("Contents")?;
+    player.menu_enter()?;
+    player.wait_until("HUT3 reopens its real Contents menu", 30, |engine| {
+        object_menu_identification(engine, owner) == Some(lc_script::Value::Int(18))
+    })?;
+    let second_flint_index = player
+        .engine()
+        .cursor_object_menu(owner)
+        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "FLNT"))
+        .expect("Tutorial07 HUT3 retains its second FLNT");
+    player.menu_navigate_to_index(second_flint_index)?;
+    player.menu_enter()?;
+    player.wait_until(
+        "the Clonk takes the second Tutorial07 flint",
+        120,
+        |engine| {
+            clonk_contents_count(engine, clonk, "FLNT") == 1
+                && object_contents_count(engine, hut, "FLNT") == 0
+        },
+    )?;
+    player.menu_close()?;
+    exit_hut_and_descend_to_gold_seam(&mut player, clonk, elevator_case, hut, owner)?;
+    player.hold_until(
+        COM_LEFT,
+        "the second FLNT reaches Tutorial07's marked GOLD seam",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.position.x <= 92)
+        },
+    )?;
+    let attached = player
+        .engine()
+        .object_snapshot(clonk)
+        .filter(|object| object.action.name == "Hangle" || object.action.name.starts_with("Scale"))
+        .map(|object| (object.action.name, object.direction));
+    if let Some((action, direction)) = attached {
+        let let_go = if action.starts_with("Scale") {
+            if direction == Direction::Left {
+                COM_RIGHT
+            } else {
+                COM_LEFT
+            }
+        } else {
+            COM_DOWN
+        };
+        player.tap(let_go)?;
+        player.wait_until(
+            "the Clonk lands before the second FLNT throw",
+            120,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        )?;
+    }
+    player.hold_until(
+        COM_LEFT,
+        "the Clonk faces the GOLD seam before the second throw",
+        30,
+        |engine| {
+            engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Walk" && object.direction == Direction::Left
+            })
+        },
+    )?;
+    player.wait_out_double_click()?;
+    let second_flint = player
+        .engine()
+        .object_snapshot(clonk)
+        .and_then(|clonk| {
+            clonk.contents.into_iter().find(|item| {
+                player
+                    .engine()
+                    .object_snapshot(*item)
+                    .is_some_and(|item| item.definition_id == "FLNT")
+            })
+        })
+        .expect("the second Tutorial07 FLNT is ready to throw");
+    player.tap(COM_THROW)?;
+    player.wait_until(
+        "the second FLNT leaves the Clonk's inventory",
+        60,
+        |engine| {
+            engine
+                .object_snapshot(second_flint)
+                .is_none_or(|flint| flint.container != Some(clonk))
+        },
+    )?;
+    player.hold_until(
+        COM_RIGHT,
+        "the second Tutorial07 FLNT detonates",
+        180,
+        |engine| engine.object_snapshot(second_flint).is_none(),
+    )?;
+    climb_right_out_of_blast_pocket(
+        &mut player,
+        clonk,
+        120,
         "the Clonk retreats from the second FLNT blast",
     )?;
-    player.assert_milestone("the real FLNT blast exposes GOLD objects", |engine| {
+    player.assert_milestone("the two real FLNT blasts expose GOLD objects", |engine| {
         engine
             .snapshot()
             .objects
@@ -554,22 +672,25 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         160,
         |engine| clonk_carries(engine, clonk, "GOLD"),
     )?;
-    carry_gold_to_hut(&mut player, clonk, elevator_case, hut, owner, 5)?;
+    return_to_hut(
+        &mut player,
+        clonk,
+        elevator_case,
+        hut,
+        owner,
+        "the GOLD-carrying Clonk",
+        Some(5),
+    )?;
     for target_wealth in [10, 15, 20] {
-        return_from_hut_and_collect_gold(
+        return_from_hut_and_collect_gold(&mut player, clonk, elevator_case, hut, owner)?;
+        return_to_hut(
             &mut player,
             clonk,
             elevator_case,
             hut,
             owner,
-        )?;
-        carry_gold_to_hut(
-            &mut player,
-            clonk,
-            elevator_case,
-            hut,
-            owner,
-            target_wealth,
+            "the GOLD-carrying Clonk",
+            Some(target_wealth),
         )?;
     }
 
@@ -1140,7 +1261,20 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         105,
         "the crystal-carrying Clonk climbs into the elevator shaft",
     )?;
-    player.tap(COM_DOWN)?;
+    player.wait_until(
+        "the crystal-carrying Clonk lands beside the home elevator",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .zip(engine.object_snapshot(elevator_case))
+                .is_some_and(|(clonk, elevator_case)| {
+                    clonk.action.name == "Walk"
+                        && (clonk.position.x - elevator_case.position.x).abs() <= 5
+                })
+        },
+    )?;
+    player.double_tap(COM_DOWN)?;
     player.wait_until(
         "the crystal-carrying Clonk grabs the home elevator",
         80,
