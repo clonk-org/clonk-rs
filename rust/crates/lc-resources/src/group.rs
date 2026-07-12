@@ -126,7 +126,7 @@ impl Group {
             GroupKind::Directory(root) => root.join(relative.as_ref()).exists(),
             GroupKind::Packed(packed) => {
                 let relative = normalize_path(relative.as_ref());
-                packed.index.contains_key(&relative)
+                packed.index.contains_key(&case_fold_group_path(&relative))
             }
         }
     }
@@ -232,11 +232,13 @@ impl PackedGroup {
         }
 
         let data_offset = reader.stream_position()?;
-        let index = entries
-            .iter()
-            .enumerate()
-            .map(|(idx, entry)| (entry.relative_path.clone(), idx))
-            .collect();
+        let mut index = HashMap::new();
+        for (idx, entry) in entries.iter().enumerate() {
+            // C4Group::GetEntry returns the first case-insensitive match.
+            index
+                .entry(case_fold_group_path(&entry.relative_path))
+                .or_insert(idx);
+        }
 
         Ok(Self {
             path,
@@ -251,7 +253,7 @@ impl PackedGroup {
     fn read_file(&self, relative: &Path) -> Result<Vec<u8>, GroupError> {
         let entry_index = self
             .index
-            .get(relative)
+            .get(&case_fold_group_path(relative))
             .copied()
             .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
         let entry = &self.entries[entry_index];
@@ -316,7 +318,7 @@ impl PackedGroup {
     fn open_child(&self, relative: &Path) -> Result<Group, GroupError> {
         let entry_index = self
             .index
-            .get(relative)
+            .get(&case_fold_group_path(relative))
             .copied()
             .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
         let entry = &self.entries[entry_index];
@@ -471,6 +473,10 @@ struct ParsedHeader {
 
 fn normalize_path(path: &Path) -> PathBuf {
     path.components().collect()
+}
+
+fn case_fold_group_path(path: &Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().to_ascii_lowercase())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -644,5 +650,17 @@ mod tests {
         assert_eq!(data, b"world");
         assert!(group.exists("hello.txt"));
         assert_eq!(group.maker(), Some(""));
+    }
+
+    #[test]
+    fn packed_group_entry_lookup_is_ascii_case_insensitive() {
+        // C4Group::GetEntry searches entry names with WildcardMatch
+        // (src/C4Group.cpp:896-904), whose character comparison ignores case
+        // (src/StdFile.cpp:337-367).
+        let group = Group::from_memory(PathBuf::from("test.c4group"), packed_group_image())
+            .expect("valid packed group");
+
+        assert!(group.exists("HELLO.TXT"));
+        assert_eq!(group.read_file("Hello.Txt").unwrap(), b"world");
     }
 }
