@@ -229,4 +229,8 @@ fn sha_resource_join_player_matches_cpp_control_codec() {
             0xee, 0xff, 0x10, 0x20, 0x30, 0x40,
         ])
     );
+    assert_eq!(
+        encode_control_payload(&frame).expect("Rust re-encodes the C++ SHA resource control"),
+        cpp_bytes
+    );
 }

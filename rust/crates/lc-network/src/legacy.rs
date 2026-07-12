@@ -58,8 +58,6 @@ pub enum LegacyControlError {
 pub enum LegacyEncodeError {
     #[error("control packet variant is not supported yet")]
     UnsupportedPacket,
-    #[error("resource-backed JoinPlayer controls with SHA data are not supported yet")]
-    UnsupportedResourceSha,
     #[error("embedded JoinPlayer data length {0} exceeds uint32")]
     PlayerDataTooLarge(usize),
     #[error("resource-backed PlayerInfo entries are not supported yet")]
@@ -731,12 +729,7 @@ fn encode_join_player(
             u32::try_from(player_data.len())
                 .map_err(|_| LegacyEncodeError::PlayerDataTooLarge(player_data.len()))?,
         ),
-        JoinPlayerSource::Resource(resource) => {
-            if resource.file_sha.is_some() {
-                return Err(LegacyEncodeError::UnsupportedResourceSha);
-            }
-            PreparedSource::Resource(resource)
-        }
+        JoinPlayerSource::Resource(resource) => PreparedSource::Resource(resource),
     };
 
     buffer.push(CID_JOIN_PLR);
@@ -769,7 +762,18 @@ fn encode_network_resource_core(buffer: &mut Vec<u8>, resource: &NetworkResource
         append_raw_u32(buffer, resource.chunk_size);
     }
     append_raw_u32(buffer, resource.contents_crc);
-    append_uint32(buffer, 0);
+    if let Some(file_sha) = resource.file_sha {
+        append_uint32(buffer, 1);
+        buffer.extend_from_slice(&file_sha);
+        for byte in file_sha {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            buffer.push(HEX[usize::from(byte >> 4)]);
+            buffer.push(HEX[usize::from(byte & 0x0f)]);
+            buffer.push(0);
+        }
+    } else {
+        append_uint32(buffer, 0);
+    }
     append_network_filename(buffer, &resource.filename);
     append_network_filename(buffer, &resource.author);
 }
