@@ -427,7 +427,7 @@ fn parse_entry(bytes: &[u8]) -> Result<PackedEntry, GroupError> {
 
 fn c_string(buf: &[u8]) -> String {
     let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..nul]).trim().to_string()
+    String::from_utf8_lossy(&buf[..nul]).into_owned()
 }
 
 fn sanitize_group_entry_filename(name: String) -> String {
@@ -736,6 +736,24 @@ mod tests {
             Path::new("empty")
         );
         assert_eq!(group.read_file("empty").unwrap(), b"data");
+    }
+
+    #[test]
+    fn packed_group_preserves_entry_filename_whitespace() {
+        // OpenRealGrpFile copies the validated C4GroupEntryCore::FileName
+        // unchanged into AddEntry (src/C4Group.cpp:784-793). VAL_Filename
+        // does not trim spaces; trimming is exclusive to VAL_Name* modes
+        // (src/C4InputValidation.cpp:59-95, 97-127).
+        let image = packed_group_image_with_entry(" report .txt ", false, b"data");
+        let group =
+            Group::from_memory(PathBuf::from("test.c4group"), image).expect("valid packed group");
+
+        assert_eq!(
+            group.entries().unwrap()[0].relative_path,
+            Path::new(" report .txt ")
+        );
+        assert_eq!(group.read_file(" report .txt ").unwrap(), b"data");
+        assert!(!group.exists("report .txt"));
     }
 
     #[test]
