@@ -1,4 +1,7 @@
-use crate::{player_file::PlayerFile, JoinPlayerConfig, JoinPlayerControlData};
+use crate::{
+    player_file::PlayerFile, JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource,
+    ScenarioError,
+};
 use crate::{ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS};
 
 /// `C4PlayerInfoList`'s synchronized per-client player-info registry.
@@ -65,6 +68,42 @@ pub enum PrepareJoinPlayerError {
     UnsupportedScriptPlayer { info_id: i32 },
     #[error("NoScenarioInit player {info_id} is not supported yet")]
     UnsupportedNoScenarioInit { info_id: i32 },
+}
+
+#[derive(Debug)]
+pub enum RemoteEmbeddedPlayerData {
+    PlayerFile(PlayerFile),
+    ScriptWithoutFile,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveRemoteEmbeddedPlayerDataError {
+    #[error("player {info_id} join is resource-backed, not embedded")]
+    ResourceBacked { info_id: i32 },
+    #[error("failed to load embedded player data for player {info_id}: {source}")]
+    PlayerDataLoad {
+        info_id: i32,
+        #[source]
+        source: ScenarioError,
+    },
+}
+
+pub fn resolve_remote_embedded_player_data(
+    join: &JoinPlayerControlData,
+    info: &ControlPlayerInfoEntry,
+) -> Result<RemoteEmbeddedPlayerData, ResolveRemoteEmbeddedPlayerDataError> {
+    let JoinPlayerSource::Embedded(data) = &join.source else {
+        return Err(ResolveRemoteEmbeddedPlayerDataError::ResourceBacked { info_id: info.id });
+    };
+    let label = std::path::PathBuf::from(join.filename.to_string_lossy().into_owned());
+    PlayerFile::load_from_bytes(label, data.clone())
+        .map(RemoteEmbeddedPlayerData::PlayerFile)
+        .map_err(
+            |source| ResolveRemoteEmbeddedPlayerDataError::PlayerDataLoad {
+                info_id: info.id,
+                source,
+            },
+        )
 }
 
 pub fn prepare_join_player_config(
@@ -236,5 +275,35 @@ mod tests {
                 startup_player_count: 2,
             }
         );
+    }
+
+    #[test]
+    fn remote_embedded_join_uses_player_data_not_the_transmitted_path() {
+        // Remote non-resource joins save PlrData and load that temporary .c4p;
+        // the transmitted Filename is not opened (src/C4Control.cpp:731-744).
+        let join = JoinPlayerControlData {
+            filename: crate::LegacyCString::from_bytes(
+                b"/definitely/missing/RemotePlayer.c4p".to_vec(),
+            )
+            .expect("valid legacy filename"),
+            info_id: 7,
+            source: crate::JoinPlayerSource::Embedded(
+                include_bytes!("../tests/fixtures/embedded_player.c4p").to_vec(),
+            ),
+            ..Default::default()
+        };
+        let info = ControlPlayerInfoEntry {
+            id: 7,
+            ..Default::default()
+        };
+
+        let RemoteEmbeddedPlayerData::PlayerFile(file) =
+            resolve_remote_embedded_player_data(&join, &info)
+                .expect("embedded player data resolves")
+        else {
+            panic!("user player data must resolve to a player file");
+        };
+
+        assert_eq!((file.name.as_str(), file.score), ("Embedded Tyler", 42));
     }
 }
