@@ -9277,6 +9277,62 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn command_restore_denumerates_missing_target_and_target2() {
+        // C++ oracle: C4Command persists Target and Target2 as enumerated
+        // object pointers, then C4Command::DenumeratePointers resolves both
+        // after every object has loaded (src/C4Command.cpp:2393-2421;
+        // src/C4Object.cpp:2914-2929). Missing objects therefore restore as
+        // null command fields rather than retaining their saved object number.
+        let script = r#"
+        func Arm(object target) {
+            return SetCommand(this(), "MoveTo", target, 0, 0, target);
+        }
+        "#;
+        let register = |engine: &mut Engine| {
+            engine
+                .register_definition(
+                    Definition::from_script("HOLD", "Holder", script)
+                        .expect("holder compiles"),
+                )
+                .expect("holder registers");
+            engine
+                .register_definition(simple_definition("TARG"))
+                .expect("target registers");
+        };
+
+        let mut engine = Engine::with_seed(7);
+        register(&mut engine);
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD"))
+            .expect("holder spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let holder_idx = engine.find_object_index(holder).expect("holder exists");
+        assert_eq!(
+            engine
+                .call_object_function(holder_idx, "Arm", vec![Value::Object(target.as_u64())])
+                .expect("command arms"),
+            Value::Bool(true)
+        );
+
+        let mut state = engine.capture_state();
+        state.objects.retain(|object| object.snapshot.id != target);
+
+        let mut restored = Engine::with_seed(0);
+        register(&mut restored);
+        restored.restore_state(&state).expect("state restores");
+        let commands = restored
+            .object_snapshot(holder)
+            .expect("holder restores")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].target, None);
+        assert_eq!(commands[0].target2, None);
+    }
+
+    #[test]
     fn legacy_state_without_script_globals_restores_defaults() {
         // Saves from before script-global persistence have no corresponding
         // C4AulScriptEngine section. Treat that omission as empty `Globals`
