@@ -397,6 +397,22 @@ impl NetworkTickGate {
         self.ready.remove(&expected_tick)
     }
 
+    fn take_exact_if_ready<F>(
+        &mut self,
+        expected_tick: Tick,
+        pre_execute: F,
+    ) -> Option<Vec<NetworkControl>>
+    where
+        F: FnOnce(&[NetworkControl]) -> bool,
+    {
+        self.ready.retain(|queued_tick, _| *queued_tick >= expected_tick);
+        let controls = self.ready.get(&expected_tick)?;
+        if !pre_execute(controls) {
+            return None;
+        }
+        self.ready.remove(&expected_tick)
+    }
+
     fn clear(&mut self) {
         self.ready.clear();
     }
@@ -10386,6 +10402,7 @@ impl GameApp {
             .network
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        let locally_controlled = local_client_id == Some(join.at_client) && !info.is_script_player();
         let player_file = if local_client_id == Some(join.by_client) {
             let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
             match PlayerFile::load_from_path(&path) {
@@ -10419,8 +10436,18 @@ impl GameApp {
                 return;
             }
         };
-        if let Err(error) = self.engine.join_player(config) {
-            tracing::warn!(info_id = join.info_id, %error, "player join failed");
+        match self.engine.join_player(config) {
+            Ok(joined) if locally_controlled => {
+                let mut local_players = self.engine.snapshot().hud.local_players;
+                if !local_players.contains(&joined.number) {
+                    local_players.push(joined.number);
+                    self.engine.set_local_players(local_players);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(info_id = join.info_id, %error, "player join failed");
+            }
         }
     }
 
@@ -20698,6 +20725,27 @@ mod tests {
     }
 
     #[test]
+    fn pending_preflight_retains_the_exact_network_tick() {
+        // C4Control::PreExecute inspects the complete list before execution;
+        // a pending packet leaves iControlReady unchanged so the same tick is
+        // retried intact (src/C4Control.cpp:73-90;
+        // src/C4GameControlNetwork.cpp:687-719).
+        let tick = 7;
+        let controls = vec![NetworkControl::JoinPlayer(
+            lc_engine::JoinPlayerControlData::default(),
+        )];
+        let mut gate = NetworkTickGate::default();
+        gate.queue(tick, tick, controls.clone());
+
+        assert!(gate.take_exact_if_ready(tick, |_| false).is_none());
+        assert_eq!(
+            gate.take_exact_if_ready(tick, |_| true),
+            Some(controls),
+            "the retained tick executes once its preflight becomes ready"
+        );
+    }
+
+    #[test]
     fn network_tick_waits_for_exact_ready_batch_and_ignores_duplicate() {
         // C4Game::Execute returns before simulation when control preparation
         // is not ready (src/C4Game.cpp:786-787), then executes the retrieved
@@ -20863,6 +20911,12 @@ mod tests {
             .expect("embedded player joined before the simulation tick");
         assert_eq!(joined.name, "Network Tyler");
         assert_eq!((joined.score, joined.total_playing_time), (42, 99));
+        // AtClient, independently of the remote ByClient source selection,
+        // makes this user player local (src/C4Player.cpp:1871-1877).
+        assert!(
+            app.snapshot.hud.local_players.contains(&joined.id),
+            "a user player targeted at the local client is locally controlled"
+        );
     }
 
     #[test]
