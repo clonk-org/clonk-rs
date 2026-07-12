@@ -21786,6 +21786,169 @@ mod tests {
             Some(serde_json::json!({ "Object": constructor.as_u64() })),
             "Script83 must target Tutorial05's constructor CLNK"
         );
+
+        // Script84-85 cycles to constructor_clnk, waits for that same WOOD to
+        // enter its collection, then points at the real ELEV construction site
+        // (content/Tutorial.c4f/Tutorial05.c4s/Script.c:230-245). C++ wraps
+        // CursorRight through the ordered crew list and collects carryables
+        // only when they cross the selected crew's collection rectangle
+        // (src/C4Player.cpp:1261-1275; src/C4GameObjects.cpp:140-196).
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E wraps selection to the constructor CLNK");
+        assert_eq!(
+            app.engine.crew_cursor(app.local_owner),
+            Some(constructor),
+            "third physical CursorRight must wrap to Tutorial05's constructor CLNK"
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 asks the constructor CLNK to collect the delivered material",
+            300,
+            |app| app_tutorial_message_contains(app, "Collect the material you just flung up"),
+        );
+        advance_app_until(
+            &mut app,
+            "twice-flung WOOD settles on the cabin hill",
+            300,
+            |app| {
+                app.engine
+                    .object_snapshot(wood)
+                    .is_some_and(|object| object.container.is_some() || !object.mobile)
+            },
+        );
+        if app
+            .engine
+            .object_snapshot(wood)
+            .is_some_and(|object| object.container != Some(constructor))
+        {
+            let constructor_x = app
+                .engine
+                .object_snapshot(constructor)
+                .expect("constructor CLNK survives selection")
+                .position
+                .x;
+            let delivered_x = app
+                .engine
+                .object_snapshot(wood)
+                .expect("delivered WOOD survives landing")
+                .position
+                .x;
+            let collect_key = if delivered_x < constructor_x {
+                VirtualKeyCode::Z
+            } else {
+                VirtualKeyCode::C
+            };
+            hold_app_key_until(
+                &mut app,
+                collect_key,
+                "constructor CLNK naturally collects the exact twice-flung WOOD",
+                240,
+                |app| {
+                    app.engine
+                        .object_snapshot(wood)
+                        .is_some_and(|object| object.container == Some(constructor))
+                },
+            );
+        }
+        assert_eq!(
+            app.engine
+                .object_snapshot(wood)
+                .expect("constructor-collected WOOD survives")
+                .container,
+            Some(constructor),
+            "physical Z/C movement must collect the original twice-flung WOOD"
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 Script85 points at the elevator construction site",
+            300,
+            |app| app_tutorial_message_contains(app, "continue work on the elevator"),
+        );
+        assert_eq!(
+            app.snapshot
+                .script_globals
+                .named
+                .get("arrow_target")
+                .and_then(|value| serde_json::to_value(value).ok()),
+            Some(serde_json::json!({ "Object": elevator.as_u64() })),
+            "Script85 must target Tutorial05's real ELEV construction site"
+        );
+
+        // The tutorial's "down" is a double physical X. C++ turns the second
+        // press inside C4DoubleClick into COM_Down_D, finds OCF_Construct at
+        // the crew position, and queues Build on that exact object
+        // (src/C4Player.cpp:1522-1536; src/C4ObjectCom.cpp:573-589).
+        let elevator_x = app
+            .engine
+            .object_snapshot(elevator)
+            .expect("Tutorial05 elevator survives Script85")
+            .position
+            .x;
+        let constructor_x = app
+            .engine
+            .object_snapshot(constructor)
+            .expect("Tutorial05 constructor survives Script85")
+            .position
+            .x;
+        if (constructor_x - elevator_x).abs() > 4 {
+            let approach_key = if elevator_x < constructor_x {
+                VirtualKeyCode::Z
+            } else {
+                VirtualKeyCode::C
+            };
+            hold_app_key_until(
+                &mut app,
+                approach_key,
+                "WOOD-carrying constructor reaches the elevator construction site",
+                240,
+                |app| {
+                    app.engine
+                        .object_snapshot(constructor)
+                        .zip(app.engine.object_snapshot(elevator))
+                        .is_some_and(|(clonk, elevator)| {
+                            (clonk.position.x - elevator.position.x).abs() <= 4
+                        })
+                },
+            );
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes DownSingle");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X emits DownDouble at ELEV");
+        }
+        // ELEV needs WOOD=4 and METL=2. C++ consumes the carried missing
+        // component before checking every component's ratio at the current
+        // construction percentage, so this first WOOD raises the ledger to
+        // 4/1 but METL=1/2 keeps the 80% site stalled for Script110's second
+        // relay (Elevator.c4d/DefCore.txt:16; src/C4Object.cpp:1682-1744;
+        // content/Tutorial.c4f/Tutorial05.c4s/Script.c:248-253).
+        advance_app_until(
+            &mut app,
+            "constructor contributes the exact twice-flung WOOD to ELEV",
+            120,
+            |app| app.engine.object_snapshot(wood).is_none(),
+        );
+        let first_delivery = app
+            .engine
+            .object_snapshot(elevator)
+            .expect("Tutorial05 ELEV survives its first delivered component");
+        assert_eq!(first_delivery.components.get("WOOD"), Some(&4));
+        assert_eq!(first_delivery.components.get("METL"), Some(&1));
+        assert_eq!(
+            first_delivery.construction, 80_000,
+            "ELEV needs its second METL before construction can pass 80%"
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 advances beyond its first elevator delivery",
+            300,
+            |app| app_tutorial_message_contains(app, "transport the remaining material"),
+        );
     }
 
     #[test]
