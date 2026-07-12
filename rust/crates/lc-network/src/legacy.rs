@@ -222,7 +222,7 @@ fn decode_control_list(
 }
 
 fn decode_join_player(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
-    let filename = reader.read_c_string()?;
+    let filename = reader.read_network_filename()?;
     let at_client = reader.read_int32()?;
     let info_id = reader.read_int32()?;
     let by_resource = reader.read_u8()? != 0;
@@ -334,6 +334,22 @@ impl<'a> Reader<'a> {
         LegacyCString::from_bytes(bytes).ok_or(LegacyControlError::UnexpectedEof)
     }
 
+    #[cfg(windows)]
+    fn read_network_filename(&mut self) -> Result<LegacyCString, LegacyControlError> {
+        self.read_c_string()
+    }
+
+    #[cfg(not(windows))]
+    fn read_network_filename(&mut self) -> Result<LegacyCString, LegacyControlError> {
+        let filename = self.read_c_string()?;
+        let native = filename
+            .as_bytes()
+            .iter()
+            .map(|byte| if *byte == b'\\' { b'/' } else { *byte })
+            .collect();
+        LegacyCString::from_bytes(native).ok_or(LegacyControlError::UnexpectedEof)
+    }
+
     fn read_uint32(&mut self) -> Result<u32, LegacyControlError> {
         let mut value = 0u32;
         for shift in (0..32).step_by(7).take(MAX_VARINT_BYTES) {
@@ -428,6 +444,19 @@ fn append_raw_i32(buffer: &mut Vec<u8>, value: i32) {
     buffer.extend(value.to_ne_bytes());
 }
 
+fn append_network_filename(buffer: &mut Vec<u8>, filename: &LegacyCString) {
+    #[cfg(windows)]
+    buffer.extend_from_slice(filename.as_bytes());
+    #[cfg(not(windows))]
+    buffer.extend(
+        filename
+            .as_bytes()
+            .iter()
+            .map(|byte| if *byte == b'/' { b'\\' } else { *byte }),
+    );
+    buffer.push(0);
+}
+
 fn encode_join_player(
     buffer: &mut Vec<u8>,
     data: &JoinPlayerControlData,
@@ -439,8 +468,7 @@ fn encode_join_player(
         .map_err(|_| LegacyEncodeError::PlayerDataTooLarge(player_data.len()))?;
 
     buffer.push(CID_JOIN_PLR);
-    buffer.extend_from_slice(data.filename.as_bytes());
-    buffer.push(0);
+    append_network_filename(buffer, &data.filename);
     append_int32(buffer, data.at_client);
     append_int32(buffer, data.info_id);
     buffer.push(0);

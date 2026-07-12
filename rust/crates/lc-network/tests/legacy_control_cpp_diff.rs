@@ -43,7 +43,7 @@ fn embedded_join_player_matches_cpp_control_codec() {
     let [EngineControlPacket::JoinPlayer(join)] = frame.controls.as_slice() else {
         panic!("expected one JoinPlayer control, got {:?}", frame.controls);
     };
-    assert_eq!(join.filename.as_bytes(), b"P\x80");
+    assert_eq!(join.filename.as_bytes(), b"Players/P\x80");
     assert_eq!((join.at_client, join.info_id, join.by_client), (-1, 64, 4));
     assert_eq!(
         join.source,
