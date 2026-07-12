@@ -19,7 +19,9 @@ use crate::{
     draw_image_bilinear, draw_image_strip, fill_rect, ClonkFontSet, HudGraphics, ImageData,
     InventoryOverlay,
 };
-use lc_graphics::{clonk_font::TextAlign, Color, Rect as SurfaceRect, Surface, TextFont};
+use lc_graphics::{
+    clonk_font::TextAlign, Color, GammaRamp, Rect as SurfaceRect, Surface, TextFont,
+};
 
 /// `C4UpperBoardHeight` (src/C4Constants.h:77): the screen strip reserved
 /// above the viewports in `C4GraphicsSystem::RecalculateViewports`
@@ -86,6 +88,21 @@ impl HudFont<'_> {
         color: Color,
         align: TextAlign,
     ) {
+        self.draw_with_gamma(surface, x, y, text, color, align, None);
+    }
+
+    /// Structural seam for the in-game `CStdDDraw::TextOut` gamma path.
+    /// The option remains unused until the HUD fragment behavioral slice.
+    pub(crate) fn draw_with_gamma(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Color,
+        align: TextAlign,
+        _gamma: Option<&GammaRamp>,
+    ) {
         match self {
             HudFont::Clonk(font) => font.draw(
                 surface,
@@ -116,6 +133,44 @@ impl HudFont<'_> {
     }
 }
 
+/// Structural seams for the three HUD fragment primitives. They deliberately
+/// keep forwarding `None` until the behavioral HUD slice, so threading a live
+/// ramp cannot change pixels in this commit.
+fn fill_hud_rect(
+    surface: &mut Surface,
+    rect: &lc_gui::Rect,
+    color: Color,
+    _gamma: Option<&GammaRamp>,
+) {
+    fill_rect(surface, rect, color);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_hud_image_strip(
+    surface: &mut Surface,
+    dest_x: i32,
+    dest_y: i32,
+    image: &ImageData,
+    src_x: u32,
+    src_y: u32,
+    src_w: u32,
+    src_h: u32,
+    _gamma: Option<&GammaRamp>,
+) {
+    draw_image_strip(
+        surface, dest_x, dest_y, image, src_x, src_y, src_w, src_h, None,
+    );
+}
+
+fn draw_hud_image_bilinear(
+    surface: &mut Surface,
+    rect: &lc_gui::Rect,
+    image: &ImageData,
+    _gamma: Option<&GammaRamp>,
+) {
+    draw_image_bilinear(surface, rect, image, None);
+}
+
 /// `{:02}:{:02}:{:02}` of `Game.Time` (C4UpperBoard::Execute,
 /// src/C4UpperBoard.cpp:41).
 pub fn format_game_time(seconds: u64) -> String {
@@ -129,7 +184,15 @@ pub fn format_game_time(seconds: u64) -> String {
 
 /// `CStdDDraw::BlitSurfaceTile`: unscaled tiling of `image` across the
 /// target rect (upper board / message board backgrounds).
-fn blit_tile(surface: &mut Surface, image: &ImageData, x: i32, y: i32, width: i32, height: i32) {
+fn blit_tile(
+    surface: &mut Surface,
+    image: &ImageData,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    gamma: Option<&GammaRamp>,
+) {
     let (tile_w, tile_h) = (image.width() as i32, image.height() as i32);
     if tile_w <= 0 || tile_h <= 0 {
         return;
@@ -140,7 +203,7 @@ fn blit_tile(surface: &mut Surface, image: &ImageData, x: i32, y: i32, width: i3
         let mut tx = 0;
         while tx < width {
             let src_w = tile_w.min(width - tx);
-            draw_image_strip(
+            draw_hud_image_strip(
                 surface,
                 x + tx,
                 y + ty,
@@ -149,7 +212,7 @@ fn blit_tile(surface: &mut Surface, image: &ImageData, x: i32, y: i32, width: i3
                 0,
                 src_w as u32,
                 src_h as u32,
-                None,
+                gamma,
             );
             tx += tile_w;
         }
@@ -180,9 +243,14 @@ fn aspect_fit(image_w: i32, image_h: i32, rect: SurfaceRect) -> SurfaceRect {
     out
 }
 
-fn draw_image_aspect(surface: &mut Surface, image: &ImageData, rect: SurfaceRect) {
+fn draw_image_aspect(
+    surface: &mut Surface,
+    image: &ImageData,
+    rect: SurfaceRect,
+    gamma: Option<&GammaRamp>,
+) {
     let target = aspect_fit(image.width() as i32, image.height() as i32, rect);
-    draw_image_bilinear(
+    draw_hud_image_bilinear(
         surface,
         &lc_gui::Rect::new(
             target.x as f32,
@@ -191,7 +259,7 @@ fn draw_image_aspect(surface: &mut Surface, image: &ImageData, rect: SurfaceRect
             target.height as f32,
         ),
         image,
-        None,
+        gamma,
     );
 }
 
@@ -267,6 +335,24 @@ pub fn draw_upper_board(
     scenario_title: &str,
     game_time_seconds: u64,
 ) {
+    draw_upper_board_with_gamma(
+        surface,
+        font,
+        hud,
+        scenario_title,
+        game_time_seconds,
+        None,
+    );
+}
+
+pub(crate) fn draw_upper_board_with_gamma(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    hud: &HudGraphics,
+    scenario_title: &str,
+    game_time_seconds: u64,
+    gamma: Option<&GammaRamp>,
+) {
     let width = surface.width() as i32;
     // Output.Hgt = max(C4UpperBoardHeight, fctUpperBoard.Hgt)
     // (C4UpperBoard::Init, src/C4UpperBoard.cpp:117-120).
@@ -277,11 +363,12 @@ pub fn draw_upper_board(
         .unwrap_or(UPPER_BOARD_HEIGHT);
 
     match hud.upper_board.as_ref() {
-        Some(board) => blit_tile(surface, board, 0, 0, width, board_height),
-        None => fill_rect(
+        Some(board) => blit_tile(surface, board, 0, 0, width, board_height, gamma),
+        None => fill_hud_rect(
             surface,
             &lc_gui::Rect::new(0.0, 0.0, width as f32, board_height as f32),
             Color::opaque(66, 44, 24),
+            gamma,
         ),
     }
 
@@ -294,11 +381,11 @@ pub fn draw_upper_board(
             let dst_w = (logo_w * zoom) as i32;
             let dst_h = (logo_h * zoom) as i32;
             let dst_x = (width as f32 / 2.0 - (logo_w / 2.0) * zoom) as i32;
-            draw_image_bilinear(
+            draw_hud_image_bilinear(
                 surface,
                 &lc_gui::Rect::new(dst_x as f32, 0.0, dst_w as f32, dst_h as f32),
                 logo,
-                None,
+                gamma,
             );
         }
     }
@@ -308,21 +395,23 @@ pub fn draw_upper_board(
     let text_y = UPPER_BOARD_HEIGHT / 2 - font.line_height() / 2;
     let time_text = format_game_time(game_time_seconds);
     let time_width = font.text_width(&time_text);
-    font.draw(
+    font.draw_with_gamma(
         surface,
         width - time_width - 10,
         text_y,
         &time_text,
         MESSAGE_COLOR,
         TextAlign::Left,
+        gamma,
     );
-    font.draw(
+    font.draw_with_gamma(
         surface,
         10,
         text_y,
         scenario_title,
         MESSAGE_COLOR,
         TextAlign::Left,
+        gamma,
     );
 }
 
@@ -335,17 +424,19 @@ fn draw_value(
     icon: Option<&ImageData>,
     text: &str,
     cgo: SurfaceRect,
+    gamma: Option<&GammaRamp>,
 ) {
     if let Some(icon) = icon {
-        draw_image_aspect(surface, icon, cgo);
+        draw_image_aspect(surface, icon, cgo, gamma);
     }
-    font.draw(
+    font.draw_with_gamma(
         surface,
         cgo.x + cgo.width as i32 - 1,
         cgo.y + cgo.height as i32 - 1,
         text,
         MESSAGE_COLOR,
         TextAlign::Right,
+        gamma,
     );
 }
 
@@ -364,13 +455,47 @@ pub fn draw_player_fixed_items(
     crew_count: i32,
     owner_color: Color,
 ) {
+    draw_player_fixed_items_with_gamma(
+        surface,
+        font,
+        hud,
+        viewport,
+        wealth,
+        score,
+        select_count,
+        crew_count,
+        owner_color,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_player_fixed_items_with_gamma(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    wealth: i32,
+    score: i32,
+    select_count: i32,
+    crew_count: i32,
+    owner_color: Color,
+    gamma: Option<&GammaRamp>,
+) {
     let (wdt, hgt) = (SYMBOL_SIZE, SYMBOL_SIZE / 2);
     let right = viewport.x + viewport.width as i32;
     let top = viewport.y + SYMBOL_BORDER;
 
     // Wealth (src/C4Viewport.cpp:1287-1296).
     let cgo = SurfaceRect::new(right - wdt - SYMBOL_BORDER, top, wdt as u32, hgt as u32);
-    draw_value(surface, font, hud.wealth.as_ref(), &wealth.to_string(), cgo);
+    draw_value(
+        surface,
+        font,
+        hud.wealth.as_ref(),
+        &wealth.to_string(),
+        cgo,
+        gamma,
+    );
 
     // Value gain / score (src/C4Viewport.cpp:1299-1309).
     let cgo = SurfaceRect::new(
@@ -379,7 +504,14 @@ pub fn draw_player_fixed_items(
         wdt as u32,
         hgt as u32,
     );
-    draw_value(surface, font, hud.score.as_ref(), &score.to_string(), cgo);
+    draw_value(
+        surface,
+        font,
+        hud.score.as_ref(),
+        &score.to_string(),
+        cgo,
+        gamma,
+    );
 
     // Crew (src/C4Viewport.cpp:1312-1321): fctCrewClr colored by the
     // player color, "SelectCount/ActiveCrewCount".
@@ -399,6 +531,7 @@ pub fn draw_player_fixed_items(
         crew_icon.as_ref(),
         &format!("{select_count}/{crew_count}"),
         cgo,
+        gamma,
     );
 }
 
@@ -414,6 +547,31 @@ pub fn draw_cursor_info(
     rank: i32,
     portrait: Option<&ImageData>,
     rank_symbols: Option<&ImageData>,
+) {
+    draw_cursor_info_with_gamma(
+        surface,
+        font,
+        hud,
+        viewport,
+        name,
+        rank,
+        portrait,
+        rank_symbols,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_cursor_info_with_gamma(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    name: &str,
+    rank: i32,
+    portrait: Option<&ImageData>,
+    rank_symbols: Option<&ImageData>,
+    gamma: Option<&GammaRamp>,
 ) {
     // ccgo = (border, border, 3*C4SymbolSize, C4SymbolSize)
     // (src/C4Viewport.cpp:904).
@@ -433,7 +591,7 @@ pub fn draw_cursor_info(
             (4 * SYMBOL_SIZE / 3 + 10) as u32,
             (SYMBOL_SIZE + 10) as u32,
         );
-        draw_image_aspect(surface, portrait, rect);
+        draw_image_aspect(surface, portrait, rect, gamma);
         ix += 4 * SYMBOL_SIZE / 3;
     }
 
@@ -446,7 +604,7 @@ pub fn draw_cursor_info(
         if cell > 0 && symbols.width() >= cell {
             let count = (symbols.width() / cell).max(1) as i32;
             let base_rank = rank.max(0) % count;
-            draw_image_strip(
+            draw_hud_image_strip(
                 surface,
                 cgo.x + ix,
                 cgo.y,
@@ -455,7 +613,7 @@ pub fn draw_cursor_info(
                 0,
                 cell,
                 cell,
-                None,
+                gamma,
             );
             ix += cell as i32;
         }
@@ -463,7 +621,15 @@ pub fn draw_cursor_info(
 
     // Name (src/C4ObjectInfo.cpp:353-370) — DEFAULT_MESSAGE_COLOR, left.
     if !name.is_empty() {
-        font.draw(surface, cgo.x + ix, cgo.y, name, MESSAGE_COLOR, TextAlign::Left);
+        font.draw_with_gamma(
+            surface,
+            cgo.x + ix,
+            cgo.y,
+            name,
+            MESSAGE_COLOR,
+            TextAlign::Left,
+            gamma,
+        );
     }
 }
 
@@ -477,6 +643,16 @@ pub fn draw_inventory(
     viewport: SurfaceRect,
     inventory: &[InventoryOverlay],
 ) {
+    draw_inventory_with_gamma(surface, font, viewport, inventory, None);
+}
+
+pub(crate) fn draw_inventory_with_gamma(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    viewport: SurfaceRect,
+    inventory: &[InventoryOverlay],
+    gamma: Option<&GammaRamp>,
+) {
     let origin_x = viewport.x + SYMBOL_BORDER;
     let origin_y = viewport.y + viewport.height as i32 - SYMBOL_BORDER - SYMBOL_SIZE;
     for (section, item) in inventory.iter().enumerate() {
@@ -487,18 +663,19 @@ pub fn draw_inventory(
             SYMBOL_SIZE as u32,
         );
         if let Some(picture) = item.picture.as_ref() {
-            draw_image_aspect(surface, picture, cell);
+            draw_image_aspect(surface, picture, cell, gamma);
         }
         // DrawIDList writes "{count}x" at the section's bottom-right for
         // every stack except a single item (C4ObjectList.cpp:343-368).
         if item.count != 1 {
-            font.draw(
+            font.draw_with_gamma(
                 surface,
                 cell.x + cell.width as i32 - 1,
                 cell.y + cell.height as i32 - 1 - font.line_height(),
                 &format!("{}x", item.count),
                 MESSAGE_COLOR,
                 TextAlign::Right,
+                gamma,
             );
         }
     }
@@ -579,7 +756,13 @@ fn com_control_index(com: u8) -> (i32, bool) {
 
 /// Nearest-neighbour scale of an `image` subregion into `dest` — the
 /// unfiltered C4Facet blit the command cells use.
-fn draw_scaled_region(surface: &mut Surface, image: &ImageData, src: SurfaceRect, dest: SurfaceRect) {
+fn draw_scaled_region(
+    surface: &mut Surface,
+    image: &ImageData,
+    src: SurfaceRect,
+    dest: SurfaceRect,
+    _gamma: Option<&GammaRamp>,
+) {
     if src.width == 0 || src.height == 0 || dest.width == 0 || dest.height == 0 {
         return;
     }
@@ -620,6 +803,7 @@ fn draw_scaled_region_aspect(
     image: &ImageData,
     src: SurfaceRect,
     dest: SurfaceRect,
+    gamma: Option<&GammaRamp>,
 ) {
     if src.width == 0 || src.height == 0 {
         return;
@@ -633,13 +817,18 @@ fn draw_scaled_region_aspect(
         w,
         h,
     );
-    draw_scaled_region(surface, image, src, fitted);
+    draw_scaled_region(surface, image, src, fitted, gamma);
 }
 
 /// The whole image aspect-fit into `dest`.
-fn draw_image_aspect_fit(surface: &mut Surface, image: &ImageData, dest: SurfaceRect) {
+fn draw_image_aspect_fit(
+    surface: &mut Surface,
+    image: &ImageData,
+    dest: SurfaceRect,
+    gamma: Option<&GammaRamp>,
+) {
     let src = SurfaceRect::new(0, 0, image.width(), image.height());
-    draw_scaled_region_aspect(surface, image, src, dest);
+    draw_scaled_region_aspect(surface, image, src, dest, gamma);
 }
 
 /// `C4Facet::GetFraction` (src/C4Facet.cpp:459-474) over a square cell.
@@ -686,25 +875,34 @@ fn draw_command_key_cell(
     com: u8,
     key_label: &str,
     show_command_keys: bool,
+    gamma: Option<&GammaRamp>,
 ) {
     if let Some(control) = hud.control.as_ref() {
-        draw_scaled_region(surface, control, SurfaceRect::new(0, 100, 64, 64), cell);
+        draw_scaled_region(
+            surface,
+            control,
+            SurfaceRect::new(0, 100, 64, 64),
+            cell,
+            gamma,
+        );
         let (control_index, double) = com_control_index(com);
         draw_scaled_region(
             surface,
             control,
             SurfaceRect::new(32 * control_index, 36 + 32 * i32::from(double), 32, 32),
             cell,
+            gamma,
         );
     }
     if show_command_keys && !key_label.is_empty() {
-        font.draw(
+        font.draw_with_gamma(
             surface,
             cell.x + cell.width as i32 / 2,
             cell.y + cell.height as i32 - font.line_height() - 2,
             key_label,
             MESSAGE_COLOR,
             TextAlign::Center,
+            gamma,
         );
     }
 }
@@ -717,34 +915,50 @@ pub fn draw_command_image_cell(
     cell: SurfaceRect,
     image: &CommandImage,
 ) {
+    draw_command_image_cell_with_gamma(surface, hud, cell, image, None);
+}
+
+pub(crate) fn draw_command_image_cell_with_gamma(
+    surface: &mut Surface,
+    hud: &HudGraphics,
+    cell: SurfaceRect,
+    image: &CommandImage,
+    gamma: Option<&GammaRamp>,
+) {
     match image {
         CommandImage::Picture(picture) => {
             if let Some(picture) = picture {
-                draw_image_aspect_fit(surface, picture, cell);
+                draw_image_aspect_fit(surface, picture, cell, gamma);
             }
         }
         CommandImage::Composite { picture, icon } => {
             if let Some(picture) = picture {
                 let frac = get_fraction(cell, 85, 85, true, false, false);
-                draw_image_aspect_fit(surface, picture, frac);
+                draw_image_aspect_fit(surface, picture, frac, gamma);
             }
             let frac = get_fraction(cell, 85, 85, false, true, false);
             match icon {
                 CommandOverlayIcon::Build => {
                     if let Some(build) = hud.build.as_ref() {
-                        draw_image_aspect_fit(surface, build, frac);
+                        draw_image_aspect_fit(surface, build, frac, gamma);
                     }
                 }
                 CommandOverlayIcon::Hand(phase) => {
                     if let Some(hand) = hud.hand.as_ref() {
-                        draw_scaled_region_aspect(surface, hand, sheet_cell(hand, *phase), frac);
+                        draw_scaled_region_aspect(
+                            surface,
+                            hand,
+                            sheet_cell(hand, *phase),
+                            frac,
+                            gamma,
+                        );
                     }
                 }
             }
         }
         CommandImage::Exit => {
             if let Some(exit) = hud.exit.as_ref() {
-                draw_image_aspect_fit(surface, exit, cell);
+                draw_image_aspect_fit(surface, exit, cell, gamma);
             }
         }
         CommandImage::BuyMenu { owner_color } | CommandImage::SellMenu { owner_color } => {
@@ -753,10 +967,20 @@ pub fn draw_command_image_cell(
             // phase 0 buy / 1 sell at (70,70,Right,Center).
             if let Some(flag) = hud.flag.as_ref() {
                 let colored = colorize_by_owner(flag, *owner_color);
-                draw_image_aspect_fit(surface, &colored, get_fraction(cell, 75, 75, false, false, false));
+                draw_image_aspect_fit(
+                    surface,
+                    &colored,
+                    get_fraction(cell, 75, 75, false, false, false),
+                    gamma,
+                );
             }
             if let Some(wealth) = hud.wealth.as_ref() {
-                draw_image_aspect_fit(surface, wealth, get_fraction(cell, 100, 50, false, true, false));
+                draw_image_aspect_fit(
+                    surface,
+                    wealth,
+                    get_fraction(cell, 100, 50, false, true, false),
+                    gamma,
+                );
             }
             if let Some(arrow) = hud.arrow.as_ref() {
                 let phase = i32::from(matches!(image, CommandImage::SellMenu { .. }));
@@ -765,6 +989,7 @@ pub fn draw_command_image_cell(
                     arrow,
                     sheet_cell(arrow, phase),
                     get_fraction(cell, 70, 70, true, false, true),
+                    gamma,
                 );
             }
         }
@@ -774,6 +999,7 @@ pub fn draw_command_image_cell(
                     surface,
                     picture,
                     get_fraction(cell, 85, 85, false, true, false),
+                    gamma,
                 );
             }
             if let Some(control) = hud.control.as_ref() {
@@ -782,6 +1008,7 @@ pub fn draw_command_image_cell(
                     control,
                     SurfaceRect::new(128, 132, 32, 32),
                     get_fraction(cell, 85, 85, true, false, false),
+                    gamma,
                 );
             }
         }
@@ -800,6 +1027,27 @@ pub fn draw_commands(
     viewport: SurfaceRect,
     icons: &[CommandIcon],
     show_command_keys: bool,
+) {
+    draw_commands_with_gamma(
+        surface,
+        key_font,
+        hud,
+        viewport,
+        icons,
+        show_command_keys,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_commands_with_gamma(
+    surface: &mut Surface,
+    key_font: &HudFont<'_>,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    icons: &[CommandIcon],
+    show_command_keys: bool,
+    gamma: Option<&GammaRamp>,
 ) {
     // `if (cgo.Hgt > C4SymbolSize)` (src/C4Viewport.cpp:950).
     if viewport.height as i32 <= SYMBOL_SIZE {
@@ -847,7 +1095,7 @@ pub fn draw_commands(
             )
         };
 
-        draw_command_image_cell(surface, hud, image_cell, &icon.image);
+        draw_command_image_cell_with_gamma(surface, hud, image_cell, &icon.image, gamma);
         draw_command_key_cell(
             surface,
             key_font,
@@ -856,6 +1104,7 @@ pub fn draw_commands(
             icon.com,
             &icon.key_label,
             show_command_keys,
+            gamma,
         );
     }
 }
@@ -878,6 +1127,16 @@ pub fn draw_energy_bar(
     viewport: SurfaceRect,
     energy_fraction: f32,
 ) {
+    draw_energy_bar_with_gamma(surface, hud, viewport, energy_fraction, None);
+}
+
+pub(crate) fn draw_energy_bar_with_gamma(
+    surface: &mut Surface,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    energy_fraction: f32,
+    gamma: Option<&GammaRamp>,
+) {
     draw_bar(
         surface,
         hud,
@@ -888,6 +1147,7 @@ pub fn draw_energy_bar(
             let fraction = energy_fraction.clamp(0.0, 1.0);
             height - (fraction * height as f32).round() as i32
         },
+        gamma,
     );
 }
 
@@ -903,6 +1163,20 @@ pub fn draw_level_bar(
     level: i32,
     range: i32,
 ) {
+    draw_level_bar_with_gamma(surface, hud, viewport, kind, slot, level, range, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_level_bar_with_gamma(
+    surface: &mut Surface,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    kind: HudBarKind,
+    slot: u32,
+    level: i32,
+    range: i32,
+    gamma: Option<&GammaRamp>,
+) {
     draw_bar(surface, hud, viewport, kind, slot, |height| {
         let bounded = if range > 0 {
             level.clamp(0, range)
@@ -910,7 +1184,7 @@ pub fn draw_level_bar(
             0
         };
         height - (i64::from(bounded) * i64::from(height) / i64::from(range.max(1))) as i32
-    });
+    }, gamma);
 }
 
 fn draw_bar(
@@ -920,6 +1194,7 @@ fn draw_bar(
     kind: HudBarKind,
     slot: u32,
     y_bar_for_height: impl FnOnce(i32) -> i32,
+    gamma: Option<&GammaRamp>,
 ) {
     let Some(bars) = hud.energy_bars.as_ref() else {
         return;
@@ -956,7 +1231,7 @@ fn draw_bar(
             (1, row % cell_h_i)
         };
         let column = kind as u32 * 2 + u32::from(row < y_bar);
-        draw_image_strip(
+        draw_hud_image_strip(
             surface,
             x,
             y + row,
@@ -965,7 +1240,7 @@ fn draw_bar(
             vidx as u32 * cell_h + dy as u32,
             cell_w,
             1,
-            None,
+            gamma,
         );
     }
 }
@@ -980,13 +1255,34 @@ pub fn draw_player_startup(
     player_name: &str,
     player_color: Color,
 ) {
+    draw_player_startup_with_gamma(
+        surface,
+        font,
+        hud,
+        viewport,
+        player_name,
+        player_color,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_player_startup_with_gamma(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    player_name: &str,
+    player_color: Color,
+    gamma: Option<&GammaRamp>,
+) {
     let (cell_w, cell_h) = KEYBOARD_CELL;
     let mut name_height_off = 0;
     if let Some(control) = hud.control.as_ref() {
         if control.width() >= cell_w && control.height() >= cell_h {
             // fctKeyboard phase 0 = keyboard set 1
             // (src/C4Viewport.cpp:1461-1466).
-            draw_image_strip(
+            draw_hud_image_strip(
                 surface,
                 viewport.x + (viewport.width as i32 - cell_w as i32) / 2,
                 viewport.y + viewport.height as i32 * 2 / 3 + DRAW_MESSAGE_OFFSET,
@@ -995,19 +1291,20 @@ pub fn draw_player_startup(
                 0,
                 cell_w,
                 cell_h,
-                None,
+                gamma,
             );
             name_height_off = cell_h as i32;
         }
     }
     // Name in ColorDw | 0xff000000, centered (src/C4Viewport.cpp:1471-1475).
-    font.draw(
+    font.draw_with_gamma(
         surface,
         viewport.x + viewport.width as i32 / 2,
         viewport.y + viewport.height as i32 * 2 / 3 + name_height_off + DRAW_MESSAGE_OFFSET,
         player_name,
         Color::opaque(player_color.r, player_color.g, player_color.b),
         TextAlign::Center,
+        gamma,
     );
 }
 
@@ -1025,6 +1322,35 @@ pub fn draw_player_controls(
     last_com: u8,
     key_labels: &[String],
     frame: u64,
+) {
+    draw_player_controls_with_gamma(
+        surface,
+        regular_font,
+        tiny_font,
+        hud,
+        viewport,
+        show_control,
+        show_control_position,
+        last_com,
+        key_labels,
+        frame,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_player_controls_with_gamma(
+    surface: &mut Surface,
+    regular_font: &HudFont<'_>,
+    tiny_font: &HudFont<'_>,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    show_control: i32,
+    show_control_position: i32,
+    last_com: u8,
+    key_labels: &[String],
+    frame: u64,
+    gamma: Option<&GammaRamp>,
 ) {
     if show_control == 0 {
         return;
@@ -1084,12 +1410,14 @@ pub fn draw_player_controls(
                 control_sheet,
                 SurfaceRect::new(64 * pressed, 100, 64, 64),
                 cell,
+                gamma,
             );
             draw_scaled_region_aspect(
                 surface,
                 control_sheet,
                 SurfaceRect::new(32 * control, 36, 32, 32),
                 cell,
+                gamma,
             );
         }
         if show_text {
@@ -1099,13 +1427,14 @@ pub fn draw_player_controls(
                 } else {
                     tiny_font
                 };
-                font.draw(
+                font.draw_with_gamma(
                     surface,
                     cell.x + cell.width as i32 / 2,
                     cell.y + cell.height as i32 - font.line_height() - 2,
                     label,
                     MESSAGE_COLOR,
                     TextAlign::Center,
+                    gamma,
                 );
             }
         }
@@ -1121,22 +1450,41 @@ pub fn draw_message_board(
     hud: &HudGraphics,
     line: Option<&str>,
 ) {
+    draw_message_board_with_gamma(surface, font, hud, line, None);
+}
+
+pub(crate) fn draw_message_board_with_gamma(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    hud: &HudGraphics,
+    line: Option<&str>,
+    gamma: Option<&GammaRamp>,
+) {
     let height = font.line_height();
     let width = surface.width() as i32;
     let y = surface.height() as i32 - height;
     match hud.background.as_ref() {
-        Some(background) => blit_tile(surface, background, 0, y, width, height),
-        None => fill_rect(
+        Some(background) => blit_tile(surface, background, 0, y, width, height, gamma),
+        None => fill_hud_rect(
             surface,
             &lc_gui::Rect::new(0.0, y as f32, width as f32, height as f32),
             Color::opaque(0, 0, 0),
+            gamma,
         ),
     }
     if let Some(line) = line.filter(|line| !line.is_empty()) {
         // iMsgY = cgo.Y + (iMsg + iLines-1)*iLineHgt + Fader with the
         // current message at iMsg = -1, iLines = 2, Fader = 0
         // (src/C4MessageBoard.cpp:271-303).
-        font.draw(surface, 0, y, line, MESSAGE_COLOR, TextAlign::Left);
+        font.draw_with_gamma(
+            surface,
+            0,
+            y,
+            line,
+            MESSAGE_COLOR,
+            TextAlign::Left,
+            gamma,
+        );
     }
 }
 
@@ -1763,5 +2111,51 @@ mod tests {
             target.get_pixel(50, (64 - strip_height - 1) as u32),
             Some(Color::opaque(0, 0, 0))
         );
+    }
+
+    #[test]
+    fn hud_gamma_leaf_seams_are_structural_until_fragment_encoding_lands() {
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x102030, 0x405060, 0x708090,
+        ]);
+        let render = |gamma: Option<&lc_graphics::GammaRamp>| {
+            let mut target = surface(32, 24);
+            let image = solid_image(2, 2, [64, 128, 192, 128]);
+            let font = bitmap_font();
+            let font = HudFont::Fallback(&font);
+
+            fill_hud_rect(
+                &mut target,
+                &lc_gui::Rect::new(0.0, 0.0, 4.0, 4.0),
+                Color::new(32, 64, 96, 128),
+                gamma,
+            );
+            draw_hud_image_strip(&mut target, 5, 0, &image, 0, 0, 2, 2, gamma);
+            draw_hud_image_bilinear(
+                &mut target,
+                &lc_gui::Rect::new(8.0, 0.0, 4.0, 4.0),
+                &image,
+                gamma,
+            );
+            draw_scaled_region(
+                &mut target,
+                &image,
+                SurfaceRect::new(0, 0, 2, 2),
+                SurfaceRect::new(13, 0, 4, 4),
+                gamma,
+            );
+            font.draw_with_gamma(
+                &mut target,
+                0,
+                8,
+                "HUD",
+                Color::opaque(64, 128, 192),
+                TextAlign::Left,
+                gamma,
+            );
+            target.pixels().to_vec()
+        };
+
+        assert_eq!(render(Some(&gamma)), render(None));
     }
 }

@@ -924,7 +924,7 @@ impl GraphicsSystem {
     ) -> Vec<EngineSurfaceSnapshot> {
         self.active_viewports.clear();
         if let Some(background) = self.hud_graphics.background.as_ref() {
-            tile_image_on_surface(&mut self.surface, background, 0, 0);
+            tile_image_on_surface(&mut self.surface, background, 0, 0, gamma);
         } else {
             self.surface.fill(Color::opaque(8, 12, 24));
         }
@@ -941,7 +941,7 @@ impl GraphicsSystem {
         let used_keys: HashSet<_> = used_camera_keys.into_iter().collect();
         self.camera_states.retain(|key, _| used_keys.contains(key));
 
-        self.draw_hud(snapshot.frame);
+        self.draw_hud(snapshot.frame, gamma);
 
         self.collect_sprite_atlas(snapshot)
     }
@@ -1011,7 +1011,7 @@ impl GraphicsSystem {
         let format = self.surface.format();
         let mut viewport_surface = Surface::new(rect.width, rect.height, format);
         if let Some(background) = self.hud_graphics.background.as_ref() {
-            tile_image_on_surface(&mut viewport_surface, background, rect.x, rect.y);
+            tile_image_on_surface(&mut viewport_surface, background, rect.x, rect.y, gamma);
         } else {
             viewport_surface.fill(Color::opaque(0, 0, 0));
         }
@@ -3395,13 +3395,14 @@ impl GraphicsSystem {
             let text_x = screen_x.round() as i32;
             let mut text_y = mark_top.round() as i32 - 2 - text_height;
             for line in &lines {
-                font.draw(
+                font.draw_with_gamma(
                     &mut self.surface,
                     text_x,
                     text_y,
                     line,
                     Color::opaque(0xff, 0x00, 0x00),
                     lc_graphics::clonk_font::TextAlign::Center,
+                    gamma,
                 );
                 text_y += line_height;
             }
@@ -3443,7 +3444,7 @@ impl GraphicsSystem {
     /// The fullscreen overlay in the C4GraphicsSystem::Execute order:
     /// per-viewport player HUD, then message board, then upper board
     /// (src/C4GraphicsSystem.cpp:352-365).
-    fn draw_hud(&mut self, frame: u64) {
+    fn draw_hud(&mut self, frame: u64, gamma: Option<&lc_graphics::GammaRamp>) {
         // Per-viewport player info (C4Viewport::DrawOverlay,
         // src/C4Viewport.cpp:835-848).
         let viewports = self.active_viewports.clone();
@@ -3468,7 +3469,7 @@ impl GraphicsSystem {
                 .or_else(|| player.crew.iter().find(|crew| crew.is_focus))
                 .or_else(|| player.crew.first());
             if let Some(crew) = cursor_crew {
-                hud::draw_cursor_info(
+                hud::draw_cursor_info_with_gamma(
                     &mut self.surface,
                     &font,
                     &self.hud_graphics,
@@ -3477,17 +3478,25 @@ impl GraphicsSystem {
                     crew.rank,
                     crew.portrait.as_ref(),
                     crew.rank_symbols.as_ref(),
+                    gamma,
                 );
-                hud::draw_inventory(&mut self.surface, &font, rect, &crew.inventory);
-                hud::draw_energy_bar(
+                hud::draw_inventory_with_gamma(
+                    &mut self.surface,
+                    &font,
+                    rect,
+                    &crew.inventory,
+                    gamma,
+                );
+                hud::draw_energy_bar_with_gamma(
                     &mut self.surface,
                     &self.hud_graphics,
                     rect,
                     crew.energy_fraction,
+                    gamma,
                 );
                 let mut bar_slot = 1;
                 if crew.magic_energy != 0 {
-                    hud::draw_level_bar(
+                    hud::draw_level_bar_with_gamma(
                         &mut self.surface,
                         &self.hud_graphics,
                         rect,
@@ -3495,11 +3504,12 @@ impl GraphicsSystem {
                         bar_slot,
                         crew.magic_energy / MAGIC_PHYSICAL_FACTOR,
                         crew.magic_capacity / MAGIC_PHYSICAL_FACTOR,
+                        gamma,
                     );
                     bar_slot += 1;
                 }
                 if crew.breath != 0 && crew.breath < crew.breath_capacity {
-                    hud::draw_level_bar(
+                    hud::draw_level_bar_with_gamma(
                         &mut self.surface,
                         &self.hud_graphics,
                         rect,
@@ -3507,6 +3517,7 @@ impl GraphicsSystem {
                         bar_slot,
                         crew.breath,
                         crew.breath_capacity,
+                        gamma,
                     );
                 }
             }
@@ -3520,17 +3531,18 @@ impl GraphicsSystem {
                     .as_deref()
                     .map(|set| hud::HudFont::Clonk(&set.mini))
                     .unwrap_or(hud::HudFont::Fallback(self.font.as_ref()));
-                hud::draw_commands(
+                hud::draw_commands_with_gamma(
                     &mut self.surface,
                     &tiny,
                     &self.hud_graphics,
                     rect,
                     &player.commands,
                     self.show_command_keys,
+                    gamma,
                 );
             }
 
-            hud::draw_player_fixed_items(
+            hud::draw_player_fixed_items_with_gamma(
                 &mut self.surface,
                 &font,
                 &self.hud_graphics,
@@ -3540,6 +3552,7 @@ impl GraphicsSystem {
                 player.select_count,
                 player.crew.len() as i32,
                 player.owner_color,
+                gamma,
             );
 
             let tiny = self
@@ -3547,7 +3560,7 @@ impl GraphicsSystem {
                 .as_deref()
                 .map(|set| hud::HudFont::Clonk(&set.mini))
                 .unwrap_or(hud::HudFont::Fallback(self.font.as_ref()));
-            hud::draw_player_controls(
+            hud::draw_player_controls_with_gamma(
                 &mut self.surface,
                 &font,
                 &tiny,
@@ -3558,34 +3571,38 @@ impl GraphicsSystem {
                 player.last_com,
                 &player.control_key_labels,
                 frame,
+                gamma,
             );
 
             if player.show_startup {
-                hud::draw_player_startup(
+                hud::draw_player_startup_with_gamma(
                     &mut self.surface,
                     &font,
                     &self.hud_graphics,
                     rect,
                     &player.name,
                     player.owner_color,
+                    gamma,
                 );
             }
         }
 
         let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
         if self.hud_chrome_active() {
-            hud::draw_message_board(
+            hud::draw_message_board_with_gamma(
                 &mut self.surface,
                 &font,
                 &self.hud_graphics,
                 self.message_board_line.as_deref(),
+                gamma,
             );
-            hud::draw_upper_board(
+            hud::draw_upper_board_with_gamma(
                 &mut self.surface,
                 &font,
                 &self.hud_graphics,
                 &self.scenario_label_text,
                 self.game_time_seconds,
+                gamma,
             );
         }
 
@@ -3597,21 +3614,23 @@ impl GraphicsSystem {
             } else {
                 2
             };
-            font.draw(
+            font.draw_with_gamma(
                 &mut self.surface,
                 hud::SYMBOL_BORDER,
                 base_y,
                 &frame_text,
                 Color::opaque(255, 255, 255),
                 lc_graphics::clonk_font::TextAlign::Left,
+                gamma,
             );
-            font.draw(
+            font.draw_with_gamma(
                 &mut self.surface,
                 hud::SYMBOL_BORDER,
                 base_y + line_height,
                 &status_text,
                 Color::opaque(255, 255, 255),
                 lc_graphics::clonk_font::TextAlign::Left,
+                gamma,
             );
         }
     }
@@ -3894,7 +3913,13 @@ impl GraphicsSystem {
     }
 }
 
-fn tile_image_on_surface(surface: &mut Surface, image: &ImageData, origin_x: i32, origin_y: i32) {
+fn tile_image_on_surface(
+    surface: &mut Surface,
+    image: &ImageData,
+    origin_x: i32,
+    origin_y: i32,
+    _gamma: Option<&lc_graphics::GammaRamp>,
+) {
     let image_width = image.width() as usize;
     let image_height = image.height() as usize;
     let surface_width = surface.width() as usize;
@@ -5333,6 +5358,25 @@ mod tests {
 
         assert_eq!(internal_path.surface().pixels(), public_path.surface().pixels());
         assert_eq!(internal_atlas, public_atlas);
+    }
+
+    #[test]
+    fn tiled_viewport_background_gamma_seam_is_structural() {
+        // The back-buffer and small-world border use fctBackground through
+        // BlitSurfaceTile (C4GraphicsSystem.cpp:290; C4Viewport.cpp:1033-1036).
+        // This structural slice only carries the ramp to that terminal leaf.
+        let image = ImageData::new(1, 1, vec![64, 128, 192, 128]);
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x102030, 0x405060, 0x708090,
+        ]);
+        let render = |gamma: Option<&lc_graphics::GammaRamp>| {
+            let mut surface = Surface::new(3, 2, PixelFormat::Rgba8888);
+            surface.fill(Color::opaque(7, 11, 13));
+            tile_image_on_surface(&mut surface, &image, 0, 0, gamma);
+            surface.pixels().to_vec()
+        };
+
+        assert_eq!(render(Some(&gamma)), render(None));
     }
 
     #[test]
