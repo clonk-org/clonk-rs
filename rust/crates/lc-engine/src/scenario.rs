@@ -22,7 +22,7 @@ use serde::Deserialize;
 use crate::landscape::{LandscapeRasterState, RuntimeTexMapMaterial, RuntimeTexMapState};
 use crate::{
     action::ActionSpec, ActionState, CommandDirection, Definition, DefinitionActionFacet,
-    DefinitionActionGraphics, DefinitionComponent, DefinitionId, DefinitionPicture,
+    DefinitionActionGraphics, DefinitionComponent, DefinitionId, DefinitionPicture, DefinitionRect,
     DefinitionPictureImage, DefinitionSpriteImage, Direction, EffectState, Engine, EngineError,
     EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings,
     RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, TeamInfo, Vector2, FULL_CON,
@@ -4128,6 +4128,12 @@ struct LegacyObjectRecord {
     layer: Option<u64>,
     /// C4Object::BlitMode (`BlitMode=`, C4Object.cpp:2817).
     blit_mode: Option<u32>,
+    /// C4Object::Color (`Color=`/`ColorDw=`, C4Object.cpp:2786-2787).
+    color: Option<u32>,
+    /// C4Object::ColorMod (`ColorMod=`, C4Object.cpp:2816).
+    color_modulation: Option<u32>,
+    /// C4Object::PictureRect (`Picture=`, C4Object.cpp:2798).
+    picture_rect: Option<DefinitionRect>,
     /// Saved C4Object::Component (`Component=WOOD=5;METL=1;`).
     components: Option<HashMap<DefinitionId, u32>>,
     contained: Option<u64>,
@@ -4501,6 +4507,37 @@ impl LegacyObjectRecord {
                 })?;
                 self.blit_mode = Some(value as u32);
             }
+            "color" | "colordw" => {
+                let value = parse_u64(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid ColorDw `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                self.color = Some(value as u32);
+            }
+            "colormod" => {
+                let value = parse_u64(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid ColorMod `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                self.color_modulation = Some(value as u32);
+            }
+            "picture" => {
+                let values = parse_i32_list(trimmed_value, self.line, "Picture")?;
+                if values.len() != 4 {
+                    return Err(ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: Picture requires 4 integers (got {})",
+                        self.line,
+                        values.len()
+                    )));
+                }
+                self.picture_rect = Some(DefinitionRect::new(
+                    values[0], values[1], values[2], values[3],
+                ));
+            }
             "component" => {
                 self.components = Some(parse_legacy_object_components(trimmed_value, self.line)?);
             }
@@ -4589,6 +4626,9 @@ impl LegacyObjectRecord {
             action_target2,
             layer,
             blit_mode,
+            color,
+            color_modulation,
+            picture_rect,
             components,
             contained,
             contents: _,
@@ -4637,6 +4677,15 @@ impl LegacyObjectRecord {
         }
         if let Some(blit_mode) = blit_mode {
             config = config.with_blit_mode(blit_mode);
+        }
+        if let Some(color) = color {
+            config = config.with_color(color);
+        }
+        if let Some(color_modulation) = color_modulation {
+            config = config.with_color_modulation(color_modulation);
+        }
+        if let Some(picture_rect) = picture_rect {
+            config = config.with_picture_rect(picture_rect);
         }
         if let Some(components) = components {
             config = config.with_components(components);
@@ -10796,7 +10845,7 @@ public func ActualizePhase(pClonk)
             scenario_dir.join("Objects.txt"),
             // XDir/YDir are float-bit C4Fixed like real saves write them
             // (Fixed.h:247-266): f-1063256064 = -5.0, f1077936128 = 3.0.
-            "[Object]\nid=BOX1\nNumber=100\nName=Scroll: Alchemist's bag\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nName=\"ScriptWipf\"\nStatus=1\nCategory=0\nLayer=100\nBlitMode=132\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nNeedEnergy=1\nSelected=1\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
+            "[Object]\nid=BOX1\nNumber=100\nName=Scroll: Alchemist's bag\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nName=\"ScriptWipf\"\nStatus=1\nCategory=0\nLayer=100\nBlitMode=132\nColorDw=1122867\nColorMod=1146447479\nPicture=-5,6,70,80\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nNeedEnergy=1\nSelected=1\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
         )
         .expect("write objects");
 
@@ -10829,6 +10878,12 @@ public func ActualizePhase(pClonk)
         assert_eq!(second.config.custom_name.as_deref(), Some("ScriptWipf"));
         assert_eq!(second.config.layer, Some(ObjectId::new(100)));
         assert_eq!(second.config.blit_mode, Some(132));
+        assert_eq!(second.config.color, Some(0x0011_2233));
+        assert_eq!(second.config.color_modulation, Some(0x4455_6677));
+        assert_eq!(
+            second.config.picture_rect,
+            Some(DefinitionRect::new(-5, 6, 70, 80))
+        );
         assert_eq!(second.config.position, Vector2::new(30, 40));
         assert_eq!(second.config.velocity, Vector2::new(-5, 3));
         assert_eq!(second.config.energy, Some(77));
@@ -10875,6 +10930,12 @@ public func ActualizePhase(pClonk)
         assert_eq!(gem_snapshot.custom_name.as_deref(), Some("ScriptWipf"));
         assert_eq!(gem_snapshot.layer, Some(ObjectId::new(100)));
         assert_eq!(gem_snapshot.blit_mode, 132);
+        assert_eq!(gem_snapshot.color, 0x0011_2233);
+        assert_eq!(gem_snapshot.color_modulation, 0x4455_6677);
+        assert_eq!(
+            gem_snapshot.picture_rect,
+            DefinitionRect::new(-5, 6, 70, 80)
+        );
         assert_eq!(gem_snapshot.position, Vector2::new(30, 40));
         // Loads denumerate Contained without the Enter transfer
         // (C4Object.cpp:1582 never runs): compile default NO_OWNER.

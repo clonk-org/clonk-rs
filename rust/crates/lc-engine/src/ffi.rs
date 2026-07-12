@@ -1027,6 +1027,10 @@ unsafe fn make_snapshot(
             // `base_blit_mode` is SetGraphics state, not C4Object::BlitMode;
             // the bridge ABI does not expose the latter yet.
             blit_mode: 0,
+            // The bridge ABI does not expose object picture state yet.
+            color: 0,
+            color_modulation: 0,
+            picture_rect: Default::default(),
             contents,
             components: HashMap::new(),
             status: ObjectStatus::Normal,

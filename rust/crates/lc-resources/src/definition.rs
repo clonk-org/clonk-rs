@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 const C4D_MAX_VERTEX: usize = 30;
+
+/// C4AllowPictureStack bits (src/C4Constants.h:301-309).
+pub const APS_COLOR: i32 = 1 << 0;
+pub const APS_GRAPHICS: i32 = 1 << 1;
+pub const APS_NAME: i32 = 1 << 2;
+pub const APS_OVERLAY: i32 = 1 << 3;
 const C4M_SOLID: i32 = 50;
 
 /// Files required to construct an engine definition from a classic C4 definition folder.
@@ -289,6 +295,11 @@ pub struct DefCore {
     pub move_to_range: i32,
     pub picture: Option<PictureRect>,
     pub color_by_owner: bool,
+    /// DefCore `AllowPictureStack` exceptions to
+    /// C4Object::CanConcatPictureWith's picture equality checks.
+    pub allow_picture_stack: i32,
+    /// DefCore graphics `Scale` as a percent (C4Def.cpp:456,725).
+    pub graphics_scale: u32,
     /// Definition-default C4Object::BlitMode (DefCore `BlitMode`).
     pub blit_mode: u32,
     pub shape: Option<PictureRect>,
@@ -634,6 +645,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut move_to_range: i32 = 0;
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
+    let mut allow_picture_stack: i32 = 0;
+    let mut graphics_scale: u32 = 100;
     let mut blit_mode: u32 = 0;
     let mut shape: Option<PictureRect> = None;
     let mut shape_width: Option<i32> = None;
@@ -775,6 +788,24 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "colorbyowner" => {
                 color_by_owner = parse_i32(value).unwrap_or(0) != 0;
+            }
+            "allowpicturestack" => {
+                // StdBitfieldAdapt over the APS_* table
+                // (src/C4Def.cpp:419-429); numeric values pass through.
+                allow_picture_stack = value
+                    .split('|')
+                    .map(str::trim)
+                    .map(|token| match token {
+                        "APS_Color" => APS_COLOR,
+                        "APS_Graphics" => APS_GRAPHICS,
+                        "APS_Name" => APS_NAME,
+                        "APS_Overlay" => APS_OVERLAY,
+                        other => other.parse::<i32>().unwrap_or(0),
+                    })
+                    .fold(0, |flags, bit| flags | bit);
+            }
+            "scale" => {
+                graphics_scale = parse_i32(value).unwrap_or(100).max(0) as u32;
             }
             "blitmode" => {
                 blit_mode = parse_i32(value).unwrap_or(0) as u32;
@@ -1014,6 +1045,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         move_to_range,
         picture,
         color_by_owner,
+        allow_picture_stack,
+        graphics_scale,
         blit_mode,
         shape: shape.or_else(|| {
             (shape_width.is_some() || shape_height.is_some() || shape_offset.is_some()).then(
@@ -2349,6 +2382,28 @@ mod tests {
         let signed = parse_def_core(b"[DefCore]\nid=SIGN\nMoveToRange=-3\n")
             .expect("signed range parses");
         assert_eq!(signed.move_to_range, -3);
+    }
+
+    #[test]
+    fn parse_def_core_allow_picture_stack_bitfield() {
+        // C4Def::CompileFunc parses AllowPictureStack through the APS_* table
+        // (src/C4Def.cpp:419-429; src/C4Constants.h:301-309).
+        let parsed = parse_def_core(
+            b"[DefCore]\nid=STACK\nAllowPictureStack=APS_Color|APS_Graphics|APS_Name|APS_Overlay\n",
+        )
+        .expect("DefCore parses");
+        assert_eq!(
+            parsed.allow_picture_stack,
+            APS_COLOR | APS_GRAPHICS | APS_NAME | APS_OVERLAY
+        );
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("DefCore parses");
+        assert_eq!(defaulted.allow_picture_stack, 0);
+        assert_eq!(defaulted.graphics_scale, 100);
+
+        let scaled = parse_def_core(b"[DefCore]\nid=SCALE\nScale=125\n")
+            .expect("graphics scale parses");
+        assert_eq!(scaled.graphics_scale, 125);
     }
 
     #[test]

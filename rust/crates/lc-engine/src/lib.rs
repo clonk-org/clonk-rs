@@ -166,6 +166,7 @@ pub use crate::rng::LcgRng;
 use lc_resources::definition::{
     ActionFacet as ResourceActionFacet, TargetRect as ResourceTargetRect,
 };
+pub use lc_resources::definition::{APS_COLOR, APS_GRAPHICS, APS_NAME, APS_OVERLAY};
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
     ResourceDefinition as ResourceDefinitionData, C4_MAX_PHYSICAL,
@@ -2384,6 +2385,16 @@ pub struct ObjectState {
     /// Object color from SetColorDw (C4Script.cpp:3661-3668, C4Object Color).
     #[serde(default)]
     pub color: u32,
+    /// Object drawing modulation (`C4Object::ColorMod`). Zero disables
+    /// modulation; otherwise the raw C4 color is applied at draw time.
+    #[serde(default)]
+    pub color_modulation: u32,
+    /// Per-object inventory/menu picture facet (`C4Object::PictureRect`). A
+    /// zero width selects the definition picture, but the raw zero rect still
+    /// participates in picture-stack equality (C4Object.cpp:3123-3127,
+    /// 6173-6191).
+    #[serde(default)]
+    pub picture_rect: DefinitionRect,
     /// Per-object shape rectangle from SetShape (C4Script.cpp:5182-5196);
     /// None means the definition shape applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2509,6 +2520,8 @@ pub(crate) fn preview_spawn_state(
         entrance_status: false,
         menu: None,
         color: 0,
+        color_modulation: 0,
+        picture_rect: DefinitionRect::default(),
         shape_override: None,
         ocf: OCF_NORMAL,
     }
@@ -2536,6 +2549,15 @@ impl ObjectState {
         }
         if let Some(blit_mode) = delta.blit_mode {
             self.blit_mode = blit_mode;
+        }
+        if let Some(picture_rect) = delta.picture_rect {
+            self.picture_rect = picture_rect;
+        }
+        if let Some(color) = delta.color {
+            self.color = color;
+        }
+        if let Some(color_modulation) = delta.color_modulation {
+            self.color_modulation = color_modulation;
         }
         let mut energy_died = false;
         if let Some(energy) = delta.energy {
@@ -2698,6 +2720,12 @@ struct ObjectDelta {
     layer: Option<Option<ObjectId>>,
     /// C4Object::BlitMode overwrite.
     blit_mode: Option<u32>,
+    /// C4Object::PictureRect overwrite (FnSetPicture).
+    picture_rect: Option<DefinitionRect>,
+    /// C4Object::Color overwrite (FnSetColorDw).
+    color: Option<u32>,
+    /// C4Object::ColorMod overwrite (FnSetClrModulation).
+    color_modulation: Option<u32>,
     portrait_source: Option<String>,
     solid_mask_override: Option<DefinitionTargetRect>,
     /// Script menu write-through (FnCreateMenu/FnCloseMenu et al.):
@@ -2784,6 +2812,15 @@ impl ObjectDelta {
         }
         if let Some(blit_mode) = update.blit_mode {
             self.blit_mode = Some(blit_mode);
+        }
+        if let Some(picture_rect) = update.picture_rect {
+            self.picture_rect = Some(picture_rect);
+        }
+        if let Some(color) = update.color {
+            self.color = Some(color);
+        }
+        if let Some(color_modulation) = update.color_modulation {
+            self.color_modulation = Some(color_modulation);
         }
         if let Some(position) = update.position {
             self.position = Some(position);
@@ -2921,6 +2958,9 @@ impl From<ObjectUpdate> for ObjectDelta {
             custom_name: update.custom_name,
             layer: update.layer,
             blit_mode: update.blit_mode,
+            picture_rect: update.picture_rect,
+            color: update.color,
+            color_modulation: update.color_modulation,
             fixed_velocity_x: update.fixed_velocity_x,
             fixed_velocity_y: update.fixed_velocity_y,
             position: update.position,
@@ -2995,6 +3035,9 @@ pub struct ObjectUpdate {
     /// C4Object::BlitMode overwrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blit_mode: Option<u32>,
+    /// FnSetPicture's raw C4Object::PictureRect overwrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_rect: Option<DefinitionRect>,
     /// SetPortrait's source-definition update (Some = set).
     #[serde(default)]
     pub portrait_source: Option<String>,
@@ -3119,6 +3162,9 @@ pub struct ObjectUpdate {
     /// SetColorDw (C4Script.cpp:3661-3668).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<u32>,
+    /// SetClrModulation's raw C4Object::ColorMod overwrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_modulation: Option<u32>,
     /// SetShape (C4Script.cpp:5182-5196).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape_override: Option<DefinitionRect>,
@@ -3334,6 +3380,9 @@ impl ObjectUpdate {
         self.custom_name.is_none()
             && self.layer.is_none()
             && self.blit_mode.is_none()
+            && self.picture_rect.is_none()
+            && self.color.is_none()
+            && self.color_modulation.is_none()
             && self.solid_mask_override.is_none()
             && self.change_def.is_none()
             && self.position.is_none()
@@ -4609,6 +4658,9 @@ impl Object {
             container: self.state.container,
             layer: self.state.layer,
             blit_mode: self.state.blit_mode,
+            color: self.state.color,
+            color_modulation: self.state.color_modulation,
+            picture_rect: self.state.picture_rect,
             contents: self.state.contents.clone(),
             components: self.state.components.clone(),
             status: self.state.status,
@@ -5159,6 +5211,17 @@ pub struct SpawnConfig {
     /// Saved C4Object::BlitMode. None uses the definition default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blit_mode: Option<u32>,
+    /// Saved raw C4Object::PictureRect (`Picture=` in Objects.txt). A zero
+    /// rect is meaningful: Picture2Facet then falls back to the def picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_rect: Option<DefinitionRect>,
+    /// Saved C4Object::Color (`ColorDw=` in Objects.txt). Fresh
+    /// ColorByOwner objects derive it from their owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
+    /// Saved C4Object::ColorMod (`ColorMod=` in Objects.txt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_modulation: Option<u32>,
     #[serde(default)]
     pub alive: Option<bool>,
     #[serde(default)]
@@ -5241,6 +5304,9 @@ impl SpawnConfig {
             container: None,
             layer: None,
             blit_mode: None,
+            picture_rect: None,
+            color: None,
+            color_modulation: None,
             alive: None,
             category: None,
             in_liquid: None,
@@ -5441,6 +5507,21 @@ impl SpawnConfig {
         self.blit_mode = Some(blit_mode);
         self
     }
+
+    pub fn with_picture_rect(mut self, picture_rect: DefinitionRect) -> Self {
+        self.picture_rect = Some(picture_rect);
+        self
+    }
+
+    pub fn with_color(mut self, color: u32) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    pub fn with_color_modulation(mut self, color_modulation: u32) -> Self {
+        self.color_modulation = Some(color_modulation);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5489,6 +5570,17 @@ pub struct ObjectSnapshot {
     /// C4Object::BlitMode, including the C4GFXBLIT_CUSTOM marker.
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub blit_mode: u32,
+    /// C4Object::Color (owner color for ColorByOwner definitions, or an
+    /// explicit SetColorDw/Objects.txt value).
+    #[serde(default)]
+    pub color: u32,
+    /// C4Object::ColorMod, persisted as `ColorMod=` in Objects.txt.
+    #[serde(default)]
+    pub color_modulation: u32,
+    /// Raw per-object C4Object::PictureRect. Width zero selects the
+    /// definition-default facet at draw time.
+    #[serde(default)]
+    pub picture_rect: DefinitionRect,
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
@@ -6084,6 +6176,42 @@ impl DefinitionPictureImage {
         }
     }
 
+    fn from_sprite_rect(sprite: &DefinitionSpriteImage, rect: DefinitionRect) -> Option<Self> {
+        let x = u32::try_from(rect.x).ok()?;
+        let y = u32::try_from(rect.y).ok()?;
+        let width = u32::try_from(rect.width).ok()?;
+        let height = u32::try_from(rect.height).ok()?;
+        if width == 0
+            || height == 0
+            || x.checked_add(width)? > sprite.width
+            || y.checked_add(height)? > sprite.height
+        {
+            return None;
+        }
+
+        let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+        for row in y..y + height {
+            let start = ((row * sprite.width + x) * 4) as usize;
+            let end = start + width as usize * 4;
+            pixels.extend_from_slice(sprite.pixels.get(start..end)?);
+        }
+        let color_mask = sprite.color_mask.as_ref().and_then(|mask| {
+            let mut cropped = Vec::with_capacity(width as usize * height as usize);
+            for row in y..y + height {
+                let start = (row * sprite.width + x) as usize;
+                let end = start + width as usize;
+                cropped.extend_from_slice(mask.get(start..end)?);
+            }
+            Some(Arc::from(cropped.into_boxed_slice()))
+        });
+        Some(Self {
+            width,
+            height,
+            pixels: Arc::from(pixels.into_boxed_slice()),
+            color_mask,
+        })
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -6218,6 +6346,12 @@ pub struct Definition {
     category: i32,
     /// DefCore `BlitMode`, copied into C4Object::BlitMode at Init/reset.
     blit_mode: u32,
+    /// DefCore `ColorByOwner`, used by picture-stack equality.
+    color_by_owner: bool,
+    /// DefCore `AllowPictureStack` APS_* exception bits.
+    allow_picture_stack: i32,
+    /// C4Def graphics scale (`C4DefCore::Scale / 100.0f`).
+    graphics_scale: f32,
     ocf_base: u32,
     value: i32,
     /// DefCore `Rebuy` (C4Def.cpp:359): permits sold objects to introduce
@@ -6440,6 +6574,9 @@ impl Definition {
             movement: MovementProfile::default(),
             category: DEFAULT_CATEGORY,
             blit_mode: 0,
+            color_by_owner: false,
+            allow_picture_stack: 0,
+            graphics_scale: 1.0,
             ocf_base: OCF_NORMAL,
             value: 0,
             rebuyable: false,
@@ -6655,6 +6792,9 @@ impl Definition {
         definition.set_crew_member(resource.core.crew_member);
         definition.set_category(resource.core.category);
         definition.set_blit_mode(resource.core.blit_mode);
+        definition.set_color_by_owner(resource.core.color_by_owner);
+        definition.set_allow_picture_stack(resource.core.allow_picture_stack);
+        definition.set_graphics_scale(resource.core.graphics_scale as f32 / 100.0);
         definition.set_value(resource.core.value);
         definition.set_rebuyable(resource.core.rebuyable);
         definition.set_base_auto_sell(resource.core.base_auto_sell);
@@ -6941,6 +7081,30 @@ impl Definition {
 
     pub fn set_blit_mode(&mut self, blit_mode: u32) {
         self.blit_mode = blit_mode;
+    }
+
+    pub fn color_by_owner(&self) -> bool {
+        self.color_by_owner
+    }
+
+    pub fn set_color_by_owner(&mut self, color_by_owner: bool) {
+        self.color_by_owner = color_by_owner;
+    }
+
+    pub fn allow_picture_stack(&self) -> i32 {
+        self.allow_picture_stack
+    }
+
+    pub fn set_allow_picture_stack(&mut self, allow_picture_stack: i32) {
+        self.allow_picture_stack = allow_picture_stack;
+    }
+
+    pub fn graphics_scale(&self) -> f32 {
+        self.graphics_scale
+    }
+
+    pub fn set_graphics_scale(&mut self, graphics_scale: f32) {
+        self.graphics_scale = graphics_scale.max(0.0);
     }
 
     pub fn ocf_base(&self) -> u32 {
@@ -16379,6 +16543,186 @@ impl Engine {
             .and_then(|definition| definition.picture_image().cloned())
     }
 
+    /// `C4Object::CanConcatPictureWith` (src/C4Object.cpp:6173-6213),
+    /// including every `AllowPictureStack` exception and the asymmetric
+    /// picture-overlay walk.
+    pub fn can_concat_picture_with(
+        &self,
+        object: &ObjectSnapshot,
+        other: &ObjectSnapshot,
+    ) -> bool {
+        if object.definition_id != other.definition_id {
+            return false;
+        }
+        let Some(definition) = self.definitions.get(&object.definition_id) else {
+            return false;
+        };
+        let allowed = definition.allow_picture_stack();
+        if allowed & APS_COLOR == 0 {
+            if definition.color_by_owner() && object.color != other.color {
+                return false;
+            }
+            if object.color_modulation != other.color_modulation
+                || object.blit_mode != other.blit_mode
+            {
+                return false;
+            }
+        }
+        if allowed & APS_GRAPHICS == 0 {
+            fn graphics_key(snapshot: &ObjectSnapshot) -> (&str, Option<&str>) {
+                snapshot
+                    .base_graphics
+                    .as_ref()
+                    .map(|graphics| {
+                        (
+                            graphics.definition.as_str(),
+                            graphics.graphics_name.as_deref(),
+                        )
+                    })
+                    .unwrap_or((snapshot.definition_id.as_str(), None))
+            }
+            if graphics_key(object) != graphics_key(other)
+                || object.picture_rect != other.picture_rect
+            {
+                return false;
+            }
+        }
+        if allowed & APS_NAME == 0 {
+            let object_name = object
+                .custom_name
+                .as_deref()
+                .or_else(|| self.crew_object_infos.get(&object.id).map(|info| info.name.as_str()))
+                .unwrap_or(definition.name());
+            let other_name = other
+                .custom_name
+                .as_deref()
+                .or_else(|| self.crew_object_infos.get(&other.id).map(|info| info.name.as_str()))
+                .unwrap_or(definition.name());
+            if object_name != other_name {
+                return false;
+            }
+        }
+        if allowed & APS_OVERLAY == 0 {
+            // C4GraphicsOverlay::operator== intentionally ignores animation
+            // phase (C4DefGraphics.cpp:868-878).
+            let overlays_equal = |left: &ObjectGraphicsOverlay, right: &ObjectGraphicsOverlay| {
+                left.mode == right.mode
+                    && left.definition == right.definition
+                    && left.graphics_name == right.graphics_name
+                    && left.action == right.action
+                    && left.blit_mode == right.blit_mode
+                    && left.color_modulation == right.color_modulation
+                    && left.transform == right.transform
+                    && left.overlay_object == right.overlay_object
+            };
+            for overlay in object
+                .graphics_overlays
+                .iter()
+                .filter(|overlay| overlay.mode == GraphicsOverlayMode::Picture)
+            {
+                let Some(other_overlay) = other
+                    .graphics_overlays
+                    .iter()
+                    .find(|candidate| candidate.id == overlay.id)
+                else {
+                    return false;
+                };
+                if !overlays_equal(other_overlay, overlay) {
+                    return false;
+                }
+            }
+            for overlay in other
+                .graphics_overlays
+                .iter()
+                .filter(|overlay| overlay.mode == GraphicsOverlayMode::Picture)
+            {
+                if !object
+                    .graphics_overlays
+                    .iter()
+                    .any(|candidate| candidate.id == overlay.id)
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// `C4Object::Picture2Facet` source selection before ColorMod/overlay
+    /// compositing (src/C4Object.cpp:3123-3129): use the object's own rect
+    /// when its width is nonzero, otherwise the definition rect, against the
+    /// currently selected base graphics bitmap.
+    pub fn object_picture_image(&self, object: &ObjectSnapshot) -> Option<DefinitionPictureImage> {
+        let rect = if object.picture_rect.width != 0 {
+            object.picture_rect
+        } else {
+            let picture = self.definition_picture(&object.definition_id)?;
+            DefinitionRect::new(picture.x, picture.y, picture.width, picture.height)
+        };
+        let scale = self
+            .definitions
+            .get(&object.definition_id)
+            .map_or(1.0, Definition::graphics_scale);
+        let scaled = |value: i32| (value as f32 * scale) as i32;
+        let rect = DefinitionRect::new(
+            scaled(rect.x),
+            scaled(rect.y),
+            scaled(rect.width),
+            scaled(rect.height),
+        );
+        let (graphics_definition, graphics_name) = object
+            .base_graphics
+            .as_ref()
+            .map(|graphics| {
+                (
+                    graphics.definition.as_str(),
+                    graphics.graphics_name.as_deref(),
+                )
+            })
+            .unwrap_or((object.definition_id.as_str(), None));
+        let sprite = self.definition_sprite_image(graphics_definition, graphics_name)?;
+        DefinitionPictureImage::from_sprite_rect(&sprite, rect)
+    }
+
+    /// Picture-mode overlay sources in C4GraphicsOverlay list order
+    /// (`C4Object::Picture2Facet`, src/C4Object.cpp:3147-3151). Each source
+    /// uses its definition picture, animation phase and definition graphics
+    /// scale before the app composites its transform/blit state.
+    pub fn object_picture_overlay_images(
+        &self,
+        object: &ObjectSnapshot,
+    ) -> Vec<(ObjectGraphicsOverlay, DefinitionPictureImage)> {
+        object
+            .graphics_overlays
+            .iter()
+            .filter(|overlay| overlay.mode == GraphicsOverlayMode::Picture)
+            .filter_map(|overlay| {
+                let definition_id = overlay
+                    .definition
+                    .as_deref()
+                    .unwrap_or(object.definition_id.as_str());
+                let definition = self.definitions.get(definition_id)?;
+                let picture = definition.picture()?;
+                let phase_x = picture
+                    .width
+                    .saturating_mul(overlay.phase)
+                    .saturating_add(picture.x);
+                let scale = definition.graphics_scale();
+                let scaled = |value: i32| (value as f32 * scale) as i32;
+                let rect = DefinitionRect::new(
+                    scaled(phase_x),
+                    scaled(picture.y),
+                    scaled(picture.width),
+                    scaled(picture.height),
+                );
+                let sprite = definition
+                    .sprite_image_variant(overlay.graphics_name.as_deref())?;
+                DefinitionPictureImage::from_sprite_rect(sprite, rect)
+                    .map(|image| (overlay.clone(), image))
+            })
+            .collect()
+    }
+
     /// The def's first portrait for the HUD cursor info
     /// (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-320). Read-only
     /// presentation data.
@@ -18409,6 +18753,7 @@ impl Engine {
             custom_name,
             layer,
             blit_mode,
+            picture_rect: update_picture_rect,
             position,
             velocity,
             fixed_velocity,
@@ -18445,6 +18790,7 @@ impl Engine {
             physicals,
             entrance_status: update_entrance_status,
             color: update_color,
+            color_modulation: update_color_modulation,
             shape_override: update_shape_override,
             menu: update_menu,
             ..
@@ -18489,6 +18835,9 @@ impl Engine {
             }
             if let Some(blit_mode) = blit_mode {
                 object.state.blit_mode = blit_mode;
+            }
+            if let Some(picture_rect) = update_picture_rect {
+                object.state.picture_rect = picture_rect;
             }
             if let Some(position) = position {
                 object.set_position(position);
@@ -18637,6 +18986,9 @@ impl Engine {
             }
             if let Some(color) = update_color {
                 object.state.color = color;
+            }
+            if let Some(color_modulation) = update_color_modulation {
+                object.state.color_modulation = color_modulation;
             }
             if let Some(shape_override) = update_shape_override {
                 object.state.shape_override = Some(shape_override);
@@ -20213,6 +20565,7 @@ impl Engine {
                     } else {
                         snapshot.blit_mode
                     },
+                    picture_rect: snapshot.picture_rect,
                     contents: Vec::new(),
                     components: snapshot.components.clone(),
                     status: snapshot.status,
@@ -20242,7 +20595,8 @@ impl Engine {
                     breath: snapshot.breath,
                     entrance_status: false,
                     menu: None,
-                    color: 0,
+                    color: snapshot.color,
+                    color_modulation: snapshot.color_modulation,
                     shape_override: None,
                     ocf: OCF_NORMAL,
                 },
@@ -27517,6 +27871,9 @@ impl Engine {
         definition.set_crew_member(core.crew_member);
         definition.set_category(core.category);
         definition.set_blit_mode(core.blit_mode);
+        definition.set_color_by_owner(core.color_by_owner);
+        definition.set_allow_picture_stack(core.allow_picture_stack);
+        definition.set_graphics_scale(core.graphics_scale as f32 / 100.0);
         definition.set_value(core.value);
         definition.set_rebuyable(core.rebuyable);
         definition.set_base_auto_sell(core.base_auto_sell);
@@ -32250,6 +32607,9 @@ impl Engine {
             container,
             layer,
             blit_mode,
+            picture_rect,
+            color,
+            color_modulation,
             alive,
             category,
             in_liquid,
@@ -32276,6 +32636,7 @@ impl Engine {
             definition_rotateable,
             definition_line,
             definition_blit_mode,
+            definition_color_by_owner,
             definition_components,
         ) = {
             let definition_ref = self
@@ -32293,6 +32654,7 @@ impl Engine {
                 definition_ref.rotateable(),
                 definition_ref.line(),
                 definition_ref.blit_mode(),
+                definition_ref.color_by_owner(),
                 definition_ref.components().to_vec(),
             )
         };
@@ -32332,6 +32694,19 @@ impl Engine {
         let initial_controller = controller
             .filter(|value| *value > OWNER_NONE)
             .unwrap_or(if loaded { OWNER_NONE } else { owner });
+        // C4Object::Init resolves ColorByOwner from the live player color;
+        // loaded objects instead compile Color/ColorDw verbatim after Clear
+        // (C4Object.cpp:201-204,2733-2787).
+        let initial_color = color.unwrap_or_else(|| {
+            (!loaded && definition_color_by_owner)
+                .then(|| self.players.get(&owner))
+                .flatten()
+                .and_then(|player| player.to_state().color)
+                .map(|color| {
+                    u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+                })
+                .unwrap_or(0)
+        });
         let owns_vertices = !vertices.is_empty();
         let shape_template = ObjectShapeTemplate::new(
             definition_vertices.clone(),
@@ -32487,7 +32862,9 @@ impl Engine {
                 breath: 0,
                 entrance_status: false,
                 menu: None,
-                color: 0,
+                color: initial_color,
+                color_modulation: color_modulation.unwrap_or(0),
+                picture_rect: picture_rect.unwrap_or_default(),
                 shape_override: None,
                 ocf: OCF_NORMAL,
             },
@@ -33370,6 +33747,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         container: snapshot.container,
         layer: snapshot.layer,
         blit_mode: snapshot.blit_mode,
+        picture_rect: snapshot.picture_rect,
         contents: snapshot.contents.clone(),
         components: snapshot.components.clone(),
         status: snapshot.status,
@@ -33399,7 +33777,8 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         breath: snapshot.breath,
         entrance_status: false,
         menu: None,
-        color: 0,
+        color: snapshot.color,
+        color_modulation: snapshot.color_modulation,
         shape_override: None,
         ocf: OCF_NORMAL,
     }

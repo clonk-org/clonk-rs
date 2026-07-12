@@ -4376,15 +4376,86 @@ fn set_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(true))
 }
 
-/// FnSetClrModulation (C4Script.cpp:3879-3896): graphics color modulation
-/// — presentation-only; acknowledged (PORT_STATUS).
+/// FnSetClrModulation (C4Script.cpp:3880-3901): set either the object's
+/// `ColorMod` or one existing overlay's modulation. A null object defaults
+/// to the calling object; an unknown overlay fails without creating it.
 fn set_clr_modulation(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = value_to_i32(
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "SetClrModulation expects at most 3 arguments: color, object and overlay id",
+        ));
+    }
+    let color = value_to_i32(
         args.first().unwrap_or(&Value::Nil),
         "SetClrModulation",
         "clr",
+    )? as u32;
+    let target = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "SetClrModulation", "object"))
+        .transpose()?
+        .flatten();
+    let overlay_id = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetClrModulation",
+        "overlay id",
     )?;
-    Ok(Value::Bool(true))
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Bool(false));
+        };
+        let changed = if overlay_id == 0 {
+            context.set_object_color_modulation(target, color)
+        } else {
+            context.set_object_overlay_color_modulation(target, overlay_id, color)
+        };
+        Ok(Value::Bool(changed))
+    })
+}
+
+/// FnGetClrModulation (C4Script.cpp:3904-3921): return the raw object or
+/// overlay modulation; a missing object/overlay is nil.
+fn get_clr_modulation(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "GetClrModulation expects at most 2 arguments: object and overlay id",
+        ));
+    }
+    let target = args
+        .first()
+        .map(|value| parse_object_reference_argument(value, "GetClrModulation", "object"))
+        .transpose()?
+        .flatten();
+    let overlay_id = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetClrModulation",
+        "overlay id",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Nil);
+        };
+        let color = if overlay_id == 0 {
+            context.object_color_modulation(target)
+        } else {
+            context.object_overlay_color_modulation(target, overlay_id)
+        };
+        Ok(color
+            .map(|color| Value::Int(color as i32))
+            .unwrap_or(Value::Nil))
+    })
 }
 
 /// FnEnter (C4Script.cpp:365-370): pObj (or the scope object) enters the
@@ -6854,6 +6925,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ChangeDef", change_def);
     script.register_host_function("GetPlrDownDouble", get_plr_down_double);
     script.register_host_function("SetClrModulation", set_clr_modulation);
+    script.register_host_function("GetClrModulation", get_clr_modulation);
     script.register_host_function("GetCrewCount", get_crew_count);
     script.register_host_function("GetCursor", get_cursor_host);
     script.register_host_function("SelectCrew", select_crew_host);
@@ -7019,6 +7091,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetObjHeight", get_obj_height);
     script.register_host_function("SetEntrance", set_entrance);
     script.register_host_function("SetColorDw", set_color_dw);
+    script.register_host_function("SetPicture", set_picture);
     script.register_host_function("SetShape", set_shape);
     script.register_host_function("AddVertex", add_vertex);
     script.register_host_function("SetVertex", set_vertex);
@@ -22969,20 +23042,56 @@ fn set_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetColorDw requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
         };
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
-        object.pending_update.color = Some(value as u32);
-        Ok(Value::Bool(true))
+        Ok(Value::Bool(
+            context
+                .object_scope_mut(target)
+                .map(|object| object.pending_update.color = Some(value as u32))
+                .is_some(),
+        ))
+    })
+}
+
+/// FnSetPicture (C4Script.cpp:3708-3715): write the object's raw picture
+/// rectangle. A null explicit target falls back to the calling object; unlike
+/// SetShape, C++ accepts any live object pointer supplied by script.
+fn set_picture(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetPicture", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetPicture", "y")?;
+    let width = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "SetPicture", "wdt")?;
+    let height = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "SetPicture", "hgt")?;
+    let mut index = 4;
+    let explicit_target =
+        consume_optional_object_reference_argument(args, &mut index, "SetPicture", "target")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let target = explicit_target.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        let changed = context
+            .object_scope_mut(target)
+            .map(|object| {
+                object.set_picture_rect(DefinitionRect::new(x, y, width, height));
+            })
+            .is_some();
+        Ok(Value::Bool(changed))
     })
 }
 
@@ -26208,6 +26317,71 @@ impl EffectHostContext {
             .is_some()
     }
 
+    fn object_color_modulation(&self, target: ObjectId) -> Option<u32> {
+        self.object_scope(target)
+            .and_then(|scope| scope.pending_update.color_modulation)
+            .or_else(|| {
+                self.get_world_object(target)
+                    .and_then(|object| object.full_state().map(|state| state.color_modulation))
+            })
+    }
+
+    fn set_object_color_modulation(&mut self, target: ObjectId, color: u32) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        self.object_scope_mut(target)
+            .map(|scope| scope.pending_update.color_modulation = Some(color))
+            .is_some()
+    }
+
+    fn object_overlay_color_modulation(
+        &self,
+        target: ObjectId,
+        overlay_id: i32,
+    ) -> Option<u32> {
+        if let Some(scope) = self.object_scope(target) {
+            return scope
+                .graphics_overlays
+                .iter()
+                .find(|overlay| overlay.id == overlay_id)
+                .map(|overlay| overlay.color_modulation);
+        }
+        self.get_world_object(target)
+            .and_then(|object| object.full_state().cloned())
+            .and_then(|state| {
+                state
+                    .graphics_overlays
+                    .iter()
+                    .find(|overlay| overlay.id == overlay_id)
+                    .map(|overlay| overlay.color_modulation)
+            })
+    }
+
+    fn set_object_overlay_color_modulation(
+        &mut self,
+        target: ObjectId,
+        overlay_id: i32,
+        color: u32,
+    ) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        let Some(scope) = self.object_scope_mut(target) else {
+            return false;
+        };
+        let Some(overlay) = scope
+            .graphics_overlays
+            .iter_mut()
+            .find(|overlay| overlay.id == overlay_id)
+        else {
+            return false;
+        };
+        overlay.color_modulation = color;
+        scope.pending_update.graphics_overlays = Some(scope.graphics_overlays.clone());
+        true
+    }
+
     /// The target's effective definition follows a same-call ChangeDef.
     fn object_definition_blit_mode(&self, target: ObjectId) -> Option<u32> {
         let definition_id = self
@@ -27092,6 +27266,11 @@ impl ObjectScopeContext {
     /// FnSetSolidMask bookkeeping (C4Script.cpp:271-278).
     fn set_solid_mask_rect(&mut self, rect: crate::DefinitionTargetRect) {
         self.pending_update.solid_mask_override = Some(rect);
+    }
+
+    /// FnSetPicture bookkeeping (C4Script.cpp:3708-3715).
+    fn set_picture_rect(&mut self, rect: DefinitionRect) {
+        self.pending_update.picture_rect = Some(rect);
     }
 
     fn alive(&self) -> bool {
@@ -27982,6 +28161,7 @@ mod tests {
         "GetCategory",
         "GetChar",
         "GetClimate",
+        "GetClrModulation",
         "GetColorDw",
         "GetComDir",
         "GetCommand",
@@ -28173,6 +28353,7 @@ mod tests {
         "SetOwner",
         "SetPhase",
         "SetPhysical",
+        "SetPicture",
         "SetPlrExtraData",
         "SetPlrKnowledge",
         "SetPlrMagic",

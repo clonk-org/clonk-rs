@@ -79,7 +79,10 @@ use lc_frontend::{
     PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
     StartupMenuAction, ViewportInput, ViewportPointer,
 };
-use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
+use lc_graphics::{
+    BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, TextFont,
+    Transform, TrueTypeFont,
+};
 use lc_gui::{ButtonTextures, Rect as GuiRect};
 use lc_network::{ClientId, ParticipantKind};
 use lc_platform::{AppPaths, PathsError};
@@ -12680,7 +12683,7 @@ fn populate_crew_inventories(
         let cursor = player.cursor;
         for crew in &mut player.crew {
             crew.inventory = (cursor == Some(crew.object_id))
-                .then(|| collect_crew_inventory(engine, snapshot, crew.object_id, player.owner_color))
+                .then(|| collect_crew_inventory(engine, snapshot, crew.object_id))
                 .unwrap_or_default();
         }
     }
@@ -12690,7 +12693,6 @@ fn collect_crew_inventory(
     engine: &Engine,
     snapshot: &SimulationSnapshot,
     crew_id: ObjectId,
-    fallback_color: Color,
 ) -> Vec<InventoryOverlay> {
     let Some(crew) = snapshot.object(crew_id) else {
         return Vec::new();
@@ -12704,37 +12706,11 @@ fn collect_crew_inventory(
         else {
             continue;
         };
-        let owner_color = snapshot
-            .players
-            .iter()
-            .find(|player| player.id == child.owner)
-            .and_then(|player| player.color)
-            .map(|color| Color::opaque(color.r, color.g, color.b))
-            .unwrap_or_else(|| {
-                if child.owner == crew.owner {
-                    fallback_color
-                } else {
-                    default_owner_color(child.owner)
-                }
-            });
-        let picture = inventory_definition_picture(engine, &child.definition_id, owner_color);
+        let picture = inventory_object_picture(engine, child);
 
-        // Best available approximation of C4Object::CanConcatPictureWith
-        // (src/C4Object.cpp:6173-6213). The snapshot models the definition,
-        // name, blit mode, graphics variant and overlays; comparing the
-        // resolved owner-colored picture also separates available ColorByOwner
-        // differences. Per-object ColorMod/PictureRect and DefCore
-        // AllowPictureStack are not snapshotted yet, and custom graphics/
-        // picture overlays are not composed into this picture, so those exact
-        // custom-picture cases remain a documented presentation gap.
         let existing = groups.iter().position(|group| {
             snapshot.object(group.object_id).is_some_and(|representative| {
-                representative.definition_id == child.definition_id
-                    && representative.custom_name == child.custom_name
-                    && representative.blit_mode == child.blit_mode
-                    && representative.base_graphics == child.base_graphics
-                    && representative.graphics_overlays == child.graphics_overlays
-                    && group.picture == picture
+                engine.can_concat_picture_with(representative, child)
             })
         });
         if let Some(index) = existing {
@@ -12752,32 +12728,165 @@ fn collect_crew_inventory(
     groups
 }
 
-fn inventory_definition_picture(
+fn inventory_object_picture(
     engine: &Engine,
-    definition_id: &str,
-    owner_color: Color,
+    object: &ObjectSnapshot,
 ) -> Option<ImageData> {
-    let image = engine.definition_picture_image(definition_id)?;
+    let image = engine.object_picture_image(object)?;
     let width = image.width();
     let height = image.height();
-    let source = image.pixels();
-    let Some(mask) = image.color_mask() else {
-        return Some(ImageData::from_arc(width, height, source));
-    };
-    let mut pixels = source.to_vec();
-    for (pixel, amount) in pixels.chunks_exact_mut(4).zip(mask.iter().copied()) {
-        let amount = u16::from(amount);
-        let inverse = 255_u16 - amount;
-        for (channel, owner) in pixel[..3]
-            .iter_mut()
-            .zip([owner_color.r, owner_color.g, owner_color.b])
-        {
-            let base = u16::from(*channel) * inverse / 255;
-            let tint = u16::from(owner) * amount / 255;
-            *channel = base.saturating_add(tint).min(255) as u8;
+    let mut pixels = inventory_picture_pixels(&image, object.color);
+    let overlays = engine.object_picture_overlay_images(object);
+    let object_mode = inventory_blit_mode(object.blit_mode);
+    let object_modulation = inventory_modulation(object.color_modulation, object.blit_mode);
+
+    if overlays.is_empty() && object_mode == BlitMode::Normal {
+        if let Some(modulation) = object_modulation {
+            modulate_inventory_pixels(&mut pixels, modulation);
+        }
+        return Some(ImageData::new(width, height, pixels));
+    }
+
+    let source = Surface::from_bytes(width, height, PixelFormat::Rgba8888, pixels).ok()?;
+    let mut composed = Surface::new(width, height, PixelFormat::Rgba8888);
+    composed
+        .blit_region_ex(
+            &source,
+            Rect::new(0, 0, width, height),
+            SurfacePoint::new(0, 0),
+            object_modulation.unwrap_or(Color::opaque(255, 255, 255)),
+            object_mode,
+        )
+        .ok()?;
+
+    for (overlay, image) in overlays {
+        let overlay_pixels = inventory_picture_pixels(&image, object.color);
+        let overlay_surface = Surface::from_bytes(
+            image.width(),
+            image.height(),
+            PixelFormat::Rgba8888,
+            overlay_pixels,
+        )
+        .ok()?;
+        let inherits_parent = overlay.blit_mode == 256;
+        let mode = if inherits_parent {
+            object_mode
+        } else {
+            inventory_blit_mode(overlay.blit_mode)
+        };
+        let modulation = if inherits_parent {
+            object_modulation
+        } else if overlay.color_modulation == 0x00ff_ffff {
+            None
+        } else {
+            inventory_modulation(overlay.color_modulation, overlay.blit_mode)
+        }
+        .unwrap_or(Color::opaque(255, 255, 255));
+        let source_rect = Rect::new(0, 0, image.width(), image.height());
+        let destination_rect = Rect::new(0, 0, width, height);
+        if let Some(transform) = overlay.transform {
+            let scale_factor = width as f32 / 64.0;
+            let center_x = width as f32 / 2.0;
+            let center_y = height as f32 / 2.0;
+            let matrix = Transform::set_move_scale(
+                center_x - transform.scale_x * center_x + transform.offset_x * scale_factor,
+                center_y - transform.scale_y * center_y + transform.offset_y * scale_factor,
+                transform.scale_x,
+                transform.scale_y,
+            );
+            let mut stretched = Surface::new(width, height, PixelFormat::Rgba8888);
+            stretched
+                .blit_stretched(
+                    &overlay_surface,
+                    source_rect,
+                    destination_rect,
+                    Color::opaque(255, 255, 255),
+                    BlitMode::Normal,
+                )
+                .ok()?;
+            composed
+                .blit_transformed(
+                    &stretched,
+                    destination_rect,
+                    SurfacePoint::new(0, 0),
+                    &matrix,
+                    modulation,
+                    mode,
+                )
+                .ok()?;
+        } else {
+            composed
+                .blit_stretched(
+                    &overlay_surface,
+                    source_rect,
+                    destination_rect,
+                    modulation,
+                    mode,
+                )
+                .ok()?;
         }
     }
-    Some(ImageData::new(width, height, pixels))
+
+    Some(ImageData::new(width, height, composed.pixels().to_vec()))
+}
+
+fn inventory_picture_pixels(
+    image: &lc_engine::DefinitionPictureImage,
+    object_color: u32,
+) -> Vec<u8> {
+    let mut pixels = image.pixels().to_vec();
+    if let Some(mask) = image.color_mask() {
+        // C4Surface::SetClr maps zero to 0xff before applying a
+        // ColorByOwner bitmap (src/C4Surface.h:110).
+        let owner = if object_color == 0 { 0xff } else { object_color };
+        let owner_color = Color::opaque(
+            ((owner >> 16) & 0xff) as u8,
+            ((owner >> 8) & 0xff) as u8,
+            (owner & 0xff) as u8,
+        );
+        for (pixel, amount) in pixels.chunks_exact_mut(4).zip(mask.iter().copied()) {
+            let amount = u16::from(amount);
+            let inverse = 255_u16 - amount;
+            for (channel, owner) in pixel[..3]
+                .iter_mut()
+                .zip([owner_color.r, owner_color.g, owner_color.b])
+            {
+                let base = u16::from(*channel) * inverse / 255;
+                let tint = u16::from(owner) * amount / 255;
+                *channel = base.saturating_add(tint).min(255) as u8;
+            }
+        }
+    }
+    pixels
+}
+
+fn inventory_modulation(color: u32, blit_mode: u32) -> Option<Color> {
+    (color != 0 || blit_mode & (2 | 8) != 0).then(|| {
+        Color::new(
+            ((color >> 16) & 0xff) as u8,
+            ((color >> 8) & 0xff) as u8,
+            (color & 0xff) as u8,
+            ((color >> 24) & 0xff) as u8,
+        )
+    })
+}
+
+fn inventory_blit_mode(raw: u32) -> BlitMode {
+    if raw & 2 != 0 {
+        BlitMode::Mod2
+    } else if raw & 1 != 0 {
+        BlitMode::Additive
+    } else {
+        BlitMode::Normal
+    }
+}
+
+fn modulate_inventory_pixels(pixels: &mut [u8], modulation: Color) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        let modulated =
+            Color::new(pixel[0], pixel[1], pixel[2], pixel[3]).modulate_clr(modulation);
+        pixel.copy_from_slice(&[modulated.r, modulated.g, modulated.b, modulated.a]);
+    }
 }
 
 fn select_focus_candidate(
@@ -14752,6 +14861,9 @@ mod tests {
             container: None,
             layer: None,
             blit_mode: 0,
+            color: 0,
+            color_modulation: 0,
+            picture_rect: Default::default(),
             contents: Vec::new(),
             components: HashMap::new(),
             status: ObjectStatus::Normal,
@@ -15411,6 +15523,9 @@ mod tests {
                 container: None,
                 layer: None,
                 blit_mode: 0,
+                color: 0,
+                color_modulation: 0,
+                picture_rect: Default::default(),
                 contents: Vec::new(),
                 components: HashMap::new(),
                 status: ObjectStatus::Normal,
@@ -15473,6 +15588,9 @@ mod tests {
                 container: None,
                 layer: None,
                 blit_mode: 0,
+                color: 0,
+                color_modulation: 0,
+                picture_rect: Default::default(),
                 contents: Vec::new(),
                 components: HashMap::new(),
                 status: ObjectStatus::Normal,
@@ -15662,6 +15780,7 @@ mod tests {
         crew.contents = vec![flag_a, rock, flag_b];
         let mut first_flag = make_object(flag_a.as_u64(), "FLAG", Vector2::ZERO);
         first_flag.owner = 0;
+        first_flag.color = 0x00c0_2040;
         first_flag.crew_member = false;
         first_flag.container = Some(crew_id);
         let mut rock_object = make_object(rock.as_u64(), "ROCK", Vector2::ZERO);
@@ -15670,6 +15789,7 @@ mod tests {
         rock_object.container = Some(crew_id);
         let mut second_flag = make_object(flag_b.as_u64(), "FLAG", Vector2::ZERO);
         second_flag.owner = 0;
+        second_flag.color = 0x00c0_2040;
         second_flag.crew_member = false;
         second_flag.container = Some(crew_id);
         let mut snapshot = make_snapshot(
@@ -15727,6 +15847,153 @@ mod tests {
             assert_eq!(picture.pixels()[offset + channel], expected);
         }
         assert_eq!(picture.pixels()[offset + 3], source_pixels[offset + 3]);
+    }
+
+    #[test]
+    fn cursor_inventory_separates_and_draws_tflint_picture_rects() {
+        // C4Object::CanConcatPictureWith compares per-object PictureRect unless
+        // APS_Graphics is set, and Picture2Facet uses the own rect when Wdt is
+        // nonzero (src/C4Object.cpp:3123-3129,6173-6213). T-Flint switches from
+        // its DefCore picture (0,12,64,64) to (0,76,64,64) while active.
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root")
+            .to_path_buf();
+        let flint_group = Group::open(
+            repository.join("content/Objects.c4d/Items.c4d/Weapons.c4d/TFlint.c4d"),
+        )
+        .expect("open real TFLN definition");
+        let flint_resource = lc_resources::ResourceDefinition::load(&flint_group)
+            .expect("load real TFLN definition");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_resource(&flint_resource).expect("compile real TFLN definition"),
+            )
+            .expect("register TFLN");
+
+        let crew_id = ObjectId::new(1);
+        let idle_id = ObjectId::new(2);
+        let active_id = ObjectId::new(3);
+        let mut crew = make_object(crew_id.as_u64(), "CLNK", Vector2::ZERO);
+        crew.owner = 0;
+        crew.contents = vec![idle_id, active_id];
+        let mut idle = make_object(idle_id.as_u64(), "TFLN", Vector2::ZERO);
+        idle.owner = 0;
+        idle.crew_member = false;
+        idle.container = Some(crew_id);
+        let mut active_json = serde_json::to_value(make_object(
+            active_id.as_u64(),
+            "TFLN",
+            Vector2::ZERO,
+        ))
+        .expect("active flint serializes");
+        active_json["owner"] = serde_json::json!(0);
+        active_json["crew_member"] = serde_json::json!(false);
+        active_json["container"] = serde_json::json!(crew_id.as_u64());
+        active_json["picture_rect"] =
+            serde_json::json!({"x": 0, "y": 76, "width": 64, "height": 64});
+        active_json["color_modulation"] = serde_json::json!(0x0040_80c0_u32);
+        let active: ObjectSnapshot =
+            serde_json::from_value(active_json).expect("active flint deserializes");
+
+        let snapshot = make_snapshot(
+            vec![crew, idle, active.clone()],
+            vec![HudPlayerSnapshot {
+                owner: 0,
+                crew: vec![crew_id],
+                focus: Some(crew_id),
+                eliminated: false,
+                wealth: 0,
+                score: 0,
+            }],
+        );
+
+        let inventory = collect_crew_inventory(
+            &engine,
+            &snapshot,
+            crew_id,
+        );
+        assert_eq!(inventory.len(), 2, "different PictureRects do not stack");
+        assert_eq!(inventory[0].object_id, idle_id);
+        assert_eq!(inventory[1].object_id, active_id);
+        let idle_picture = inventory[0].picture.as_ref().expect("idle picture");
+        let active_picture = inventory[1].picture.as_ref().expect("active picture");
+        assert_eq!((idle_picture.width(), idle_picture.height()), (64, 64));
+        assert_eq!((active_picture.width(), active_picture.height()), (64, 64));
+        assert_ne!(idle_picture.pixels(), active_picture.pixels());
+
+        // C4Object::Picture2Facet runs PrepareDrawing before drawing the
+        // selected rect (src/C4Object.cpp:3138-3154); ColorMod therefore
+        // modulates the inventory picture, not only the in-world sprite.
+        let mut unmodulated = active.clone();
+        unmodulated.color_modulation = 0;
+        let unmodulated = inventory_object_picture(&engine, &unmodulated)
+            .expect("unmodulated active picture");
+        let modulation = Color::new(0x40, 0x80, 0xc0, 0);
+        for (source, actual) in unmodulated
+            .pixels()
+            .chunks_exact(4)
+            .zip(active_picture.pixels().chunks_exact(4))
+        {
+            let expected =
+                Color::new(source[0], source[1], source[2], source[3]).modulate_clr(modulation);
+            assert_eq!(actual, &[expected.r, expected.g, expected.b, expected.a]);
+        }
+    }
+
+    #[test]
+    fn cursor_inventory_composes_picture_overlay_phase() {
+        // Picture2Facet draws MODE_Picture overlays after the base, using the
+        // overlay's definition picture and phase (src/C4Object.cpp:3144-3151;
+        // src/C4DefGraphics.cpp:655-659,834-855).
+        let mut engine = Engine::new();
+        let mut base = Definition::from_script("BASE", "Base", "#strict")
+            .expect("base definition compiles");
+        base.set_picture(Some(lc_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        base.set_sprite_image(Some(lc_engine::DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([0xff, 0, 0, 0xff]),
+            color_mask: None,
+        }));
+        engine.register_definition(base).expect("base registers");
+
+        let mut overlay = Definition::from_script("OVRL", "Overlay", "#strict")
+            .expect("overlay definition compiles");
+        overlay.set_picture(Some(lc_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        overlay.set_sprite_image(Some(lc_engine::DefinitionSpriteImage {
+            width: 2,
+            height: 1,
+            pixels: Arc::from([0, 0xff, 0, 0xff, 0, 0, 0xff, 0xff]),
+            color_mask: None,
+        }));
+        engine
+            .register_definition(overlay)
+            .expect("overlay registers");
+
+        let mut object = make_object(1, "BASE", Vector2::ZERO);
+        let mut picture_overlay = lc_engine::ObjectGraphicsOverlay::new(
+            1,
+            lc_engine::GraphicsOverlayMode::Picture,
+        )
+        .with_definition(Some("OVRL".to_string()));
+        picture_overlay.phase = 1;
+        object.graphics_overlays.push(picture_overlay);
+        let picture = inventory_object_picture(&engine, &object).expect("picture composes");
+        assert_eq!(picture.pixels(), &[0, 0, 0xff, 0xff]);
     }
 
     #[test]
