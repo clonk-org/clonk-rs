@@ -14369,6 +14369,22 @@ mod tests {
         );
     }
 
+    fn hold_app_key_until(
+        app: &mut GameApp,
+        key: VirtualKeyCode,
+        milestone: &str,
+        max_ticks: u32,
+        reached: impl FnMut(&GameApp) -> bool,
+    ) {
+        AppVirtualKeyboard::new(app)
+            .press(key)
+            .unwrap_or_else(|error| panic!("press physical {key:?} for {milestone}: {error}"));
+        advance_app_until(app, milestone, max_ticks, reached);
+        AppVirtualKeyboard::new(app)
+            .release(key)
+            .unwrap_or_else(|error| panic!("release physical {key:?} after {milestone}: {error}"));
+    }
+
     fn app_tutorial_message_contains(app: &GameApp, needle: &str) -> bool {
         app.snapshot
             .hud
@@ -14394,6 +14410,209 @@ mod tests {
                     .is_some_and(|item| item.definition_id == definition)
             })
         })
+    }
+
+    fn app_collect_one_gold_around_blast_debris(app: &mut GameApp, clonk: ObjectId) {
+        // Blasts also expose collectible ROCK. C++ CLNK has exactly one
+        // nonspecial slot, so a real player must throw incidental debris away
+        // before GOLD can enter (Clonk.c4d/Script.c:738-763). Keep all motion,
+        // scale/hangle release and Throw/Drop transitions on physical keys
+        // (C4Object.cpp:3618-3640; C4ObjectCom.cpp:625-675).
+        hold_app_key_until(
+            app,
+            VirtualKeyCode::Z,
+            "CLNK first approaches exposed GOLD",
+            120,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    app_clonk_carries(app, clonk, "GOLD")
+                        || !object.contents.is_empty()
+                        || object.action.name == "Hangle"
+                        || object.action.name.starts_with("Scale")
+                })
+            },
+        );
+
+        for _ in 0..8 {
+            if app_clonk_carries(app, clonk, "GOLD") {
+                return;
+            }
+
+            if app
+                .engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| !object.contents.is_empty())
+            {
+                let start_x = app
+                    .engine
+                    .object_snapshot(clonk)
+                    .expect("CLNK survives incidental debris pickup")
+                    .position
+                    .x;
+                let nearest_gold_x = app
+                    .engine
+                    .snapshot()
+                    .objects
+                    .into_iter()
+                    .filter(|object| {
+                        object.definition_id == "GOLD" && object.container.is_none()
+                    })
+                    .min_by_key(|object| (object.position.x - start_x).abs())
+                    .expect("exposed GOLD remains after incidental debris pickup")
+                    .position
+                    .x;
+                let (toward, toward_direction) = if nearest_gold_x < start_x {
+                    (VirtualKeyCode::Z, Direction::Left)
+                } else {
+                    (VirtualKeyCode::C, Direction::Right)
+                };
+                let (away, away_direction) = if toward == VirtualKeyCode::Z {
+                    (VirtualKeyCode::C, Direction::Right)
+                } else {
+                    (VirtualKeyCode::Z, Direction::Left)
+                };
+
+                hold_app_key_until(
+                    app,
+                    away,
+                    "CLNK faces away from GOLD before throwing debris",
+                    20,
+                    |app| {
+                        app.engine
+                            .object_snapshot(clonk)
+                            .is_some_and(|object| object.direction == away_direction)
+                    },
+                );
+                AppVirtualKeyboard::new(app)
+                    .tap(VirtualKeyCode::A)
+                    .expect("physical A throws incidental blast debris away");
+                advance_app_until(app, "CLNK throws incidental blast debris", 30, |app| {
+                    app.engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.contents.is_empty())
+                });
+                hold_app_key_until(
+                    app,
+                    toward,
+                    "CLNK leaves thrown debris and moves toward GOLD",
+                    60,
+                    |app| {
+                        app_clonk_carries(app, clonk, "GOLD")
+                            || app.engine.object_snapshot(clonk).is_some_and(|object| {
+                                object.action.name == "Hangle"
+                                    || object.action.name.starts_with("Scale")
+                                    || if toward_direction == Direction::Left {
+                                        object.position.x <= start_x - 12
+                                    } else {
+                                        object.position.x >= start_x + 12
+                                    }
+                            })
+                    },
+                );
+                if app_clonk_carries(app, clonk, "GOLD") {
+                    return;
+                }
+            }
+
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("CLNK survives GOLD collection route");
+            let action = clonk_now.action.name;
+            if action == "Hangle" {
+                AppVirtualKeyboard::new(app)
+                    .tap(VirtualKeyCode::X)
+                    .expect("physical X drops CLNK from the blast-pocket ceiling");
+                advance_app_until(
+                    app,
+                    "CLNK drops from Hangle in the blast pocket",
+                    100,
+                    |app| {
+                        app.engine.object_snapshot(clonk).is_some_and(|object| {
+                            object.action.name == "Walk"
+                                || object.action.name.starts_with("Scale")
+                        })
+                    },
+                );
+                continue;
+            }
+            if action.starts_with("Scale") {
+                let let_go = if clonk_now.direction == Direction::Left {
+                    VirtualKeyCode::C
+                } else {
+                    VirtualKeyCode::Z
+                };
+                AppVirtualKeyboard::new(app)
+                    .tap(let_go)
+                    .expect("physical direction lets CLNK go of the blast wall");
+                advance_app_until(
+                    app,
+                    "CLNK lets go into the blast pocket",
+                    120,
+                    |app| {
+                        app_clonk_carries(app, clonk, "GOLD")
+                            || app.engine.object_snapshot(clonk).is_some_and(|object| {
+                                object.action.name == "Walk"
+                                    || object.action.name == "Hangle"
+                                    || object.action.name.starts_with("Scale")
+                            })
+                    },
+                );
+                continue;
+            }
+            if action != "Walk" {
+                advance_app_until(
+                    app,
+                    "CLNK settles in the blast pocket",
+                    100,
+                    |app| {
+                        app.engine.object_snapshot(clonk).is_some_and(|object| {
+                            object.action.name == "Walk"
+                                || object.action.name == "Hangle"
+                                || object.action.name.starts_with("Scale")
+                        })
+                    },
+                );
+                continue;
+            }
+
+            let target = app
+                .engine
+                .snapshot()
+                .objects
+                .into_iter()
+                .filter(|object| object.definition_id == "GOLD" && object.container.is_none())
+                .min_by_key(|object| {
+                    (object.position.x - clonk_now.position.x).abs()
+                        + (object.position.y - clonk_now.position.y).abs()
+                })
+                .expect("exposed GOLD remains in the blast pocket");
+            let toward = if target.position.x < clonk_now.position.x {
+                VirtualKeyCode::Z
+            } else {
+                VirtualKeyCode::C
+            };
+            hold_app_key_until(
+                app,
+                toward,
+                "CLNK advances toward exposed GOLD",
+                220,
+                |app| {
+                    app_clonk_carries(app, clonk, "GOLD")
+                        || app.engine.object_snapshot(clonk).is_some_and(|object| {
+                            object.action.name == "Hangle"
+                                || object.action.name.starts_with("Scale")
+                                || !object.contents.is_empty()
+                        })
+                },
+            );
+        }
+
+        assert!(
+            app_clonk_carries(app, clonk, "GOLD"),
+            "physical-key blast-pocket route must collect one GOLD; clonk={:?}",
+            app.engine.object_snapshot(clonk)
+        );
     }
 
     fn app_cursor_inventory_contains(
@@ -14456,6 +14675,10 @@ mod tests {
         let env_guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(repository)),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
+            // The virtual-player milestones intentionally assert the shipped
+            // US tutorial copy. Isolate them from the developer machine's
+            // locale just like the user-data/config roots.
+            ("LC_LANGUAGE", Some(Path::new("US"))),
         ]);
         let paths = AppPaths::discover().expect("discover repository install");
         let audio_options = AudioOptions {
@@ -19585,13 +19808,14 @@ mod tests {
     }
 
     #[test]
-    fn app_virtual_keyboard_builds_tutorial04_elevator_site_from_real_conkit() {
-        // Tutorial04 teaches the complete physical-key path into HUT2, through
-        // C4MN_Contents, and into CNKT's CXCN construction menu. Keep every
-        // state transition behind GameApp::handle_key so this covers C++ key
-        // mapping, auto-context close/Exit, and DigDouble synthesis as well as
-        // the engine route (Tutorial04.c4s/Script.c:40-126;
-        // C4Player.cpp:1490-1554; C4ObjectMenu.cpp:279-435).
+    fn app_virtual_keyboard_sells_first_tutorial04_gold_after_real_elevator_route() {
+        // Tutorial04 teaches the complete physical-key route from HUT2 and
+        // CNKT through construction, elevator operation, mining and the first
+        // GOLD sale. Keep every state transition behind GameApp::handle_key so
+        // this covers C++ key mapping, menu conversion, DigDouble synthesis,
+        // movement and one-slot inventory behavior at the actual app boundary
+        // (Tutorial04.c4s/Script.c:40-226; C4Player.cpp:1490-1554;
+        // C4ObjectMenu.cpp:279-435).
         let mut app = real_tutorial_app(4, "Tutorial 4 app virtual player");
         assert!(
             !app.mouse_control,
@@ -19954,6 +20178,599 @@ mod tests {
         assert!(
             app.engine.cursor_object_menu(app.local_owner).is_none(),
             "removing CNKT closes the menu it owns"
+        );
+
+        // Down at an OCF_Construct object queues Build before Grab, and the
+        // Build procedure advances construction until ELEV creates ELEC
+        // (C4ObjectCom.cpp:573-588,690-697; C4Object.cpp:5010-5043;
+        // Tutorial04.c4s/Script.c:119-137).
+        advance_app_until(&mut app, "Tutorial04 build-ELEV prompt", 240, |app| {
+            app_tutorial_message_contains(app, "press 'down' to start working")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X starts ELEV construction");
+        advance_app_until(&mut app, "CLNK starts building ELEV", 30, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Build")
+        });
+        advance_app_until(&mut app, "ELEV finishes and creates ELEC", 720, |app| {
+            app_object_with_definition(app, "ELEC").is_some()
+                && app
+                    .engine
+                    .object_snapshot(elevator.id)
+                    .is_some_and(|object| object.construction == 100_000)
+        });
+        let elevator_case =
+            app_object_with_definition(&app, "ELEC").expect("completed ELEV creates ELEC");
+
+        advance_app_until(&mut app, "Tutorial04 grab-ELEC prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Grab the elevator case")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs ELEC");
+        advance_app_until(&mut app, "CLNK grabs ELEC", 60, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(elevator_case)
+            })
+        });
+
+        // ELEC maps held Dig to downward travel and held Up to upward travel;
+        // Tutorial04 observes the real crew positions before changing prompts
+        // (Tutorial04.c4s/Script.c:139-166).
+        advance_app_until(&mut app, "Tutorial04 drill-shaft prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Hold down the 'dig' key")
+        });
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::D,
+            "ELEC drills CLNK to the shaft bottom",
+            360,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.y >= 340)
+            },
+        );
+        advance_app_until(&mut app, "Tutorial04 ride-up prompt", 240, |app| {
+            app_tutorial_message_contains(app, "ride the elevator back up")
+        });
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::S,
+            "ELEC carries CLNK back to the surface",
+            240,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.y <= 270)
+            },
+        );
+        advance_app_until(&mut app, "Tutorial04 let-go prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Let go of the elevator case")
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X to ungrab ELEC");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X to ungrab ELEC");
+        }
+        advance_app_until(&mut app, "CLNK lets go of ELEC", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name != "Push")
+        });
+        advance_app_until(&mut app, "Tutorial04 spawns surface TFLN", 240, |app| {
+            app_tutorial_message_contains(app, "Walk back to the cabin")
+                && app_object_with_definition(app, "TFLN").is_some()
+        });
+
+        // The shaft lip alternates Jump and Scale. Re-emitting physical Right
+        // on Scale and physical Up after landing follows the C++ transitions;
+        // the exiting TFLN is collected naturally before its fuse expires
+        // (C4Object.cpp:3618-3628,4284-4299,4823-4855;
+        // Tutorial04.c4s/Script.c:167-179).
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("physical C exits the shaft toward TFLN");
+        let mut previous_action = String::new();
+        for _ in 0..60 {
+            if app_clonk_carries(&app, clonk, "TFLN") {
+                break;
+            }
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("CLNK survives the shaft exit");
+            let action = clonk_now.action.name;
+            let entered_scale =
+                action.starts_with("Scale") && !previous_action.starts_with("Scale");
+            let left_scale_in_flight = action == "Jump" && previous_action.starts_with("Scale");
+            let landed = action == "Walk" && previous_action != "Walk";
+            if entered_scale {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .release(VirtualKeyCode::C)
+                    .expect("release physical C on Scale");
+                keyboard
+                    .press(VirtualKeyCode::C)
+                    .expect("repress physical C on Scale");
+            } else if (landed || left_scale_in_flight) && clonk_now.position.x < 550 {
+                AppVirtualKeyboard::new(&mut app)
+                    .tap(VirtualKeyCode::S)
+                    .expect("physical S jumps out of the shaft");
+            }
+            previous_action = action;
+            app.update().expect("advance CLNK toward surface TFLN");
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C after TFLN pickup");
+        assert!(
+            app_clonk_carries(&app, clonk, "TFLN"),
+            "CLNK must naturally collect the real exiting TFLN"
+        );
+
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "TFLN-carrying CLNK returns toward ELEC",
+            120,
+            |app| {
+                app_tutorial_message_contains(app, "Ride back down into the mine")
+                    || app
+                        .engine
+                        .object_snapshot(clonk)
+                        .zip(app.engine.object_snapshot(elevator_case))
+                        .is_some_and(|(clonk, elevator)| {
+                            clonk.position.x <= elevator.position.x + 5
+                        })
+            },
+        );
+        advance_app_until(&mut app, "Tutorial04 TFLN ride-down prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Ride back down into the mine")
+                && app_clonk_carries(app, clonk, "TFLN")
+        });
+
+        let (clonk_x, elevator_x) = app
+            .engine
+            .object_snapshot(clonk)
+            .zip(app.engine.object_snapshot(elevator_case))
+            .map(|(clonk, elevator)| (clonk.position.x, elevator.position.x))
+            .expect("CLNK and ELEC survive the surface return");
+        if clonk_x < elevator_x - 5 {
+            hold_app_key_until(
+                &mut app,
+                VirtualKeyCode::C,
+                "CLNK aligns with ELEC from the left",
+                120,
+                |app| {
+                    app.engine
+                        .object_snapshot(clonk)
+                        .zip(app.engine.object_snapshot(elevator_case))
+                        .is_some_and(|(clonk, elevator)| {
+                            (clonk.position.x - elevator.position.x).abs() <= 5
+                        })
+                },
+            );
+        } else if clonk_x > elevator_x + 5 {
+            hold_app_key_until(
+                &mut app,
+                VirtualKeyCode::Z,
+                "CLNK aligns with ELEC from the right",
+                120,
+                |app| {
+                    app.engine
+                        .object_snapshot(clonk)
+                        .zip(app.engine.object_snapshot(elevator_case))
+                        .is_some_and(|(clonk, elevator)| {
+                            (clonk.position.x - elevator.position.x).abs() <= 5
+                        })
+                },
+            );
+        }
+        if let Some(clonk_now) = app.engine.object_snapshot(clonk) {
+            if clonk_now.action.name.starts_with("Scale") {
+                let away = if clonk_now.direction == Direction::Left {
+                    VirtualKeyCode::C
+                } else {
+                    VirtualKeyCode::Z
+                };
+                AppVirtualKeyboard::new(&mut app)
+                    .tap(away)
+                    .expect("physical direction leaves Scale beside ELEC");
+            }
+        }
+        advance_app_until(
+            &mut app,
+            "TFLN-carrying CLNK settles beside ELEC",
+            120,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .zip(app.engine.object_snapshot(elevator_case))
+                    .is_some_and(|(clonk, elevator)| {
+                        clonk.action.name == "Walk"
+                            && (clonk.position.x - elevator.position.x).abs() <= 5
+                    })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs ELEC with TFLN");
+        advance_app_until(&mut app, "TFLN-carrying CLNK grabs ELEC", 60, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(elevator_case)
+            })
+        });
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::D,
+            "ELEC carries TFLN-carrying CLNK underground",
+            360,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.y >= 340)
+            },
+        );
+        advance_app_until(&mut app, "Tutorial04 gold-tunnel prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Dig a tunnel all the way")
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X to ungrab underground");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X to ungrab underground");
+        }
+        advance_app_until(&mut app, "CLNK lets go underground", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+
+        // A physical Dig press followed by held Left+Down steers DFA_DIG into
+        // Script175's 80x80 gold rectangle. Bottom contact redirects the first
+        // diagonal to Left, so a fresh Down edge restores DownLeft exactly as
+        // C++ does (Tutorial04.c4s/Script.c:180-207;
+        // C4ObjectCom.cpp:353-362; C4Object.cpp:3573-3631,4354-4368).
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D starts the gold tunnel");
+        advance_app_until(&mut app, "CLNK starts digging toward GOLD", 30, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Dig")
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("physical Z steers Dig left");
+            keyboard
+                .press(VirtualKeyCode::X)
+                .expect("physical X steers Dig down");
+        }
+        for _ in 0..12 {
+            app.update().expect("advance initial tunnel Dig");
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release physical X to refresh diagonal Dig");
+            keyboard
+                .press(VirtualKeyCode::X)
+                .expect("repress physical X for diagonal Dig");
+        }
+        for _ in 0..240 {
+            let reached = app_tutorial_message_contains(&app, "struck solid gold")
+                || app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    (357..437).contains(&object.position.x)
+                        && (348..428).contains(&object.position.y)
+                });
+            if reached {
+                break;
+            }
+            if app
+                .engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.command_direction == CommandDirection::Left)
+            {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .release(VirtualKeyCode::X)
+                    .expect("release physical X after bottom redirect");
+                keyboard
+                    .press(VirtualKeyCode::X)
+                    .expect("repress physical X toward GOLD");
+            }
+            app.update().expect("advance real gold tunnel");
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release physical X at the gold face");
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z at the gold face");
+        }
+        assert!(
+            app_tutorial_message_contains(&app, "struck solid gold")
+                || app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    (357..437).contains(&object.position.x)
+                        && (348..428).contains(&object.position.y)
+                }),
+            "physical-key tunnel must reach Tutorial04's gold rectangle"
+        );
+        advance_app_until(&mut app, "Tutorial04 blast-GOLD prompt", 120, |app| {
+            app_tutorial_message_contains(app, "struck solid gold")
+        });
+        advance_app_until(&mut app, "CLNK stops Dig at the gold face", 40, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+
+        let safe_x = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("CLNK survives the gold tunnel")
+            .position
+            .x
+            + 24;
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "TFLN-carrying CLNK reaches a safe throwing distance",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x >= safe_x)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::Z)
+            .expect("physical Z faces CLNK toward the gold vein");
+        app.update()
+            .expect("settle left-facing CLNK before TFLN throw");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A throws TFLN toward GOLD");
+        advance_app_until(&mut app, "TFLN leaves CLNK inventory", 30, |app| {
+            !app_clonk_carries(app, clonk, "TFLN")
+        });
+        advance_app_until(&mut app, "real TFLN blast frees GOLD", 180, |app| {
+            app_object_with_definition(app, "GOLD").is_some()
+        });
+        for _ in 0..100 {
+            app.update().expect("settle the first real GOLD blast");
+        }
+        if app
+            .engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.action.name == "Hangle")
+        {
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::X)
+                .expect("physical X drops CLNK from the tunnel ceiling");
+            advance_app_until(&mut app, "CLNK drops into the GOLD pocket", 60, |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Walk" || object.action.name.starts_with("Scale")
+                })
+            });
+        }
+        app_collect_one_gold_around_blast_debris(&mut app, clonk);
+        let sold_gold = app
+            .engine
+            .object_snapshot(clonk)
+            .expect("GOLD-carrying CLNK survives collection")
+            .contents
+            .into_iter()
+            .find(|&object_id| {
+                app.engine
+                    .object_snapshot(object_id)
+                    .is_some_and(|object| object.definition_id == "GOLD")
+            })
+            .expect("CLNK carries the exact GOLD object to be sold");
+        let wealth_before_sale = app
+            .engine
+            .player(app.local_owner)
+            .expect("local player exists before sale")
+            .wealth();
+
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("physical C returns GOLD-carrying CLNK to ELEC");
+        let mut returned_to_elevator = false;
+        let mut previous_action = String::new();
+        for _ in 0..360 {
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("GOLD-carrying CLNK survives the tunnel return");
+            returned_to_elevator =
+                app.engine
+                    .object_snapshot(elevator_case)
+                    .is_some_and(|elevator| {
+                        clonk_now.action.name == "Walk"
+                            && (clonk_now.position.x - elevator.position.x).abs() <= 5
+                    });
+            if returned_to_elevator {
+                break;
+            }
+            let action = clonk_now.action.name;
+            if action.starts_with("Scale") && !previous_action.starts_with("Scale") {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .release(VirtualKeyCode::C)
+                    .expect("release physical C on tunnel Scale");
+                keyboard
+                    .press(VirtualKeyCode::C)
+                    .expect("repress physical C to leave tunnel Scale");
+            } else if action == "Hangle" && previous_action != "Hangle" {
+                AppVirtualKeyboard::new(&mut app)
+                    .tap(VirtualKeyCode::X)
+                    .expect("physical X drops from the tunnel ceiling");
+            }
+            previous_action = action;
+            app.update().expect("advance GOLD-carrying CLNK to ELEC");
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C beside ELEC");
+        assert!(
+            returned_to_elevator,
+            "GOLD-carrying CLNK must return to ELEC; clonk={:?}, elevator={:?}",
+            app.engine.object_snapshot(clonk),
+            app.engine.object_snapshot(elevator_case)
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs ELEC with GOLD");
+        advance_app_until(&mut app, "GOLD-carrying CLNK grabs ELEC", 60, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(elevator_case)
+            })
+        });
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::S,
+            "ELEC raises GOLD-carrying CLNK to the surface",
+            300,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.y <= 270)
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X to ungrab ELEC with GOLD");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X to ungrab ELEC with GOLD");
+        }
+        advance_app_until(
+            &mut app,
+            "GOLD-carrying CLNK lets go of ELEC",
+            60,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name != "Push")
+            },
+        );
+
+        // Cross the surface lip using only held Right and real Up jump edges,
+        // then enter HUT2 through its actual entrance. BaseAutoSell removes the
+        // GOLD and increments wealth by five (C4Object.cpp:3618-3628,
+        // 4284-4299,4823-4855; Tutorial04.c4s/Script.c:214-234).
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("physical C climbs the shaft lip with GOLD");
+        let mut previous_action = String::new();
+        for _ in 0..240 {
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("GOLD-carrying CLNK survives the shaft climb");
+            if clonk_now.position.x >= 558 {
+                break;
+            }
+            let action = clonk_now.action.name;
+            let entered_scale =
+                action.starts_with("Scale") && !previous_action.starts_with("Scale");
+            let left_scale_in_flight = action == "Jump" && previous_action.starts_with("Scale");
+            let landed = action == "Walk" && previous_action != "Walk";
+            if entered_scale {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .release(VirtualKeyCode::C)
+                    .expect("release physical C on shaft Scale");
+                keyboard
+                    .press(VirtualKeyCode::C)
+                    .expect("repress physical C on shaft Scale");
+            } else if landed || left_scale_in_flight {
+                AppVirtualKeyboard::new(&mut app)
+                    .tap(VirtualKeyCode::S)
+                    .expect("physical S jumps the shaft lip");
+            }
+            previous_action = action;
+            app.update()
+                .expect("advance GOLD-carrying CLNK over the shaft lip");
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C on the cabin hill");
+        assert!(
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.position.x >= 558),
+            "GOLD-carrying CLNK must reach the cabin hill"
+        );
+        advance_app_until(
+            &mut app,
+            "GOLD-carrying CLNK lands beside HUT2",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "GOLD-carrying CLNK aligns with HUT2's entrance",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x <= 570)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S enters HUT2 with GOLD");
+        advance_app_until(&mut app, "GOLD-carrying CLNK enters HUT2", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+        advance_app_until(&mut app, "HUT2 sells the first GOLD chunk", 80, |app| {
+            app.engine
+                .player(app.local_owner)
+                .is_some_and(|player| player.wealth() == wealth_before_sale + 5)
+                && app.engine.object_snapshot(sold_gold).is_none()
+        });
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player survives sale")
+                .wealth(),
+            wealth_before_sale + 5,
+            "GOLD value five is added exactly once (C4Object.cpp:970-997; C4Player.cpp:866-897; GOLD DefCore.txt:13,18)"
+        );
+        assert!(
+            app.engine.object_snapshot(sold_gold).is_none(),
+            "BaseAutoSell must remove the sold GOLD object"
+        );
+        assert!(
+            !app_clonk_carries(&app, clonk, "GOLD"),
+            "BaseAutoSell must remove the first GOLD from CLNK"
         );
     }
 
