@@ -413,6 +413,68 @@ impl NetworkTickGate {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdmissionResourceUnavailable {
+    Unloadable,
+    NoTransferBackend,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdmissionResourceState {
+    Loading { removed: bool },
+    Complete { path: PathBuf, removed: bool },
+    Unavailable(AdmissionResourceUnavailable),
+}
+
+#[derive(Debug, Default)]
+struct AdmissionResourceStore {
+    resources: BTreeMap<i32, AdmissionResourceState>,
+}
+
+impl AdmissionResourceStore {
+    fn ensure_by_core(
+        &mut self,
+        core: &lc_engine::NetworkResourceCore,
+    ) -> &AdmissionResourceState {
+        self.resources.entry(core.id).or_insert_with(|| {
+            AdmissionResourceState::Unavailable(if core.loadable {
+                AdmissionResourceUnavailable::NoTransferBackend
+            } else {
+                AdmissionResourceUnavailable::Unloadable
+            })
+        })
+    }
+
+    fn status(&self, resource_id: i32) -> Option<&AdmissionResourceState> {
+        self.resources.get(&resource_id)
+    }
+
+    fn clear(&mut self) {
+        self.resources.clear();
+    }
+}
+
+fn preflight_admission_resources(
+    resources: &mut AdmissionResourceStore,
+    controls: &[NetworkControl],
+) -> bool {
+    let mut ready = true;
+    for control in controls {
+        let control_ready = match control {
+            NetworkControl::JoinPlayer(lc_engine::JoinPlayerControlData {
+                source: lc_engine::JoinPlayerSource::Resource(core),
+                ..
+            }) => !matches!(
+                resources.ensure_by_core(core),
+                AdmissionResourceState::Loading { .. }
+            ),
+            _ => true,
+        };
+        ready &= control_ready;
+    }
+    ready
+}
+
 struct FrontendAssets {
     font: Arc<dyn TextFont>,
     menu_background: Option<ImageData>,
@@ -3356,6 +3418,7 @@ struct GameApp {
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
     control_player_infos: ControlPlayerInfoRegistry,
+    admission_resources: AdmissionResourceStore,
     executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
@@ -6437,6 +6500,7 @@ impl GameApp {
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
             control_player_infos: ControlPlayerInfoRegistry::default(),
+            admission_resources: AdmissionResourceStore::default(),
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(|p| p.recordings_dir()),
@@ -10437,7 +10501,12 @@ impl GameApp {
                     // authoritative, including interleaved SyncCheck packets.
                     let Some(controls) = self
                         .network_ticks
-                        .take_exact_if_ready(tick, |_| true)
+                        .take_exact_if_ready(tick, |controls| {
+                            preflight_admission_resources(
+                                &mut self.admission_resources,
+                                controls,
+                            )
+                        })
                     else {
                         return Ok(());
                     };
@@ -11847,6 +11916,7 @@ impl GameApp {
         self.sync_checks.clear();
         self.network_ticks.clear();
         self.control_player_infos = ControlPlayerInfoRegistry::default();
+        self.admission_resources.clear();
         self.refresh_object_menu();
         self.focus_id = None;
         self.focus_snapshot = None;
@@ -12356,6 +12426,7 @@ impl GameApp {
         self.sync_checks.clear();
         self.network_ticks.clear();
         self.control_player_infos = ControlPlayerInfoRegistry::default();
+        self.admission_resources.clear();
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
         self.ingame_menu = None;
@@ -20363,6 +20434,85 @@ mod tests {
             Some(controls),
             "the retained tick executes once its preflight becomes ready"
         );
+    }
+
+    #[test]
+    fn unloadable_resource_join_is_unavailable_and_does_not_stall_tick() {
+        // AddByCore returns null for an unloadable absent resource; PreExecute
+        // therefore reports ready and JoinPlr later no-ops, without blocking
+        // following controls (src/C4Network2Res.cpp:1499-1515;
+        // src/C4Control.cpp:73-109,758-764,811-825).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.engine.set_network_game(true);
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let initial_frame = app.engine.frame();
+        let info_id = 17;
+        let resource_id = 61;
+        let local_owner = app.local_owner;
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: 3,
+            id: resource_id,
+            loadable: false,
+            filename: lc_engine::LegacyCString::from_bytes(b"Missing.c4p".to_vec())
+                .expect("valid resource filename"),
+            ..Default::default()
+        };
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![
+                    NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
+                        client_id: 1,
+                        players: vec![lc_engine::ControlPlayerInfoEntry {
+                            id: info_id,
+                            ..Default::default()
+                        }],
+                        by_client: 1,
+                        ..Default::default()
+                    }),
+                    NetworkControl::JoinPlayer(lc_engine::JoinPlayerControlData {
+                        at_client: 0,
+                        info_id,
+                        source: lc_engine::JoinPlayerSource::Resource(resource),
+                        by_client: 1,
+                        ..Default::default()
+                    }),
+                    NetworkControl::Player {
+                        owner: local_owner,
+                        event: ControlEvent::Press(ControlButton::Right),
+                    },
+                ],
+            })
+            .expect("queue unloadable resource join");
+
+        app.update().expect("execute nonblocking resource tick");
+
+        assert_eq!(
+            app.admission_resources.status(resource_id),
+            Some(&AdmissionResourceState::Unavailable(
+                AdmissionResourceUnavailable::Unloadable
+            ))
+        );
+        assert!(
+            app.snapshot
+                .players
+                .iter()
+                .all(|player| player.player_info_id != info_id),
+            "an unavailable resource cannot create a player"
+        );
+        assert_ne!(
+            app.engine
+                .player(local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_RIGHT),
+            0,
+            "the later control still executes"
+        );
+        assert_eq!(app.engine.frame(), initial_frame + 1);
     }
 
     #[test]
