@@ -1412,7 +1412,7 @@ impl GraphicsSystem {
         lighting: f32,
     ) {
         if let Some(state) = self.sky.clone() {
-            self.render_configured_sky(&state, frame, environment, events, lighting);
+            self.render_configured_sky(&state, frame, events, lighting);
         } else {
             let base = environment
                 .sky_color
@@ -1429,7 +1429,6 @@ impl GraphicsSystem {
         &mut self,
         state: &SkyRenderState,
         frame: Option<&SkyFrame>,
-        environment: &EnvironmentFrame,
         events: &[WeatherEvent],
         lighting: f32,
     ) {
@@ -1442,7 +1441,7 @@ impl GraphicsSystem {
             let tinted = Self::apply_lighting(base, lighting);
             self.surface.fill(tinted);
         } else if !settings.has_surface {
-            self.fill_sky_gradient(settings, environment, lighting);
+            self.fill_sky_gradient(settings, lighting);
         } else {
             self.surface.fill(Color::opaque(0, 0, 0));
         }
@@ -1451,10 +1450,10 @@ impl GraphicsSystem {
             if let Some(image) = state.image() {
                 self.tile_sky_image(image, settings, frame, lighting);
             } else {
-                self.fill_sky_gradient(settings, environment, lighting);
+                self.fill_sky_gradient(settings, lighting);
             }
         } else if settings.back_color.is_none() {
-            self.fill_sky_gradient(settings, environment, lighting);
+            self.fill_sky_gradient(settings, lighting);
         }
 
         if events
@@ -1468,12 +1467,8 @@ impl GraphicsSystem {
     fn fill_sky_gradient(
         &mut self,
         settings: &SkySettings,
-        environment: &EnvironmentFrame,
         lighting: f32,
     ) {
-        let gamma = environment.settings.season_gamma();
-        let top_gamma = gamma.map(|(_, _, high)| high);
-        let bottom_gamma = gamma.map(|(low, _, _)| low);
         // C4Sky::Draw without a surface fades from GetSkyFadeClr(TargetY)
         // to GetSkyFadeClr(TargetY+Hgt) (C4Sky.cpp:219-225): the fade spans
         // the landscape height in world coordinates, offset by the
@@ -1485,14 +1480,10 @@ impl GraphicsSystem {
         };
         let view_top = self.viewport_y.round() as i32;
         let view_bottom = (self.viewport_y + self.surface_height as f32 / zoom).round() as i32;
-        let top = Self::mix_color_with_gamma(
-            Self::sky_fade_color(settings, view_top, self.world_height),
-            top_gamma,
-        );
-        let bottom = Self::mix_color_with_gamma(
-            Self::sky_fade_color(settings, view_bottom, self.world_height),
-            bottom_gamma,
-        );
+        let top = Self::sky_fade_color(settings, view_top, self.world_height);
+        let bottom = Self::sky_fade_color(settings, view_bottom, self.world_height);
+        let top = Color::opaque(top.r, top.g, top.b);
+        let bottom = Color::opaque(bottom.r, bottom.g, bottom.b);
         self.fill_vertical_gradient(top, bottom, lighting);
     }
 
@@ -1643,17 +1634,6 @@ impl GraphicsSystem {
             wrapped += dimension;
         }
         wrapped
-    }
-
-    fn mix_color_with_gamma(base: RgbColor, gamma: Option<RgbColor>) -> Color {
-        if let Some(gamma) = gamma {
-            let r = ((base.r as u16 + gamma.r as u16) / 2) as u8;
-            let g = ((base.g as u16 + gamma.g as u16) / 2) as u8;
-            let b = ((base.b as u16 + gamma.b as u16) / 2) as u8;
-            Color::opaque(r, g, b)
-        } else {
-            Color::opaque(base.r, base.g, base.b)
-        }
     }
 
     fn lerp_color(a: Color, b: Color, t: f32) -> Color {
@@ -7148,6 +7128,46 @@ mod tests {
         assert!(
             top.r > top.b,
             "expected the red fade_top at the top of the view, got {top:?}"
+        );
+    }
+
+    #[test]
+    fn sky_gradient_is_not_pre_tinted_by_the_season_curve() {
+        // C4Sky::Draw emits GetSkyFadeClr directly (C4Sky.cpp:219-236).
+        // C4Weather's season curve is one global gamma control applied to
+        // the completed frame (C4GraphicsSystem.cpp:787-809), so tinting
+        // only the sky here would apply it once before the global LUT.
+        let mut snapshot = make_snapshot();
+        snapshot.environment.settings = EnvironmentSettings::new(0)
+            .with_season(0)
+            .with_temperature(-20)
+            .with_gamma_enabled();
+        snapshot.landscape = None;
+        let fade = RgbColor::new(100, 120, 140);
+        let settings = SkySettings {
+            fade_top: fade,
+            fade_bottom: fade,
+            ..Default::default()
+        };
+
+        let focus = &snapshot.objects[0];
+        let mut graphics = GraphicsSystem::new(
+            120,
+            80,
+            60,
+            "Unmodified Sky Fade",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_sky(Some(SkyRenderState::new(settings, None)));
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(Color::opaque(fade.r, fade.g, fade.b))
         );
     }
 

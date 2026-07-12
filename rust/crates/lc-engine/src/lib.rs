@@ -1794,6 +1794,14 @@ impl EnvironmentSettings {
         }
     }
 
+    fn season_gamma_control_points(&self) -> Option<[u32; 3]> {
+        let pack = |color: RgbColor| {
+            (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+        };
+        self.season_gamma()
+            .map(|(low, middle, high)| [pack(low), pack(middle), pack(high)])
+    }
+
     fn dynamic_sky_color(time_of_day: u16, ambient_temperature: i32) -> RgbColor {
         let normalized_time = f32::from(time_of_day) / f32::from(Self::TIME_CYCLE.max(1));
         let daylight = (1.0 - (normalized_time * core::f32::consts::TAU).cos()) * 0.5;
@@ -1913,12 +1921,21 @@ impl EnvironmentSettings {
     /// `BoundBy(Std + Random(2*Rnd + 1) - Rnd, Min, Max)`
     /// (C4SVal::Evaluate, C4Scenario.cpp:43-46); the wind itself steps ±1
     /// toward the target on Tick10 frames.
-    pub fn advance_frame(&mut self, rng: &mut LcgRng, frame: u64) {
+    pub fn advance_frame(&mut self, rng: &mut LcgRng, frame: u64) -> Option<[u32; 3]> {
         self.refresh_runtime_fields();
-        if frame % 35 == 0 {
-            self.update_season();
+        let season_gamma_update = if frame % 35 == 0 {
+            let season_changed = self.update_season();
+            // C4Weather::Execute refreshes the season curve inside the
+            // rollover branch, before this frame's temperature step
+            // (C4Weather.cpp:77-93).
+            let update = season_changed
+                .then(|| self.season_gamma_control_points())
+                .flatten();
             self.update_temperature_from_season();
-        }
+            update
+        } else {
+            None
+        };
         if frame % 1000 == 0 {
             let rnd = self.wind_variation.max(0);
             self.wind_target = (self.base_wind + rng.random(2 * rnd + 1) - rnd)
@@ -1930,6 +1947,7 @@ impl EnvironmentSettings {
         }
         self.advance_time_of_day();
         self.update_precipitation_runtime();
+        season_gamma_update
     }
 
     pub fn time_of_day(&self) -> u16 {
@@ -1975,7 +1993,7 @@ impl EnvironmentSettings {
     /// `SeasonDelay += YearSpeed`; at 200 the delay resets to ZERO (not
     /// modulo) and the season steps exactly once, wrapping to the scenario
     /// `StartSeason.Min` only when it exceeds `StartSeason.Max`.
-    fn update_season(&mut self) {
+    fn update_season(&mut self) -> bool {
         self.season_delay = self.season_delay.saturating_add(self.year_speed);
         if self.season_delay >= 200 {
             self.season_delay = 0;
@@ -1983,6 +2001,9 @@ impl EnvironmentSettings {
             if self.season > self.season_max {
                 self.season = self.season_min;
             }
+            true
+        } else {
+            false
         }
     }
 
@@ -14280,6 +14301,23 @@ impl Engine {
         self.gamma = GammaControlState::default();
     }
 
+    /// C4Weather::SetSeasonGamma writes the weather curve into
+    /// C4GRI_SEASON (slot 1) and leaves the existing slot untouched when
+    /// NoGamma is set (C4Weather.cpp:259-284).
+    fn refresh_season_gamma_control(&mut self) {
+        if let Some(points) = self.environment.season_gamma_control_points() {
+            let _ = self.gamma.set_ramp(1, points);
+        }
+    }
+
+    fn apply_environment_delta(&mut self, delta: &EnvironmentDelta) {
+        let refresh_gamma = delta.requests_season_gamma_refresh();
+        delta.apply(&mut self.environment);
+        if refresh_gamma {
+            self.refresh_season_gamma_control();
+        }
+    }
+
     pub fn set_environment(&mut self, environment: EnvironmentSettings) {
         let mut environment = environment;
         environment.refresh_runtime_fields();
@@ -15240,7 +15278,7 @@ impl Engine {
         }
 
         if let Some(delta) = environment {
-            delta.apply(&mut self.environment);
+            self.apply_environment_delta(&delta);
         }
         if let Some(delta) = physics {
             self.apply_physics_delta(delta);
@@ -18566,7 +18604,7 @@ impl Engine {
             }
 
             if let Some(update) = environment {
-                update.apply(&mut self.environment);
+                self.apply_environment_delta(&update);
             }
             if let Some(delta) = physics {
                 self.apply_physics_delta(delta);
@@ -18849,7 +18887,9 @@ impl Engine {
         self.tick_particles();
         self.tick_mass_movers();
         self.weather_events.clear();
-        self.environment.advance_frame(&mut self.rng, frame);
+        if let Some(points) = self.environment.advance_frame(&mut self.rng, frame) {
+            let _ = self.gamma.set_ramp(1, points);
+        }
         self.tick_weather_events(frame)?;
         if let Some(sky) = &mut self.sky {
             sky.advance(&self.environment);
@@ -19562,7 +19602,7 @@ impl Engine {
         self.apply_next_mission_commands(next_mission_commands);
 
         if let Some(update) = environment {
-            update.apply(&mut self.environment);
+            self.apply_environment_delta(&update);
         }
         if let Some(delta) = physics {
             self.apply_physics_delta(delta);
@@ -27923,6 +27963,9 @@ impl Engine {
         self.environment.meteorite = meteorite;
         self.environment.volcano = volcano;
         self.environment.earthquake = earthquake;
+        // C4Weather::Init calls SetSeasonGamma after all scenario weather
+        // fields, including NoGamma, have been established (:65-69).
+        self.refresh_season_gamma_control();
         Ok(())
     }
 
@@ -33284,7 +33327,7 @@ impl Engine {
                 self.request_game_over()?;
             }
             if let Some(update) = environment {
-                update.apply(&mut self.environment);
+                self.apply_environment_delta(&update);
             }
             if let Some(delta) = physics {
                 self.apply_physics_delta(delta);
@@ -33434,7 +33477,7 @@ impl Engine {
                 self.request_game_over()?;
             }
             if let Some(update) = environment {
-                update.apply(&mut self.environment);
+                self.apply_environment_delta(&update);
             }
             if let Some(delta) = physics {
                 self.apply_physics_delta(delta);
@@ -34252,9 +34295,15 @@ fn merge_environment_delta(target: &mut EnvironmentDelta, source: &EnvironmentDe
     }
     if let Some(temperature) = source.temperature {
         target.temperature = Some(temperature);
+        target.season_gamma_handled = source.season_gamma_handled;
     }
     if let Some(climate) = source.climate {
         target.climate = Some(climate);
+        target.season_gamma_handled = source.season_gamma_handled;
+    }
+    if let Some(season) = source.season {
+        target.season = Some(season);
+        target.season_gamma_handled = source.season_gamma_handled;
     }
 }
 

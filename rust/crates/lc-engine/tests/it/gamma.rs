@@ -1,8 +1,13 @@
-use lc_engine::{Definition, Engine, EngineState, GammaControlState, Recording, SpawnConfig};
+use lc_engine::{
+    scenario::{LegacyC4SVal, LegacyWeatherInit},
+    Definition, Engine, EngineState, EnvironmentSettings, GammaControlState, Recording,
+    SpawnConfig,
+};
 
 use crate::support::real_scenario::{join_local_player, load_tutorial};
 
 const TUTORIAL06_RAMP: [u32; 3] = [0x000000, 0x646464, 0xc8c8c8];
+const COLD_WINTER_RAMP: [u32; 3] = [0x00000a, 0x75759a, 0xe5e5ff];
 
 fn gamma_probe_definition() -> Definition {
     Definition::from_script(
@@ -19,6 +24,33 @@ fn gamma_probe_definition() -> Definition {
         public func SetSecond()
         {
             SetGamma(0x010203, 0x818283, 0xfefdfc, 1);
+        }
+
+        public func SetWinter()
+        {
+            SetSeason(0);
+        }
+
+        public func SetCold()
+        {
+            SetTemperature(-20);
+        }
+
+        public func SetNewClimate()
+        {
+            SetClimate(10);
+        }
+
+        public func SetSeasonThenExplicitGamma()
+        {
+            SetSeason(0);
+            SetGamma(0x010203, 0x818283, 0xfefdfc, 1);
+        }
+
+        public func SetExplicitGammaThenSeason()
+        {
+            SetGamma(0x010203, 0x818283, 0xfefdfc, 1);
+            SetSeason(0);
         }
 
         public func ResetDefault()
@@ -55,6 +87,173 @@ fn call_probe(engine: &mut Engine, function: &str) {
     engine
         .call_object_function(0, function, Vec::new())
         .unwrap_or_else(|error| panic!("{function} executes: {error}"));
+}
+
+fn cold_winter_weather_init() -> LegacyWeatherInit {
+    let flat = |value: i32| LegacyC4SVal::new(value, 0, -100, 100);
+    LegacyWeatherInit {
+        season: flat(0),
+        year_speed: flat(0),
+        climate: flat(70), // 100 - 70 - 50 = -20
+        wind: flat(0),
+        rain: flat(0),
+        precipitation: "Water".to_string(),
+        lightning: flat(0),
+        meteorite: flat(0),
+        volcano: flat(0),
+        earthquake: flat(0),
+        no_initialize: true,
+    }
+}
+
+#[test]
+fn weather_init_writes_exact_season_gamma_to_slot_one() {
+    // C4Weather::Init calls SetSeasonGamma after assigning Season,
+    // Temperature, Climate, and NoGamma (C4Weather.cpp:36-69). Season 0
+    // selects the winter row; Temperature=-20 subtracts 10 from red/green
+    // and adds 10 to blue (C4Weather.cpp:259-284).
+    let init = cold_winter_weather_init();
+    let mut engine = Engine::with_seed(0);
+    engine.set_environment(EnvironmentSettings::new(0).with_gamma_enabled());
+
+    engine
+        .apply_weather_init(&init)
+        .expect("weather initialization succeeds");
+
+    assert_eq!(engine.gamma_controls().ramp(1), Some(COLD_WINTER_RAMP));
+}
+
+#[test]
+fn no_gamma_leaves_the_existing_season_slot_untouched() {
+    // SetSeasonGamma's first operation is `if (NoGamma) return;`
+    // (C4Weather.cpp:259-261). Init and all three setters therefore retain
+    // the previous C4GRI_SEASON value instead of resetting it.
+    let mut engine = gamma_probe_engine();
+    call_probe(&mut engine, "SetSecond");
+    let expected = engine.gamma_controls().ramp(1);
+    engine.set_environment(
+        EnvironmentSettings::new(0)
+            .with_season(50)
+            .with_temperature(0)
+            .with_gamma_disabled(),
+    );
+
+    engine
+        .apply_weather_init(&cold_winter_weather_init())
+        .expect("weather initialization succeeds");
+    assert_eq!(engine.gamma_controls().ramp(1), expected);
+
+    for function in ["SetWinter", "SetCold", "SetNewClimate"] {
+        call_probe(&mut engine, function);
+        assert_eq!(
+            engine.gamma_controls().ramp(1),
+            expected,
+            "{function} leaves slot 1 untouched"
+        );
+    }
+}
+
+#[test]
+fn weather_setters_refresh_slot_one_like_cpp() {
+    // C4Weather::SetTemperature, SetClimate, and SetSeason each call
+    // SetSeasonGamma after updating their field (C4Weather.cpp:223-243).
+    let mut engine = gamma_probe_engine();
+    engine.set_environment(
+        EnvironmentSettings::new(0)
+            .with_season(50)
+            .with_temperature(0)
+            .with_gamma_enabled(),
+    );
+
+    call_probe(&mut engine, "SetSecond");
+    call_probe(&mut engine, "SetWinter");
+    assert_eq!(
+        engine.gamma_controls().ramp(1),
+        Some([0x000000, 0x7f7f90, 0xefefff]),
+        "SetSeason refreshes the weather slot"
+    );
+
+    call_probe(&mut engine, "SetSecond");
+    call_probe(&mut engine, "SetCold");
+    assert_eq!(
+        engine.gamma_controls().ramp(1),
+        Some(COLD_WINTER_RAMP),
+        "SetTemperature refreshes the weather slot"
+    );
+
+    call_probe(&mut engine, "SetSecond");
+    call_probe(&mut engine, "SetNewClimate");
+    assert_eq!(
+        engine.gamma_controls().ramp(1),
+        Some(COLD_WINTER_RAMP),
+        "SetClimate refreshes the weather slot even though climate is not a ramp input"
+    );
+}
+
+#[test]
+fn season_rollover_refreshes_gamma_before_temperature_drift() {
+    // C4Weather::Execute calls SetSeasonGamma only inside the rollover
+    // branch, before the separate Tick35 temperature drift
+    // (C4Weather.cpp:72-93). At -10 the winter curve shifts by five even
+    // though this same frame then raises Temperature to -9.
+    let mut environment = EnvironmentSettings::new(0)
+        .with_season(0)
+        .with_season_bounds(0, 100)
+        .with_year_speed(1)
+        .with_climate(0)
+        .with_temperature_range(0)
+        .with_temperature(-10)
+        .with_gamma_enabled();
+    environment.season_delay = 199;
+    let mut engine = Engine::with_seed(0);
+    engine.set_environment(environment);
+
+    for _ in 0..34 {
+        engine.tick().expect("pre-rollover frame succeeds");
+    }
+    assert_eq!(
+        engine.gamma_controls().ramp(1),
+        Some(GammaControlState::DEFAULT_RAMP),
+        "non-Tick35 frames do not rewrite the season control"
+    );
+
+    engine.tick().expect("rollover frame succeeds");
+
+    assert_eq!(engine.environment().season, 1);
+    assert_eq!(engine.environment().temperature, -9);
+    assert_eq!(
+        engine.gamma_controls().ramp(1),
+        Some([0x000005, 0x7a7a95, 0xeaeaff]),
+        "gamma uses the pre-drift -10 temperature"
+    );
+}
+
+#[test]
+fn weather_and_explicit_gamma_writes_retain_script_call_order() {
+    // C++ applies both calls immediately: SetSeason delegates to
+    // SetSeasonGamma (C4Weather.cpp:229-233), while SetGamma writes the
+    // requested slot directly (C4Script.cpp:4998-5006). The later call
+    // therefore owns C4GRI_SEASON when both occur in one callback.
+    let mut engine = gamma_probe_engine();
+    let summer = EnvironmentSettings::new(0)
+        .with_season(50)
+        .with_temperature(0)
+        .with_gamma_enabled();
+    engine.set_environment(summer);
+    call_probe(&mut engine, "SetSeasonThenExplicitGamma");
+    assert_eq!(
+        engine.gamma_controls().ramp(1),
+        Some([0x010203, 0x818283, 0xfefdfc]),
+        "later explicit SetGamma wins"
+    );
+
+    engine.set_environment(summer);
+    call_probe(&mut engine, "SetExplicitGammaThenSeason");
+    assert_eq!(
+        engine.gamma_controls().ramp(1),
+        Some([0x000000, 0x7f7f90, 0xefefff]),
+        "later SetSeasonGamma wins"
+    );
 }
 
 #[test]

@@ -8700,6 +8700,7 @@ pub struct EnvironmentDelta {
     pub temperature: Option<i32>,
     pub climate: Option<i32>,
     pub season: Option<i32>,
+    pub(crate) season_gamma_handled: bool,
 }
 
 impl EnvironmentDelta {
@@ -8708,6 +8709,11 @@ impl EnvironmentDelta {
             && self.temperature.is_none()
             && self.climate.is_none()
             && self.season.is_none()
+    }
+
+    pub(crate) fn requests_season_gamma_refresh(&self) -> bool {
+        !self.season_gamma_handled
+            && (self.temperature.is_some() || self.climate.is_some() || self.season.is_some())
     }
 
     pub fn apply(&self, environment: &mut EnvironmentSettings) {
@@ -8758,6 +8764,7 @@ impl EnvironmentContext {
         let clamped = temperature.clamp(-100, 100);
         self.settings.borrow_mut().temperature = clamped;
         self.pending.borrow_mut().temperature = Some(clamped);
+        self.queue_season_gamma_control();
     }
 
     fn ambient_temperature(&self) -> i32 {
@@ -8769,6 +8776,7 @@ impl EnvironmentContext {
         let clamped = climate.clamp(-50, 50);
         self.settings.borrow_mut().climate = clamped;
         self.pending.borrow_mut().climate = Some(clamped);
+        self.queue_season_gamma_control();
     }
 
     fn climate(&self) -> i32 {
@@ -8776,12 +8784,30 @@ impl EnvironmentContext {
     }
 
     /// C4Weather::SetSeason (C4Weather.cpp:229-233): BoundBy(iSeason, 0,
-    /// 100); the SetSeasonGamma refresh is a derived presentation getter
-    /// on the Rust side.
+    /// 100), then SetSeasonGamma immediately. Queueing the gamma operation
+    /// here preserves its order relative to an explicit SetGamma call in
+    /// the same callback.
     fn set_season(&self, season: i32) {
         let clamped = season.clamp(0, 100);
         self.settings.borrow_mut().season = clamped;
         self.pending.borrow_mut().season = Some(clamped);
+        self.queue_season_gamma_control();
+    }
+
+    fn queue_season_gamma_control(&self) {
+        let points = self.settings.borrow().season_gamma_control_points();
+        let handled = points.is_none_or(|points| {
+            HOST_CONTEXT.with(|cell| {
+                cell.borrow_mut().as_mut().is_some_and(|context| {
+                    context.register_landscape_operation(LandscapeOperation::GammaRamp {
+                        index: 1,
+                        points,
+                    });
+                    true
+                })
+            })
+        });
+        self.pending.borrow_mut().season_gamma_handled = handled;
     }
 
     fn season(&self) -> i32 {
@@ -33787,6 +33813,24 @@ func Missing() { return ComponentAll(nil, WOOD); }
         let value = result.expect("SetSeason/GetSeason succeeds");
         assert_eq!(value, Value::Int(100));
         assert_eq!(delta.season, Some(100));
+    }
+
+    #[test]
+    fn merged_environment_delta_forwards_nested_season_and_gamma_handling() {
+        // Nested/script host outcomes are folded into the outer callback's
+        // EnvironmentDelta. SetSeason must survive that merge together with
+        // the marker saying its in-order GammaRamp was already queued.
+        let mut target = EnvironmentDelta::default();
+        let source = EnvironmentDelta {
+            season: Some(37),
+            season_gamma_handled: true,
+            ..EnvironmentDelta::default()
+        };
+
+        crate::merge_environment_delta(&mut target, &source);
+
+        assert_eq!(target.season, Some(37));
+        assert!(target.season_gamma_handled);
     }
 
     #[test]
