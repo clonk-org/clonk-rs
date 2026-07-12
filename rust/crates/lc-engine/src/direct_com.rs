@@ -2012,6 +2012,118 @@ impl Engine {
         Ok(())
     }
 
+    /// The row partition produced by `C4ObjectListIterator::GetNext` for an
+    /// object menu: category-ineligible entries are invisible, same-ID chunks
+    /// retain list order, and only `CanConcatPictureWith`-equal objects share
+    /// a row (C4ObjectList.cpp:849-903).
+    fn object_menu_picture_groups(
+        &self,
+        contents: &[ObjectId],
+        category_mask: i32,
+    ) -> Vec<(ObjectId, i32)> {
+        let eligible = contents
+            .iter()
+            .filter_map(|object_id| {
+                let index = self.find_object_index(*object_id)?;
+                let object = &self.objects[index];
+                (!object.destroyed
+                    && object.state.status.is_active()
+                    && object.state.category & category_mask != 0)
+                    .then_some(*object_id)
+                    .and_then(|object_id| {
+                        self.object_snapshot(object_id)
+                            .map(|snapshot| (object_id, snapshot))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut groups = Vec::new();
+        let mut chunk_start = 0usize;
+        while chunk_start < eligible.len() {
+            let chunk_definition = eligible[chunk_start].1.definition_id.as_str();
+            let chunk_end = eligible[chunk_start..]
+                .iter()
+                .position(|(_, object)| object.definition_id != chunk_definition)
+                .map(|offset| chunk_start + offset)
+                .unwrap_or(eligible.len());
+
+            for current in chunk_start..chunk_end {
+                // GetNext's duplicate scan is deliberately directional:
+                // each prior object asks whether it concatenates `current`.
+                if (chunk_start..current).any(|prior| {
+                    self.can_concat_picture_with(&eligible[prior].1, &eligible[current].1)
+                }) {
+                    continue;
+                }
+                // Its piCount scan uses the reverse direction: each later
+                // object asks whether it concatenates the representative.
+                let count = 1usize
+                    + (current + 1..chunk_end)
+                        .filter(|later| {
+                            self.can_concat_picture_with(
+                                &eligible[*later].1,
+                                &eligible[current].1,
+                            )
+                        })
+                        .count();
+                groups.push((
+                    eligible[current].0,
+                    i32::try_from(count).unwrap_or(i32::MAX),
+                ));
+            }
+            chunk_start = chunk_end;
+        }
+
+        groups
+    }
+
+    /// `C4ObjectList::ObjectCount(id)` counts every live same-ID content,
+    /// independently of the category/picture group used for the visible row
+    /// (C4ObjectList.cpp:320-329; C4ObjectMenu.cpp:266-267,317-319).
+    fn live_contents_definition_count(&self, contents: &[ObjectId], definition_id: &str) -> i32 {
+        let count = contents
+            .iter()
+            .filter_map(|candidate| self.find_object_index(*candidate))
+            .filter(|&candidate| {
+                let candidate = &self.objects[candidate];
+                !candidate.destroyed
+                    && candidate.state.status.is_active()
+                    && candidate.definition_id == definition_id
+            })
+            .count();
+        i32::try_from(count).unwrap_or(i32::MAX)
+    }
+
+    /// `ClearItems(false)` keeps the numeric slot. `checkIDSelection` first
+    /// accepts that slot when its C4ID survived, otherwise finds the first row
+    /// carrying the old C4ID; `AdjustSelection` supplies the numeric fallback
+    /// (C4ObjectMenu.cpp:147-164; C4Menu.cpp:975-1017).
+    fn refilled_object_menu_selection(
+        items: &[crate::ObjectMenuItem],
+        previous_selection: Option<i32>,
+        selected_definition: Option<&str>,
+    ) -> i32 {
+        if items.is_empty() {
+            return -1;
+        }
+        if let (Some(previous), Some(selected)) = (previous_selection, selected_definition) {
+            if usize::try_from(previous)
+                .ok()
+                .and_then(|selection| items.get(selection))
+                .is_some_and(|item| item.item_id == selected)
+            {
+                return previous;
+            }
+        }
+        if let Some(selection) = selected_definition
+            .and_then(|selected| items.iter().position(|item| item.item_id == selected))
+            .and_then(|selection| i32::try_from(selection).ok())
+        {
+            return selection;
+        }
+        let last = i32::try_from(items.len() - 1).unwrap_or(i32::MAX);
+        previous_selection.unwrap_or(0).clamp(0, last)
+    }
+
     /// C4Object::ActivateMenu(C4MN_Sell) plus C4ObjectMenu's immediate
     /// refill over the base's stContents list (C4Object.cpp:1932-1943;
     /// C4ObjectMenu.cpp:238-277).
@@ -2044,34 +2156,15 @@ impl Engine {
             | crate::CATEGORY_VEHICLE
             | crate::CATEGORY_OBJECT
             | CATEGORY_TRADE_LIVING;
-        let mut seen_definitions = Vec::new();
         let mut items = Vec::new();
 
-        for item_id in contents.iter().copied() {
+        for (item_id, count) in self.object_menu_picture_groups(&contents, sell_category) {
             let Some(item_index) = self.find_object_index(item_id) else {
                 continue;
             };
             let item = &self.objects[item_index];
-            if item.destroyed
-                || !item.state.status.is_active()
-                || item.state.category & sell_category == 0
-                || seen_definitions.contains(&item.definition_id)
-            {
-                continue;
-            }
             let definition_id = item.definition_id.clone();
-            seen_definitions.push(definition_id.clone());
-            let count = contents
-                .iter()
-                .filter_map(|candidate| self.find_object_index(*candidate))
-                .filter(|&candidate| {
-                    let candidate = &self.objects[candidate];
-                    !candidate.destroyed
-                        && candidate.state.status.is_active()
-                        && candidate.definition_id == definition_id
-                })
-                .count();
-            let count = i32::try_from(count).unwrap_or(i32::MAX);
+            let all_count = self.live_contents_definition_count(&contents, &definition_id);
             let Some(definition) = self.definitions.get(&definition_id) else {
                 continue;
             };
@@ -2084,7 +2177,7 @@ impl Engine {
             let command2 = format!(
                 "AppendCommand(this,\"Sell\",Object({}),{},0,,0,{})&&ExecuteCommand()",
                 base_id.as_u64(),
-                count,
+                all_count,
                 definition_id
             );
             items.push(crate::ObjectMenuItem {
@@ -2106,18 +2199,11 @@ impl Engine {
         // C4ID vanished, AdjustSelection keeps the old slot when valid and
         // otherwise walks backward to the final row (C4ObjectMenu.cpp:
         // 147-164,238-275; C4Menu.cpp:975-1017).
-        let selection = if items.is_empty() {
-            -1
-        } else {
-            selected_definition
-                .as_ref()
-                .and_then(|selected| items.iter().position(|item| &item.item_id == selected))
-                .and_then(|selection| i32::try_from(selection).ok())
-                .unwrap_or_else(|| {
-                    let last = i32::try_from(items.len() - 1).unwrap_or(i32::MAX);
-                    previous_selection.unwrap_or(0).clamp(0, last)
-                })
-        };
+        let selection = Self::refilled_object_menu_selection(
+            &items,
+            previous_selection,
+            selected_definition.as_deref(),
+        );
         let base_name = self
             .definitions
             .get(&base_definition)
@@ -2158,51 +2244,37 @@ impl Engine {
     ) -> Result<(), EngineError> {
         const CATEGORY_TRADE_LIVING: i32 = 1 << 16;
         let crew_id = self.objects[crew_index].id;
-        let selected_definition = self.objects[crew_index]
+        let (previous_selection, selected_definition) = self.objects[crew_index]
             .state
             .menu
             .as_ref()
             .filter(|menu| menu.identification == Value::Int(identification))
-            .and_then(|menu| usize::try_from(menu.selection).ok().zip(Some(menu)))
-            .and_then(|(selection, menu)| menu.items.get(selection))
-            .map(|item| item.item_id.clone());
+            .map(|menu| {
+                let selected_definition = usize::try_from(menu.selection)
+                    .ok()
+                    .and_then(|selection| menu.items.get(selection))
+                    .map(|item| item.item_id.clone());
+                (Some(menu.selection), selected_definition)
+            })
+            .unwrap_or((None, None));
         let container_id = self.objects[container_index].id;
         let container_definition = self.objects[container_index].definition_id.clone();
         let has_entrance = self.objects[container_index].state.ocf & ocf::ENTRANCE != 0;
         let contents = self.objects[container_index].state.contents.clone();
-        let mut seen_definitions = Vec::new();
         let mut items = Vec::new();
+        let get_category = crate::CATEGORY_STATIC_BACK
+            | crate::CATEGORY_STRUCTURE
+            | crate::CATEGORY_VEHICLE
+            | crate::CATEGORY_OBJECT
+            | CATEGORY_TRADE_LIVING;
 
-        for item_id in contents.iter().copied() {
+        for (item_id, count) in self.object_menu_picture_groups(&contents, get_category) {
             let Some(item_index) = self.find_object_index(item_id) else {
                 continue;
             };
             let item = &self.objects[item_index];
-            let get_category = crate::CATEGORY_STATIC_BACK
-                | crate::CATEGORY_STRUCTURE
-                | crate::CATEGORY_VEHICLE
-                | crate::CATEGORY_OBJECT
-                | CATEGORY_TRADE_LIVING;
-            if item.destroyed
-                || !item.state.status.is_active()
-                || item.state.category & get_category == 0
-                || seen_definitions.contains(&item.definition_id)
-            {
-                continue;
-            }
             let definition_id = item.definition_id.clone();
-            seen_definitions.push(definition_id.clone());
-            let count = contents
-                .iter()
-                .filter_map(|candidate| self.find_object_index(*candidate))
-                .filter(|&candidate| {
-                    let candidate = &self.objects[candidate];
-                    !candidate.destroyed
-                        && candidate.state.status.is_active()
-                        && candidate.definition_id == definition_id
-                })
-                .count();
-            let count = i32::try_from(count).unwrap_or(i32::MAX);
+            let all_count = self.live_contents_definition_count(&contents, &definition_id);
             let carryable = item.state.ocf & ocf::CARRYABLE != 0;
             let get = carryable || !has_entrance;
             let command_name = if get { "Get" } else { "Activate" };
@@ -2219,12 +2291,12 @@ impl Engine {
                 command_name,
                 item_id.as_u64()
             );
-            let command2 = (count > 1)
+            let command2 = (all_count > 1)
                 .then(|| {
                     format!(
                         "SetCommand(this, \"{}\", , {},0, Object({}), {}) && ExecuteCommand()",
                         command_name,
-                        count,
+                        all_count,
                         container_id.as_u64(),
                         definition_id
                     )
@@ -2244,11 +2316,11 @@ impl Engine {
             });
         }
 
-        let selection = selected_definition
-            .as_ref()
-            .and_then(|selected| items.iter().position(|item| &item.item_id == selected))
-            .and_then(|selection| i32::try_from(selection).ok())
-            .unwrap_or_else(|| i32::from(!items.is_empty()) - 1);
+        let selection = Self::refilled_object_menu_selection(
+            &items,
+            previous_selection,
+            selected_definition.as_deref(),
+        );
         let container_name = self
             .definitions
             .get(&container_definition)
@@ -4949,6 +5021,139 @@ protected func IsBuilt() { return GetCon() >= 100; }
                 .map(|item| (item.item_id.as_str(), item.count))
                 .collect::<Vec<_>>(),
             vec![("FLAG", 1), ("LORY", 1)]
+        );
+    }
+
+    #[test]
+    fn contents_and_sell_refills_group_only_cpp_concatable_pictures() {
+        // C4MN_Sell and C4MN_Contents both enumerate the target's stContents
+        // through C4ObjectListIterator (C4ObjectMenu.cpp:238-275,279-326).
+        // That iterator emits a separate row for same-ID objects unless
+        // C4Object::CanConcatPictureWith succeeds (C4ObjectList.cpp:849-903;
+        // C4Object.cpp:6173-6213). The row count is the concat group count,
+        // while command2 deliberately keeps Contents.ObjectCount(id), i.e. the
+        // count of every same-ID object (C4ObjectMenu.cpp:266-271,317-321).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        engine.register_definition(hut).expect("register hut");
+        let mut flint = Definition::from_script("TFLN", "T-Flint", "#strict\n")
+            .expect("flint compiles");
+        flint.set_category(crate::CATEGORY_OBJECT);
+        flint.set_collectible(true);
+        flint.set_value(15);
+        engine.register_definition(flint).expect("register flint");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        let idle = engine
+            .spawn_object(SpawnConfig::new("TFLN").with_container(hut))
+            .expect("spawn idle flint");
+        let activated = engine
+            .spawn_object(SpawnConfig::new("TFLN").with_container(hut))
+            .expect("spawn activated flint");
+        engine
+            .apply_object_update(
+                activated,
+                crate::ObjectUpdate {
+                    picture_rect: Some(crate::DefinitionRect::new(0, 76, 64, 64)),
+                    ..crate::ObjectUpdate::default()
+                },
+            )
+            .expect("activated flint changes its picture");
+        assert!(!engine.can_concat_picture_with(
+            &engine.object_snapshot(idle).expect("idle flint exists"),
+            &engine
+                .object_snapshot(activated)
+                .expect("activated flint exists"),
+        ));
+
+        engine
+            .open_base_sell_menu(crew_index, hut_index)
+            .expect("open sell menu");
+        let sell = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("sell menu opens");
+        assert_eq!(
+            sell.items
+                .iter()
+                .map(|item| (item.item_id.as_str(), item.count))
+                .collect::<Vec<_>>(),
+            vec![("TFLN", 1), ("TFLN", 1)],
+            "different per-object pictures occupy separate C++ menu rows"
+        );
+        assert!(sell
+            .items
+            .iter()
+            .all(|item| item.command2.contains(",2,0,,0,TFLN")));
+        let ordered_flints = engine.object_snapshot(hut).expect("hut exists").contents;
+        assert_eq!(ordered_flints.len(), 2);
+        for (row, object) in sell.items.iter().zip(&ordered_flints) {
+            assert!(row
+                .command
+                .contains(&format!("Object({})", object.as_u64())));
+        }
+        engine
+            .player_in_com(1, COM_RIGHT, 0)
+            .expect("select second picture row");
+        engine
+            .open_base_sell_menu(crew_index, hut_index)
+            .expect("refill sell menu");
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("sell menu remains open")
+                .selection,
+            1,
+            "same-ID picture rows keep C++'s surviving numeric selection"
+        );
+
+        engine
+            .open_container_contents_menu(crew_index, hut_index, 18)
+            .expect("open contents menu");
+        let contents = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("contents menu opens");
+        assert_eq!(
+            contents
+                .items
+                .iter()
+                .map(|item| (item.item_id.as_str(), item.count))
+                .collect::<Vec<_>>(),
+            vec![("TFLN", 1), ("TFLN", 1)]
+        );
+        assert!(contents.items.iter().all(|item| {
+            item.command2.contains(&format!(
+                "SetCommand(this, \"Get\", , 2,0, Object({}), TFLN)",
+                hut.as_u64()
+            ))
+        }));
+        engine
+            .player_in_com(1, COM_RIGHT, 0)
+            .expect("select second contents picture row");
+        engine
+            .open_container_contents_menu(crew_index, hut_index, 18)
+            .expect("refill contents menu");
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("contents menu remains open")
+                .selection,
+            1
         );
     }
 
