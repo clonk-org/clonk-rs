@@ -6993,6 +6993,144 @@ mod tests {
     }
 
     #[test]
+    fn real_tutorial_seven_acid_rain_matches_cpp_animated_pxs_sequence() {
+        // Tutorial07 fixes rain at 77 and wind at 50 and selects AcidRain
+        // (Scenario.txt:70-75). FXP1's Process action calls Precipitation
+        // every two frames and that callback inserts three PXS at strength 77
+        // (Precipitation.c4d/ActMap.txt:1-8; Script.c:5-17). ExecObjects runs
+        // before PXS.Execute, so each new triplet moves on its creation frame
+        // (C4Game.cpp:808-835; C4PXS.cpp:218-239). AcidRain has no PXSGfx:
+        // C++ therefore draws a gamma-shaded, half-open velocity line from
+        // x-xdir/y-ydir to x/y (C4PXS.cpp:242-277; StdGL.cpp:893-933,
+        // 1082-1087). Pin ten actual frames, not merely spawn counts.
+        let mut engine = load_repository_tutorial(7);
+        let material_group = Group::open(
+            crate::test_support::repo_root()
+                .join("content/Tutorial.c4f/Tutorial07.c4s/Material.c4g"),
+        )
+        .expect("Tutorial07 Material.c4g opens");
+        let materials = MaterialLibrary::from_group(&material_group)
+            .expect("Tutorial07 materials load");
+        let acid = materials.get("AcidRain").expect("AcidRain material");
+        let color: [u8; 9] = acid
+            .int_list("Color")
+            .expect("AcidRain color")
+            .into_iter()
+            .map(|value| value as u8)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("AcidRain has three RGB triplets");
+        assert!(acid.value("PXSGfx").is_none());
+        assert_eq!(color, [200, 250, 200, 200, 250, 200, 200, 250, 200]);
+        assert_eq!(acid.int("Density"), Some(25));
+        let material = MaterialRenderInfo::new(
+            color,
+            [0; 6],
+            acid.value("TextureOverlay").map(ToOwned::to_owned),
+            acid.int("OverlayType").unwrap_or(0),
+            acid.int("Density").unwrap_or(0),
+        );
+
+        let expected_frames = [
+            (0, 0xdbdc_9dc5, 0, None),
+            (3, 0x277e_7b80, 21, Some((467, 1, 594, 7))),
+            (3, 0xe7f0_2595, 24, Some((468, 8, 594, 15))),
+            (6, 0xf17e_eee9, 42, Some((281, 1, 595, 22))),
+            (6, 0xf7a1_67d8, 45, Some((282, 8, 596, 29))),
+            (9, 0x0fa1_c864, 63, Some((282, 1, 641, 36))),
+            (9, 0xa533_fc59, 68, Some((283, 8, 641, 43))),
+            (12, 0x0217_2809, 84, Some((284, 1, 642, 50))),
+            (12, 0x534c_2638, 87, Some((285, 8, 643, 57))),
+            (15, 0x7e04_6a65, 106, Some((287, 1, 644, 64))),
+        ];
+        let expected_first_particle = [
+            [32_676_571, 552_373, 39_643, 486_837],
+            [32_725_473, 1_033_657, 48_902, 481_284],
+            [32_782_076, 1_504_401, 56_603, 470_744],
+            [32_843_797, 1_973_587, 61_721, 469_186],
+            [32_908_681, 2_436_830, 64_884, 463_243],
+            [32_974_351, 2_899_856, 65_670, 463_026],
+            [33_045_211, 3_362_274, 70_860, 462_418],
+            [33_123_318, 3_824_705, 78_107, 462_431],
+            [33_205_670, 4_279_441, 82_352, 454_736],
+        ];
+
+        for (frame_index, &(expected_count, checksum, changed_count, expected_bounds)) in
+            expected_frames.iter().enumerate()
+        {
+            let snapshot = engine.tick().expect("Tutorial07 weather frame");
+            let pxs = snapshot
+                .particles
+                .iter()
+                .filter(|particle| particle.definition_id == "material/pxs/acidrain")
+                .collect::<Vec<_>>();
+            assert_eq!(pxs.len(), expected_count, "frame {} PXS cadence", snapshot.frame);
+            assert_eq!(
+                pxs.iter().map(|particle| particle.pxs_slot).collect::<Vec<_>>(),
+                (0..expected_count as u32).map(Some).collect::<Vec<_>>(),
+                "frame {} preserves C4PXS slot order",
+                snapshot.frame,
+            );
+            if let Some(first) = pxs.first() {
+                assert_eq!(
+                    first.pxs_fixed,
+                    Some(expected_first_particle[frame_index - 1]),
+                    "frame {} first AcidRain PXS trajectory",
+                    snapshot.frame,
+                );
+            }
+            let mut graphics = GraphicsSystem::new(
+                1024,
+                256,
+                256,
+                "Tutorial 07 Acid Rain",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(Color::opaque(7, 11, 13));
+            graphics.set_material_render_info(Arc::new(HashMap::from([(
+                "acidrain".to_string(),
+                material.clone(),
+            )])));
+            let gamma_points = snapshot.environment.gamma.combined_control_points();
+            assert_eq!(gamma_points, [0x000000, 0x648064, 0xc8ffc8]);
+            let gamma = lc_graphics::GammaRamp::from_control_points(gamma_points);
+            graphics.draw_pxs(
+                &snapshot.particles,
+                GraphicsSystem::lighting_factor(snapshot.environment.settings.time_of_day),
+                Some(&gamma),
+            );
+            let background = Color::opaque(7, 11, 13);
+            let changed = (0..graphics.surface().height())
+                .flat_map(|y| (0..graphics.surface().width()).map(move |x| (x, y)))
+                .filter(|&(x, y)| graphics.surface().get_pixel(x, y) != Some(background))
+                .collect::<Vec<_>>();
+            let bounds = changed.iter().fold(None, |bounds, &(x, y)| {
+                Some(bounds.map_or(
+                    (x, y, x, y),
+                    |(x0, y0, x1, y1): (u32, u32, u32, u32)| {
+                        (x0.min(x), y0.min(y), x1.max(x), y1.max(y))
+                    },
+                ))
+            });
+            assert_eq!(
+                graphics.surface().snapshot().checksum(),
+                checksum,
+                "frame {} rendered PXS streaks",
+                snapshot.frame,
+            );
+            assert_eq!(
+                (changed.len(), bounds),
+                (changed_count, expected_bounds),
+                "frame {} rendered PXS coverage",
+                snapshot.frame,
+            );
+        }
+    }
+
+    #[test]
     fn viewport_point_at_maps_screen_to_world() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
