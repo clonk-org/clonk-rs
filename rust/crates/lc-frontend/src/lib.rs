@@ -4025,13 +4025,17 @@ fn draw_pxs_pixel(
     x: i32,
     y: i32,
     color: Color,
-    _gamma: Option<&lc_graphics::GammaRamp>,
+    gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     if x < 0 || y < 0 || x >= surface.width() as i32 || y >= surface.height() as i32 {
         return;
     }
     let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
-    let _ = surface.set_pixel(x as u32, y as u32, blend_color_over(color, background));
+    let blended = gamma.map_or_else(
+        || blend_color_over(color, background),
+        |gamma| gamma_blend_fragment_over(color, background, gamma),
+    );
+    let _ = surface.set_pixel(x as u32, y as u32, blended);
 }
 
 fn draw_pxs_line(
@@ -4126,7 +4130,7 @@ fn draw_pxs_image_region(
     source: &SourceRect,
     modulation_transparency: u8,
     lighting: f32,
-    _gamma: Option<&lc_graphics::GammaRamp>,
+    gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     if target.size.width <= 0.0
         || target.size.height <= 0.0
@@ -4182,16 +4186,29 @@ fn draw_pxs_image_region(
             }
             let alpha = opacity / 255.0;
             let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
-            let blend = |source: f32, destination: u8| -> u8 {
-                ((source * lighting).clamp(0.0, 255.0) * alpha
-                    + f32::from(destination) * (1.0 - alpha))
-                    .round()
-                    .clamp(0.0, 255.0) as u8
+            let blend = |channel, source: f32, destination: u8| -> u8 {
+                let source = (source * lighting).clamp(0.0, 255.0);
+                store_channel(
+                    sample_channel(gamma, channel, source) * alpha
+                        + f32::from(destination) * (1.0 - alpha),
+                )
             };
             let color = Color::new(
-                blend(sample[0], background.r),
-                blend(sample[1], background.g),
-                blend(sample[2], background.b),
+                blend(
+                    lc_graphics::gamma::GammaChannel::Red,
+                    sample[0],
+                    background.r,
+                ),
+                blend(
+                    lc_graphics::gamma::GammaChannel::Green,
+                    sample[1],
+                    background.g,
+                ),
+                blend(
+                    lc_graphics::gamma::GammaChannel::Blue,
+                    sample[2],
+                    background.b,
+                ),
                 255,
             );
             let _ = surface.set_pixel(x as u32, y as u32, color);
@@ -4326,7 +4343,7 @@ fn draw_image_region(
     source: &SourceRect,
     flip_x: bool,
     owner_color: Option<Color>,
-    _gamma: Option<&lc_graphics::GammaRamp>,
+    gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
         return;
@@ -4408,13 +4425,21 @@ fn draw_image_region(
                 continue;
             }
 
-            let blended = if color.a == 255 {
-                color
-            } else {
-                let background = surface
-                    .get_pixel(target_x as u32, target_y as u32)
-                    .unwrap_or_default();
-                blend_colors(color, background)
+            let blended = match (color.a, gamma) {
+                (255, Some(gamma)) => gamma_encode_fragment(color, gamma),
+                (255, None) => color,
+                (_, Some(gamma)) => {
+                    let background = surface
+                        .get_pixel(target_x as u32, target_y as u32)
+                        .unwrap_or_default();
+                    gamma_blend_fragment_over(color, background, gamma)
+                }
+                (_, None) => {
+                    let background = surface
+                        .get_pixel(target_x as u32, target_y as u32)
+                        .unwrap_or_default();
+                    blend_colors(color, background)
+                }
             };
 
             let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
@@ -4434,7 +4459,7 @@ fn draw_image_region_rotated(
     flip_x: bool,
     owner_color: Option<Color>,
     rotation_degrees: f32,
-    _gamma: Option<&lc_graphics::GammaRamp>,
+    gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     if dest_width <= 0.0 || dest_height <= 0.0 {
         return;
@@ -4561,7 +4586,14 @@ fn draw_image_region_rotated(
                 continue;
             }
 
-            if color.a < 255 {
+            if let Some(gamma) = gamma {
+                if color.a == 255 {
+                    color = gamma_encode_fragment(color, gamma);
+                } else {
+                    let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
+                    color = gamma_blend_fragment_over(color, background, gamma);
+                }
+            } else if color.a < 255 {
                 let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
                 color = blend_colors(color, background);
             }
@@ -5425,58 +5457,165 @@ mod tests {
     }
 
     #[test]
-    fn object_and_pxs_gamma_seams_are_structural_until_fragment_encoding_lands() {
+    fn object_and_old_style_pxs_gamma_sample_independent_r16_channels() {
         let gamma = lc_graphics::GammaRamp::from_control_points([
             0x102030, 0x405060, 0x708090,
         ]);
-        let render = |gamma: Option<&lc_graphics::GammaRamp>| {
-            let snapshot = make_snapshot();
-            let sprites = solid_sprite(
+        let snapshot = make_snapshot();
+        let mut graphics = GraphicsSystem::new(
+            128,
+            128,
+            128,
+            "Gamma Object/PXS",
+            test_font(),
+            solid_sprite(
                 "TestObject",
                 1,
                 1,
-                Color::opaque(240, 80, 20),
+                Color::opaque(0, 0, 0),
                 Some(DefinitionRect::new(0, 0, 1, 1)),
                 false,
-            );
-            let mut graphics = GraphicsSystem::new(
-                128,
-                128,
-                128,
-                "Gamma Object/PXS Seam",
-                test_font(),
-                sprites,
-                empty_cursor_atlas(),
-                empty_hud_graphics(),
-            );
-            graphics.surface_mut().fill(Color::opaque(7, 11, 13));
-            graphics.set_material_render_info(Arc::new(HashMap::from([(
-                "rain".to_string(),
-                MaterialRenderInfo::new(
-                    [40, 120, 200, 0, 0, 0, 0, 0, 0],
-                    [0; 6],
-                    None,
-                    0,
-                    25,
-                ),
-            )])));
-            graphics.draw_pxs(
-                &[pxs_particle("rain", [96 << 16, 100 << 16, 0, 0], 0)],
-                1.0,
-                gamma,
-            );
-            graphics.draw_objects(
-                &snapshot.objects,
-                &snapshot.render_order,
-                1.0,
-                &HashMap::new(),
-                ObjectRenderPass::Normal,
-                gamma,
-            );
-            graphics.surface().pixels().to_vec()
-        };
+            ),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(200, 200, 200));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "rain".to_string(),
+            MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 25),
+        )])));
 
-        assert_eq!(render(Some(&gamma)), render(None));
+        graphics.draw_pxs(
+            &[pxs_particle("rain", [96 << 16, 100 << 16, 0, 0], 0)],
+            1.0,
+            Some(&gamma),
+        );
+        graphics.draw_objects(
+            &snapshot.objects,
+            &snapshot.render_order,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            Some(&gamma),
+        );
+
+        let encoded = Some(Color::new(17, 33, 49, 255));
+        assert_eq!(graphics.surface().get_pixel(96, 100), encoded);
+        assert_eq!(graphics.surface().get_pixel(100, 100), encoded);
+    }
+
+    #[test]
+    fn rotated_base_overlay_gamma_samples_before_translucent_blending() {
+        let mut object = make_snapshot().objects.remove(0);
+        let mut overlay = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base);
+        overlay.definition = Some("Overlay".to_string());
+        object.graphics_overlays.push(overlay);
+        let mut graphics = GraphicsSystem::new(
+            9,
+            9,
+            9,
+            "Gamma Rotated Overlay",
+            test_font(),
+            solid_sprite(
+                "Overlay",
+                3,
+                3,
+                Color::new(64, 128, 192, 128),
+                Some(DefinitionRect::new(-1, -1, 3, 3)),
+                false,
+            ),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(200, 200, 200));
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+
+        graphics.draw_object_overlays(
+            &object,
+            None,
+            4.0,
+            4.0,
+            1.0,
+            45.0,
+            None,
+            Some(&gamma),
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(4, 4),
+            Some(Color::new(125, 150, 175, 255))
+        );
+    }
+
+    #[test]
+    fn graphical_pxs_gamma_samples_filtered_rgb_before_translucent_blending() {
+        let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
+        surface.fill(Color::opaque(200, 200, 200));
+        let image = ImageData::new(1, 1, vec![64, 128, 192, 128]);
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+
+        draw_pxs_image_region(
+            &mut surface,
+            &GuiRect::new(0.0, 0.0, 1.0, 1.0),
+            &image,
+            &SourceRect::new(0, 0, 1, 1),
+            0,
+            1.0,
+            Some(&gamma),
+        );
+
+        assert_eq!(
+            surface.get_pixel(0, 0),
+            Some(Color::new(125, 150, 175, 255))
+        );
+    }
+
+    #[test]
+    fn tutorial_seven_acid_rain_pxs_uses_its_green_gamma_ramp() {
+        // Tutorial07 Script.c:12 and AcidRain.c4m:3: the opaque old-style
+        // PXS fragment (200,250,200) is sampled by the scenario's green-heavy
+        // ramp before it replaces the framebuffer pixel.
+        let mut graphics = GraphicsSystem::new(
+            4,
+            4,
+            4,
+            "Tutorial 07 Acid Rain",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let background = Color::opaque(7, 11, 13);
+        graphics.surface_mut().fill(background);
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "acidrain".to_string(),
+            MaterialRenderInfo::new(
+                [200, 250, 200, 200, 250, 200, 200, 250, 200],
+                [0; 6],
+                None,
+                0,
+                25,
+            ),
+        )])));
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x648064, 0xc8ffc8,
+        ]);
+
+        graphics.draw_pxs(
+            &[pxs_particle("acidrain", [2 << 16, 2 << 16, 0, 0], 0)],
+            1.0,
+            Some(&gamma),
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(2, 2),
+            Some(Color::opaque(157, 250, 157))
+        );
+        assert_eq!(graphics.surface().get_pixel(1, 2), Some(background));
     }
 
     #[test]
