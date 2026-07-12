@@ -3,6 +3,36 @@ use lc_engine::AudioCommand;
 use crate::support::real_scenario::load_tutorial;
 
 #[test]
+fn tutorial07_real_acid_rain_starts_on_each_cpp_phase_call() {
+    // The shipped FXP1 Process action has Delay=2 and PhaseCall=Precipitation
+    // (Objects.c4d/Effects.c4d/Precipitation.c4d/ActMap.txt). Each callback
+    // performs three InsertMaterial calls, and Tutorial07's fixed strength 77
+    // makes `Random(50) > iStrength` impossible (its Scenario.txt and the
+    // shipped Precipitation Script.c). C4Object::ExecAction invokes PhaseCall
+    // after advancing Phase on every second execution (C4Object.cpp:5466-5476).
+    let mut engine = load_tutorial(7, 0);
+
+    let acid_rain_count = |engine: &lc_engine::Engine| {
+        engine
+            .snapshot()
+            .particles
+            .into_iter()
+            .filter(|particle| particle.definition_id == "material/pxs/acidrain")
+            .count()
+    };
+
+    let expected = [0, 3, 3, 6];
+    for (tick, expected_count) in (1..=4).zip(expected) {
+        engine.tick().expect("Tutorial07 weather tick succeeds");
+        assert_eq!(
+            acid_rain_count(&engine),
+            expected_count,
+            "shipped Tutorial07 precipitation count after tick {tick}",
+        );
+    }
+}
+
+#[test]
 fn tutorial07_tick10_starts_cpp_wind_loop_at_level_40() {
     // Tutorial07 fixes Wind=50 (Scenario.txt:74). C4Weather::Execute steps
     // wind and then runs SoundLevel("Wind", nullptr, (abs(Wind)-30)*2) on

@@ -26,10 +26,10 @@ use lc_engine::{
     math::{fixtoi, itofix, C4Fixed},
     DefinitionActionGraphics, DefinitionId, DefinitionRect, DefinitionTargetRect, Direction,
     DrawTransform,
-    EnvironmentFrame, EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape,
-    ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, ParticleSnapshot, RgbColor,
-    SimulationSnapshot, SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2,
-    WeatherEvent, FULL_CON, OWNER_NONE,
+    EnvironmentFrame, EnvironmentSettings, FloatVector2, GammaControlState, GraphicsOverlayMode,
+    Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, ParticleSnapshot,
+    RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
+    SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent, FULL_CON, OWNER_NONE,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -931,6 +931,11 @@ pub struct GraphicsSystem {
     hud_graphics: Arc<HudGraphics>,
     active_viewports: Vec<ActiveViewport>,
     camera_states: HashMap<CameraKey, CameraState>,
+    /// Gamma currently installed in CStdDDraw. A runtime SetGamma mutates the
+    /// snapshot controls during the game tick, but C4GraphicsSystem applies
+    /// them only after drawing that render pass; a fresh graphics system has
+    /// already received InitGame's explicit ApplyGamma.
+    active_gamma_control_points: Option<[u32; 3]>,
     /// C4ConfigGeneral::ScrollSmooth. Config plumbing lives above the
     /// frontend; retain the exact C++ default and clamp at use meanwhile.
     scroll_smooth: i32,
@@ -988,6 +993,7 @@ impl GraphicsSystem {
             hud_graphics,
             active_viewports: Vec::new(),
             camera_states: HashMap::new(),
+            active_gamma_control_points: None,
             scroll_smooth: DEFAULT_SCROLL_SMOOTH,
             sky: None,
             material_textures: Arc::new(HashMap::new()),
@@ -1153,17 +1159,33 @@ impl GraphicsSystem {
         self.clonk_fonts = fonts;
     }
 
+    /// Installs the current scenario controls immediately, matching the
+    /// explicit `ApplyGamma` at the end of `C4Game::Init` (C4Game.cpp:490).
+    /// Runtime `SetGamma` changes continue through [`Self::render_frame`]'s
+    /// draw-then-apply lifecycle.
+    pub fn apply_gamma_now(&mut self, gamma: &GammaControlState) {
+        self.active_gamma_control_points = Some(gamma.combined_control_points());
+    }
+
     pub fn render_frame(
         &mut self,
         snapshot: &SimulationSnapshot,
         viewports: &[ViewportInput<'_>],
     ) -> Vec<EngineSurfaceSnapshot> {
-        self.render_frame_with_gamma(snapshot, viewports, None)
+        let pending = snapshot.environment.gamma.combined_control_points();
+        // C4Game::Init applies the initialization controls before the first
+        // render (C4Game.cpp:490). Later SetGamma calls set fSetGamma during
+        // simulation and C4GraphicsSystem::Execute applies them only after it
+        // has drawn the current pass (C4GraphicsSystem.cpp:195-199).
+        let active = self.active_gamma_control_points.unwrap_or(pending);
+        let gamma = lc_graphics::GammaRamp::from_control_points(active);
+        let snapshots = self.render_frame_with_gamma(snapshot, viewports, Some(&gamma));
+        self.active_gamma_control_points = Some(pending);
+        snapshots
     }
 
-    /// Structural seam for the C++ per-fragment gamma path. Public rendering
-    /// deliberately supplies `None` until the active/pending frame lifecycle
-    /// and fragment encoding land in later behavioral slices.
+    /// Internal seam for C++ per-fragment gamma rendering and exact isolated
+    /// fragment tests. Public rendering drives its active/pending lifecycle.
     fn render_frame_with_gamma(
         &mut self,
         snapshot: &SimulationSnapshot,
@@ -5667,9 +5689,21 @@ mod tests {
         }
     }
 
+    fn standard_gamma_color(color: Color) -> Color {
+        gamma_encode_fragment(color, &lc_graphics::GammaRamp::standard())
+    }
+
     #[test]
-    fn public_gamma_render_path_still_delegates_with_none() {
+    fn public_gamma_render_defers_runtime_change_until_after_current_pass() {
+        // A runtime SetGamma marks fSetGamma during simulation, but
+        // C4GraphicsSystem::Execute draws all viewports first and calls
+        // ApplyGamma only at its tail (C4GraphicsSystem.cpp:160-199).
         let snapshot = make_snapshot();
+        let mut changed = snapshot.clone();
+        changed
+            .environment
+            .gamma
+            .set_ramp(0, [0x102030, 0x405060, 0x708090]);
         let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
         let make_graphics = || {
             GraphicsSystem::new(
@@ -5683,13 +5717,27 @@ mod tests {
                 empty_hud_graphics(),
             )
         };
-        let mut public_path = make_graphics();
-        let mut internal_path = make_graphics();
-        let public_atlas = public_path.render_frame(&snapshot, &viewports);
-        let internal_atlas = internal_path.render_frame_with_gamma(&snapshot, &viewports, None);
+        let mut public = make_graphics();
+        public.render_frame(&snapshot, &viewports);
+        public.render_frame(&changed, &viewports);
+        let before_apply = public.surface().pixels().to_vec();
+        public.render_frame(&changed, &viewports);
+        let after_apply = public.surface().pixels().to_vec();
 
-        assert_eq!(internal_path.surface().pixels(), public_path.surface().pixels());
-        assert_eq!(internal_atlas, public_atlas);
+        let standard = lc_graphics::GammaRamp::from_control_points(
+            snapshot.environment.gamma.combined_control_points(),
+        );
+        let changed_ramp = lc_graphics::GammaRamp::from_control_points(
+            changed.environment.gamma.combined_control_points(),
+        );
+        let mut standard_render = make_graphics();
+        standard_render.render_frame_with_gamma(&changed, &viewports, Some(&standard));
+        let mut changed_render = make_graphics();
+        changed_render.render_frame_with_gamma(&changed, &viewports, Some(&changed_ramp));
+
+        assert_eq!(before_apply, standard_render.surface().pixels());
+        assert_eq!(after_apply, changed_render.surface().pixels());
+        assert_ne!(before_apply, after_apply);
     }
 
     #[test]
@@ -6632,6 +6680,88 @@ mod tests {
     }
 
     #[test]
+    fn real_tutorial_seven_apply_gamma_now_replaces_reused_menu_gamma() {
+        // Tutorial07 Initialize installs this ramp before the first game
+        // render (Tutorial07.c4s/Script.c:12; C4Game.cpp:490), and its shipped
+        // AcidRain material supplies opaque old-style PXS colour 200,250,200
+        // (AcidRain.c4m:3). C4PXS::Draw emits that fragment through the active
+        // shader gamma textures (C4PXS.cpp:242-277; StdGL.cpp:1082-1087).
+        let tutorial = crate::test_support::repo_root().join("content/Tutorial.c4f/Tutorial07.c4s");
+        let script = std::fs::read_to_string(tutorial.join("Script.c"))
+            .expect("read shipped Tutorial07 Script.c");
+        let gamma_values = script
+            .lines()
+            .find(|line| line.contains("SetGamma("))
+            .expect("shipped Tutorial07 sets gamma")
+            .split(|character: char| !character.is_ascii_digit())
+            .filter(|value| !value.is_empty())
+            .map(|value| value.parse::<u32>().expect("Tutorial07 gamma channel"))
+            .collect::<Vec<_>>();
+        assert_eq!(gamma_values.len(), 9);
+        let rgb = |offset: usize| {
+            (gamma_values[offset] << 16)
+                | (gamma_values[offset + 1] << 8)
+                | gamma_values[offset + 2]
+        };
+
+        let material = std::fs::read_to_string(tutorial.join("Material.c4g/AcidRain.c4m"))
+            .expect("read shipped Tutorial07 AcidRain material");
+        let material_color = material
+            .lines()
+            .find_map(|line| line.strip_prefix("Color="))
+            .expect("shipped AcidRain material color")
+            .split(',')
+            .map(|value| value.parse::<u8>().expect("AcidRain color channel"))
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("AcidRain has three RGB triplets");
+
+        let mut snapshot = make_snapshot();
+        snapshot
+            .environment
+            .gamma
+            .set_ramp(0, [rgb(0), rgb(3), rgb(6)]);
+        snapshot
+            .particles
+            .push(pxs_particle("acidrain", [100 << 16, 60 << 16, 0, 0], 0));
+        let mut graphics = GraphicsSystem::new(
+            120,
+            100,
+            100,
+            "Tutorial 07 Acid Rain",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "acidrain".to_string(),
+            MaterialRenderInfo::new(material_color, [0; 6], None, 0, 25),
+        )])));
+
+        let menu_snapshot = make_snapshot();
+        graphics.render_frame(
+            &menu_snapshot,
+            &[ViewportInput::from_focus(&menu_snapshot.objects[0])],
+        );
+        graphics.apply_gamma_now(&snapshot.environment.gamma);
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::from_focus(&snapshot.objects[0])],
+        );
+        let (x, y) = graphics
+            .world_to_screen(0, Vector2::new(100, 60))
+            .expect("acid-rain point is in the Tutorial07 viewport");
+
+        assert_eq!(
+            graphics
+                .surface()
+                .get_pixel(x.round() as u32, y.round() as u32),
+            Some(Color::opaque(157, 250, 157)),
+        );
+    }
+
+    #[test]
     fn viewport_point_at_maps_screen_to_world() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
@@ -6988,7 +7118,7 @@ mod tests {
             graphics
                 .surface()
                 .get_pixel(screen_x.round() as u32, screen_y.round() as u32),
-            Some(Color::opaque(240, 0, 0)),
+            Some(standard_gamma_color(Color::opaque(240, 0, 0))),
         );
 
         let mut background_snapshot = snapshot.clone();
@@ -7022,7 +7152,9 @@ mod tests {
             background_graphics
                 .surface()
                 .get_pixel(screen_x.round() as u32, screen_y.round() as u32),
-            Some(Color::opaque(0, 0, 240).modulate(lighting)),
+            Some(standard_gamma_color(
+                Color::opaque(0, 0, 240).modulate(lighting),
+            )),
             "PXS must cover C4D_Background objects drawn before landscape",
         );
     }
@@ -7086,7 +7218,7 @@ mod tests {
 
         assert_eq!(
             render(lc_engine::DEFAULT_CATEGORY | CATEGORY_FOREGROUND_FLAG),
-            Some(Color::opaque(0, 220, 0)),
+            Some(standard_gamma_color(Color::opaque(0, 220, 0))),
             "cursor mark covers ordinary foreground",
         );
         assert_eq!(
@@ -7095,7 +7227,7 @@ mod tests {
                     | CATEGORY_FOREGROUND_FLAG
                     | CATEGORY_PARALLAX_FLAG,
             ),
-            Some(Color::opaque(220, 0, 0)),
+            Some(standard_gamma_color(Color::opaque(220, 0, 0))),
             "custom-GUI/parallax foreground covers cursor mark",
         );
     }
@@ -8001,8 +8133,14 @@ mod tests {
         let (viewport_x, viewport_y) = graphics.viewport();
         let x = (105 - viewport_x) as u32;
         let y = (100 - viewport_y) as u32;
-        assert_eq!(graphics.surface().get_pixel(x, y), Some(green));
-        assert_ne!(graphics.surface().get_pixel(x, y), Some(blue));
+        assert_eq!(
+            graphics.surface().get_pixel(x, y),
+            Some(standard_gamma_color(green))
+        );
+        assert_ne!(
+            graphics.surface().get_pixel(x, y),
+            Some(standard_gamma_color(blue))
+        );
     }
 
     #[test]
@@ -8085,7 +8223,7 @@ mod tests {
             graphics
                 .surface()
                 .get_pixel((64 - viewport_x) as u32, (50 - viewport_y) as u32),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "SetObjectOrder keeps the raised ELEC TopFace over ELEV"
         );
     }
@@ -8133,7 +8271,7 @@ mod tests {
         let screen_y = (snapshot.objects[0].position.y - viewport_y) as u32;
         assert_eq!(
             graphics.surface().get_pixel(screen_x, screen_y),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "expected the sprite pixel, not the vertex-polygon fill"
         );
     }
@@ -8185,17 +8323,17 @@ mod tests {
         // The face covers world [56,64) x [32,40).
         assert_eq!(
             graphics.surface().get_pixel((sx - 5) as u32, (sy - 5) as u32),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "expected the face inside the shape rect"
         );
         assert_ne!(
             graphics.surface().get_pixel((sx + 1) as u32, (sy + 1) as u32),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "face must not extend past the shape rect (centered draw would)"
         );
         assert_ne!(
             graphics.surface().get_pixel((sx - 9) as u32, (sy - 9) as u32),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "face must start at the shape top-left"
         );
     }
@@ -8250,17 +8388,17 @@ mod tests {
         // top rows of the tiny test surface.)
         assert_eq!(
             graphics.surface().get_pixel((sx + 1) as u32, (sy - 2) as u32),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "expected the half-grown face inside the con-scaled shape"
         );
         assert_ne!(
             graphics.surface().get_pixel((sx - 2) as u32, (sy - 2) as u32),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "half-grown face must not spill left of the scaled shape"
         );
         assert_ne!(
             graphics.surface().get_pixel((sx + 5) as u32, (sy - 2) as u32),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "half-grown face must be half-width"
         );
     }
@@ -8324,7 +8462,7 @@ mod tests {
         let sy = 40 - viewport_y;
         assert_eq!(
             graphics.surface().get_pixel((sx + 1) as u32, (sy + 1) as u32),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "expected the '2' graphics variant, not the default sheet"
         );
     }
@@ -8413,12 +8551,12 @@ mod tests {
         // GREEN sheet half (Facet x=8).
         assert_eq!(
             graphics.surface().get_pixel((sx + 1) as u32, (sy + 3) as u32),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "expected the facet at cox+FacetX/coy+FacetY sourcing Facet x/y"
         );
         assert_ne!(
             graphics.surface().get_pixel((sx - 3) as u32, (sy - 3) as u32),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "facet must not be centered on the position"
         );
     }
@@ -8520,20 +8658,26 @@ mod tests {
         let cable_top = (45 - viewport_y) as u32;
         let cable_last = (81 - viewport_y) as u32;
         let cable_bottom = (82 - viewport_y) as u32;
-        assert_eq!(graphics.surface().get_pixel(cable_x, cable_top), Some(green));
-        assert_eq!(graphics.surface().get_pixel(cable_x, cable_last), Some(green));
+        assert_eq!(
+            graphics.surface().get_pixel(cable_x, cable_top),
+            Some(standard_gamma_color(green))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(cable_x, cable_last),
+            Some(standard_gamma_color(green))
+        );
         assert_eq!(
             graphics.surface().get_pixel(cable_x + 1, cable_last),
-            Some(green)
+            Some(standard_gamma_color(green))
         );
         assert_ne!(
             graphics.surface().get_pixel(cable_x + 2, cable_last),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "the stretched target keeps the source facet's two-pixel width"
         );
         assert_ne!(
             graphics.surface().get_pixel(cable_x, cable_bottom),
-            Some(green),
+            Some(standard_gamma_color(green)),
             "FacetTargetStretch must stop at the target shape's top edge"
         );
     }
@@ -8687,11 +8831,12 @@ mod tests {
     }
 
     fn count_red_text_pixels(graphics: &GraphicsSystem) -> usize {
+        let red = standard_gamma_color(Color::opaque(255, 0, 0));
         graphics
             .surface()
             .pixels()
             .chunks_exact(4)
-            .filter(|chunk| *chunk == [255u8, 0, 0, 255])
+            .filter(|chunk| *chunk == [red.r, red.g, red.b, red.a])
             .count()
     }
 
@@ -8730,12 +8875,13 @@ mod tests {
         // (src/C4Game.cpp:1877-1881), so the label block starts one line
         // higher than the rank-0 name-only label.
         let min_red_y = |graphics: &GraphicsSystem| {
+            let red = standard_gamma_color(Color::opaque(255, 0, 0));
             graphics
                 .surface()
                 .pixels()
                 .chunks_exact(4)
                 .enumerate()
-                .filter(|(_, chunk)| *chunk == [255u8, 0, 0, 255])
+                .filter(|(_, chunk)| *chunk == [red.r, red.g, red.b, red.a])
                 .map(|(index, _)| index / graphics.surface().width() as usize)
                 .min()
         };
@@ -8810,12 +8956,12 @@ mod tests {
         let breath_x = energy_x + 2; // one-pixel bar + C++'s one-pixel gap
         assert_eq!(
             graphics.surface().get_pixel(energy_x, bar_bottom_y as u32),
-            Some(Color::opaque(220, 0, 0)),
+            Some(standard_gamma_color(Color::opaque(220, 0, 0))),
             "energy remains in bar index 0"
         );
         assert_eq!(
             graphics.surface().get_pixel(breath_x, bar_bottom_y as u32),
-            Some(Color::opaque(0, 0, 220)),
+            Some(standard_gamma_color(Color::opaque(0, 0, 220))),
             "partial breath uses filled source column 4 immediately after energy"
         );
 
@@ -8824,14 +8970,14 @@ mod tests {
         graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
         assert_eq!(
             graphics.surface().get_pixel(breath_x, bar_bottom_y as u32),
-            Some(Color::opaque(0, 220, 0)),
+            Some(standard_gamma_color(Color::opaque(0, 220, 0))),
             "present magic occupies the middle slot with source column 2"
         );
         assert_eq!(
             graphics
                 .surface()
                 .get_pixel(breath_x + 2, bar_bottom_y as u32),
-            Some(Color::opaque(0, 0, 220)),
+            Some(standard_gamma_color(Color::opaque(0, 0, 220))),
             "breath shifts one compact slot right when magic is present"
         );
     }
@@ -9449,7 +9595,7 @@ mod tests {
 
         assert_eq!(
             graphics.surface().get_pixel(0, 0),
-            Some(Color::opaque(0, 190, 0)),
+            Some(standard_gamma_color(Color::opaque(0, 190, 0))),
             "the liquid animation path must preserve Acid's material RGB"
         );
     }

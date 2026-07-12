@@ -11760,6 +11760,10 @@ impl GameApp {
         self.configure_running_state(label, ground);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
+        // C4Game::InitGame applies the scenario gamma before its first frame
+        // (C4Game.cpp:487-490).
+        self.graphics
+            .apply_gamma_now(&self.snapshot.environment.gamma);
         self.refresh_object_menu();
         self.refresh_focus();
         self.active_scenario = Some(scenario.clone());
