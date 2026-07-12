@@ -1,4 +1,4 @@
-use crate::{ControlPlayerInfoEntry, PlayerInfoControlData};
+use crate::{ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS};
 
 /// `C4PlayerInfoList`'s synchronized per-client player-info registry.
 #[derive(Debug, Default)]
@@ -15,14 +15,21 @@ struct ClientPlayerInfos {
 impl ControlPlayerInfoRegistry {
     pub fn apply(&mut self, info: PlayerInfoControlData) {
         let PlayerInfoControlData {
-            client_id, players, ..
+            client_id,
+            flags,
+            players,
+            ..
         } = info;
         if let Some(existing) = self
             .clients
             .iter_mut()
             .find(|client| client.client_id == client_id)
         {
-            existing.players = players;
+            if flags & CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS != 0 {
+                existing.players.extend(players);
+            } else {
+                existing.players = players;
+            }
         } else {
             self.clients.push(ClientPlayerInfos { client_id, players });
         }
@@ -71,5 +78,28 @@ mod tests {
         assert!(registry.get(7).is_none());
         assert_eq!(registry.get(8).map(|entry| entry.id), Some(8));
         assert_eq!(registry.player_count(), 1);
+    }
+
+    #[test]
+    fn add_packet_appends_to_the_clients_player_list() {
+        // CIF_AddPlayers makes C4PlayerInfoList::AddInfo call
+        // C4ClientPlayerInfos::GrabMergeFrom, which appends in packet order
+        // (src/C4PlayerInfo.cpp:458-482,834-880).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![player(7)],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            players: vec![player(8)],
+            ..Default::default()
+        });
+
+        assert_eq!(registry.get(7).map(|entry| entry.id), Some(7));
+        assert_eq!(registry.get(8).map(|entry| entry.id), Some(8));
+        assert_eq!(registry.player_count(), 2);
     }
 }
