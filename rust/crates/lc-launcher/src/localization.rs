@@ -173,6 +173,12 @@ fn append_language_codes(codes: &mut Vec<String>, seen: &mut HashSet<String>, se
 }
 
 fn parse_language_code(segment: &str) -> Option<String> {
+    let trimmed = segment.trim_start_matches(|character: char| character.is_ascii_whitespace());
+    let prefix = &trimmed.as_bytes()[..trimmed.len().min(2)];
+    (!prefix.is_empty()).then(|| String::from_utf8_lossy(prefix).into_owned())
+}
+
+fn parse_environment_language_code(segment: &str) -> Option<String> {
     let mut code = String::new();
     for ch in segment.chars() {
         if ch.is_ascii_alphabetic() {
@@ -192,7 +198,7 @@ fn parse_language_code(segment: &str) -> Option<String> {
 fn environment_language_code() -> Option<String> {
     for key in ["LC_LANGUAGE", "LC_ALL", "LANG"] {
         if let Ok(value) = std::env::var(key) {
-            if let Some(code) = parse_language_code(&value) {
+            if let Some(code) = parse_environment_language_code(&value) {
                 return Some(code);
             }
         }
@@ -229,5 +235,25 @@ fn merge_translations(
         if override_existing || !target.contains_key(&entry.key) {
             target.insert(entry.key.clone(), entry.value.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_language_sequence_copies_two_char_prefixes_verbatim() {
+        // C4ConfigGeneral::GetLanguageSequence uses SCopySegment with a
+        // two-byte limit and leading-whitespace skipping; it neither filters
+        // nor uppercases the copied prefix (src/C4Config.cpp:1492-1506;
+        // src/C4Strings.cpp:185-203).
+        let mut config = Config::new();
+        config.set_in(Some("General"), "LanguageEx", " de - Deutsch, x, --invalid");
+
+        assert_eq!(
+            discover_language_codes(Some(&config)),
+            vec!["de".to_string(), "x".to_string(), "--".to_string()]
+        );
     }
 }
