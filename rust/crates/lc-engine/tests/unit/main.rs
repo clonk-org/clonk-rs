@@ -9370,6 +9370,55 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn object_restore_denumerates_missing_direct_object_pointers() {
+        // C++ oracle: after all objects compile, C4Object::DenumeratePointers
+        // resolves Contained, Action.Target, Action.Target2, and pLayer
+        // together. A saved number absent from both live object lists becomes
+        // null rather than aborting the load (src/C4Object.cpp:2914-2919;
+        // src/C4EnumeratedObjectPtr.cpp:32-42).
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(simple_definition("HOLD"))
+            .expect("holder registers");
+        engine
+            .register_definition(simple_definition("TARG"))
+            .expect("target registers");
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD"))
+            .expect("holder spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+
+        let mut state = engine.capture_state();
+        let saved_holder = state
+            .objects
+            .iter_mut()
+            .find(|object| object.snapshot.id == holder)
+            .expect("saved holder exists");
+        saved_holder.snapshot.container = Some(target);
+        saved_holder.snapshot.action.target = Some(target);
+        saved_holder.snapshot.action.target2 = Some(target);
+        saved_holder.snapshot.layer = Some(target);
+        state.objects.retain(|object| object.snapshot.id != target);
+
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(simple_definition("HOLD"))
+            .expect("holder registers");
+        restored
+            .register_definition(simple_definition("TARG"))
+            .expect("target definition registers");
+        restored.restore_state(&state).expect("state restores");
+
+        let holder = restored.object_snapshot(holder).expect("holder restores");
+        assert_eq!(holder.container, None);
+        assert_eq!(holder.action.target, None);
+        assert_eq!(holder.action.target2, None);
+        assert_eq!(holder.layer, None);
+    }
+
+    #[test]
     fn object_local_restore_maps_values_to_current_definition_names() {
         // C++ oracle: LocalNamed first compiles the saved names into a
         // temporary C4ValueMapNames, then C4Object::CompileFunc switches to
