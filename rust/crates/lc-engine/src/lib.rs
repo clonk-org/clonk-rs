@@ -22384,8 +22384,8 @@ impl Engine {
     /// ±StableRange (±10, C4Physics.h:23, normalized to ±180) snaps
     /// upright when the rotation-0 shape stands contact-free at the
     /// current position; any contact keeps the tilt. NoStabilize defs opt
-    /// out (:491). The C++ probe is a full ContactCheck — its Contact*
-    /// script dispatch for ContactCalls=1 defs is not modeled here.
+    /// out (:491). The upright probe is the ordinary ContactCheck, including
+    /// Contact* callback dispatch for ContactCalls definitions (:503).
     fn stabilize_object(&mut self, idx: usize, solid_mask_indices: &[usize]) {
         let rotation = self.objects[idx].state.rotation;
         let signed = if rotation > 180 {
@@ -22408,14 +22408,22 @@ impl Engine {
             return;
         }
         let upright_vertices = self.objects[idx].unrotated_shape_vertices();
+        let original_vertices = self.objects[idx].state.vertices.clone();
+        let object_id = self.objects[idx].id;
+        let position = self.objects[idx].state.position;
+        // C++ temporarily writes r=0 and UpdateShape() before ContactCheck,
+        // so the callback observes the upright rotation and vertices. fix_r
+        // is left untouched unless stabilization succeeds (:498-514).
+        self.objects[idx].state.rotation = 0;
+        self.objects[idx].state.vertices = upright_vertices;
         let contact = self
             .landscape
             .as_ref()
             .map(|landscape| {
                 let solid_masks = self.solid_masks_for_movement(solid_mask_indices);
                 shape_contact_check(
-                    &upright_vertices,
-                    self.objects[idx].state.position,
+                    &self.objects[idx].state.vertices,
+                    position,
                     landscape,
                     &self.materials,
                     &solid_masks,
@@ -22426,14 +22434,19 @@ impl Engine {
             .unwrap_or_default();
         // ContactCheck always overwrites t_contact, including with zero,
         // before it dispatches Contact* callbacks (C4Movement.cpp:166-182).
-        // Stabilize's callback dispatch remains the explicitly acknowledged
-        // gap above; the command-visible latch must still match the probe.
         self.objects[idx].frame_t_contact = contact.contact_cnat;
-        if !contact.is_contact() {
-            let object = &mut self.objects[idx];
-            object.state.rotation = 0;
+        if contact.is_contact() {
+            self.dispatch_contact_callbacks(idx, contact.contact_cnat);
+            if let Some(index) = self.find_object_index(object_id) {
+                // ContactCheck rejected the trial: restore exactly Shape and
+                // integer r. Callback changes to other fields (including
+                // fix_r) remain live, matching C++'s two assignments (:505-508).
+                self.objects[index].state.vertices = original_vertices;
+                self.objects[index].state.rotation = rotation;
+            }
+        } else if let Some(index) = self.find_object_index(object_id) {
+            let object = &mut self.objects[index];
             object.fixed_rotation = C4Fixed::ZERO;
-            object.state.vertices = upright_vertices;
         }
     }
 
@@ -25046,8 +25059,17 @@ impl Engine {
             object.frame_t_contact = contact.contact_cnat;
         }
 
+        self.dispatch_contact_callbacks(idx, contact.contact_cnat);
+        Some(contact)
+    }
+
+    /// The callback half of `C4Object::ContactCheck` (C4Movement.cpp:
+    /// 166-182): contacted directions run left/right/top/bottom and a truthy
+    /// result stops the remaining calls. Both movement probes and Stabilize's
+    /// temporary upright probe use this same path.
+    fn dispatch_contact_callbacks(&mut self, idx: usize, contact_cnat: u32) {
         for cnat in [CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM] {
-            if contact.contact_cnat & cnat == 0 {
+            if contact_cnat & cnat == 0 {
                 continue;
             }
             let Some(function_name) = contact_callback_name(cnat) else {
@@ -25098,8 +25120,6 @@ impl Engine {
                 }
             }
         }
-
-        Some(contact)
     }
 
     /// ObjectActionCornerScale (C4ObjectCom.cpp:167-217): probe a free
