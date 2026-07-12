@@ -80,6 +80,8 @@ pub enum RemoteEmbeddedPlayerData {
 pub enum ResolveRemoteEmbeddedPlayerDataError {
     #[error("player {info_id} join is resource-backed, not embedded")]
     ResourceBacked { info_id: i32 },
+    #[error("embedded player data for player {info_id} is not a gzip archive")]
+    UnsupportedArchiveMagic { info_id: i32 },
     #[error("failed to load embedded player data for player {info_id}: {source}")]
     PlayerDataLoad {
         info_id: i32,
@@ -95,6 +97,11 @@ pub fn resolve_remote_embedded_player_data(
     let JoinPlayerSource::Embedded(data) = &join.source else {
         return Err(ResolveRemoteEmbeddedPlayerDataError::ResourceBacked { info_id: info.id });
     };
+    if !matches!(data.as_slice(), [0x1e, 0x8c, ..] | [0x1f, 0x8b, ..]) {
+        return Err(
+            ResolveRemoteEmbeddedPlayerDataError::UnsupportedArchiveMagic { info_id: info.id },
+        );
+    }
     let label = std::path::PathBuf::from(join.filename.to_string_lossy().into_owned());
     PlayerFile::load_from_bytes(label, data.clone())
         .map(RemoteEmbeddedPlayerData::PlayerFile)
@@ -305,5 +312,31 @@ mod tests {
         };
 
         assert_eq!((file.name.as_str(), file.score), ("Embedded Tyler", 42));
+    }
+
+    #[test]
+    fn remote_embedded_join_rejects_non_gzip_player_data() {
+        // CStdFile recognizes packed C4Groups only by the custom 1e8c or
+        // standard 1f8b gzip magic (src/CStdFile.cpp:92-107;
+        // src/StdGzCompressedFile.cpp:62-114).
+        let mut data = include_bytes!("../tests/fixtures/embedded_player.c4p").to_vec();
+        data[..2].copy_from_slice(&[0, 0]);
+        let join = JoinPlayerControlData {
+            info_id: 7,
+            source: crate::JoinPlayerSource::Embedded(data),
+            ..Default::default()
+        };
+        let info = ControlPlayerInfoEntry {
+            id: 7,
+            ..Default::default()
+        };
+
+        let error = resolve_remote_embedded_player_data(&join, &info)
+            .expect_err("raw or non-gzip player data must be rejected");
+
+        assert!(matches!(
+            error,
+            ResolveRemoteEmbeddedPlayerDataError::UnsupportedArchiveMagic { info_id: 7 }
+        ));
     }
 }
