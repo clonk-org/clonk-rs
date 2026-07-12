@@ -2213,6 +2213,55 @@ mod tests {
     }
 
     #[test]
+    fn weather_meteor_spawn_honors_open_and_closed_top_motion() {
+        // C4Weather::Execute creates METO at y=-20 with zero ydir when
+        // Landscape.TopOpen, but at y=5 with itofix(2) ydir in a closed cave.
+        // The shared r2/r1 draws still precede object creation in both cases
+        // (C4Weather.cpp:104-120).
+        let spawn = |top_open: bool| {
+            let mut engine = Engine::with_seed(18);
+            let mut landscape = Landscape::flat(64, 40);
+            landscape.set_border_open(0, 0, top_open, false);
+            engine.set_landscape(landscape);
+            engine
+                .register_definition(simple_definition("METO"))
+                .expect("meteor definition registers");
+            let mut environment = engine.environment();
+            environment.meteorite = 100;
+            engine.set_environment(environment);
+
+            let mut mirror = engine.rng.clone();
+            assert_eq!(mirror.random(60), 0, "seed reaches the meteor gate");
+            assert!(mirror.random(100) < 100);
+            let r2 = mirror.random(101);
+            let x = mirror.random(64);
+
+            engine
+                .tick_weather_events(10)
+                .expect("weather tick launches meteor");
+            let meteor = engine
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "METO")
+                .expect("meteor spawned");
+            assert_eq!(meteor.state.position.x, x);
+            assert_eq!(meteor.state.owner, OWNER_NONE);
+            assert_eq!(
+                meteor.fixed_velocity.x,
+                C4Fixed::from_raw(itofix(r2 - 50).val() / 10)
+            );
+            assert_eq!(
+                meteor.rotation_velocity,
+                C4Fixed::from_raw(itofix(1).val() / 5)
+            );
+            (meteor.state.position.y, meteor.fixed_velocity.y)
+        };
+
+        assert_eq!(spawn(true), (-20, C4Fixed::ZERO));
+        assert_eq!(spawn(false), (5, itofix(2)));
+    }
+
+    #[test]
     fn mrf_insert_check_splash_matches_cpp() {
         // mrfInsertCheck splash (C4Material.cpp:572-579): with fYDir >
         // itofix(1) and SplashRate set, !Random(SplashRate) bounces the PXS:

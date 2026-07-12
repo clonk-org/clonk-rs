@@ -17362,16 +17362,25 @@ impl Engine {
         Ok(())
     }
 
-    /// Meteor creation (C4Weather.cpp:110-119): "METO" at y = -20 (TopOpen;
-    /// the cave-landscape y = 5 variant needs the scenario TopOpen flag,
-    /// which the engine does not carry yet) with xdir = itofix(r2-50)/10,
-    /// ydir = 0, rdir = itofix(1)/5.
+    /// Meteor creation (C4Weather.cpp:110-119): "METO" at y=-20/ydir=0
+    /// with an open top, or y=5/ydir=itofix(2) in a closed cave; xdir is
+    /// itofix(r2-50)/10 and rdir is itofix(1)/5 in both cases.
     fn trigger_meteorite(&mut self, x: i32, r2: i32) -> Result<bool, EngineError> {
         const METEOR_DEFINITION: &str = "METO";
         if !self.definitions.contains_key(METEOR_DEFINITION) {
             return Ok(false);
         }
-        let config = SpawnConfig::new(METEOR_DEFINITION).with_position(Vector2::new(x.max(0), -20));
+        let top_open = self
+            .landscape
+            .as_ref()
+            .is_none_or(crate::landscape::Landscape::top_open);
+        let (y, ydir) = if top_open {
+            (-20, C4Fixed::ZERO)
+        } else {
+            (5, itofix(2))
+        };
+        let config =
+            SpawnConfig::new(METEOR_DEFINITION).with_position(Vector2::new(x.max(0), y));
         let meteor_id = match self.spawn_object(config) {
             Ok(id) => id,
             Err(EngineError::UnknownDefinition(_)) => return Ok(false),
@@ -17382,7 +17391,7 @@ impl Engine {
         };
         let object = &mut self.objects[index];
         object.fixed_velocity =
-            FixedVec2::new(C4Fixed::from_raw(itofix(r2 - 50).val() / 10), C4Fixed::ZERO);
+            FixedVec2::new(C4Fixed::from_raw(itofix(r2 - 50).val() / 10), ydir);
         object.rotation_velocity = C4Fixed::from_raw(itofix(1).val() / 5);
         Ok(true)
     }
