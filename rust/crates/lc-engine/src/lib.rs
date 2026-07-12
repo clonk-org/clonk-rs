@@ -5900,6 +5900,38 @@ fn denumerate_script_value(value: &Value, object_numbers: &HashSet<u64>) -> Valu
     }
 }
 
+fn denumerate_effect_value(value: &mut EffectVarValue, object_numbers: &HashSet<u64>) {
+    match value {
+        EffectVarValue::Object(id) if !object_numbers.contains(id) => {
+            *value = EffectVarValue::Nil;
+        }
+        EffectVarValue::Array(values) => {
+            for value in values {
+                denumerate_effect_value(value, object_numbers);
+            }
+        }
+        EffectVarValue::Proplist(entries) => {
+            for value in entries.values_mut() {
+                denumerate_effect_value(value, object_numbers);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn denumerate_effect(effect: &mut EffectState, object_numbers: &HashSet<u64>) {
+    if effect.command_target.is_some_and(|target| {
+        u64::try_from(target)
+            .ok()
+            .is_none_or(|target| !object_numbers.contains(&target))
+    }) {
+        effect.command_target = None;
+    }
+    for value in &mut effect.vars {
+        denumerate_effect_value(value, object_numbers);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub frame: u64,
@@ -21058,6 +21090,12 @@ impl Engine {
             for value in object.state.local_vars.values_mut() {
                 *value = denumerate_script_value(value, &object_numbers);
             }
+            for effect in &mut object.state.effects {
+                denumerate_effect(effect, &object_numbers);
+            }
+        }
+        for effect in &mut self.global_effects {
+            denumerate_effect(effect, &object_numbers);
         }
         // Backward compatibility for states written before ObjectSnapshot
         // carried C4Object::Select: project the legacy per-player list onto

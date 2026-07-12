@@ -9211,6 +9211,72 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn effect_restore_denumerates_command_targets_and_variables() {
+        // C++ oracle: C4Effect::DenumeratePointers resolves the command target
+        // and recursively denumerates EffectVars (src/C4Effect.cpp:186-198).
+        // Object effects run that pass from C4Object.cpp:2914-2930; global
+        // effects run it from C4Game.cpp:2491-2494.
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(simple_definition("HOLD"))
+            .expect("holder registers");
+        engine
+            .register_definition(simple_definition("TARG"))
+            .expect("target registers");
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD"))
+            .expect("holder spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+
+        let saved_effect = EffectState::new("SavedRefs")
+            .with_command_target(Some(target.as_u64() as i32))
+            .with_vars(vec![
+                EffectVarValue::Object(target.as_u64()),
+                EffectVarValue::Array(vec![
+                    EffectVarValue::Object(target.as_u64()),
+                    EffectVarValue::Object(holder.as_u64()),
+                ]),
+            ]);
+        let mut state = engine.capture_state();
+        state
+            .objects
+            .iter_mut()
+            .find(|object| object.snapshot.id == holder)
+            .expect("saved holder exists")
+            .snapshot
+            .effects = vec![saved_effect.clone()];
+        state.global_effects = vec![saved_effect];
+        state.objects.retain(|object| object.snapshot.id != target);
+
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(simple_definition("HOLD"))
+            .expect("holder registers");
+        restored
+            .register_definition(simple_definition("TARG"))
+            .expect("target registers");
+        restored.restore_state(&state).expect("state restores");
+
+        let expected_vars = vec![
+            EffectVarValue::Nil,
+            EffectVarValue::Array(vec![
+                EffectVarValue::Nil,
+                EffectVarValue::Object(holder.as_u64()),
+            ]),
+        ];
+        let object_effect = &restored
+            .object_snapshot(holder)
+            .expect("holder restores")
+            .effects[0];
+        assert_eq!(object_effect.command_target, None);
+        assert_eq!(object_effect.vars(), expected_vars);
+        assert_eq!(restored.global_effects()[0].command_target, None);
+        assert_eq!(restored.global_effects()[0].vars(), expected_vars);
+    }
+
+    #[test]
     fn legacy_state_without_script_globals_restores_defaults() {
         // Saves from before script-global persistence have no corresponding
         // C4AulScriptEngine section. Treat that omission as empty `Globals`
