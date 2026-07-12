@@ -9419,6 +9419,66 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn player_restore_denumerates_missing_object_pointers() {
+        // C++ oracle: loading player runtime data denumerates Cursor,
+        // ViewCursor, and Captain, then rebuilds Crew through DenumerateRead
+        // (src/C4Player.cpp:1556-1614,1631-1633,1789-1796). Missing object
+        // numbers become null and never remain visible to GetViewCursor.
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(simple_definition("HOLD"))
+            .expect("holder registers");
+        engine
+            .register_definition(simple_definition("TARG"))
+            .expect("target registers");
+        engine
+            .spawn_object(SpawnConfig::new("HOLD"))
+            .expect("holder spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+
+        let mut state = engine.capture_state();
+        state.players = vec![PlayerState {
+            id: 1,
+            cursor: Some(target),
+            viewports: vec![
+                PlayerViewport::new(Vector2::new(12, 34)).with_focus(Some(target)),
+            ],
+            crew: vec![target],
+            ..PlayerState::default()
+        }];
+        state.crew_selection.insert(
+            1,
+            CrewSelectionState {
+                selected: vec![target],
+                cursor: Some(target),
+            },
+        );
+        state.objects.retain(|object| object.snapshot.id != target);
+
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(simple_definition("HOLD"))
+            .expect("holder registers");
+        restored
+            .register_definition(simple_definition("TARG"))
+            .expect("target definition registers");
+        restored.restore_state(&state).expect("state restores");
+
+        let snapshot = restored.snapshot();
+        let player = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == 1)
+            .expect("player restores");
+        assert_eq!(player.cursor, None);
+        assert!(player.crew.is_empty());
+        assert_eq!(player.viewports[0].focus, None);
+        assert_eq!(player.viewports[0].center, Vector2::new(12, 34));
+    }
+
+    #[test]
     fn object_local_restore_maps_values_to_current_definition_names() {
         // C++ oracle: LocalNamed first compiles the saved names into a
         // temporary C4ValueMapNames, then C4Object::CompileFunc switches to

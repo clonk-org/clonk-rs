@@ -21087,6 +21087,21 @@ impl Engine {
             .players
             .iter()
             .cloned()
+            .map(|mut state| {
+                // C4Player::DenumeratePointers resolves Cursor/ViewCursor
+                // and rebuilds Crew only after the object table is complete
+                // (C4Player.cpp:1789-1796). PlayerViewport::focus is the
+                // modeled ViewCursor surface; multiple viewports generalize
+                // the single legacy pointer.
+                denumerate_object_reference(&mut state.cursor, &object_numbers);
+                for viewport in &mut state.viewports {
+                    denumerate_object_reference(&mut viewport.focus, &object_numbers);
+                }
+                state
+                    .crew
+                    .retain(|id| object_numbers.contains(&id.as_u64()));
+                state
+            })
             .map(Player::from_state)
             .map(|player| (player.id(), player))
             .collect();
