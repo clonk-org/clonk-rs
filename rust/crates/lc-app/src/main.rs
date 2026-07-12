@@ -25899,7 +25899,7 @@ mod tests {
     }
 
     #[test]
-    fn app_virtual_keyboard_reaches_tutorial07_balloon_production_after_two_flint_blasts() {
+    fn app_virtual_keyboard_reaches_tutorial07_crystal_objective_by_balloon() {
         // Script2..12 introduces the shipped CRYS/BALN/GOLD/FLNT route before
         // handing control back at "Good luck!" (Tutorial07.c4s/Script.c:
         // 36-90). From there every transition below enters through
@@ -26420,6 +26420,256 @@ mod tests {
             app_selected_object_menu_item(&app).map(|item| item.item_id.as_str()),
             Some("BALN"),
             "physical menu navigation reaches the shipped BALN production prompt"
+        );
+
+        // Production executes the selected menu row, consumes the ordinary
+        // WRKS components and runs C4Command::Build until the finished vehicle
+        // receives Exit (C4Command.cpp:823-899). The remaining controls mirror
+        // a real player: X/X boards or leaves BALN, held S climbs, and normal
+        // C/Z walking collects CRYS. Script14 observes that containment and
+        // advances to the sailboat prompt without any test-side state write
+        // (Tutorial07.c4s/Script.c:92-99).
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A starts BALN production");
+        advance_app_until(&mut app, "WRKS creates real BALN construction", 80, |app| {
+            app_object_with_definition(app, "BALN").is_some()
+        });
+        let balloon = app_object_with_definition(&app, "BALN")
+            .expect("Tutorial07 BALN construction keeps its identity");
+        advance_app_until(
+            &mut app,
+            "WRKS completes BALN through normal production",
+            2_400,
+            |app| {
+                app.engine
+                    .object_snapshot(balloon)
+                    .is_some_and(|object| object.construction == 100_000)
+            },
+        );
+        advance_app_until(&mut app, "completed BALN exits WRKS", 160, |app| {
+            app.engine
+                .object_snapshot(balloon)
+                .is_some_and(|object| object.container.is_none())
+        });
+        if app
+            .engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.container.is_some())
+        {
+            if app.engine.cursor_object_menu(owner).is_none() {
+                AppVirtualKeyboard::new(&mut app)
+                    .tap(VirtualKeyCode::S)
+                    .expect("physical S restores WRKS context after production");
+                advance_app_until(&mut app, "WRKS restores context after BALN", 30, |app| {
+                    app.engine
+                        .cursor_object_menu(owner)
+                        .is_some_and(|(_, menu)| menu.identification == context_identification)
+                });
+            }
+            app_navigate_object_menu_to(&mut app, "Exit", |item| item.caption == "Exit");
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::A)
+                .expect("physical A exits BALN builder from WRKS");
+        }
+        advance_app_until(&mut app, "BALN builder exits WRKS", 100, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container.is_none() && object.action.name == "Walk")
+        });
+
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes BALN boarding");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X boards BALN");
+        }
+        advance_app_until(&mut app, "CLNK boards produced BALN", 100, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(balloon)
+            })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::S)
+            .expect("held physical S climbs in BALN");
+        advance_app_until(&mut app, "BALN climbs to CRYS flight level", 180, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.position.y <= 115)
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::S)
+            .expect("release physical S at CRYS flight level");
+        assert_eq!(
+            app.engine
+                .object_snapshot(balloon)
+                .expect("BALN after physical S release")
+                .command_direction,
+            CommandDirection::Stop,
+            "physical S release immediately stops BALN through ControlUpdate"
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X down-tap returns BALN to Stop");
+        assert_eq!(
+            app.engine
+                .object_snapshot(balloon)
+                .expect("BALN after physical X tap")
+                .command_direction,
+            CommandDirection::Stop,
+            "physical X release immediately restores BALN Stop through ControlUpdate"
+        );
+        for _ in 0..11 {
+            app.update().expect("wait out BALN vertical-control buffer");
+        }
+        for coast_frame in 0..900 {
+            if app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push"
+                    && object.action.target == Some(balloon)
+                    && object.position.x >= 570
+            }) {
+                break;
+            }
+            app.update()
+                .expect("advance BALN toward opposite CRYS cliff");
+            let balloon_now = app
+                .engine
+                .object_snapshot(balloon)
+                .expect("BALN during opposite-cliff coast");
+            if balloon_now.command_direction == CommandDirection::Down {
+                // BALN::CheckWindY deliberately changes Stop to Down when the
+                // drifting balloon reaches solid ground (Balloon.c4d/Script.c:
+                // 134-143). At this route's cliff contact a player must hold
+                // Up again to clear the lip; keep that correction on the same
+                // physical-key boundary as live play.
+                assert_eq!(
+                    app.engine
+                        .snapshot()
+                        .players
+                        .into_iter()
+                        .find(|player| player.id == owner)
+                        .expect("Tutorial07 player survives BALN coast")
+                        .control
+                        .pressed_coms,
+                    0,
+                    "BALN's ground-triggered Down is not a stuck physical key"
+                );
+                AppVirtualKeyboard::new(&mut app)
+                    .press(VirtualKeyCode::S)
+                    .expect("physical S raises BALN away from the cliff contact");
+                advance_app_until(
+                    &mut app,
+                    "BALN clears the CRYS cliff lip under held physical S",
+                    240,
+                    |app| {
+                        app.engine
+                            .object_snapshot(balloon)
+                            .is_some_and(|object| object.position.y <= 90)
+                    },
+                );
+                AppVirtualKeyboard::new(&mut app)
+                    .release(VirtualKeyCode::S)
+                    .expect("release physical S above the CRYS cliff lip");
+                assert_eq!(
+                    app.engine
+                        .object_snapshot(balloon)
+                        .expect("BALN after corrective physical S release")
+                        .command_direction,
+                    CommandDirection::Stop,
+                    "corrective S release returns BALN to Stop"
+                );
+            } else {
+                assert_eq!(
+                    balloon_now.command_direction,
+                    CommandDirection::Stop,
+                    "BALN has an unexpected coast direction on frame {coast_frame}"
+                );
+            }
+        }
+        assert!(
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push"
+                    && object.action.target == Some(balloon)
+                    && object.position.x >= 570
+            }),
+            "BALN reaches opposite CRYS cliff; clonk={:?}; balloon={:?}; control={:?}",
+            app.engine.object_snapshot(clonk),
+            app.engine.object_snapshot(balloon),
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == owner)
+                .map(|player| player.control),
+        );
+
+        let crystal =
+            app_object_with_definition(&app, "CRYS").expect("Tutorial07 creates objective CRYS");
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes BALN exit");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X leaves BALN");
+        }
+        advance_app_until(&mut app, "CLNK lands on CRYS cliff", 180, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Walk"
+                    && object.container.is_none()
+                    && object.position.x >= 570
+            })
+        });
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "CLNK crosses the objective CRYS",
+            120,
+            |app| {
+                app_clonk_carries(app, clonk, "CRYS")
+                    || app
+                        .engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.position.x >= 650)
+            },
+        );
+        if !app_clonk_carries(&app, clonk, "CRYS") {
+            hold_app_key_until(
+                &mut app,
+                VirtualKeyCode::Z,
+                "CLNK naturally collects objective CRYS",
+                180,
+                |app| app_clonk_carries(app, clonk, "CRYS"),
+            );
+        }
+        assert_eq!(
+            app.engine
+                .object_snapshot(crystal)
+                .expect("objective CRYS survives collection")
+                .container,
+            Some(clonk),
+            "physical walking puts Tutorial07 CRYS in CLNK inventory"
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "CRYS-carrying CLNK steps fully onto the cliff",
+            120,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x >= 650 && object.action.name == "Walk")
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial07 advances to the CRYS-side sailboat prompt",
+            240,
+            |app| app_tutorial_message_contains(app, "Dig through the earth"),
         );
     }
 
