@@ -100,6 +100,9 @@ pub fn resolve_remote_embedded_player_data(
         return Err(ResolveRemoteEmbeddedPlayerDataError::ResourceBacked { info_id: info.id });
     };
     if data.is_empty() {
+        if info.is_script_player() {
+            return Ok(RemoteEmbeddedPlayerData::ScriptWithoutFile);
+        }
         return Err(ResolveRemoteEmbeddedPlayerDataError::MissingPlayerData { info_id: info.id });
     }
     if !matches!(data.as_slice(), [0x1e, 0x8c, ..] | [0x1f, 0x8b, ..]) {
@@ -365,6 +368,30 @@ mod tests {
         assert!(matches!(
             error,
             ResolveRemoteEmbeddedPlayerDataError::MissingPlayerData { info_id: 7 }
+        ));
+    }
+
+    #[test]
+    fn remote_script_join_accepts_empty_player_data() {
+        // Remote script players join without a player filename when PlrData is
+        // empty (src/C4Control.cpp:745-749).
+        let join = JoinPlayerControlData {
+            info_id: 7,
+            source: crate::JoinPlayerSource::Embedded(Vec::new()),
+            ..Default::default()
+        };
+        let info = ControlPlayerInfoEntry {
+            id: 7,
+            player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
+            ..Default::default()
+        };
+
+        let resolved = resolve_remote_embedded_player_data(&join, &info)
+            .expect("empty script player data is valid");
+
+        assert!(matches!(
+            resolved,
+            RemoteEmbeddedPlayerData::ScriptWithoutFile
         ));
     }
 }
