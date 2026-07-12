@@ -215,8 +215,18 @@ pub(crate) struct DefinitionMetadata {
     /// scopes seed from these so creation callbacks (AdjustSeatVertex,
     /// CHBM Connect) mutate the REAL vertex list, not an empty one.
     pub vertices: Vec<ObjectVertex>,
+    /// Def->Shape.ContactDensity copied by fresh C4Object::Init. None is
+    /// reserved for synthetic host fixtures and means C4M_Solid.
+    pub contact_density: Option<i32>,
     /// Fire fields for the host-path incinerate (C4Object::Blast).
     pub fire: DefinitionFireMetadata,
+}
+
+impl DefinitionMetadata {
+    fn contact_density(&self) -> i32 {
+        self.contact_density
+            .unwrap_or(crate::CONTACT_DENSITY_SOLID)
+    }
 }
 
 /// `SetPhysical`/`GetPhysical` modes (C4Script.cpp:552-555).
@@ -3147,6 +3157,7 @@ fn bubble(args: &[Value]) -> Result<Value, RuntimeError> {
             OWNER_NONE,
             metadata.category,
             FULL_CON,
+            metadata.contact_density(),
             metadata.vertices.clone(),
         )));
         context.register_spawn(spawn, preview);
@@ -7109,6 +7120,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetShape", set_shape);
     script.register_host_function("AddVertex", add_vertex);
     script.register_host_function("SetVertex", set_vertex);
+    script.register_host_function("SetContactDensity", set_contact_density);
     script.register_host_function("SetAlive", set_alive);
     script.register_host_function("GetAlive", get_alive);
     script.register_host_function("SetOwner", set_owner);
@@ -15093,12 +15105,9 @@ fn script_jump_hits_liquid(
     launch: FixedVec2,
     gravity: C4Fixed,
 ) -> bool {
-    if context
-        .get_world_object(object.id())
-        .map(|object| object.contact_density())
-        .unwrap_or(crate::CONTACT_DENSITY_SOLID)
-        <= 25
-    {
+    // The scope carries the live C4Shape field, including a preceding
+    // SetContactDensity in this same script call (C4Script.cpp:1286-1291).
+    if object.contact_density() <= 25 {
         return false;
     }
     let mut position = object.fixed_position();
@@ -19689,6 +19698,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
             });
         let definition_category = metadata.category;
@@ -19792,6 +19802,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 owner,
                 definition_category,
                 0,
+                metadata.contact_density(),
                 metadata.vertices.clone(),
             );
             state.alive = initial_alive;
@@ -20075,6 +20086,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     rotateable: 0,
                     line: 0,
                     vertices: Vec::new(),
+                    contact_density: None,
                     fire: DefinitionFireMetadata::default(),
                 });
             // C4Object::Init discards sampled rotation/rdir for definitions
@@ -20174,6 +20186,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     initial_controller,
                     metadata.category,
                     0,
+                    metadata.contact_density(),
                     metadata.vertices,
                 );
                 state.velocity = preview_velocity;
@@ -20606,6 +20619,7 @@ fn register_placement_object(
             OWNER_NONE,
             metadata.category,
             0,
+            metadata.contact_density(),
             metadata.vertices,
         );
         state.alive = initial_alive;
@@ -21149,6 +21163,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
             });
         let definition_category = metadata.category;
@@ -21251,6 +21266,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 creator_controller.unwrap_or(owner),
                 definition_category,
                 0,
+                metadata.contact_density(),
                 metadata.vertices.clone(),
             );
             state.alive = initial_alive;
@@ -22829,6 +22845,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
             });
 
@@ -22902,6 +22919,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                     preview_controller,
                     metadata.category,
                     FULL_CON,
+                    metadata.contact_density(),
                     metadata.vertices.clone(),
                 );
                 state.container = Some(container);
@@ -23246,6 +23264,44 @@ fn set_shape(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
         object.pending_update.shape_override = Some(DefinitionRect::new(x, y, width, height));
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnSetContactDensity (C4Script.cpp:1286-1291): overwrite the live
+/// C4Shape field on the explicit object, or on the calling object when the
+/// optional pointer is nil. This is per object rather than a definition
+/// mutation; later host calls in this same VM call observe the write.
+fn set_contact_density(args: &[Value]) -> Result<Value, RuntimeError> {
+    let density = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetContactDensity",
+        "density",
+    )?;
+    let mut index = 1;
+    let explicit_target = consume_optional_object_reference_argument(
+        args,
+        &mut index,
+        "SetContactDensity",
+        "target",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let target = explicit_target.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
+        object.set_contact_density(density);
         Ok(Value::Bool(true))
     })
 }
@@ -24013,6 +24069,7 @@ fn incinerate_landscape_at(x: i32, y: i32) -> Result<Value, RuntimeError> {
                 OWNER_NONE,
                 metadata.category,
                 FULL_CON,
+                metadata.contact_density(),
                 metadata.vertices.clone(),
             );
             state.blit_mode = metadata.blit_mode;
@@ -25491,6 +25548,7 @@ impl EffectHostContext {
                 if let Some(state) = world_object.full_state() {
                     scope.current_mobile = state.mobile;
                     scope.current_t_attach = state.t_attach;
+                    scope.current_contact_density = state.contact_density;
                     scope.walk_rotation.t_attach = state.t_attach;
                 }
             }
@@ -26214,6 +26272,7 @@ impl EffectHostContext {
         scope.current_fixed_velocity = object.fixed_velocity;
         scope.current_mobile = state.mobile;
         scope.current_t_attach = state.t_attach;
+        scope.current_contact_density = state.contact_density;
         scope.walk_rotation.t_attach = state.t_attach;
         scope.definition_id = Some(object.definition_id().to_string());
         scope
@@ -27003,6 +27062,8 @@ struct ObjectScopeContext {
     current_magic_energy: i32,
     current_damage: i32,
     current_construction: i32,
+    /// Live C4Shape::ContactDensity, independently mutable from the def.
+    current_contact_density: i32,
     current_alive: bool,
     /// C4Object::Mobile, including explicit native helper overrides.
     current_mobile: bool,
@@ -27114,6 +27175,7 @@ impl ObjectScopeContext {
             current_magic_energy: 0,
             current_damage: clamped_damage,
             current_construction: clamped_construction,
+            current_contact_density: crate::CONTACT_DENSITY_SOLID,
             current_alive: alive,
             current_mobile: false,
             current_t_attach: 0,
@@ -27902,6 +27964,17 @@ impl ObjectScopeContext {
         self.pending_update.construction = Some(clamped);
     }
 
+    fn contact_density(&self) -> i32 {
+        self.pending_update
+            .contact_density
+            .unwrap_or(self.current_contact_density)
+    }
+
+    fn set_contact_density(&mut self, contact_density: i32) {
+        self.current_contact_density = contact_density;
+        self.pending_update.contact_density = Some(contact_density);
+    }
+
     fn adjust_construction(&mut self, delta: i32) -> i32 {
         let current = self.construction();
         let mut next = current.saturating_add(delta);
@@ -28453,6 +28526,7 @@ mod tests {
         "SetComDir",
         "SetCommand",
         "SetComponent",
+        "SetContactDensity",
         "SetController",
         "SetCrewEnabled",
         "SetCursor",
@@ -32096,6 +32170,7 @@ func ProbeBadIndex(id) {
                 rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
             },
         )]);
@@ -32145,7 +32220,8 @@ func ProbeBadIndex(id) {
                     stretch_growth: false,
                     rotateable: 0,
                     line: 0,
-                    vertices: Vec::new(),
+                vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
                 },
             ),
@@ -32173,7 +32249,8 @@ func ProbeBadIndex(id) {
                     stretch_growth: false,
                     rotateable: 0,
                     line: 0,
-                    vertices: Vec::new(),
+                vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
                 },
             ),
@@ -32226,6 +32303,7 @@ func ProbeBadIndex(id) {
                 rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
             },
         )]);
@@ -32290,6 +32368,7 @@ func ProbeBadIndex(id) {
                 rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
             },
         )]);
@@ -32363,7 +32442,8 @@ func ProbeBadIndex(id) {
             stretch_growth: false,
             rotateable: 0,
             line: 0,
-            vertices: Vec::new(),
+                vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
         };
         metadata.components = vec![("WOOD".to_string(), 3), ("METL".to_string(), 1)];
@@ -32412,6 +32492,7 @@ func ProbeBadIndex(id) {
                 OWNER_NONE,
                 DEFAULT_CATEGORY,
                 crate::FULL_CON,
+                crate::CONTACT_DENSITY_SOLID,
                 Vec::new(),
             );
             state.components = components
@@ -33027,6 +33108,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
             },
         )]);
@@ -33076,6 +33158,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
             },
         )]);
@@ -33141,6 +33224,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
             },
         )]);
@@ -33977,6 +34061,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             OWNER_NONE,
             DEFAULT_CATEGORY,
             crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
             Vec::new(),
         );
         state.action = crate::ActionState::new("Walk");
@@ -34927,6 +35012,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             OWNER_NONE,
             DEFAULT_CATEGORY,
             crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
             vertices,
         )));
         let target_value = object_reference_value(target_id);
@@ -35482,6 +35568,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             OWNER_NONE,
             DEFAULT_CATEGORY,
             crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
             Vec::new(),
         )));
         let world = HostWorldContext::from_objects(vec![target]).with_definition_metadata(Rc::new(
@@ -35609,6 +35696,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             OWNER_NONE,
             DEFAULT_CATEGORY,
             crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
             Vec::new(),
         )));
         let mut worker_script = lc_script::Engine::new();
@@ -36933,6 +37021,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             OWNER_NONE,
             DEFAULT_CATEGORY,
             crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
             Vec::new(),
         )));
         let world = HostWorldContext::from_objects(vec![target]).with_definition_metadata(Rc::new(
@@ -38170,6 +38259,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             OWNER_NONE,
             crate::CATEGORY_LIVING,
             FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
             Vec::new(),
         );
         state.crew_member = true;
@@ -39407,6 +39497,7 @@ public func SeedFull()
                 rotateable: 0,
                 line: 0,
                 vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
             },
         )]);
@@ -39508,7 +39599,8 @@ public func SeedFull()
             stretch_growth: false,
             rotateable: 0,
             line: 0,
-            vertices: Vec::new(),
+                vertices: Vec::new(),
+                contact_density: None,
                 fire: DefinitionFireMetadata::default(),
         };
         let definitions = HashMap::from([

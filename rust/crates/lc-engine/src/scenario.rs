@@ -4102,6 +4102,8 @@ struct LegacyObjectRecord {
     vertex_y: Option<Vec<i32>>,
     vertex_cnat: Option<Vec<i32>>,
     vertex_friction: Option<Vec<i32>>,
+    /// Saved live C4Shape::ContactDensity (C4Shape.cpp:495-510).
+    contact_density: Option<i32>,
     energy: Option<i32>,
     /// C4Object::NeedEnergy (`NeedEnergy=`, C4Object.cpp:2805).
     need_energy: Option<bool>,
@@ -4322,6 +4324,14 @@ impl LegacyObjectRecord {
             "vertexfriction" => {
                 self.vertex_friction =
                     Some(parse_i32_list(trimmed_value, self.line, "VertexFriction")?);
+            }
+            "contactdensity" => {
+                self.contact_density = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid ContactDensity `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
             }
             "energy" => {
                 self.energy = Some(parse_i32(trimmed_value).map_err(|err| {
@@ -4607,6 +4617,7 @@ impl LegacyObjectRecord {
             vertex_y,
             vertex_cnat,
             vertex_friction,
+            contact_density,
             energy,
             need_energy,
             selected,
@@ -4689,6 +4700,9 @@ impl LegacyObjectRecord {
         }
         if let Some(components) = components {
             config = config.with_components(components);
+        }
+        if let Some(contact_density) = contact_density {
+            config = config.with_contact_density(contact_density);
         }
 
         if xdir.is_some() || ydir.is_some() {
@@ -11609,7 +11623,7 @@ public func ActualizePhase(pClonk)
         //     applying the spawn rotation again would double-rotate.
         std::fs::write(
             scenario_dir.join("Objects.txt"),
-            "[Object]\nid=GOOD\nNumber=90\nStatus=1\nX=10\nY=10\n\
+            "[Object]\nid=GOOD\nNumber=90\nStatus=1\nX=10\nY=10\nContactDensity=25\n\
              Vertices=3\nVertexX=2,-14,14\nVertexY=11,-4,-4\n\
              VertexCNAT=8,1,2\nVertexFriction=50,50,50\n\n\
              [Object]\nid=GOOD\nNumber=91\nStatus=1\nX=30\nY=10\nRotation=90\n\
@@ -11630,6 +11644,10 @@ public func ActualizePhase(pClonk)
             .find_object_index(ObjectId::new(90))
             .expect("object 90 exists");
         let vertices = &engine.objects[idx].state.vertices;
+        assert_eq!(
+            engine.objects[idx].state.contact_density, 25,
+            "saved live Shape.ContactDensity loads with the embedded shape"
+        );
         assert_eq!(vertices.len(), 3, "saved Vertices= count wins over the def");
         assert_eq!(
             (
@@ -11650,6 +11668,10 @@ public func ActualizePhase(pClonk)
             .find_object_index(ObjectId::new(91))
             .expect("object 91 exists");
         let vertices = &engine.objects[idx].state.vertices;
+        assert_eq!(
+            engine.objects[idx].state.contact_density, 50,
+            "missing saved ContactDensity uses C4Shape::Clear's solid default"
+        );
         assert_eq!(
             (vertices[0].x, vertices[0].y),
             (-11, 2),

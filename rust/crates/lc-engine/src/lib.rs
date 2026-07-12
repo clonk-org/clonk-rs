@@ -2006,6 +2006,14 @@ fn default_construction() -> i32 {
     FULL_CON
 }
 
+fn default_contact_density() -> i32 {
+    CONTACT_DENSITY_SOLID
+}
+
+fn is_default_contact_density(value: &i32) -> bool {
+    *value == CONTACT_DENSITY_SOLID
+}
+
 /// One menu entry (C4MenuItem, C4Menu.h:60-101) — the sim-observable core:
 /// the composed left/right-click commands (FnAddMenuItem, C4Script.cpp:
 /// 1556-1597), count, item id, selectability (= command non-empty,
@@ -2267,6 +2275,13 @@ pub struct ObjectState {
     pub effects: Vec<EffectState>,
     #[serde(default)]
     pub vertices: Vec<ObjectVertex>,
+    /// Live C4Shape::ContactDensity. SetContactDensity mutates this
+    /// per-object value and C4Shape::CompileFunc persists it.
+    #[serde(
+        default = "default_contact_density",
+        skip_serializing_if = "is_default_contact_density"
+    )]
+    pub contact_density: i32,
     #[serde(default)]
     pub container: Option<ObjectId>,
     #[serde(default)]
@@ -2471,6 +2486,7 @@ pub(crate) fn preview_spawn_state(
     controller: i32,
     category: i32,
     construction: i32,
+    contact_density: i32,
     vertices: Vec<ObjectVertex>,
 ) -> ObjectState {
     ObjectState {
@@ -2495,6 +2511,7 @@ pub(crate) fn preview_spawn_state(
         command_direction: CommandDirection::default(),
         effects: Vec::new(),
         vertices,
+        contact_density,
         container: None,
         layer: None,
         blit_mode: 0,
@@ -2596,6 +2613,9 @@ impl ObjectState {
         }
         if let Some(construction) = delta.construction {
             self.construction = construction.clamp(0, FULL_CON);
+        }
+        if let Some(contact_density) = delta.contact_density {
+            self.contact_density = contact_density;
         }
         if let Some(direction) = delta.direction {
             self.direction = direction;
@@ -2759,6 +2779,8 @@ struct ObjectDelta {
     /// Explicit `C4Object::Action.t_attach` overwrite. Native Fling clears
     /// either CNAT_Bottom or the complete mask in the same frame.
     t_attach: Option<u32>,
+    /// Live per-object C4Shape::ContactDensity overwrite.
+    contact_density: Option<i32>,
     rotation: Option<i32>,
     /// Sub-pixel angular velocity (16.16 fixed-point degrees/frame) set by
     /// `SetRDir`. Mirrors C++ `pObj->rdir = itofix(n, prec)` (`C4Script.cpp:710`).
@@ -2853,6 +2875,9 @@ impl ObjectDelta {
         }
         if let Some(t_attach) = update.t_attach {
             self.t_attach = Some(t_attach);
+        }
+        if let Some(contact_density) = update.contact_density {
+            self.contact_density = Some(contact_density);
         }
         if let Some(rotation) = update.rotation {
             self.rotation = Some(rotation);
@@ -2977,6 +3002,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             fixed_velocity: update.fixed_velocity,
             mobile: update.mobile,
             t_attach: update.t_attach,
+            contact_density: update.contact_density,
             rotation: update.rotation,
             rotation_velocity: update.rotation_velocity,
             energy: update.energy,
@@ -3142,6 +3168,9 @@ pub struct ObjectUpdate {
     /// object's own-vertex mode unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_vertices: Option<Vec<ObjectVertex>>,
+    /// FnSetContactDensity's live C4Shape::ContactDensity overwrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_density: Option<i32>,
     /// Permanent own-vertex base overwrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertices: Option<Vec<ObjectVertex>>,
@@ -3252,6 +3281,11 @@ impl ObjectUpdate {
 
     pub fn with_construction(mut self, construction: i32) -> Self {
         self.construction = Some(construction.clamp(0, FULL_CON));
+        self
+    }
+
+    pub fn with_contact_density(mut self, contact_density: i32) -> Self {
+        self.contact_density = Some(contact_density);
         self
     }
 
@@ -3422,6 +3456,7 @@ impl ObjectUpdate {
             && self.entrance_status.is_none()
             && self.container.is_none()
             && self.live_vertices.is_none()
+            && self.contact_density.is_none()
             && self.vertices.is_none()
             && self.graphics_overlays.is_none()
             && self.draw_transform.is_none()
@@ -4662,6 +4697,7 @@ impl Object {
             action_procedure: procedure,
             effects: self.state.effects.clone(),
             vertices: self.state.vertices.clone(),
+            contact_density: self.state.contact_density,
             own_vertices: self.own_shape_vertices.clone(),
             container: self.state.container,
             layer: self.state.layer,
@@ -5192,6 +5228,10 @@ pub struct SpawnConfig {
     pub effects: Vec<EffectState>,
     #[serde(default)]
     pub vertices: Vec<ObjectVertex>,
+    /// Saved live C4Shape::ContactDensity. None means a fresh object copies
+    /// its definition; a loaded object defaults to C4M_Solid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_density: Option<i32>,
     /// Explicit per-object `C4Object::Component` list. Loaded Objects.txt
     /// entries compile this verbatim (C4Object.cpp:2811); fresh objects use
     /// their definition components scaled to initial Con when absent.
@@ -5303,6 +5343,7 @@ impl SpawnConfig {
             command_direction: CommandDirection::default(),
             effects: Vec::new(),
             vertices: Vec::new(),
+            contact_density: None,
             components: None,
             owner: OWNER_NONE,
             controller: None,
@@ -5451,6 +5492,11 @@ impl SpawnConfig {
         self
     }
 
+    pub fn with_contact_density(mut self, contact_density: i32) -> Self {
+        self.contact_density = Some(contact_density);
+        self
+    }
+
     pub fn with_components(mut self, components: HashMap<DefinitionId, u32>) -> Self {
         self.components = Some(components);
         self
@@ -5568,6 +5614,12 @@ pub struct ObjectSnapshot {
     pub effects: Vec<EffectState>,
     #[serde(default)]
     pub vertices: Vec<ObjectVertex>,
+    /// Saved live C4Shape::ContactDensity (C4Shape.cpp:495-510).
+    #[serde(
+        default = "default_contact_density",
+        skip_serializing_if = "is_default_contact_density"
+    )]
+    pub contact_density: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_vertices: Option<Vec<ObjectVertex>>,
     #[serde(default)]
@@ -14194,6 +14246,7 @@ impl Engine {
                             rotateable: definition.rotateable(),
                             line: definition.line(),
                             vertices: definition.shape_vertices().to_vec(),
+                            contact_density: Some(definition.contact_density()),
                             clonk_name_newlines: definition
                                 .clonk_names()
                                 .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32),
@@ -14277,9 +14330,7 @@ impl Engine {
                 )
                 .with_fixed_motion(object.fixed_position, object.fixed_velocity)
                 .with_move_to_range(definition.map_or(0, Definition::move_to_range))
-                .with_contact_density(
-                    definition.map_or(CONTACT_DENSITY_SOLID, Definition::contact_density),
-                )
+                .with_contact_density(object.state.contact_density)
                 .with_direction(object.state.direction.to_script_value())
                 .with_selected(object.state.selected)
                 .with_crew_disabled(object.state.crew_disabled)
@@ -18795,6 +18846,7 @@ impl Engine {
             alive,
             container,
             live_vertices,
+            contact_density,
             vertices,
             graphics_overlays,
             base_graphics: update_base_graphics,
@@ -18903,6 +18955,9 @@ impl Engine {
             if let Some(t_attach) = t_attach {
                 object.state.t_attach = t_attach;
                 object.frame_t_attach = t_attach;
+            }
+            if let Some(contact_density) = contact_density {
+                object.state.contact_density = contact_density;
             }
             if let Some(cause) = energy_loss_cause {
                 // Kill-trace mark BEFORE the energy write
@@ -20575,6 +20630,7 @@ impl Engine {
                     command_direction: snapshot.command_direction,
                     effects: snapshot.effects.clone(),
                     vertices: snapshot.vertices.clone(),
+                    contact_density: snapshot.contact_density,
                     container: None,
                     layer: snapshot.layer,
                     blit_mode: if snapshot.blit_mode == 0 {
@@ -21988,11 +22044,14 @@ impl Engine {
         if signed == 0 || !(-math::STABLE_RANGE..=math::STABLE_RANGE).contains(&signed) {
             return;
         }
-        let (no_stabilize, contact_density) = self
+        let no_stabilize = self
             .definitions
             .get(&self.objects[idx].definition_id)
-            .map(|definition| (definition.no_stabilize(), definition.contact_density()))
-            .unwrap_or((false, CONTACT_DENSITY_SOLID));
+            .is_some_and(Definition::no_stabilize);
+        // C4Shape::ContactDensity is live object state. C4Object::Stabilize
+        // probes Shape.CheckContact after SetContactDensity mutations
+        // (C4Movement.cpp:488-516; C4Shape.cpp:495-510).
+        let contact_density = self.objects[idx].state.contact_density;
         if no_stabilize {
             return;
         }
@@ -22083,7 +22142,7 @@ impl Engine {
             .get(&self.objects[idx].definition_id)
             .map(|definition| {
                 (
-                    definition.contact_density(),
+                    self.objects[idx].state.contact_density,
                     definition.contact_function_calls(),
                     definition.border_bound(),
                     definition.rotateable(),
@@ -22535,11 +22594,7 @@ impl Engine {
                 let object = &self.objects[idx];
                 let mut sample_position = object.state.position;
                 let mut record = object.state.shape_attach;
-                let contact_density = self
-                    .definitions
-                    .get(&definition_id)
-                    .map(Definition::contact_density)
-                    .unwrap_or(CONTACT_DENSITY_SOLID);
+                let contact_density = object.state.contact_density;
                 let attached = shape_attach(
                     &object.state.vertices,
                     &mut sample_position,
@@ -24573,11 +24628,7 @@ impl Engine {
             let object = self.objects.get(idx)?;
             let landscape = self.landscape.as_ref()?;
             let masks = self.solid_masks_for_movement(solid_mask_indices);
-            let contact_density = self
-                .definitions
-                .get(definition_id)
-                .map(|definition| definition.contact_density())
-                .unwrap_or(CONTACT_DENSITY_SOLID);
+            let contact_density = object.state.contact_density;
             shape_contact_check(
                 &object.state.vertices,
                 position,
@@ -28955,11 +29006,7 @@ impl Engine {
         };
         let indices: Vec<usize> = (0..self.objects.len()).collect();
         let masks = self.solid_masks_for_movement(&indices);
-        let contact_density = self
-            .definitions
-            .get(&object.definition_id)
-            .map(|definition| definition.contact_density())
-            .unwrap_or(CONTACT_DENSITY_SOLID);
+        let contact_density = object.state.contact_density;
         !shape_contact_check(
             &object.state.vertices,
             position,
@@ -32669,6 +32716,7 @@ impl Engine {
             command_direction,
             effects,
             vertices,
+            contact_density,
             components,
             owner,
             controller,
@@ -32709,6 +32757,7 @@ impl Engine {
             definition_blit_mode,
             definition_color_by_owner,
             definition_components,
+            definition_contact_density,
         ) = {
             let definition_ref = self
                 .definitions
@@ -32727,6 +32776,7 @@ impl Engine {
                 definition_ref.blit_mode(),
                 definition_ref.color_by_owner(),
                 definition_ref.components().to_vec(),
+                definition_ref.contact_density(),
             )
         };
         let mut initial_action = match action {
@@ -32874,6 +32924,13 @@ impl Engine {
                 command_direction,
                 effects: Vec::new(),
                 vertices: initial_vertices,
+                // Fresh Init copies Def->Shape. Loaded objects compile the
+                // embedded shape from a Clear() default of C4M_Solid.
+                contact_density: contact_density.unwrap_or(if loaded {
+                    CONTACT_DENSITY_SOLID
+                } else {
+                    definition_contact_density
+                }),
                 container: None,
                 layer,
                 blit_mode: blit_mode
@@ -33815,6 +33872,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         command_direction: snapshot.command_direction,
         effects: snapshot.effects.clone(),
         vertices: snapshot.vertices.clone(),
+        contact_density: snapshot.contact_density,
         container: snapshot.container,
         layer: snapshot.layer,
         blit_mode: snapshot.blit_mode,
@@ -33892,6 +33950,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     rotateable: 0,
                     line: 0,
                     vertices: Vec::new(),
+                    contact_density: None,
                     fire: compat::DefinitionFireMetadata::default(),
                 },
             )
@@ -33941,6 +34000,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     .fixed_velocity
                     .unwrap_or_else(|| FixedVec2::from_ints(object.velocity.x, object.velocity.y)),
             )
+            .with_contact_density(object.contact_density)
             .with_direction(object.direction.to_script_value())
             .with_contents(object.contents.clone())
             .with_need_energy(object.need_energy)

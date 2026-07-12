@@ -3056,11 +3056,10 @@ impl Engine {
             self.objects[index].state.command_direction,
             self.objects[index].state.direction,
         );
-        let contact_density = self
-            .definitions
-            .get(&self.objects[index].definition_id)
-            .map(crate::Definition::contact_density)
-            .unwrap_or(crate::CONTACT_DENSITY_SOLID);
+        // ObjectComJump reads pObj->Shape.ContactDensity, not Def->Shape
+        // (C4ObjectCom.cpp:297-305). SetContactDensity therefore changes the
+        // dive gate independently for every live object.
+        let contact_density = self.objects[index].state.contact_density;
         if contact_density > 25
             && self.object_com_jump_hits_liquid(index, launch)
             && self.object_action_dive(index, launch.x, launch.y)?

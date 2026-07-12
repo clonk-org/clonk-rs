@@ -665,6 +665,7 @@ mod tests {
             action_procedure: None,
             effects: Vec::new(),
             vertices: Vec::new(),
+            contact_density: 50,
             own_vertices: None,
             container: None,
             layer: None,

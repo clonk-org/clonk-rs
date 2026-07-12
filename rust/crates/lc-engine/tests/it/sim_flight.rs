@@ -2,8 +2,8 @@ use lc_engine::landscape::PixelGrid;
 use lc_engine::{
     command::CommandId, ActionSpec, ActionState, CommandDirection, Definition,
     DefinitionTargetRect, Direction, Engine, EngineError, JoinPlayerConfig, Landscape,
-    ObjectUpdate, ObjectVertex, PhysicsSettings, SpawnConfig, Vector2, CATEGORY_STATIC_BACK,
-    CNAT_BOTTOM,
+    ObjectUpdate, ObjectVertex, PhysicsSettings, SpawnConfig, Vector2, CATEGORY_OBJECT,
+    CATEGORY_STATIC_BACK, CNAT_BOTTOM,
 };
 use lc_resources::PhysicalInfo;
 use lc_script::Value;
@@ -602,6 +602,213 @@ fn script_jump_native_respects_contact_density_dive_gate() {
     assert_eq!(
         engine.object_snapshot(object).expect("probe survives").action.name,
         "Jump"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(object)
+            .expect("probe survives")
+            .contact_density,
+        25
+    );
+}
+
+#[test]
+fn script_set_contact_density_changes_the_same_call_jump_gate() {
+    // FnSetContactDensity writes the live C4Shape field immediately
+    // (C4Script.cpp:1286-1291). The following FnJump in the same script call
+    // must observe 25 and skip the dive branch (C4ObjectCom.cpp:297-305).
+    let mut actions = HashMap::new();
+    actions.insert(
+        "Walk".to_string(),
+        ActionSpec::default().with_procedure("walk"),
+    );
+    actions.insert(
+        "Jump".to_string(),
+        ActionSpec::default().with_procedure("flight"),
+    );
+    actions.insert(
+        "Dive".to_string(),
+        ActionSpec::default().with_procedure("swim"),
+    );
+    let script = r#"
+#strict
+func ProbeLow()
+{
+    SetContactDensity(C4M_Liquid);
+    return Jump();
+}
+func ProbeSolid()
+{
+    SetContactDensity(C4M_Solid);
+    return Jump();
+}
+"#;
+    let mut definition =
+        Definition::from_script("SCDN", "Contact density probe", script).expect("probe compiles");
+    definition.configure_actions(Some("Walk".to_string()), actions);
+    definition.set_shape_vertices(vec![ObjectVertex::new(0, 9).with_cnat(CNAT_BOTTOM)]);
+    definition.set_physical(PhysicalInfo {
+        walk: 70_000,
+        jump: 40_000,
+        ..Default::default()
+    });
+    let restored_definition = definition.clone();
+
+    let mut engine = Engine::new();
+    engine.set_landscape(raster_landscape_with_densities(
+        240,
+        100,
+        vec![0, 25],
+        |_, y| u8::from(y >= 50),
+    ));
+    engine.set_physics(PhysicsSettings::new(100, 20, -20));
+    engine
+        .register_definition(definition)
+        .expect("probe registers");
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("SCDN")
+                .with_position(Vector2::new(120, 40))
+                .with_action(ActionState::new("Walk"))
+                .with_direction(Direction::Right)
+                .with_command_direction(CommandDirection::Right),
+        )
+        .expect("probe spawns");
+    let index = engine.find_object_index(object).expect("probe exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "ProbeLow", Vec::new())
+            .expect("ProbeLow changes the live shape then jumps"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        engine.object_snapshot(object).expect("probe survives").action.name,
+        "Jump"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(object)
+            .expect("probe survives")
+            .contact_density,
+        25
+    );
+
+    // C4Shape::CompileFunc stores ContactDensity in the object's embedded
+    // Shape (C4Shape.cpp:495-510), so the per-object value survives a state
+    // round trip independently of the definition's default.
+    let state = engine.capture_state();
+    let mut restored = Engine::new();
+    restored
+        .register_definition(restored_definition)
+        .expect("probe registers after restore");
+    restored.restore_state(&state).expect("state restores");
+    assert_eq!(
+        restored
+            .object_snapshot(object)
+            .expect("restored probe survives")
+            .contact_density,
+        25
+    );
+
+    restored
+        .apply_object_update(
+            object,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(120, 40))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .with_direction(Direction::Right)
+                .with_command_direction(CommandDirection::Right),
+        )
+        .expect("reset restored probe");
+    let index = restored
+        .find_object_index(object)
+        .expect("restored probe exists");
+    assert_eq!(
+        restored
+            .call_object_function(index, "ProbeSolid", Vec::new())
+            .expect("ProbeSolid restores the live shape then jumps"),
+        Value::Bool(true)
+    );
+    let snapshot = restored.object_snapshot(object).expect("probe survives");
+    assert_eq!(snapshot.action.name, "Dive");
+    assert_eq!(snapshot.contact_density, 50);
+}
+
+#[test]
+fn live_contact_density_controls_movement_contact_with_liquid() {
+    // C4Shape::ContactCheck compares landscape density against the live
+    // Shape.ContactDensity (C4Shape.cpp:83-156; C4Movement.cpp:337-470).
+    // This is the mechanism used by Fantasy's WalkOnLiquid spell, which sets
+    // the target to C4M_Liquid and later restores C4M_Solid
+    // (WalkOnLiquid.c4d/Script.c:105,131).
+    let mut actions = HashMap::new();
+    actions.insert(
+        "Flight".to_string(),
+        ActionSpec::default().with_procedure("flight"),
+    );
+    let mut definition = Definition::from_script(
+        "WALK",
+        "Liquid attachment probe",
+        "#strict\nfunc Enable() { return SetContactDensity(C4M_Liquid); }\n",
+    )
+    .expect("probe compiles");
+    definition.configure_actions(Some("Flight".to_string()), actions);
+    definition.set_category(CATEGORY_OBJECT);
+    definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
+
+    let mut engine = Engine::new();
+    engine.set_landscape(raster_landscape_with_densities(
+        80,
+        60,
+        vec![0, 25],
+        |_, y| u8::from(y >= 20),
+    ));
+    engine.set_physics(PhysicsSettings::new(100, 20, -20));
+    engine
+        .register_definition(definition)
+        .expect("probe registers");
+    let walker = engine
+        .spawn_object(
+            SpawnConfig::new("WALK")
+                .with_position(Vector2::new(20, 18))
+                .with_velocity(Vector2::new(0, 3))
+                .with_mobile(true)
+                .with_action(ActionState::new("Flight")),
+        )
+        .expect("liquid walker spawns");
+    let falling_control = engine
+        .spawn_object(
+            SpawnConfig::new("WALK")
+                .with_position(Vector2::new(40, 18))
+                .with_velocity(Vector2::new(0, 3))
+                .with_mobile(true)
+                .with_action(ActionState::new("Flight")),
+        )
+        .expect("solid-density control spawns");
+    let walker_index = engine.find_object_index(walker).expect("walker exists");
+    assert_eq!(
+        engine
+            .call_object_function(walker_index, "Enable", Vec::new())
+            .expect("WalkOnLiquid-style mutation succeeds"),
+        Value::Bool(true)
+    );
+
+    engine.tick().expect("movement contact probe ticks");
+
+    let walker = engine.object_snapshot(walker).expect("walker survives");
+    let falling = engine
+        .object_snapshot(falling_control)
+        .expect("control survives");
+    assert_eq!(walker.contact_density, 25);
+    assert_eq!(
+        walker.position.y, 19,
+        "liquid-density shape stops at the liquid surface"
+    );
+    assert!(
+        falling.position.y > walker.position.y,
+        "solid-density control should pass through density-25 liquid: {falling:?}"
     );
 }
 
