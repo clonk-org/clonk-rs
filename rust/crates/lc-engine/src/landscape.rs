@@ -1981,25 +1981,13 @@ impl Landscape {
         result
     }
     pub fn can_incinerate(&self, x: i32, y: i32, materials: &MaterialSet) -> bool {
-        if self.surface.is_empty() || materials.is_empty() {
-            return false;
-        }
-
-        let Some(surface_y) = self.surface_height(x) else {
-            return false;
-        };
-        if y < surface_y {
-            return false;
-        }
-
-        let Some(material_id) = self.solid_material_at(x) else {
-            return false;
-        };
-        let Some(material) = materials.get_by_id(material_id) else {
-            return false;
-        };
-
-        material.inflammable() > 0
+        // C4Landscape::Incinerate reads GetMat(x, y), so the authoritative
+        // raster pixel (and the normal GetPix border rules) select the
+        // material; the derived column surface is irrelevant here
+        // (C4Landscape.cpp:1417-1426).
+        self.border_material_at(x, y)
+            .and_then(|material| materials.get_by_id(material))
+            .is_some_and(|material| material.inflammable() > 0)
     }
 
     pub fn surface_height(&self, x: i32) -> Option<i32> {
@@ -4710,12 +4698,64 @@ mod tests {
         let wood = materials.id_of("Wood").expect("wood exists");
         let stone = materials.id_of("Stone").expect("stone exists");
 
-        let landscape_flammable = Landscape::flat_with_material(5, 60, Some(wood));
+        let mut landscape_flammable = Landscape::flat_with_material(5, 60, Some(wood));
+        landscape_flammable.set_world_height(100);
         assert!(landscape_flammable.can_incinerate(2, 65, &materials));
         assert!(!landscape_flammable.can_incinerate(2, 55, &materials));
 
-        let landscape_non_flammable = Landscape::flat_with_material(5, 60, Some(stone));
+        let mut landscape_non_flammable = Landscape::flat_with_material(5, 60, Some(stone));
+        landscape_non_flammable.set_world_height(100);
         assert!(!landscape_non_flammable.can_incinerate(2, 65, &materials));
+    }
+
+    #[test]
+    fn can_incinerate_reads_the_exact_raster_material_like_cpp() {
+        // C++ oracle: C4Landscape::Incinerate calls GetMat(x, y) and tests
+        // that exact material's Inflammable field (src/C4Landscape.cpp:
+        // 1417-1426). It does not substitute the column's surface material.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Stone]
+            Name=Stone
+            Density=120
+            Inflammable=0
+
+            [Material Oil]
+            Name=Oil
+            Density=100
+            Inflammable=50
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let stone = materials.id_of("Stone").expect("stone exists");
+
+        let mut densities = vec![0; 128];
+        densities[1] = 120;
+        densities[2] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Stone".to_string());
+        material_names[2] = Some("Oil".to_string());
+        let grid = PixelGrid::new(
+            3,
+            3,
+            vec![1, 1, 1, 1, 2, 1, 1, 1, 1],
+            densities,
+            material_names,
+            vec![None; 128],
+        );
+        let mut landscape = Landscape::flat_with_material(3, 3, Some(stone));
+        landscape.set_pixel_grid(grid);
+        landscape.resolve_grid_materials(|name| materials.id_of(name));
+
+        assert!(
+            landscape.can_incinerate(1, 1, &materials),
+            "the exact Oil pixel is inflammable even above the column surface"
+        );
+        assert!(
+            !landscape.can_incinerate(0, 1, &materials),
+            "the adjacent exact Stone pixel is not inflammable"
+        );
     }
 
     #[test]
