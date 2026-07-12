@@ -563,17 +563,27 @@ fn blit_cell(
                 continue; // clipped
             };
             let af = out_a / 255.0;
-            // Modulate in float; with a gamma ramp the result goes through
-            // the shader's gamma texel lookup, else round like before.
-            let modulate = |c: u8, m: u8| -> f32 {
+            // Modulate in float; the shader samples an independent normalized
+            // R16 gamma texture for each RGB channel before blending
+            // (StdGL.cpp:1068-1087,1246-1263).
+            let modulate = |channel: crate::gamma::GammaChannel, c: u8, m: u8| -> f32 {
                 let v = c as f32 * m as f32 / 255.0;
-                gamma.map_or_else(|| v.round(), |g| f32::from(g.encode_float(v)))
+                gamma.map_or(v, |g| g.sample_channel_float(channel, v))
             };
             let blend = |src: f32, dst: u8| (src * af + dst as f32 * (1.0 - af)).round() as u8;
             let blended = Color::new(
-                blend(modulate(px.r, mod_rgb[0]), dst.r),
-                blend(modulate(px.g, mod_rgb[1]), dst.g),
-                blend(modulate(px.b, mod_rgb[2]), dst.b),
+                blend(
+                    modulate(crate::gamma::GammaChannel::Red, px.r, mod_rgb[0]),
+                    dst.r,
+                ),
+                blend(
+                    modulate(crate::gamma::GammaChannel::Green, px.g, mod_rgb[1]),
+                    dst.g,
+                ),
+                blend(
+                    modulate(crate::gamma::GammaChannel::Blue, px.b, mod_rgb[2]),
+                    dst.b,
+                ),
                 blend(out_a, dst.a),
             );
             let _ = surface.set_pixel(dx, dy, blended);
@@ -794,6 +804,29 @@ mod tests {
         assert_eq!(px(&sfc, 8, 0).a, 0);
         assert_eq!(px(&sfc, 0, 3), Color::new(255, 255, 255, 255)); // cell row 3
         assert_eq!(px(&sfc, 0, 4).a, 0); // below cell_height
+    }
+
+    #[test]
+    fn draw_gamma_samples_independent_rgb_tables() {
+        // Font glyphs use the same three-channel blit shader as sprites
+        // (StdFont.cpp:922-925; StdGL.cpp:1068-1087).
+        let font = test_font();
+        let gamma = crate::GammaRamp::from_control_points([
+            0x102030, 0x405060, 0x708090,
+        ]);
+        let mut sfc = surface();
+        font.draw_with_gamma(
+            &mut sfc,
+            0,
+            0,
+            "A",
+            [0, 0, 0, 255],
+            TextAlign::Left,
+            false,
+            Some(&gamma),
+        );
+
+        assert_eq!(px(&sfc, 0, 0), Color::new(17, 33, 49, 255));
     }
 
     #[test]

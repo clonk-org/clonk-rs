@@ -4531,9 +4531,21 @@ pub fn draw_image_strip(
             }
             let blended = if rgba[3] == 255 {
                 Color::new(
-                    encode_channel(gamma, f32::from(rgba[0])) as u8,
-                    encode_channel(gamma, f32::from(rgba[1])) as u8,
-                    encode_channel(gamma, f32::from(rgba[2])) as u8,
+                    store_channel(sample_channel(
+                        gamma,
+                        lc_graphics::gamma::GammaChannel::Red,
+                        f32::from(rgba[0]),
+                    )),
+                    store_channel(sample_channel(
+                        gamma,
+                        lc_graphics::gamma::GammaChannel::Green,
+                        f32::from(rgba[1]),
+                    )),
+                    store_channel(sample_channel(
+                        gamma,
+                        lc_graphics::gamma::GammaChannel::Blue,
+                        f32::from(rgba[2]),
+                    )),
                     255,
                 )
             } else if gamma.is_none() {
@@ -4542,15 +4554,24 @@ pub fn draw_image_strip(
             } else {
                 let dst = surface.get_pixel(tx as u32, ty as u32).unwrap_or_default();
                 let af = f32::from(rgba[3]) / 255.0;
-                let blend = |src: u8, dst: u8| -> u8 {
-                    (encode_channel(gamma, f32::from(src)) * af + f32::from(dst) * (1.0 - af))
-                        .round()
-                        .clamp(0.0, 255.0) as u8
+                let blend = |channel, src: u8, dst: u8| -> u8 {
+                    store_channel(
+                        sample_channel(gamma, channel, f32::from(src)) * af
+                            + f32::from(dst) * (1.0 - af),
+                    )
                 };
                 Color::new(
-                    blend(rgba[0], dst.r),
-                    blend(rgba[1], dst.g),
-                    blend(rgba[2], dst.b),
+                    blend(lc_graphics::gamma::GammaChannel::Red, rgba[0], dst.r),
+                    blend(
+                        lc_graphics::gamma::GammaChannel::Green,
+                        rgba[1],
+                        dst.g,
+                    ),
+                    blend(
+                        lc_graphics::gamma::GammaChannel::Blue,
+                        rgba[2],
+                        dst.b,
+                    ),
                     255,
                 )
             };
@@ -4679,26 +4700,31 @@ fn draw_image_bilinear_impl(
                     let dst = surface.get_pixel(px as u32, py as u32).unwrap_or_default();
                     let out = match blend_mode {
                         BilinearBlend::AlphaOver => {
-                            let blend = |src: f32, dst: u8| -> u8 {
-                                (encode_channel(gamma, src) * af + f32::from(dst) * (1.0 - af))
-                                    .round()
-                                    .clamp(0.0, 255.0)
-                                    as u8
+                            let blend = |channel, src: f32, dst: u8| -> u8 {
+                                store_channel(
+                                    sample_channel(gamma, channel, src) * af
+                                        + f32::from(dst) * (1.0 - af),
+                                )
                             };
                             Color::new(
-                                blend(s[0], dst.r),
-                                blend(s[1], dst.g),
-                                blend(s[2], dst.b),
+                                blend(lc_graphics::gamma::GammaChannel::Red, s[0], dst.r),
+                                blend(lc_graphics::gamma::GammaChannel::Green, s[1], dst.g),
+                                blend(lc_graphics::gamma::GammaChannel::Blue, s[2], dst.b),
                                 255,
                             )
                         }
                         BilinearBlend::Additive => {
-                            let add = |src: f32, dst: u8| -> u8 {
-                                (f32::from(dst) + encode_channel(gamma, src) * af)
-                                    .round()
-                                    .clamp(0.0, 255.0) as u8
+                            let add = |channel, src: f32, dst: u8| -> u8 {
+                                store_channel(
+                                    f32::from(dst) + sample_channel(gamma, channel, src) * af,
+                                )
                             };
-                            Color::new(add(s[0], dst.r), add(s[1], dst.g), add(s[2], dst.b), dst.a)
+                            Color::new(
+                                add(lc_graphics::gamma::GammaChannel::Red, s[0], dst.r),
+                                add(lc_graphics::gamma::GammaChannel::Green, s[1], dst.g),
+                                add(lc_graphics::gamma::GammaChannel::Blue, s[2], dst.b),
+                                dst.a,
+                            )
                         }
                     };
                     let _ = surface.set_pixel(px as u32, py as u32, out);
@@ -4708,13 +4734,21 @@ fn draw_image_bilinear_impl(
     }
 }
 
-/// Encodes a filtered colour channel the way the C++ blit shader does:
-/// through the gamma 1D-texture lookup when a ramp is given
-/// (StdGL.cpp:1082-1086), else round-to-nearest.
-fn encode_channel(gamma: Option<&lc_graphics::GammaRamp>, x: f32) -> f32 {
+/// Samples a filtered colour channel the way the C++ blit shader does. The
+/// normalized R16 result stays in float for blending and is rounded only on
+/// framebuffer store (StdGL.cpp:908,1082-1086,1246-1255).
+fn sample_channel(
+    gamma: Option<&lc_graphics::GammaRamp>,
+    channel: lc_graphics::gamma::GammaChannel,
+    x: f32,
+) -> f32 {
     gamma
-        .map(|ramp| f32::from(ramp.encode_float(x)))
-        .unwrap_or_else(|| x.round().clamp(0.0, 255.0))
+        .map(|ramp| ramp.sample_channel_float(channel, x))
+        .unwrap_or_else(|| x.clamp(0.0, 255.0))
+}
+
+fn store_channel(value: f32) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
 }
 
 /// Stretches `image` into `rect` with GL_LINEAR-equivalent bilinear sampling
@@ -4842,6 +4876,51 @@ mod tests {
         draw_image_strip(&mut surface, 0, 0, &image, 2, 0, 2, 1, None);
         assert_eq!(surface.get_pixel(0, 0), Some(gray(30)));
         assert_eq!(surface.get_pixel(1, 0), Some(gray(40)));
+    }
+
+    #[test]
+    fn draw_image_strip_gamma_uses_independent_rgb_tables() {
+        // The blit shader samples three independent R16 gamma textures after
+        // texture modulation (StdGL.cpp:1068-1087,1246-1263).
+        let image = ImageData::new(1, 1, vec![0, 0, 0, 255]);
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x102030, 0x405060, 0x708090,
+        ]);
+        let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
+
+        draw_image_strip(&mut surface, 0, 0, &image, 0, 0, 1, 1, Some(&gamma));
+
+        assert_eq!(
+            surface.get_pixel(0, 0),
+            Some(Color::new(17, 33, 49, 255))
+        );
+    }
+
+    #[test]
+    fn draw_image_bilinear_gamma_samples_r16_before_alpha_blending() {
+        // Gamma lookup precedes fixed-function source-alpha blending; the
+        // normalized R16 sample stays in float until framebuffer storage
+        // (StdGL.cpp:908,1081-1087,1246-1255).
+        let image = ImageData::new(1, 1, vec![64, 128, 192, 128]);
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+        let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
+        surface
+            .set_pixel(0, 0, Color::opaque(200, 200, 200))
+            .unwrap();
+
+        draw_image_bilinear(
+            &mut surface,
+            &GuiRect::new(0.0, 0.0, 1.0, 1.0),
+            &image,
+            Some(&gamma),
+        );
+
+        assert_eq!(
+            surface.get_pixel(0, 0),
+            Some(Color::new(125, 150, 175, 255))
+        );
     }
 
     #[test]

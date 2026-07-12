@@ -119,8 +119,24 @@ impl GammaRamp {
     /// Applies one channel's ramp to a filtered (fractional) colour value with
     /// the shader's `GL_NEAREST` texture-coordinate semantics.
     pub fn encode_channel_float(&self, channel: GammaChannel, x: f32) -> u8 {
-        let index = ((x.clamp(0.0, 255.0) * 256.0 / 255.0) as usize).min(255);
+        let index = Self::sample_index(x);
         framebuffer_channel(self.channels[channel.index()][index])
+    }
+
+    /// Samples one normalized R16 gamma texel as a framebuffer-scale float.
+    ///
+    /// The C++ shader consumes `GL_R16` through a normalized sampler and the
+    /// blend stage receives that unrounded float (`StdGL.cpp:1081-1087,
+    /// 1246-1255`). Callers performing alpha or additive blending must keep
+    /// this value in float and round only when storing the final pixel.
+    pub fn sample_channel_float(&self, channel: GammaChannel, x: f32) -> f32 {
+        let index = Self::sample_index(x);
+        // `u16 / 65535 * 255` is exactly `u16 / 257`.
+        f32::from(self.channels[channel.index()][index]) / 257.0
+    }
+
+    fn sample_index(x: f32) -> usize {
+        ((x.clamp(0.0, 255.0) * 256.0 / 255.0) as usize).min(255)
     }
 
     /// Applies the ramp to a *filtered* (fractional) colour value the way the
@@ -228,20 +244,32 @@ mod tests {
         assert_eq!(encoded, crate::Color::new(50, 100, 150, 128));
 
         let alpha = f32::from(source.a) / 255.0;
+        // GL_R16 is normalized to float in the shader. Fixed-function
+        // blending consumes that unrounded sample and the framebuffer rounds
+        // only once on store (StdGL.cpp:1081-1087,908; 1250-1255).
+        let samples = [
+            ramp.sample_channel_float(GammaChannel::Red, f32::from(source.r)),
+            ramp.sample_channel_float(GammaChannel::Green, f32::from(source.g)),
+            ramp.sample_channel_float(GammaChannel::Blue, f32::from(source.b)),
+        ];
+        assert!((samples[0] - f32::from(0x31f1_u16) / 257.0).abs() < f32::EPSILON);
+        assert!((samples[1] - f32::from(0x6465_u16) / 257.0).abs() < f32::EPSILON);
+        assert!((samples[2] - f32::from(0x96d8_u16) / 257.0).abs() < f32::EPSILON);
+
         let over_opaque_200 =
-            |value: u8| (f32::from(value) * alpha + 200.0 * (1.0 - alpha)).round() as u8;
+            |value: f32| (value * alpha + 200.0 * (1.0 - alpha)).round() as u8;
         let pre_blend = crate::Color::new(
-            over_opaque_200(encoded.r),
-            over_opaque_200(encoded.g),
-            over_opaque_200(encoded.b),
+            over_opaque_200(samples[0]),
+            over_opaque_200(samples[1]),
+            over_opaque_200(samples[2]),
             255,
         );
         assert_eq!(pre_blend, crate::Color::new(125, 150, 175, 255));
 
         let raw_blend = crate::Color::new(
-            over_opaque_200(source.r),
-            over_opaque_200(source.g),
-            over_opaque_200(source.b),
+            over_opaque_200(f32::from(source.r)),
+            over_opaque_200(f32::from(source.g)),
+            over_opaque_200(f32::from(source.b)),
             255,
         );
         let post_blend = crate::Color::new(
