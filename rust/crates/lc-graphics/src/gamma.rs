@@ -10,23 +10,37 @@
 
 use crate::Surface;
 
-/// One 8-bit-in / 8-bit-out gamma lookup per colour channel, plus the float
-/// fragment-shader semantics for filtered (non-integer) colour values.
-#[derive(Clone, Debug, PartialEq)]
-pub struct GammaRamp {
-    red: [u8; 256],
-    green: [u8; 256],
-    blue: [u8; 256],
-    ramp16: [u16; 256],
+/// A colour component of the C++ gamma ramp.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GammaChannel {
+    Red,
+    Green,
+    Blue,
 }
 
-/// Builds one channel's 16-bit ramp from three control values, then converts
-/// to 8-bit framebuffer output.
+impl GammaChannel {
+    const fn index(self) -> usize {
+        match self {
+            Self::Red => 0,
+            Self::Green => 1,
+            Self::Blue => 2,
+        }
+    }
+}
+
+/// Three exact 16-bit gamma lookups, plus the 8-bit framebuffer and filtered
+/// fragment-shader encoders derived from them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GammaRamp {
+    channels: [[u16; 256]; 3],
+}
+
+/// Builds the uncorrected curve for one channel from three control values.
 ///
 /// Mirrors `CGammaControl::SetClrChannel` (StdDDraw2.cpp:237-271) with
 /// size=256 and no ref ramp; the shader samples the 16-bit value and the
 /// 8-bit framebuffer store rounds `v * 255 / 65535` = `v / 257`.
-fn ramp_channel(c1: u8, c2: u8, c3: u8) -> ([u8; 256], [u16; 256]) {
+fn raw_ramp_channel(c1: u8, c2: u8, c3: u8) -> [u16; 256] {
     let (c1, c2) = (i64::from(c1), i64::from(c2));
     let c3 = i64::from(c3) + 1; // "adjust clr3-value" (StdDDraw2.cpp:242)
     let size: i64 = 256;
@@ -36,18 +50,32 @@ fn ramp_channel(c1: u8, c2: u8, c3: u8) -> ([u8; 256], [u16; 256]) {
     for i in 0..size / 2 {
         let i2 = size / 2 - i;
         let bend = (2 * c2 - c1 - c3) * 2 * i * i2;
-        // MinGamma clamp per SetClrChannel (StdDDraw2.cpp:240,267).
-        ramp16[i as usize] =
-            (((c1 * i2 + c2 * i) * size1 + bend) / denom).clamp(0x100, 0xffff) as u16;
+        ramp16[i as usize] = (((c1 * i2 + c2 * i) * size1 + bend) / denom).clamp(0, 0xffff) as u16;
         ramp16[(i + size / 2) as usize] =
-            (((c2 * i2 + c3 * i) * size1 + bend) / denom).clamp(0x100, 0xffff) as u16;
+            (((c2 * i2 + c3 * i) * size1 + bend) / denom).clamp(0, 0xffff) as u16;
     }
-    let mut out = [0u8; 256];
-    for (entry, v) in out.iter_mut().zip(ramp16) {
-        // 16-bit ramp value -> 8-bit framebuffer store rounding.
-        *entry = (f32::from(v) / 257.0).round() as u8;
-    }
-    (out, ramp16)
+    ramp16
+}
+
+fn ramp_channel(c1: u8, c2: u8, c3: u8) -> [u16; 256] {
+    let raw = raw_ramp_channel(c1, c2, c3);
+    let mut reference = raw_ramp_channel(0x00, 0x80, 0xff);
+    reference
+        .iter_mut()
+        .for_each(|value| *value = (*value).max(0x100));
+
+    std::array::from_fn(|i| {
+        // `CStdDDraw::SetGamma` supplies `DefRamp` as `ref`. C++ applies this
+        // correction before the MinGamma clamp (StdDDraw2.cpp:254-267).
+        let linear = 0x10000_i64 * i as i64 / 255;
+        (i64::from(raw[i]) + i64::from(reference[i]) - linear).clamp(0x100, 0xffff) as u16
+    })
+}
+
+const fn framebuffer_channel(value: u16) -> u8 {
+    // A normalized 16-bit texture sample written to an 8-bit framebuffer is
+    // rounded to the nearest of the 256 representable values.
+    ((value as u32 + 128) / 257) as u8
 }
 
 impl GammaRamp {
@@ -57,13 +85,42 @@ impl GammaRamp {
     /// (StdDDraw2.cpp:284-286); with the default grey control points every
     /// channel is identical, so the swap is unobservable here.
     pub fn standard() -> Self {
-        let (lut, ramp16) = ramp_channel(0x00, 0x80, 0xff);
+        Self::from_control_points([0x000000, 0x808080, 0xffffff])
+    }
+
+    /// Builds the exact three-channel C++ ramp from packed `0xRRGGBB` control
+    /// points (`CGammaControl::Set`, StdDDraw2.cpp:273-286).
+    ///
+    /// The apparently reversed extractors are intentional: LegacyClonk's
+    /// `GetBValue` reads the high byte and feeds the red table, while
+    /// `GetRValue` reads the low byte and feeds the blue table.
+    pub fn from_control_points(control_points: [u32; 3]) -> Self {
+        let [c1, c2, c3] = control_points;
         Self {
-            red: lut,
-            green: lut,
-            blue: lut,
-            ramp16,
+            channels: [
+                ramp_channel((c1 >> 16) as u8, (c2 >> 16) as u8, (c3 >> 16) as u8),
+                ramp_channel((c1 >> 8) as u8, (c2 >> 8) as u8, (c3 >> 8) as u8),
+                ramp_channel(c1 as u8, c2 as u8, c3 as u8),
+            ],
         }
+    }
+
+    /// Returns the exact normalized 16-bit texture entry for an integer input.
+    pub fn encode_channel_u16(&self, channel: GammaChannel, x: u8) -> u16 {
+        self.channels[channel.index()][usize::from(x)]
+    }
+
+    /// Applies one channel's ramp to an integer input and converts the texture
+    /// sample to its rounded 8-bit framebuffer representation.
+    pub fn encode_channel(&self, channel: GammaChannel, x: u8) -> u8 {
+        framebuffer_channel(self.encode_channel_u16(channel, x))
+    }
+
+    /// Applies one channel's ramp to a filtered (fractional) colour value with
+    /// the shader's `GL_NEAREST` texture-coordinate semantics.
+    pub fn encode_channel_float(&self, channel: GammaChannel, x: f32) -> u8 {
+        let index = ((x.clamp(0.0, 255.0) * 256.0 / 255.0) as usize).min(255);
+        framebuffer_channel(self.channels[channel.index()][index])
     }
 
     /// Applies the ramp to a *filtered* (fractional) colour value the way the
@@ -73,17 +130,16 @@ impl GammaRamp {
     /// and up above — then the 16-bit texel is stored to the 8-bit
     /// framebuffer with rounding.
     pub fn encode_float(&self, x: f32) -> u8 {
-        let index = ((x.clamp(0.0, 255.0) * 256.0 / 255.0) as usize).min(255);
-        (f32::from(self.ramp16[index]) / 257.0).round() as u8
+        self.encode_channel_float(GammaChannel::Red, x)
     }
 
     /// Applies the ramp to every pixel of `surface`, like the blit shader
     /// does per fragment.
     pub fn apply_to_surface(&self, surface: &mut Surface) {
         for px in surface.pixels_mut().chunks_exact_mut(4) {
-            px[0] = self.red[px[0] as usize];
-            px[1] = self.green[px[1] as usize];
-            px[2] = self.blue[px[2] as usize];
+            px[0] = self.encode_channel(GammaChannel::Red, px[0]);
+            px[1] = self.encode_channel(GammaChannel::Green, px[1]);
+            px[2] = self.encode_channel(GammaChannel::Blue, px[2]);
         }
     }
 }
@@ -97,13 +153,104 @@ mod tests {
     fn standard_ramp_is_identity_except_black_floor() {
         let ramp = GammaRamp::standard();
         // MinGamma 0x100 lifts black: round(256/257) = 1.
-        assert_eq!(ramp.red[0], 1);
+        assert_eq!(ramp.encode_channel(GammaChannel::Red, 0), 1);
         // Everything else is identity for the default control points.
         for c in [1usize, 63, 64, 127, 128, 129, 200, 254, 255] {
-            assert_eq!(ramp.red[c], c as u8, "channel value {c}");
+            assert_eq!(
+                ramp.encode_channel(GammaChannel::Red, c as u8),
+                c as u8,
+                "channel value {c}"
+            );
         }
-        assert_eq!(ramp.red, ramp.green);
-        assert_eq!(ramp.green, ramp.blue);
+        assert_eq!(ramp.channels[0], ramp.channels[1]);
+        assert_eq!(ramp.channels[1], ramp.channels[2]);
+    }
+
+    #[test]
+    fn tutorial_six_ramp_preserves_exact_cpp_16_bit_samples() {
+        // `CGammaControl::Set` + `SetClrChannel` (StdDDraw2.cpp:237-286).
+        let ramp = GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
+        let expected = [
+            (0, 0x0100, 1),
+            (64, 0x31f1, 50),
+            (128, 0x6465, 100),
+            (192, 0x96d8, 150),
+            (255, 0xc8fc, 200),
+        ];
+
+        for (input, raw, framebuffer) in expected {
+            for channel in [GammaChannel::Red, GammaChannel::Green, GammaChannel::Blue] {
+                assert_eq!(ramp.encode_channel_u16(channel, input), raw);
+                assert_eq!(ramp.encode_channel(channel, input), framebuffer);
+            }
+        }
+    }
+
+    #[test]
+    fn packed_control_points_feed_the_cpp_red_green_blue_channels() {
+        // `GetBValue` reads the high packed byte and `GetRValue` the low byte;
+        // `CGammaControl::Set` deliberately uses them for red and blue in that
+        // order (StdColors.h:43-45; StdDDraw2.cpp:283-286).
+        let ramp = GammaRamp::from_control_points([0x102030, 0x405060, 0x708090]);
+
+        assert_eq!(ramp.encode_channel_u16(GammaChannel::Red, 0), 0x1110);
+        assert_eq!(ramp.encode_channel_u16(GammaChannel::Green, 0), 0x2120);
+        assert_eq!(ramp.encode_channel_u16(GammaChannel::Blue, 0), 0x3130);
+        assert_eq!(ramp.encode_channel_float(GammaChannel::Red, 0.0), 17);
+        assert_eq!(ramp.encode_channel_float(GammaChannel::Green, 0.0), 33);
+        assert_eq!(ramp.encode_channel_float(GammaChannel::Blue, 0.0), 49);
+
+        let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
+        surface
+            .set_pixel(0, 0, crate::Color::new(0, 0, 0, 7))
+            .unwrap();
+        ramp.apply_to_surface(&mut surface);
+        assert_eq!(
+            surface.get_pixel(0, 0),
+            Some(crate::Color::new(17, 33, 49, 7))
+        );
+    }
+
+    #[test]
+    fn shader_gamma_encodes_source_before_alpha_blending() {
+        // The fragment shader samples gamma before emitting its colour
+        // (StdGL.cpp:1081-1087); fixed-function source-alpha blending follows
+        // (StdGL.cpp:908). Applying gamma to the composited surface is not
+        // equivalent.
+        let ramp = GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
+        let source = crate::Color::new(64, 128, 192, 128);
+        let encoded = crate::Color::new(
+            ramp.encode_channel_float(GammaChannel::Red, f32::from(source.r)),
+            ramp.encode_channel_float(GammaChannel::Green, f32::from(source.g)),
+            ramp.encode_channel_float(GammaChannel::Blue, f32::from(source.b)),
+            source.a,
+        );
+        assert_eq!(encoded, crate::Color::new(50, 100, 150, 128));
+
+        let alpha = f32::from(source.a) / 255.0;
+        let over_opaque_200 =
+            |value: u8| (f32::from(value) * alpha + 200.0 * (1.0 - alpha)).round() as u8;
+        let pre_blend = crate::Color::new(
+            over_opaque_200(encoded.r),
+            over_opaque_200(encoded.g),
+            over_opaque_200(encoded.b),
+            255,
+        );
+        assert_eq!(pre_blend, crate::Color::new(125, 150, 175, 255));
+
+        let raw_blend = crate::Color::new(
+            over_opaque_200(source.r),
+            over_opaque_200(source.g),
+            over_opaque_200(source.b),
+            255,
+        );
+        let post_blend = crate::Color::new(
+            ramp.encode_channel(GammaChannel::Red, raw_blend.r),
+            ramp.encode_channel(GammaChannel::Green, raw_blend.g),
+            ramp.encode_channel(GammaChannel::Blue, raw_blend.b),
+            255,
+        );
+        assert_ne!(post_blend, pre_blend);
     }
 
     #[test]
