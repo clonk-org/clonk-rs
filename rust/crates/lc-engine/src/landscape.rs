@@ -2033,18 +2033,14 @@ impl Landscape {
     }
 
     pub fn is_solid_at(&self, x: i32, y: i32) -> bool {
-        // The C++ GetPix border rules (C4Landscape.h:144-161, defaults from
-        // C4SLandscape::Default): the top is open, the sides and bottom are
-        // closed (MCVehic — solid). Without these, script loops that walk
-        // until solid never terminate outside the landscape.
-        if y < 0 {
-            return false;
-        }
-        if x < 0 || x as u32 >= self.width {
-            return true;
-        }
-        if y >= self.estimated_height() {
-            return true;
+        // GBackSolid reads DensitySolid(GetDensity), so configured GetPix
+        // borders apply before the in-bounds landscape: open borders are
+        // sky and closed borders are MCVehic (C4Landscape.h:144-180;
+        // C4Wrappers.h:169-177).
+        match self.border_pixel(x, y) {
+            Some(BorderPixel::Sky) => return false,
+            Some(BorderPixel::Vehicle) => return true,
+            None => {}
         }
         // GBackSolid = DensitySolid(Pix2Dens[pix]) (C4Wrappers.h:174-177):
         // the pixel plane is the truth — caves are AIR below the column
@@ -4892,6 +4888,31 @@ mod tests {
         assert_eq!(default.density_at(-1, 2, &materials), 100);
         assert_eq!(default.density_at(4, -1, &materials), 0);
         assert_eq!(default.density_at(4, 5, &materials), 100, "in-ground");
+    }
+
+    #[test]
+    fn solidity_queries_honour_configured_open_borders_like_cpp() {
+        // C++ oracle: GBackSolid is DensitySolid(GetDensity), and GetDensity
+        // maps through GetPix's configured borders in x-before-y order
+        // (src/C4Wrappers.h:169-177; src/C4Landscape.h:144-180).
+        let (_materials, _vehicle, earth) = vehicle_earth_materials();
+        let mut landscape = Landscape::flat_with_material(10, 5, Some(earth));
+        landscape.set_world_height(20);
+        landscape.set_border_open(8, 12, false, true);
+
+        assert!(!landscape.is_solid_at(-1, 7), "left side is open above y=8");
+        assert!(landscape.is_solid_at(-1, 8), "left side closes at y=8");
+        assert!(
+            !landscape.is_solid_at(10, 11),
+            "right side is open above y=12"
+        );
+        assert!(landscape.is_solid_at(10, 12), "right side closes at y=12");
+        assert!(landscape.is_solid_at(4, -1), "configured top is closed");
+        assert!(!landscape.is_solid_at(4, 20), "configured bottom is open");
+        assert!(
+            !landscape.is_solid_at(-1, -5),
+            "x border takes precedence over the closed top"
+        );
     }
 
     #[test]
