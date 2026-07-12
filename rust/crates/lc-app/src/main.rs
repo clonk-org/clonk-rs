@@ -25899,7 +25899,7 @@ mod tests {
     }
 
     #[test]
-    fn app_virtual_keyboard_reaches_tutorial07_crystal_objective_by_balloon() {
+    fn app_virtual_keyboard_reaches_tutorial07_home_cave_by_sailboat() {
         // Script2..12 introduces the shipped CRYS/BALN/GOLD/FLNT route before
         // handing control back at "Good luck!" (Tutorial07.c4s/Script.c:
         // 36-90). From there every transition below enters through
@@ -26670,6 +26670,394 @@ mod tests {
             "Tutorial07 advances to the CRYS-side sailboat prompt",
             240,
             |app| app_tutorial_message_contains(app, "Dig through the earth"),
+        );
+
+        // D followed by held X/Z follows the shipped diagonal dig route into
+        // SLBS's cave. The stepped recovery below reacts only to visible
+        // Walk/Scale transitions, as a player does at the irregular tunnel
+        // lips; no object position or terrain state is written by the test.
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D arms CRYS-side digging");
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::X)
+            .expect("held physical X aims the first tunnel segment down");
+        advance_app_until(
+            &mut app,
+            "CRYS-carrying CLNK starts the sailboat tunnel",
+            1,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Dig")
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("held physical Z aims the first tunnel segment left");
+        advance_app_until(
+            &mut app,
+            "diagonal tunnel opens toward the sailboat cave",
+            260,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk" && object.position.x <= 575)
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z at the first tunnel exit");
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release physical X at the first tunnel exit");
+        }
+
+        let sailboat = app_object_with_definition(&app, "SLBS")
+            .or_else(|| app_object_with_definition(&app, "SLBT"))
+            .expect("Tutorial07 creates its return sailboat");
+        for lip in 1..=12 {
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("CRYS-carrying CLNK survives above SLBS");
+            if clonk_now.position.y >= 290 {
+                break;
+            }
+            if clonk_now.action.name.starts_with("Scale") {
+                hold_app_key_until(
+                    &mut app,
+                    VirtualKeyCode::X,
+                    &format!("CRYS-carrying CLNK descends cave lip {lip}"),
+                    180,
+                    |app| {
+                        app.engine.object_snapshot(clonk).is_some_and(|object| {
+                            object.position.y >= 290 || object.action.name == "Walk"
+                        })
+                    },
+                );
+            } else {
+                hold_app_key_until(
+                    &mut app,
+                    VirtualKeyCode::Z,
+                    &format!("CRYS-carrying CLNK reaches cave lip {lip}"),
+                    120,
+                    |app| {
+                        app.engine.object_snapshot(clonk).is_some_and(|object| {
+                            object.position.y >= 290 || object.action.name.starts_with("Scale")
+                        })
+                    },
+                );
+            }
+        }
+        for segment in 1..=8 {
+            let start_position = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("CLNK survives between sailboat-cave ledges")
+                .position;
+            if start_position.y >= 290 {
+                break;
+            }
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::D)
+                .unwrap_or_else(|error| panic!("physical D starts cave dig {segment}: {error}"));
+            AppVirtualKeyboard::new(&mut app)
+                .press(VirtualKeyCode::X)
+                .unwrap_or_else(|error| panic!("physical X aims cave dig {segment}: {error}"));
+            if segment >= 2 {
+                AppVirtualKeyboard::new(&mut app)
+                    .press(VirtualKeyCode::C)
+                    .unwrap_or_else(|error| {
+                        panic!("physical C aims cave dig {segment} right: {error}")
+                    });
+            }
+            advance_app_until(
+                &mut app,
+                &format!("CLNK starts sailboat-cave dig segment {segment}"),
+                1,
+                |app| {
+                    app.engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.action.name == "Dig")
+                },
+            );
+            assert_eq!(
+                app.engine
+                    .object_snapshot(clonk)
+                    .expect("CLNK retains requested cave-dig heading")
+                    .command_direction,
+                if segment == 1 {
+                    CommandDirection::Down
+                } else {
+                    CommandDirection::DownRight
+                },
+                "physical keys choose cave-dig heading for segment {segment}"
+            );
+            advance_app_until(
+                &mut app,
+                &format!("cave dig segment {segment} reaches air or SLBS"),
+                180,
+                |app| {
+                    app.engine.object_snapshot(clonk).is_some_and(|object| {
+                        object.position.y >= 290 || object.action.name == "Walk"
+                    })
+                },
+            );
+            if segment >= 2 {
+                AppVirtualKeyboard::new(&mut app)
+                    .release(VirtualKeyCode::C)
+                    .unwrap_or_else(|error| {
+                        panic!("release physical C after cave dig {segment}: {error}")
+                    });
+            }
+            AppVirtualKeyboard::new(&mut app)
+                .release(VirtualKeyCode::X)
+                .unwrap_or_else(|error| {
+                    panic!("release physical X after cave dig {segment}: {error}")
+                });
+            if segment == 2 {
+                for lip in 1..=12 {
+                    let step_start_y = app
+                        .engine
+                        .object_snapshot(clonk)
+                        .expect("CLNK survives the tunnel descent")
+                        .position
+                        .y;
+                    if step_start_y >= 290 {
+                        break;
+                    }
+                    if app
+                        .engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.action.name == "Walk")
+                    {
+                        hold_app_key_until(
+                            &mut app,
+                            VirtualKeyCode::C,
+                            &format!("CLNK walks off tunnel lip {lip}"),
+                            120,
+                            |app| {
+                                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                                    object.position.y >= 290
+                                        || matches!(object.action.name.as_str(), "Jump" | "Scale")
+                                })
+                            },
+                        );
+                    }
+                    advance_app_until(
+                        &mut app,
+                        &format!("CLNK clears or catches tunnel lip {lip}"),
+                        30,
+                        |app| {
+                            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                                object.position.y >= 290 || object.action.name == "Scale"
+                            })
+                        },
+                    );
+                    if app
+                        .engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.position.y >= 290)
+                    {
+                        break;
+                    }
+                    AppVirtualKeyboard::new(&mut app)
+                        .press(VirtualKeyCode::X)
+                        .unwrap_or_else(|error| {
+                            panic!("physical X scales below tunnel lip {lip}: {error}")
+                        });
+                    advance_app_until(
+                        &mut app,
+                        &format!("CLNK scales below tunnel lip {lip}"),
+                        120,
+                        |app| {
+                            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                                object.position.y >= 290
+                                    || (object.action.name == "Walk"
+                                        && object.position.y > step_start_y)
+                            })
+                        },
+                    );
+                    AppVirtualKeyboard::new(&mut app)
+                        .release(VirtualKeyCode::X)
+                        .unwrap_or_else(|error| {
+                            panic!("release physical X below tunnel lip {lip}: {error}")
+                        });
+                }
+            }
+        }
+        assert!(
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.position.y >= 290),
+            "physical digging descends into the sailboat cave; clonk={:?}; sailboat={:?}",
+            app.engine.object_snapshot(clonk),
+            app.engine.object_snapshot(sailboat)
+        );
+
+        for approach in 1..=12 {
+            let (clonk_now, sailboat_now) = app
+                .engine
+                .object_snapshot(clonk)
+                .zip(app.engine.object_snapshot(sailboat))
+                .expect("CLNK and SLBS survive the cave approach");
+            if clonk_now.action.name == "Walk"
+                && (clonk_now.position.x - sailboat_now.position.x).abs() <= 5
+                && (clonk_now.position.y - sailboat_now.position.y).abs() <= 20
+            {
+                break;
+            }
+            if clonk_now.action.name.starts_with("Scale") {
+                if clonk_now.position.y > sailboat_now.position.y + 10 {
+                    hold_app_key_until(
+                        &mut app,
+                        VirtualKeyCode::S,
+                        &format!("CLNK climbs toward SLBS on approach {approach}"),
+                        180,
+                        |app| {
+                            app.engine
+                                .object_snapshot(clonk)
+                                .zip(app.engine.object_snapshot(sailboat))
+                                .is_some_and(|(clonk, sailboat)| {
+                                    clonk.position.y <= sailboat.position.y + 10
+                                        || clonk.action.name == "Walk"
+                                })
+                        },
+                    );
+                } else {
+                    let away_from_wall = if clonk_now.direction == Direction::Left {
+                        VirtualKeyCode::C
+                    } else {
+                        VirtualKeyCode::Z
+                    };
+                    AppVirtualKeyboard::new(&mut app)
+                        .tap(away_from_wall)
+                        .unwrap_or_else(|error| {
+                            panic!("physical key leaves scale on approach {approach}: {error}")
+                        });
+                }
+                continue;
+            }
+            if clonk_now.action.name == "Jump" {
+                advance_app_until(
+                    &mut app,
+                    &format!("CLNK lands during SLBS approach {approach}"),
+                    120,
+                    |app| {
+                        app.engine.object_snapshot(clonk).is_some_and(|object| {
+                            matches!(object.action.name.as_str(), "Walk" | "Scale" | "ScaleDown")
+                        })
+                    },
+                );
+                continue;
+            }
+            let horizontal = if clonk_now.position.x < sailboat_now.position.x - 5 {
+                VirtualKeyCode::C
+            } else {
+                VirtualKeyCode::Z
+            };
+            hold_app_key_until(
+                &mut app,
+                horizontal,
+                &format!("CLNK closes on SLBS during approach {approach}"),
+                180,
+                |app| {
+                    app.engine
+                        .object_snapshot(clonk)
+                        .zip(app.engine.object_snapshot(sailboat))
+                        .is_some_and(|(clonk, sailboat)| {
+                            ((clonk.position.x - sailboat.position.x).abs() <= 5
+                                && (clonk.position.y - sailboat.position.y).abs() <= 20)
+                                || clonk.action.name != "Walk"
+                        })
+                },
+            );
+        }
+        assert!(
+            app.engine
+                .object_snapshot(clonk)
+                .zip(app.engine.object_snapshot(sailboat))
+                .is_some_and(|(clonk, sailboat)| {
+                    clonk.action.name == "Walk"
+                        && (clonk.position.x - sailboat.position.x).abs() <= 5
+                        && (clonk.position.y - sailboat.position.y).abs() <= 20
+                }),
+            "physical cave traversal reaches SLBS; clonk={:?}; sailboat={:?}",
+            app.engine.object_snapshot(clonk),
+            app.engine.object_snapshot(sailboat)
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes SLBS grab");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X grabs SLBS");
+        }
+        advance_app_until(&mut app, "CRYS-carrying CLNK grabs SLBS", 100, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(sailboat)
+            })
+        });
+        advance_app_until(&mut app, "Tutorial07 asks CLNK to sail home", 120, |app| {
+            app_tutorial_message_contains(app, "Use the boat to sail back home")
+        });
+
+        // Held physical Z is forwarded through SLBS::ControlUpdate and its
+        // ordinary Wind2Sail action. Reach the home cave, release Z to Stop,
+        // then leave the boat with the normal X/X ungrab gesture.
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "SLBS reaches Tutorial07's home cave",
+            900,
+            |app| {
+                app.engine
+                    .object_snapshot(sailboat)
+                    .is_some_and(|object| object.position.x <= 210)
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes home-cave SLBS release");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X leaves SLBS at home");
+        }
+        advance_app_until(&mut app, "CLNK steps off SLBS at home", 100, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "CRYS-carrying CLNK walks from SLBS into the home cave",
+            160,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x <= 170)
+            },
+        );
+        advance_app_until(&mut app, "CLNK stands inside the home cave", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        assert_eq!(
+            app.engine
+                .object_snapshot(crystal)
+                .expect("objective CRYS survives the return crossing")
+                .container,
+            Some(clonk),
+            "CRYS remains in CLNK inventory on reaching the home cave"
         );
     }
 
