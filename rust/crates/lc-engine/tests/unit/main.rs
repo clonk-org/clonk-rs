@@ -19031,6 +19031,81 @@ public func Launch(pItem) {
         );
     }
 
+    #[test]
+    fn script_exit_runs_ejection_then_departure_and_reports_reentry_like_cpp() {
+        // C4Object::Exit clears Contained, calls the old container's
+        // Ejection(object), then the object's Departure(container), and only
+        // afterwards returns `!Contained` (C4Object.cpp:1532-1563). Ejection
+        // may synchronously re-enter the object, making Exit return false;
+        // Departure still runs and observes the re-established relation.
+        let container_script = r#"#strict
+local ejected;
+func Ejection(pItem)
+{
+    ejected = 1;
+    Enter(this(), pItem);
+}
+"#;
+        let item_script = r#"#strict
+local departure_saw_reentry;
+func Departure(pOldContainer)
+{
+    departure_saw_reentry = (Contained() == pOldContainer);
+}
+func Leave()
+{
+    return Exit();
+}
+"#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("CONT", "Container", container_script)
+                    .expect("container compiles"),
+            )
+            .expect("container registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
+            )
+            .expect("item registers");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT").with_category(CATEGORY_OBJECT))
+            .expect("container spawns");
+        let item = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(container),
+            )
+            .expect("item spawns");
+
+        let item_idx = engine.find_object_index(item).expect("item exists");
+        let result = engine
+            .call_object_function(item_idx, "Leave", vec![])
+            .expect("Leave runs");
+        assert_eq!(result, Value::Bool(false), "callback re-entry makes Exit fail");
+
+        let container_idx = engine
+            .find_object_index(container)
+            .expect("container remains");
+        let item_idx = engine.find_object_index(item).expect("item remains");
+        assert_eq!(engine.objects[item_idx].state.container, Some(container));
+        assert_eq!(
+            engine.objects[container_idx].state.local_vars.get("ejected"),
+            Some(&Value::Int(1)),
+            "Ejection ran"
+        );
+        assert_eq!(
+            engine.objects[item_idx]
+                .state
+                .local_vars
+                .get("departure_saw_reentry"),
+            Some(&Value::Bool(true)),
+            "Departure ran after Ejection and saw the re-entry"
+        );
+    }
+
     // C4Object::Enter adds the object to the container's Contents list
     // IMMEDIATELY (`Contents.Add(this, C4ObjectList::stContents)`,
     // C4Object.cpp:1601-1605) — the mirror of the same-call Exit shrink
