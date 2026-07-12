@@ -6053,6 +6053,10 @@ pub struct EngineState {
     pub round_results: RoundResultsState,
     #[serde(default)]
     pub landscape_insert_thrust: bool,
+    /// Saved `Game.Rules & C4RULE_StructuresSnowIn`. C++ persists the
+    /// derived Rules bitmask between its Tick255 refreshes (C4Game.cpp:1957).
+    #[serde(default)]
+    pub structures_snow_in: bool,
     /// The persistent C4MassMoverSet slots (MassMover.c4b in C++ saves,
     /// C4MassMover.cpp:181-217).
     #[serde(default)]
@@ -6170,6 +6174,7 @@ impl EngineState {
             game_over: snapshot.game_over,
             round_results: snapshot.round_results.clone(),
             landscape_insert_thrust: false,
+            structures_snow_in: false,
             // SimulationSnapshot carries no mover slots (the C++ snapshot
             // boundary is object-level); the set restores empty.
             mass_movers: MassMoverSet::new(),
@@ -10836,6 +10841,7 @@ pub struct Engine {
     team_home_base_rule: bool,
     construction_needs_material: bool,
     structures_need_energy: bool,
+    structures_snow_in: bool,
     base_buy_enabled: bool,
     base_sell_enabled: bool,
     base_auto_sell_enabled: bool,
@@ -12567,6 +12573,7 @@ impl Engine {
             team_home_base_rule: false,
             construction_needs_material: false,
             structures_need_energy: false,
+            structures_snow_in: false,
             base_buy_enabled: true,
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
@@ -19084,6 +19091,11 @@ impl Engine {
         self.transfer_zones.retain_existing(&alive);
         self.prune_selection();
         self.process_spawn_queue(spawn_requests)?;
+        // C4Game::UpdateRules follows Script.Execute and refreshes only on
+        // Tick255 (plus frame one) (C4Game.cpp:845,4038-4047).
+        if frame == 1 || frame % 255 == 0 {
+            self.refresh_structures_snow_in_rule();
+        }
         let alive_owners = self.refresh_elimination_state();
         // C4Player::Execute's Tick35 CheckElimination (C4Player.cpp:225-235)
         // — crewless owners eliminate ONE-WAY at the boundary only.
@@ -20778,6 +20790,7 @@ impl Engine {
             game_over: self.game_over_triggered,
             round_results: self.round_results.clone(),
             landscape_insert_thrust: self.landscape_insert_thrust,
+            structures_snow_in: self.structures_snow_in,
             mass_movers: self.mass_movers.clone(),
             sky: self.sky.as_ref().map(SkyState::snapshot),
             rng: self.rng.clone(),
@@ -20804,6 +20817,7 @@ impl Engine {
         self.environment.refresh_runtime_fields();
         self.gamma = state.gamma;
         self.landscape_insert_thrust = state.landscape_insert_thrust;
+        self.structures_snow_in = state.structures_snow_in;
         self.landscape = state.landscape.clone();
         // C4MassMoverSet::Load semantics (C4MassMover.cpp:204-217): the
         // saved slots restore verbatim; nothing is re-derived from the
@@ -27444,9 +27458,8 @@ impl Engine {
         Ok(())
     }
 
-    /// `C4Object::ExecBase` (C4Object.cpp:1000-1031): the Tick10 new-base
-    /// assignment by contained flag and the Tick35 auto-sale/lost-flag pass.
-    /// The Tick35 structure snow-dig (:1034-1043) stays unported.
+    /// `C4Object::ExecBase` (C4Object.cpp:1000-1044): base assignment,
+    /// auto-sale/lost-flag handling, and upright structure snow clearing.
     fn exec_object_base(&mut self, idx: usize, frame: u64) -> Result<(), EngineError> {
         // New base assignment by flag, no old base removal (:1005-1018).
         if frame % 10 == 0 {
@@ -27537,8 +27550,45 @@ impl Engine {
                     }
                 }
             }
+
+            // Environmental action (:1033-1044): unless the STSN rule is
+            // active, upright structures dig Snow and FlyAshes out of their
+            // current shape rectangle. This is independent of Base validity.
+            let snow_rect = self.objects.get(idx).and_then(|object| {
+                (object.state.category & CATEGORY_STRUCTURE != 0
+                    && object.fixed_rotation == C4Fixed::ZERO
+                    && !self.structures_snow_in)
+                    .then(|| {
+                        object.current_shape_rect().map(|shape| {
+                            (
+                                Vector2::new(
+                                    object.state.position.x.saturating_add(shape.x),
+                                    object.state.position.y.saturating_add(shape.y),
+                                ),
+                                shape.width,
+                                shape.height,
+                            )
+                        })
+                    })
+                    .flatten()
+            });
+            if let Some((origin, width, height)) = snow_rect {
+                for material in ["Snow", "FlyAshes"] {
+                    if let Some(material) = self.materials.id_of(material) {
+                        self.dig_free_material_rect(origin, width, height, material);
+                    }
+                }
+            }
         }
         Ok(())
+    }
+
+    fn refresh_structures_snow_in_rule(&mut self) {
+        self.structures_snow_in = self.objects.iter().any(|object| {
+            object.definition_id.as_str() == "STSN"
+                && object.state.status.is_active()
+                && !object.destroyed
+        });
     }
 
     /// `GBackWind` (C4Wrappers.h:189-192): zero inside tunnel-background
@@ -31049,6 +31099,40 @@ impl Engine {
         };
         self.check_instability_range(tx, ty);
         mat
+    }
+
+    /// `C4Landscape::DigFreeMat` (C4Landscape.cpp:1012-1021): only pixels
+    /// of the requested material enter `DigFreePix`; there is no material
+    /// accounting or dig-out cast for this rectangle helper.
+    fn dig_free_material_rect(
+        &mut self,
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        material: MaterialId,
+    ) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let x_end = origin.x.saturating_add(width);
+        let y_end = origin.y.saturating_add(height);
+        for x in origin.x..x_end {
+            for y in origin.y..y_end {
+                let matches = self
+                    .landscape
+                    .as_ref()
+                    .and_then(|landscape| landscape.material_at(x, y))
+                    == Some(material);
+                if matches {
+                    let _ = self.dig_free_pix(x, y);
+                }
+            }
+        }
+        if let Some(landscape) = self.landscape.as_mut() {
+            let start = origin.x.max(0) as usize;
+            let end = x_end.max(0).min(landscape.width() as i32) as usize;
+            landscape.refresh_raster_columns(start..end);
+        }
     }
 
     /// C4Landscape::DigFreeSinglePix (C4Landscape.h:236-240): DigFreePix
