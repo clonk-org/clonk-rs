@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use lc_engine::{CommandKind, ControlCommand};
-use lc_graphics::{Color, Rect, Surface, TextFont};
+use lc_graphics::{Color, GammaRamp, Rect, Surface, TextFont};
 use lc_gui::ImageData;
 
 const BACKDROP_COLOR: Color = Color::new(0, 0, 0, 180);
@@ -128,13 +128,22 @@ impl SaveBrowserState {
     }
 
     pub fn render(&self, surface: &mut Surface, font: &dyn TextFont) {
+        self.render_with_gamma(surface, font, None);
+    }
+
+    pub fn render_with_gamma(
+        &self,
+        surface: &mut Surface,
+        font: &dyn TextFont,
+        gamma: Option<&GammaRamp>,
+    ) {
         let width = surface.width() as i32;
         let height = surface.height() as i32;
         if width <= 0 || height <= 0 {
             return;
         }
 
-        fill_rect(surface, surface.bounds(), BACKDROP_COLOR);
+        fill_rect(surface, surface.bounds(), BACKDROP_COLOR, gamma);
 
         let panel_width = PANEL_WIDTH
             .min(width - PANEL_PADDING * 2)
@@ -152,8 +161,8 @@ impl SaveBrowserState {
         let panel_x = (width - panel_width) / 2;
         let panel_y = (height - panel_height) / 2;
         let panel_rect = Rect::new(panel_x, panel_y, panel_width as u32, panel_height as u32);
-        fill_rect(surface, panel_rect, PANEL_COLOR);
-        draw_border(surface, panel_rect, PANEL_BORDER);
+        fill_rect(surface, panel_rect, PANEL_COLOR, gamma);
+        draw_border(surface, panel_rect, PANEL_BORDER, gamma);
 
         let title = match self.mode {
             SaveBrowserMode::Save { .. } => "Save Game",
@@ -162,13 +171,15 @@ impl SaveBrowserState {
 
         let title_x = panel_x + PANEL_PADDING;
         let mut cursor_y = panel_y + PANEL_PADDING;
-        font.draw_text(
+        lc_frontend::draw_text_with_gamma(
+            font,
             surface,
             title_x as f32,
             cursor_y as f32,
             title,
             TITLE_FONT_SIZE,
             TITLE_COLOR,
+            gamma,
         );
 
         cursor_y += TITLE_GAP;
@@ -185,28 +196,32 @@ impl SaveBrowserState {
             );
             let is_selected = self.selected == Some(index);
             if is_selected {
-                fill_rect(surface, item_rect, HIGHLIGHT_COLOR);
+                fill_rect(surface, item_rect, HIGHLIGHT_COLOR, gamma);
             }
 
             match item {
                 SaveMenuItem::NewSlot { label } => {
                     let title = format!("Create New Save ({label})");
-                    font.draw_text(
+                    lc_frontend::draw_text_with_gamma(
+                        font,
                         surface,
                         (item_rect.x + 12) as f32,
                         (item_rect.y + 10) as f32,
                         &title,
                         ITEM_FONT_SIZE,
                         HIGHLIGHT_TEXT_COLOR,
+                        gamma,
                     );
                     let description = "Create a new save file with the suggested name.";
-                    font.draw_text(
+                    lc_frontend::draw_text_with_gamma(
+                        font,
                         surface,
                         (item_rect.x + 12) as f32,
                         (item_rect.y + 28) as f32,
                         description,
                         DETAIL_FONT_SIZE,
                         MUTED_TEXT_COLOR,
+                        gamma,
                     );
                 }
                 SaveMenuItem::Entry(entry) => {
@@ -215,22 +230,26 @@ impl SaveBrowserState {
                     } else {
                         TEXT_COLOR
                     };
-                    font.draw_text(
+                    lc_frontend::draw_text_with_gamma(
+                        font,
                         surface,
                         (item_rect.x + 12) as f32,
                         (item_rect.y + 8) as f32,
                         &entry.display_name,
                         ITEM_FONT_SIZE,
                         label_color,
+                        gamma,
                     );
                     let details = format!("{} • {}", entry.scenario_title, entry.saved_label);
-                    font.draw_text(
+                    lc_frontend::draw_text_with_gamma(
+                        font,
                         surface,
                         (item_rect.x + 12) as f32,
                         (item_rect.y + 28) as f32,
                         &details,
                         DETAIL_FONT_SIZE,
                         MUTED_TEXT_COLOR,
+                        gamma,
                     );
                     if is_selected {
                         preview = Some(entry);
@@ -248,13 +267,15 @@ impl SaveBrowserState {
             };
             let text_x = (panel_x + PANEL_PADDING + 12) as f32;
             let text_y = (panel_y + PANEL_PADDING + TITLE_GAP + 12) as f32;
-            font.draw_text(
+            lc_frontend::draw_text_with_gamma(
+                font,
                 surface,
                 text_x,
                 text_y,
                 message,
                 ITEM_FONT_SIZE,
                 MUTED_TEXT_COLOR,
+                gamma,
             );
         }
 
@@ -267,11 +288,11 @@ impl SaveBrowserState {
                 PREVIEW_WIDTH as u32,
                 PREVIEW_HEIGHT as u32,
             );
-            fill_rect(surface, preview_rect, Color::new(12, 24, 40, 220));
-            draw_border(surface, preview_rect, PANEL_BORDER);
+            fill_rect(surface, preview_rect, Color::new(12, 24, 40, 220), gamma);
+            draw_border(surface, preview_rect, PANEL_BORDER, gamma);
 
             if let Some(thumbnail) = entry.thumbnail.as_ref() {
-                blit_image(surface, preview_rect, thumbnail);
+                blit_image(surface, preview_rect, thumbnail, gamma);
             } else {
                 let message = "No thumbnail available";
                 let metrics = font.measure_text(message, DETAIL_FONT_SIZE);
@@ -279,13 +300,15 @@ impl SaveBrowserState {
                     - metrics.width / 2.0)
                     .max(preview_rect.x as f32 + 8.0);
                 let text_y = preview_rect.y as f32 + PREVIEW_HEIGHT as f32 / 2.0 - 8.0;
-                font.draw_text(
+                lc_frontend::draw_text_with_gamma(
+                    font,
                     surface,
                     text_x,
                     text_y,
                     message,
                     DETAIL_FONT_SIZE,
                     MUTED_TEXT_COLOR,
+                    gamma,
                 );
             }
         }
@@ -335,17 +358,11 @@ impl SaveBrowserState {
     }
 }
 
-fn fill_rect(surface: &mut Surface, rect: Rect, color: Color) {
-    if let Some(clipped) = rect.intersection(surface.bounds()) {
-        for y in clipped.y..(clipped.y + clipped.height as i32) {
-            for x in clipped.x..(clipped.x + clipped.width as i32) {
-                let _ = surface.blend_pixel(x as u32, y as u32, color);
-            }
-        }
-    }
+fn fill_rect(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
+    lc_frontend::draw_color_rect(surface, rect, color, gamma);
 }
 
-fn draw_border(surface: &mut Surface, rect: Rect, color: Color) {
+fn draw_border(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
@@ -353,47 +370,22 @@ fn draw_border(surface: &mut Surface, rect: Rect, color: Color) {
     let bottom = Rect::new(rect.x, rect.y + rect.height as i32 - 1, rect.width, 1);
     let left = Rect::new(rect.x, rect.y, 1, rect.height);
     let right = Rect::new(rect.x + rect.width as i32 - 1, rect.y, 1, rect.height);
-    fill_rect(surface, top, color);
-    fill_rect(surface, bottom, color);
-    fill_rect(surface, left, color);
-    fill_rect(surface, right, color);
+    fill_rect(surface, top, color, gamma);
+    fill_rect(surface, bottom, color, gamma);
+    fill_rect(surface, left, color, gamma);
+    fill_rect(surface, right, color, gamma);
 }
 
-fn blit_image(surface: &mut Surface, rect: Rect, image: &ImageData) {
-    let target = rect.intersection(surface.bounds()).unwrap_or(rect);
-    if target.width == 0 || target.height == 0 {
-        return;
-    }
-
-    let pixels = image.pixels();
-    if pixels.len() < (image.width() * image.height() * 4) as usize {
-        return;
-    }
-
-    let scale_x = image.width() as f32 / rect.width as f32;
-    let scale_y = image.height() as f32 / rect.height as f32;
-    for y in 0..target.height {
-        for x in 0..target.width {
-            let src_x = ((x as f32 + rect.x as f32 - target.x as f32) * scale_x)
-                .floor()
-                .clamp(0.0, image.width().saturating_sub(1) as f32) as u32;
-            let src_y = ((y as f32 + rect.y as f32 - target.y as f32) * scale_y)
-                .floor()
-                .clamp(0.0, image.height().saturating_sub(1) as f32) as u32;
-
-            let idx = ((src_y * image.width() + src_x) * 4) as usize;
-            if idx + 3 >= pixels.len() {
-                continue;
-            }
-            let color = Color::new(
-                pixels[idx],
-                pixels[idx + 1],
-                pixels[idx + 2],
-                pixels[idx + 3],
-            );
-            let px = x as i32 + target.x;
-            let py = y as i32 + target.y;
-            let _ = surface.blend_pixel(px as u32, py as u32, color);
-        }
-    }
+fn blit_image(surface: &mut Surface, rect: Rect, image: &ImageData, gamma: Option<&GammaRamp>) {
+    lc_frontend::draw_image_with_gamma(
+        surface,
+        &lc_gui::Rect::new(
+            rect.x as f32,
+            rect.y as f32,
+            rect.width as f32,
+            rect.height as f32,
+        ),
+        image,
+        gamma,
+    );
 }

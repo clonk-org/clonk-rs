@@ -1,7 +1,7 @@
 use lc_frontend::classic_gui::{ClassicButtonState, ClassicGuiSkin, IntRect};
 use lc_frontend::{ClonkFontSet, ImageData};
 use lc_graphics::clonk_font::TextAlign;
-use lc_graphics::{Color, Rect, Surface, TextFont};
+use lc_graphics::{Color, GammaRamp, Rect, Surface, TextFont};
 
 const CLASSIC_DIALOG_TITLE: &str = "Evaluation";
 const CLASSIC_MIN_CAPTION_HEIGHT: i32 = 23;
@@ -774,20 +774,35 @@ impl GameOverState {
         font: &dyn TextFont,
         classic: Option<GameOverClassicResources<'_>>,
     ) {
+        self.render_with_gamma(surface, font, classic, None);
+    }
+
+    pub fn render_with_gamma(
+        &self,
+        surface: &mut Surface,
+        font: &dyn TextFont,
+        classic: Option<GameOverClassicResources<'_>>,
+        gamma: Option<&GammaRamp>,
+    ) {
         if surface.width() == 0 || surface.height() == 0 {
             return;
         }
 
         if let Some(classic) = classic {
-            self.render_classic(surface, classic);
+            self.render_classic(surface, classic, gamma);
         } else {
-            self.render_fallback(surface, font);
+            self.render_fallback(surface, font, gamma);
         }
     }
 
-    fn render_fallback(&self, surface: &mut Surface, font: &dyn TextFont) {
+    fn render_fallback(
+        &self,
+        surface: &mut Surface,
+        font: &dyn TextFont,
+        gamma: Option<&GammaRamp>,
+    ) {
         let surface_rect = Rect::new(0, 0, surface.width(), surface.height());
-        fill_rect(surface, surface_rect, BACKDROP_COLOR);
+        fill_rect(surface, surface_rect, BACKDROP_COLOR, gamma);
 
         let title_height = TITLE_FONT_SIZE.ceil() as i32;
         let subtitle_height = if self.subtitle.is_empty() {
@@ -797,8 +812,8 @@ impl GameOverState {
         };
         let header_height = HEADER_FONT_SIZE.ceil() as i32;
         let panel_rect = self.panel_rect(surface.width(), surface.height());
-        fill_rect(surface, panel_rect, PANEL_COLOR);
-        draw_border(surface, panel_rect, PANEL_BORDER);
+        fill_rect(surface, panel_rect, PANEL_COLOR, gamma);
+        draw_border(surface, panel_rect, PANEL_BORDER, gamma);
 
         let content_left = panel_rect.x + PANEL_PADDING;
         let content_right = panel_rect.x + panel_rect.width as i32 - PANEL_PADDING;
@@ -813,6 +828,7 @@ impl GameOverState {
             content_left,
             content_right,
             cursor_y,
+            gamma,
         );
         cursor_y += title_height + GAP_AFTER_TITLE;
 
@@ -826,6 +842,7 @@ impl GameOverState {
                 content_left,
                 content_right,
                 cursor_y,
+                gamma,
             );
             cursor_y += subtitle_height + GAP_AFTER_SUBTITLE;
         }
@@ -849,6 +866,7 @@ impl GameOverState {
             wealth_column_x,
             score_column_x,
             value_column_x,
+            gamma,
         );
         cursor_y += header_height;
 
@@ -858,7 +876,7 @@ impl GameOverState {
             panel_rect.width - (PANEL_PADDING as u32 * 2),
             1,
         );
-        fill_rect(surface, rule_rect, HEADER_RULE_COLOR);
+        fill_rect(surface, rule_rect, HEADER_RULE_COLOR, gamma);
         cursor_y += GAP_AFTER_HEADER;
 
         for entry in &self.entries {
@@ -872,7 +890,7 @@ impl GameOverState {
                 ROW_HEIGHT as u32,
             );
             if entry.is_local {
-                fill_rect(surface, row_rect, LOCAL_ROW_HIGHLIGHT);
+                fill_rect(surface, row_rect, LOCAL_ROW_HIGHLIGHT, gamma);
             }
 
             let text_y = row_top as f32 + (ROW_HEIGHT as f32 - ROW_FONT_SIZE) * 0.5;
@@ -881,12 +899,13 @@ impl GameOverState {
                 let size = COLOR_SWATCH_SIZE.min(ROW_HEIGHT - 4);
                 let swatch_y = row_top + (ROW_HEIGHT - size) / 2;
                 let swatch_rect = Rect::new(name_x, swatch_y, size as u32, size as u32);
-                fill_rect(surface, swatch_rect, color);
-                draw_border(surface, swatch_rect, COLOR_SWATCH_BORDER);
+                fill_rect(surface, swatch_rect, color, gamma);
+                draw_border(surface, swatch_rect, COLOR_SWATCH_BORDER, gamma);
                 name_x += size + 8;
             }
 
-            font.draw_text(
+            lc_frontend::draw_text_with_gamma(
+                font,
                 surface,
                 name_x as f32,
                 text_y,
@@ -897,20 +916,23 @@ impl GameOverState {
                 } else {
                     TEXT_COLOR
                 },
+                gamma,
             );
 
-            font.draw_text(
+            lc_frontend::draw_text_with_gamma(
+                font,
                 surface,
                 outcome_column_x as f32,
                 text_y,
                 entry.outcome.label(),
                 ROW_FONT_SIZE,
                 entry.outcome.label_color(),
+                gamma,
             );
 
-            draw_stat(surface, font, wealth_column_x, text_y, entry.wealth);
-            draw_stat(surface, font, score_column_x, text_y, entry.score);
-            draw_stat(surface, font, value_column_x, text_y, entry.value);
+            draw_stat(surface, font, wealth_column_x, text_y, entry.wealth, gamma);
+            draw_stat(surface, font, score_column_x, text_y, entry.score, gamma);
+            draw_stat(surface, font, value_column_x, text_y, entry.value, gamma);
         }
 
         for (index, (button, rect)) in self
@@ -927,8 +949,9 @@ impl GameOverState {
                 } else {
                     BUTTON_COLOR
                 },
+                gamma,
             );
-            draw_border(surface, rect, BUTTON_BORDER_COLOR);
+            draw_border(surface, rect, BUTTON_BORDER_COLOR, gamma);
             draw_text_centered(
                 surface,
                 font,
@@ -938,6 +961,7 @@ impl GameOverState {
                 rect.x,
                 rect.x + rect.width as i32,
                 rect.y + (BUTTON_HEIGHT - BUTTON_FONT_SIZE.ceil() as i32) / 2,
+                gamma,
             );
         }
 
@@ -953,12 +977,18 @@ impl GameOverState {
             content_left,
             content_right,
             footer_y as i32,
+            gamma,
         );
     }
 
-    fn render_classic(&self, surface: &mut Surface, resources: GameOverClassicResources<'_>) {
+    fn render_classic(
+        &self,
+        surface: &mut Surface,
+        resources: GameOverClassicResources<'_>,
+        gamma: Option<&GammaRamp>,
+    ) {
         let layout = self.classic_layout(surface.width(), surface.height(), resources.fonts);
-        resources.skin.draw_dialog(surface, layout.dialog, None);
+        resources.skin.draw_dialog(surface, layout.dialog, gamma);
         resources.skin.draw_caption(
             surface,
             layout.caption,
@@ -966,11 +996,11 @@ impl GameOverState {
             &resources.fonts.text,
             [0xff, 0xff, 0xff, 0xff],
             TextAlign::Left,
-            None,
+            gamma,
         );
-        self.render_classic_close_button(surface, resources, layout.close_button);
+        self.render_classic_close_button(surface, resources, layout.close_button, gamma);
 
-        self.render_classic_evaluation(surface, resources);
+        self.render_classic_evaluation(surface, resources, gamma);
         for (index, (button, rect)) in self.buttons.iter().zip(layout.buttons).enumerate() {
             resources.skin.draw_button(
                 surface,
@@ -981,7 +1011,7 @@ impl GameOverState {
                     pressed: self.pressed_button == Some(index),
                     highlighted: self.selected_button == index,
                 },
-                None,
+                gamma,
             );
         }
     }
@@ -991,6 +1021,7 @@ impl GameOverState {
         surface: &mut Surface,
         resources: GameOverClassicResources<'_>,
         rect: IntRect,
+        gamma: Option<&GammaRamp>,
     ) {
         let hovered = self
             .pointer_position
@@ -1001,7 +1032,7 @@ impl GameOverState {
                     surface,
                     &lc_gui::Rect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
                     highlight,
-                    None,
+                    gamma,
                 );
             }
         };
@@ -1013,7 +1044,7 @@ impl GameOverState {
             .and_then(|icons| crop_image(icons, CLASSIC_CLOSE_ICON_SOURCE))
             .map(|icon| lc_frontend::classic_gui::blacken_transparent_pixels(&icon));
         if let Some(icon) = icon.as_ref() {
-            draw_classic_image(surface, icon, rect);
+            draw_classic_image(surface, icon, rect, gamma);
         }
         if hovered && self.close_pressed {
             draw_highlight(surface);
@@ -1024,6 +1055,7 @@ impl GameOverState {
         &self,
         surface: &mut Surface,
         resources: GameOverClassicResources<'_>,
+        gamma: Option<&GammaRamp>,
     ) {
         let layout =
             self.classic_evaluation_layout(surface.width(), surface.height(), resources.fonts);
@@ -1034,6 +1066,7 @@ impl GameOverState {
                     surface,
                     grayscale.as_ref().unwrap_or(picture),
                     goal_layout.picture,
+                    gamma,
                 );
             }
             if goal.fulfilled {
@@ -1042,7 +1075,7 @@ impl GameOverState {
                     .and_then(|icons| crop_image(icons, CLASSIC_FULFILLED_STAR_SOURCE))
                     .map(|star| lc_frontend::classic_gui::blacken_transparent_pixels(&star));
                 if let Some(star) = star.as_ref() {
-                    draw_classic_image(surface, star, goal_layout.fulfilled_star);
+                    draw_classic_image(surface, star, goal_layout.fulfilled_star, gamma);
                 }
             }
         }
@@ -1059,7 +1092,7 @@ impl GameOverState {
                 } else {
                     0x7faf_afaf
                 },
-                None,
+                gamma,
             );
 
             let owner_color = Color::opaque(
@@ -1071,7 +1104,7 @@ impl GameOverState {
                 .player
                 .map(|image| lc_frontend::hud::colorize_by_owner(image, owner_color));
             if let Some(icon) = player.big_icon.as_ref().or(fallback_icon.as_ref()) {
-                draw_classic_image(surface, icon, player_layout.icon);
+                draw_classic_image(surface, icon, player_layout.icon, gamma);
             }
 
             draw_clonk_text(
@@ -1090,6 +1123,7 @@ impl GameOverState {
                     Color::opaque(0xff, 0xff, 0xff)
                 },
                 TextAlign::Left,
+                gamma,
             );
 
             if player.score_old >= 0 {
@@ -1100,6 +1134,7 @@ impl GameOverState {
                     player_layout.score_anchor,
                     player.score_old,
                     player.score_new,
+                    gamma,
                 );
             }
             let total = player.total_playing_time;
@@ -1116,6 +1151,7 @@ impl GameOverState {
                 ),
                 Color::opaque(0xff, 0xff, 0xff),
                 TextAlign::Right,
+                gamma,
             );
         }
     }
@@ -1130,7 +1166,12 @@ fn surface_rect(rect: IntRect) -> Rect {
     Rect::new(rect.x, rect.y, rect.w.max(0) as u32, rect.h.max(0) as u32)
 }
 
-fn draw_classic_image(surface: &mut Surface, image: &ImageData, rect: IntRect) {
+fn draw_classic_image(
+    surface: &mut Surface,
+    image: &ImageData,
+    rect: IntRect,
+    gamma: Option<&GammaRamp>,
+) {
     lc_frontend::draw_image_bilinear(
         surface,
         &lc_gui::Rect::new(
@@ -1140,7 +1181,7 @@ fn draw_classic_image(surface: &mut Surface, image: &ImageData, rect: IntRect) {
             rect.h.max(0) as f32,
         ),
         image,
-        None,
+        gamma,
     );
 }
 
@@ -1184,6 +1225,7 @@ fn render_settlement_score(
     anchor: (i32, i32),
     score_old: i32,
     score_new: Option<i32>,
+    gamma: Option<&GammaRamp>,
 ) {
     // C4PlayerInfoListBox::UpdateScoreLabel emits Ico:Settlement followed by
     // gray old/gain and white new score. CStdFont scales the inline image to
@@ -1222,6 +1264,7 @@ fn render_settlement_score(
                 w: icon_width,
                 h: icon_height,
             },
+            gamma,
         );
     }
     draw_clonk_text(
@@ -1232,6 +1275,7 @@ fn render_settlement_score(
         &text,
         Color::opaque(0xff, 0xff, 0xff),
         TextAlign::Left,
+        gamma,
     );
 }
 
@@ -1243,6 +1287,7 @@ fn draw_clonk_text(
     text: &str,
     color: Color,
     align: TextAlign,
+    gamma: Option<&GammaRamp>,
 ) {
     font.draw_with_gamma(
         surface,
@@ -1252,7 +1297,7 @@ fn draw_clonk_text(
         [color.r, color.g, color.b, color.a],
         align,
         true,
-        None,
+        gamma,
     );
 }
 
@@ -1272,27 +1317,32 @@ fn draw_header(
     wealth_x: i32,
     score_x: i32,
     value_x: i32,
+    gamma: Option<&GammaRamp>,
 ) {
     let header_y = baseline_y as f32;
-    font.draw_text(
+    lc_frontend::draw_text_with_gamma(
+        font,
         surface,
         name_x as f32,
         header_y,
         "Player",
         HEADER_FONT_SIZE,
         HEADER_COLOR,
+        gamma,
     );
-    font.draw_text(
+    lc_frontend::draw_text_with_gamma(
+        font,
         surface,
         outcome_x as f32,
         header_y,
         "Outcome",
         HEADER_FONT_SIZE,
         HEADER_COLOR,
+        gamma,
     );
-    draw_header_stat(surface, font, wealth_x, header_y, "Wealth");
-    draw_header_stat(surface, font, score_x, header_y, "Score");
-    draw_header_stat(surface, font, value_x, header_y, "Value");
+    draw_header_stat(surface, font, wealth_x, header_y, "Wealth", gamma);
+    draw_header_stat(surface, font, score_x, header_y, "Score", gamma);
+    draw_header_stat(surface, font, value_x, header_y, "Value", gamma);
 }
 
 fn draw_header_stat(
@@ -1301,17 +1351,34 @@ fn draw_header_stat(
     column_x: i32,
     baseline: f32,
     label: &str,
+    gamma: Option<&GammaRamp>,
 ) {
     let metrics = font.measure_text(label, HEADER_FONT_SIZE);
     let x = column_x as f32 + STAT_COLUMN_WIDTH as f32 - metrics.width;
-    font.draw_text(surface, x, baseline, label, HEADER_FONT_SIZE, HEADER_COLOR);
+    lc_frontend::draw_text_with_gamma(
+        font,
+        surface,
+        x,
+        baseline,
+        label,
+        HEADER_FONT_SIZE,
+        HEADER_COLOR,
+        gamma,
+    );
 }
 
-fn draw_stat(surface: &mut Surface, font: &dyn TextFont, column_x: i32, y: f32, value: i32) {
+fn draw_stat(
+    surface: &mut Surface,
+    font: &dyn TextFont,
+    column_x: i32,
+    y: f32,
+    value: i32,
+    gamma: Option<&GammaRamp>,
+) {
     let text = format!("{value}");
     let metrics = font.measure_text(&text, ROW_FONT_SIZE);
     let x = column_x as f32 + STAT_COLUMN_WIDTH as f32 - metrics.width;
-    font.draw_text(surface, x, y, &text, ROW_FONT_SIZE, TEXT_COLOR);
+    lc_frontend::draw_text_with_gamma(font, surface, x, y, &text, ROW_FONT_SIZE, TEXT_COLOR, gamma);
 }
 
 fn draw_text_centered(
@@ -1323,24 +1390,19 @@ fn draw_text_centered(
     left: i32,
     right: i32,
     baseline: i32,
+    gamma: Option<&GammaRamp>,
 ) {
     let metrics = font.measure_text(text, size);
     let width = metrics.width;
     let x = (left as f32 + right as f32 - width) * 0.5;
-    font.draw_text(surface, x, baseline as f32, text, size, color);
+    lc_frontend::draw_text_with_gamma(font, surface, x, baseline as f32, text, size, color, gamma);
 }
 
-fn fill_rect(surface: &mut Surface, rect: Rect, color: Color) {
-    if let Some(clipped) = rect.intersection(surface.bounds()) {
-        for y in clipped.y..(clipped.y + clipped.height as i32) {
-            for x in clipped.x..(clipped.x + clipped.width as i32) {
-                let _ = surface.blend_pixel(x as u32, y as u32, color);
-            }
-        }
-    }
+fn fill_rect(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
+    lc_frontend::draw_color_rect(surface, rect, color, gamma);
 }
 
-fn draw_border(surface: &mut Surface, rect: Rect, color: Color) {
+fn draw_border(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
@@ -1348,10 +1410,10 @@ fn draw_border(surface: &mut Surface, rect: Rect, color: Color) {
     let bottom = Rect::new(rect.x, rect.y + rect.height as i32 - 1, rect.width, 1);
     let left = Rect::new(rect.x, rect.y, 1, rect.height);
     let right = Rect::new(rect.x + rect.width as i32 - 1, rect.y, 1, rect.height);
-    fill_rect(surface, top, color);
-    fill_rect(surface, bottom, color);
-    fill_rect(surface, left, color);
-    fill_rect(surface, right, color);
+    fill_rect(surface, top, color, gamma);
+    fill_rect(surface, bottom, color, gamma);
+    fill_rect(surface, left, color, gamma);
+    fill_rect(surface, right, color, gamma);
 }
 
 #[cfg(test)]

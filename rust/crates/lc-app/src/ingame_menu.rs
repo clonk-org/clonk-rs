@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use lc_engine::{CommandKind, ControlCommand};
 use lc_frontend::{hud::HudFont, HudGraphics};
 use lc_graphics::clonk_font::TextAlign;
-use lc_graphics::{Color, Rect, Surface};
+use lc_graphics::{Color, GammaRamp, Rect, Surface};
 use lc_gui::ImageData;
 
 /// `C4MN_SymbolSize` (C4Menu.h:34): min item height and extra-bar height.
@@ -919,8 +919,20 @@ impl IngameMenuState {
         tiny_font: Option<&HudFont<'_>>,
         gfx: &IngameMenuGraphics,
     ) {
+        self.render_with_gamma(surface, area, font, tiny_font, gfx, None);
+    }
+
+    pub fn render_with_gamma(
+        &self,
+        surface: &mut Surface,
+        area: Rect,
+        font: &HudFont<'_>,
+        tiny_font: Option<&HudFont<'_>>,
+        gfx: &IngameMenuGraphics,
+        gamma: Option<&GammaRamp>,
+    ) {
         let layout = self.layout(area, font, gfx);
-        draw_menu(self, &layout, surface, font, tiny_font, gfx);
+        draw_menu(self, &layout, surface, font, tiny_font, gfx, gamma);
     }
 
     /// Menu geometry per `C4Menu::InitLocation`/`InitSize`
@@ -1083,6 +1095,7 @@ fn draw_menu(
     font: &HudFont<'_>,
     tiny_font: Option<&HudFont<'_>>,
     gfx: &IngameMenuGraphics,
+    gamma: Option<&GammaRamp>,
 ) {
     let bounds = layout.bounds;
     let (x0, y0) = (bounds.x, bounds.y);
@@ -1094,14 +1107,15 @@ fn draw_menu(
         surface,
         bounds,
         Color::new(0, 0, 0, STANDARD_BG_ALPHA),
+        gamma,
     );
-    draw_3d_frame(surface, bounds);
+    draw_3d_frame(surface, bounds, gamma);
 
     // Wooden caption bar with the menu symbol and title
     // (WoodenLabel::DrawElement, C4GuiLabels.cpp:168-213).
     let title_rect = Rect::new(x0, y0, bounds.width, layout.title_height as u32);
     if let Some(caption) = gfx.caption_bar.as_ref() {
-        draw_caption_bar(surface, title_rect, caption);
+        draw_caption_bar(surface, title_rect, caption, gamma);
     }
     let mut icon_indent = 0;
     if let Some((image, src)) = gfx.symbol_source(&menu.symbol) {
@@ -1112,18 +1126,20 @@ fn draw_menu(
             image,
             src,
             Rect::new(x0 + 1, y0 + 1, side, side),
+            gamma,
         );
         // GetLeftIndent = bar height when an icon is set (C4Gui.h:560).
         icon_indent = layout.title_height;
     }
     // ALeft x offset +5, vertically centered -1 (C4GuiLabels.cpp:183-212).
-    font.draw(
+    font.draw_with_gamma(
         surface,
         x0 + icon_indent + 5,
         y0 + (layout.title_height - font.line_height()) / 2 - 1,
         menu.caption(),
         CAPTION_COLOR,
         TextAlign::Left,
+        gamma,
     );
 
     // Client area: items stacked vertically (C4Menu::UpdateElementPositions).
@@ -1148,7 +1164,7 @@ fn draw_menu(
         // Selection mark: filled red box (C4MenuItem::DrawElement,
         // C4Menu.cpp:152-154).
         if index == menu.selection() {
-            fill_rect(surface, row_rect, SELECTION_COLOR);
+            fill_rect(surface, row_rect, SELECTION_COLOR, gamma);
         }
         // Symbol square at the left, width == item height (C4Menu.cpp:156-166).
         if let Some((image, src)) = gfx.symbol_source(&item.symbol) {
@@ -1158,16 +1174,18 @@ fn draw_menu(
                 src,
                 Rect::new(client_x, item_y, layout.item_height as u32, row_rect.height),
                 matches!(item.symbol, MenuSymbol::PlayerColor),
+                gamma,
             );
         }
         // Caption (C4MN_Style_Context: FontRegular, left, C4Menu.cpp:170-172).
-        font.draw(
+        font.draw_with_gamma(
             surface,
             client_x + layout.item_height,
             item_y,
             &item.caption,
             MESSAGE_COLOR,
             TextAlign::Left,
+            gamma,
         );
     }
 
@@ -1181,21 +1199,41 @@ fn draw_menu(
             MN_SYMBOL_SIZE as u32,
         );
         // divider frame in palette color 80 (#440000) (C4Menu.cpp:932-935).
-        draw_rect_outline(surface, extra, EXTRA_FRAME_COLOR);
+        draw_rect_outline(surface, extra, EXTRA_FRAME_COLOR, gamma);
         let cell = extra.height;
         let mut cx = extra.x;
         let tiny = tiny_font.unwrap_or(font);
         // Enter: key cap with the Throw command + OK symbol
         // (C4Menu.cpp:857-864).
-        draw_command_key(surface, gfx, tiny, cx, extra.y, cell, 3, &gfx.throw_key);
+        draw_command_key(
+            surface,
+            gfx,
+            tiny,
+            cx,
+            extra.y,
+            cell,
+            3,
+            &gfx.throw_key,
+            gamma,
+        );
         cx += cell as i32;
-        draw_ok_cancel(surface, gfx, cx, extra.y, cell, 0, 0);
+        draw_ok_cancel(surface, gfx, cx, extra.y, cell, 0, 0, gamma);
         cx += cell as i32;
         // Close: key cap with the Dig command + cancel symbol
         // (C4Menu.cpp:874-880).
-        draw_command_key(surface, gfx, tiny, cx, extra.y, cell, 5, &gfx.dig_key);
+        draw_command_key(
+            surface,
+            gfx,
+            tiny,
+            cx,
+            extra.y,
+            cell,
+            5,
+            &gfx.dig_key,
+            gamma,
+        );
         cx += cell as i32;
-        draw_ok_cancel(surface, gfx, cx, extra.y, cell, 1, 0);
+        draw_ok_cancel(surface, gfx, cx, extra.y, cell, 1, 0, gamma);
     }
 
     // Tooltip with the info caption after the selection has rested
@@ -1209,7 +1247,7 @@ fn draw_menu(
             let row = menu.selection().saturating_sub(layout.scroll);
             let item_x = client_x;
             let item_y = client_y + row as i32 * layout.item_height;
-            draw_tooltip(surface, font, item_x, item_y, info);
+            draw_tooltip(surface, font, item_x, item_y, info, gamma);
         }
     }
 }
@@ -1226,25 +1264,28 @@ pub(crate) fn draw_command_key(
     size: u32,
     control_index: i32,
     key_name: &str,
+    gamma: Option<&GammaRamp>,
 ) {
     if let Some(control) = gfx.control.as_ref() {
         let dest = Rect::new(x, y, size, size);
-        draw_image_region(surface, control, Rect::new(0, 100, 64, 64), dest);
+        draw_image_region(surface, control, Rect::new(0, 100, 64, 64), dest, gamma);
         draw_image_region(
             surface,
             control,
             Rect::new(32 * control_index, 36, 32, 32),
             dest,
+            gamma,
         );
     }
     if gfx.show_command_keys && !key_name.is_empty() {
-        tiny_font.draw(
+        tiny_font.draw_with_gamma(
             surface,
             x + size as i32 / 2,
             y + size as i32 - tiny_font.line_height() - 2,
             key_name,
             MESSAGE_COLOR,
             TextAlign::Center,
+            gamma,
         );
     }
 }
@@ -1258,6 +1299,7 @@ pub(crate) fn draw_ok_cancel(
     size: u32,
     px: i32,
     py: i32,
+    gamma: Option<&GammaRamp>,
 ) {
     if let Some(control) = gfx.control.as_ref() {
         draw_image_region(
@@ -1265,6 +1307,7 @@ pub(crate) fn draw_ok_cancel(
             control,
             Rect::new(128 + 32 * px, 100 + 32 * py, 32, 32),
             Rect::new(x, y, size, size),
+            gamma,
         );
     }
 }
@@ -1276,6 +1319,7 @@ pub(crate) fn draw_tooltip(
     x: i32,
     y: i32,
     text: &str,
+    gamma: Option<&GammaRamp>,
 ) {
     let area_w = surface.width() as i32;
     let lines = break_message(font, text, MAX_TOOLTIP_WDT);
@@ -1289,20 +1333,27 @@ pub(crate) fn draw_tooltip(
     let h = text_h + 4;
     let ty = if y < h + 5 { y + 5 } else { y - h - 5 };
     let tx = (x - w / 2).clamp(0, (area_w - w).max(0));
-    fill_rect(surface, Rect::new(tx, ty, w as u32, (h - 1) as u32), TOOLTIP_BG_COLOR);
+    fill_rect(
+        surface,
+        Rect::new(tx, ty, w as u32, (h - 1) as u32),
+        TOOLTIP_BG_COLOR,
+        gamma,
+    );
     draw_rect_outline(
         surface,
         Rect::new(tx, ty, w as u32, h as u32),
         Color::new(0, 0, 0, TOOLTIP_FRAME_ALPHA),
+        gamma,
     );
     for (index, line) in lines.iter().enumerate() {
-        font.draw(
+        font.draw_with_gamma(
             surface,
             tx + 3,
             ty + 1 + index as i32 * font.line_height(),
             line,
             TOOLTIP_TEXT_COLOR,
             TextAlign::Left,
+            gamma,
         );
     }
 }
@@ -1336,7 +1387,7 @@ fn break_message(font: &HudFont<'_>, text: &str, max_width: i32) -> Vec<String> 
 
 /// `C4GUI::Element::Draw3DFrame` (C4Gui.cpp:264-279) with the default border
 /// colors at `C4GUI_BorderAlpha`.
-pub(crate) fn draw_3d_frame(surface: &mut Surface, rect: Rect) {
+pub(crate) fn draw_3d_frame(surface: &mut Surface, rect: Rect, gamma: Option<&GammaRamp>) {
     let x0 = rect.x;
     let y0 = rect.y;
     let x1 = rect.x + rect.width as i32 - 1;
@@ -1347,6 +1398,7 @@ pub(crate) fn draw_3d_frame(surface: &mut Surface, rect: Rect) {
             surface,
             Rect::new(x_start, y, (x_end - x_start).max(0) as u32, 1),
             color,
+            gamma,
         );
     };
     let vline = |surface: &mut Surface, x: i32, y_start: i32, y_end: i32, color: Color| {
@@ -1354,6 +1406,7 @@ pub(crate) fn draw_3d_frame(surface: &mut Surface, rect: Rect) {
             surface,
             Rect::new(x, y_start, 1, (y_end - y_start).max(0) as u32),
             color,
+            gamma,
         );
     };
     hline(surface, x0, x1, y0, BORDER_COLOR_1);
@@ -1368,7 +1421,12 @@ pub(crate) fn draw_3d_frame(surface: &mut Surface, rect: Rect) {
 
 /// The zoomed branch of `C4GUI::Element::DrawBar` (C4Gui.cpp:313-329) for
 /// `GetRes()->barCaption`: GUICaption.png sliced 32/128/32 horizontally.
-pub(crate) fn draw_caption_bar(surface: &mut Surface, rect: Rect, image: &ImageData) {
+pub(crate) fn draw_caption_bar(
+    surface: &mut Surface,
+    rect: Rect,
+    image: &ImageData,
+    gamma: Option<&GammaRamp>,
+) {
     let img_h = image.height() as i32;
     if img_h <= 0 || rect.height == 0 {
         return;
@@ -1383,6 +1441,7 @@ pub(crate) fn draw_caption_bar(surface: &mut Surface, rect: Rect, image: &ImageD
         image,
         Rect::new(0, 0, 32, img_h as u32),
         Rect::new(rect.x, rect.y, begin_w as u32, rect.height),
+        gamma,
     );
     let mut ix = begin_w;
     while ix < w - right_show {
@@ -1396,6 +1455,7 @@ pub(crate) fn draw_caption_bar(surface: &mut Surface, rect: Rect, image: &ImageD
             image,
             Rect::new(32, 0, src_w as u32, img_h as u32),
             Rect::new(rect.x + ix, rect.y, w2 as u32, rect.height),
+            gamma,
         );
         ix += mid_w;
     }
@@ -1404,6 +1464,7 @@ pub(crate) fn draw_caption_bar(surface: &mut Surface, rect: Rect, image: &ImageD
         image,
         Rect::new(160, 0, 32, img_h as u32),
         Rect::new(rect.x + w - begin_w, rect.y, begin_w as u32, rect.height),
+        gamma,
     );
 }
 
@@ -1414,6 +1475,7 @@ pub(crate) fn draw_image_region(
     image: &ImageData,
     src: Rect,
     dest: Rect,
+    gamma: Option<&GammaRamp>,
 ) {
     if dest.width == 0 || dest.height == 0 || src.width == 0 || src.height == 0 {
         return;
@@ -1448,7 +1510,17 @@ pub(crate) fn draw_image_region(
             if color.a == 0 {
                 continue;
             }
-            let result = if color.a == 255 {
+            let result = if let Some(gamma) = gamma {
+                let destination = surface
+                    .get_pixel(target_x as u32, target_y as u32)
+                    .unwrap_or_default();
+                let output = if color.a == 255 {
+                    lc_frontend::gamma_encode_fragment(color, gamma)
+                } else {
+                    lc_frontend::gamma_blend_fragment_over(color, destination, gamma)
+                };
+                surface.set_pixel(target_x as u32, target_y as u32, output)
+            } else if color.a == 255 {
                 surface.set_pixel(target_x as u32, target_y as u32, color)
             } else {
                 surface.blend_pixel(target_x as u32, target_y as u32, color)
@@ -1469,6 +1541,7 @@ pub(crate) fn draw_image_region_aspect(
     src: Rect,
     dest: Rect,
     colorize: bool,
+    gamma: Option<&GammaRamp>,
 ) {
     if src.width == 0 || src.height == 0 {
         return;
@@ -1485,44 +1558,43 @@ pub(crate) fn draw_image_region_aspect(
     );
     if colorize {
         let colored = lc_frontend::hud::colorize_by_owner(image, Color::opaque(0, 0, 0xff));
-        draw_image_region(surface, &colored, src, fitted);
+        draw_image_region(surface, &colored, src, fitted, gamma);
     } else {
-        draw_image_region(surface, image, src, fitted);
+        draw_image_region(surface, image, src, fitted, gamma);
     }
 }
 
-fn fill_rect(surface: &mut Surface, rect: Rect, color: Color) {
-    if let Some(clipped) = rect.intersection(surface.bounds()) {
-        for y in clipped.y..(clipped.y + clipped.height as i32) {
-            for x in clipped.x..(clipped.x + clipped.width as i32) {
-                let result = if color.a == 255 {
-                    surface.set_pixel(x as u32, y as u32, color)
-                } else {
-                    surface.blend_pixel(x as u32, y as u32, color)
-                };
-                if result.is_err() {
-                    break;
-                }
-            }
-        }
-    }
+fn fill_rect(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
+    lc_frontend::draw_color_rect(surface, rect, color, gamma);
 }
 
-fn draw_rect_outline(surface: &mut Surface, rect: Rect, color: Color) {
+fn draw_rect_outline(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
-    fill_rect(surface, Rect::new(rect.x, rect.y, rect.width, 1), color);
+    fill_rect(
+        surface,
+        Rect::new(rect.x, rect.y, rect.width, 1),
+        color,
+        gamma,
+    );
     fill_rect(
         surface,
         Rect::new(rect.x, rect.y + rect.height as i32 - 1, rect.width, 1),
         color,
+        gamma,
     );
-    fill_rect(surface, Rect::new(rect.x, rect.y, 1, rect.height), color);
+    fill_rect(
+        surface,
+        Rect::new(rect.x, rect.y, 1, rect.height),
+        color,
+        gamma,
+    );
     fill_rect(
         surface,
         Rect::new(rect.x + rect.width as i32 - 1, rect.y, 1, rect.height),
         color,
+        gamma,
     );
 }
 
@@ -1930,4 +2002,5 @@ mod tests {
         let pixel = surface.get_pixel(probe_x, probe_y).expect("pixel");
         assert_eq!((pixel.r, pixel.g, pixel.b), (0xc8, 0x00, 0x00));
     }
+
 }

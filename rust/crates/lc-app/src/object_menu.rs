@@ -6,11 +6,11 @@ use lc_engine::{
 };
 use lc_frontend::{
     default_owner_color,
-    hud::{draw_command_image_cell, HudFont},
+    hud::{draw_command_image_cell_with_gamma, HudFont},
     CommandImage, CommandOverlayIcon, GuiPoint,
 };
 use lc_graphics::clonk_font::TextAlign;
-use lc_graphics::{Color, Rect, Surface, TextFont};
+use lc_graphics::{Color, GammaRamp, Rect, Surface, TextFont};
 use lc_gui::ImageData;
 
 use crate::ingame_menu::{
@@ -450,6 +450,39 @@ pub fn render_engine_script_menu(
     show_close_button: bool,
     time_on_selection: u32,
 ) {
+    render_engine_script_menu_with_gamma(
+        surface,
+        area,
+        font,
+        fallback_font,
+        tiny_font,
+        menu,
+        gfx,
+        title_icon,
+        item_icons,
+        selected_component_icons,
+        show_close_button,
+        time_on_selection,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_engine_script_menu_with_gamma(
+    surface: &mut Surface,
+    area: Rect,
+    font: &HudFont<'_>,
+    fallback_font: &dyn TextFont,
+    tiny_font: Option<&HudFont<'_>>,
+    menu: &lc_engine::ObjectMenuState,
+    gfx: &IngameMenuGraphics,
+    title_icon: Option<&ImageData>,
+    item_icons: &[Option<ImageData>],
+    selected_component_icons: &[Option<ImageData>],
+    show_close_button: bool,
+    time_on_selection: u32,
+    gamma: Option<&GammaRamp>,
+) {
     if surface.width() == 0 || surface.height() == 0 || area.width == 0 || area.height == 0 {
         return;
     }
@@ -471,6 +504,7 @@ pub fn render_engine_script_menu(
             selected,
             show_close_button,
             time_on_selection,
+            gamma,
         );
         return;
     }
@@ -482,6 +516,7 @@ pub fn render_engine_script_menu(
         &engine_script_menu_title(menu),
         "No menu entries.",
         None,
+        gamma,
     );
 }
 
@@ -499,6 +534,7 @@ fn render_engine_normal_menu(
     selected: Option<usize>,
     show_close_button: bool,
     time_on_selection: u32,
+    gamma: Option<&GammaRamp>,
 ) {
     let layout = engine_script_menu_layout(area, font, menu, gfx.show_commands);
     let bounds = layout.bounds;
@@ -513,12 +549,13 @@ fn render_engine_normal_menu(
         surface,
         bounds,
         Color::new(0, 0, 0, CLASSIC_BG_ALPHA),
+        gamma,
     );
-    draw_3d_frame(surface, bounds);
+    draw_3d_frame(surface, bounds, gamma);
 
     let title_rect = layout.title;
     if let Some(caption_bar) = gfx.caption_bar.as_ref() {
-        draw_caption_bar(surface, title_rect, caption_bar);
+        draw_caption_bar(surface, title_rect, caption_bar, gamma);
     }
     let icon_indent = if menu.title_symbol == ObjectMenuSymbol::Definition {
         title_icon.map_or(0, |icon| {
@@ -529,6 +566,7 @@ fn render_engine_normal_menu(
                 Rect::new(0, 0, icon.width(), icon.height()),
                 Rect::new(x + 1, y + 1, side, side),
                 false,
+                gamma,
             );
             title_height
         })
@@ -539,11 +577,12 @@ fn render_engine_normal_menu(
             title_icon.cloned(),
             gfx,
         );
-        draw_command_image_cell(
+        draw_command_image_cell_with_gamma(
             surface,
             &gfx.hud,
             Rect::new(x + 1, y + 1, side, side),
             &image,
+            gamma,
         );
         title_height
     };
@@ -570,13 +609,14 @@ fn render_engine_normal_menu(
         })
         .unwrap_or(title_text_clip);
     surface.set_clip(nested_clip);
-    font.draw(
+    font.draw_with_gamma(
         surface,
         x + icon_indent + 5,
         y + (title_height - font.line_height()) / 2 - 1,
         &engine_script_menu_title(menu),
         CLASSIC_CAPTION_COLOR,
         TextAlign::Left,
+        gamma,
     );
     match previous_clip {
         Some(clip) => surface.set_clip(clip),
@@ -592,6 +632,7 @@ fn render_engine_normal_menu(
                 Rect::new(source_x, source_y, 40, 40),
                 layout.close_button_rect(),
                 false,
+                gamma,
             );
         }
     }
@@ -617,7 +658,7 @@ fn render_engine_normal_menu(
             layout.item_height as u32,
         );
         if selected == Some(index) && menu.text_progress != Some(0) {
-            fill_rect(surface, cell, CLASSIC_SELECTION_COLOR);
+            fill_rect(surface, cell, CLASSIC_SELECTION_COLOR, gamma);
         }
         let symbol_cell = if menu.style == 1 {
             Rect::new(
@@ -631,25 +672,27 @@ fn render_engine_normal_menu(
         };
         let picture = item_icons.get(index).cloned().flatten();
         let image = command_image_for_menu_symbol(item.symbol, picture, gfx);
-        draw_command_image_cell(surface, &gfx.hud, symbol_cell, &image);
+        draw_command_image_cell_with_gamma(surface, &gfx.hud, symbol_cell, &image, gamma);
         if menu.style == 1 {
-            font.draw(
+            font.draw_with_gamma(
                 surface,
                 cell_x + layout.item_height,
                 cell_y,
                 &item.caption,
                 CLASSIC_CAPTION_COLOR,
                 TextAlign::Left,
+                gamma,
             );
         }
         if item.count != MENU_ITEM_NO_COUNT {
-            font.draw(
+            font.draw_with_gamma(
                 surface,
                 cell_x + layout.item_width - 1,
                 cell_y + layout.item_height - 1 - font.line_height(),
                 &format!("{}x", item.count),
                 CLASSIC_CAPTION_COLOR,
                 TextAlign::Right,
+                gamma,
             );
         }
     }
@@ -661,7 +704,7 @@ fn render_engine_normal_menu(
             (width - 2) as u32,
             CLASSIC_COMMAND_HEIGHT as u32,
         );
-        draw_border(surface, extra, CLASSIC_EXTRA_FRAME_COLOR);
+        draw_border(surface, extra, CLASSIC_EXTRA_FRAME_COLOR, gamma);
         let mut remaining = extra;
         if gfx.show_commands {
             let mut truncate_control = || {
@@ -689,10 +732,11 @@ fn render_engine_normal_menu(
                     cell.width,
                     3,
                     &gfx.throw_key,
+                    gamma,
                 );
             }
             if let Some(cell) = truncate_control() {
-                draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 0, 0);
+                draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 0, 0, gamma);
             }
             if selected
                 .and_then(|selection| menu.items.get(selection))
@@ -708,10 +752,11 @@ fn render_engine_normal_menu(
                         cell.width,
                         11,
                         &gfx.special2_key,
+                        gamma,
                     );
                 }
                 if let Some(cell) = truncate_control() {
-                    draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 2, 1);
+                    draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 2, 1, gamma);
                 }
             }
             if let Some(cell) = truncate_control() {
@@ -724,6 +769,7 @@ fn render_engine_normal_menu(
                     cell.width,
                     5,
                     &gfx.dig_key,
+                    gamma,
                 );
             }
             if let Some(cell) = truncate_control() {
@@ -732,9 +778,15 @@ fn render_engine_normal_menu(
                     .iter()
                     .any(|item| item.symbol == ObjectMenuSymbol::Exit)
                 {
-                    draw_command_image_cell(surface, &gfx.hud, cell, &CommandImage::Exit);
+                    draw_command_image_cell_with_gamma(
+                        surface,
+                        &gfx.hud,
+                        cell,
+                        &CommandImage::Exit,
+                        gamma,
+                    );
                 } else {
-                    draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 1, 0);
+                    draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 1, 0, gamma);
                 }
             }
         }
@@ -748,19 +800,21 @@ fn render_engine_normal_menu(
                         .get(cell.component_index)
                         .cloned()
                         .flatten();
-                    draw_command_image_cell(
+                    draw_command_image_cell_with_gamma(
                         surface,
                         &gfx.hud,
                         cell.rect,
                         &CommandImage::Picture(picture),
+                        gamma,
                     );
-                    font.draw(
+                    font.draw_with_gamma(
                         surface,
                         cell.rect.x + cell.rect.width as i32 - 1,
                         cell.rect.y + cell.rect.height as i32 - 1 - font.line_height(),
                         &cell.count_label,
                         CLASSIC_CAPTION_COLOR,
                         TextAlign::Right,
+                        gamma,
                     );
                 }
             }
@@ -785,15 +839,17 @@ fn render_engine_normal_menu(
                         Rect::new(0, 0, wealth.width(), wealth.height()),
                         wealth_rect,
                         false,
+                        gamma,
                     );
                 }
-                font.draw(
+                font.draw_with_gamma(
                     surface,
                     right,
                     remaining.y,
                     &value,
                     CLASSIC_CAPTION_COLOR,
                     TextAlign::Right,
+                    gamma,
                 );
             }
         }
@@ -807,7 +863,7 @@ fn render_engine_normal_menu(
             let slot = selection.saturating_sub(first_index);
             let cell_x = client_x + (slot as i32 % columns) * layout.item_width;
             let cell_y = client_y + (slot as i32 / columns) * layout.item_height;
-            draw_tooltip(surface, font, cell_x, cell_y, &item.info_caption);
+            draw_tooltip(surface, font, cell_x, cell_y, &item.info_caption, gamma);
         }
     }
 }
@@ -1203,13 +1259,22 @@ impl ObjectMenuState {
     }
 
     pub fn render(&self, surface: &mut Surface, font: &dyn TextFont) {
+        self.render_with_gamma(surface, font, None);
+    }
+
+    pub fn render_with_gamma(
+        &self,
+        surface: &mut Surface,
+        font: &dyn TextFont,
+        gamma: Option<&GammaRamp>,
+    ) {
         let width = surface.width() as i32;
         let height = surface.height() as i32;
         if width <= 0 || height <= 0 {
             return;
         }
 
-        fill_rect(surface, surface.bounds(), BACKDROP_COLOR);
+        fill_rect(surface, surface.bounds(), BACKDROP_COLOR, gamma);
 
         let hint = if self.available_modes().len() >= 2 {
             Some(MODE_HINT)
@@ -1233,6 +1298,7 @@ impl ObjectMenuState {
                     &title,
                     empty_message,
                     hint,
+                    gamma,
                 );
             }
             MenuMode::Container => {
@@ -1251,10 +1317,20 @@ impl ObjectMenuState {
                         &title,
                         empty_message,
                         hint,
+                        gamma,
                     );
                 } else {
                     let empty: &[ObjectMenuItem] = &[];
-                    Self::render_entries(surface, font, empty, None, &title, empty_message, hint);
+                    Self::render_entries(
+                        surface,
+                        font,
+                        empty,
+                        None,
+                        &title,
+                        empty_message,
+                        hint,
+                        gamma,
+                    );
                 }
             }
             MenuMode::Context => {
@@ -1267,6 +1343,7 @@ impl ObjectMenuState {
                     &title,
                     "No actions available.",
                     hint,
+                    gamma,
                 );
             }
             MenuMode::Build => {
@@ -1279,6 +1356,7 @@ impl ObjectMenuState {
                     &title,
                     "No home base supplies available.",
                     hint,
+                    gamma,
                 );
             }
         }
@@ -1292,6 +1370,7 @@ impl ObjectMenuState {
         title: &str,
         empty_message: &str,
         hint: Option<&str>,
+        gamma: Option<&GammaRamp>,
     ) {
         let width = surface.width() as i32;
         let height = surface.height() as i32;
@@ -1316,28 +1395,32 @@ impl ObjectMenuState {
         let panel_y = (height - panel_height) / 2;
 
         let panel_rect = Rect::new(panel_x, panel_y, panel_width as u32, panel_height as u32);
-        fill_rect(surface, panel_rect, PANEL_COLOR);
-        draw_border(surface, panel_rect, PANEL_BORDER);
+        fill_rect(surface, panel_rect, PANEL_COLOR, gamma);
+        draw_border(surface, panel_rect, PANEL_BORDER, gamma);
 
         let mut cursor_y = panel_y + PANEL_PADDING;
-        font.draw_text(
+        lc_frontend::draw_text_with_gamma(
+            font,
             surface,
             (panel_x + PANEL_PADDING) as f32,
             cursor_y as f32,
             title,
             TITLE_FONT_SIZE,
             TITLE_COLOR,
+            gamma,
         );
 
         cursor_y += TITLE_GAP;
         if items.is_empty() {
-            font.draw_text(
+            lc_frontend::draw_text_with_gamma(
+                font,
                 surface,
                 (panel_x + PANEL_PADDING) as f32,
                 (cursor_y + 10) as f32,
                 empty_message,
                 ITEM_FONT_SIZE,
                 MUTED_TEXT_COLOR,
+                gamma,
             );
             return;
         }
@@ -1350,7 +1433,7 @@ impl ObjectMenuState {
                 ITEM_HEIGHT as u32,
             );
             if Some(index) == selected {
-                fill_rect(surface, row_rect, HIGHLIGHT_COLOR);
+                fill_rect(surface, row_rect, HIGHLIGHT_COLOR, gamma);
             }
 
             let primary_color = if !item.selectable() {
@@ -1375,26 +1458,30 @@ impl ObjectMenuState {
                     icon_size,
                     icon_size,
                 );
-                draw_menu_icon(surface, icon_rect, icon);
+                draw_menu_icon(surface, icon_rect, icon, gamma);
                 text_x = icon_rect.x + icon_rect.width as i32 + 8;
             }
-            font.draw_text(
+            lc_frontend::draw_text_with_gamma(
+                font,
                 surface,
                 text_x as f32,
                 (row_rect.y + 8) as f32,
                 &label_text,
                 ITEM_FONT_SIZE,
                 primary_color,
+                gamma,
             );
 
             if let Some(description) = item.description() {
-                font.draw_text(
+                lc_frontend::draw_text_with_gamma(
+                    font,
                     surface,
                     text_x as f32,
                     (row_rect.y + 22) as f32,
                     description,
                     DETAIL_FONT_SIZE,
                     MUTED_TEXT_COLOR,
+                    gamma,
                 );
             }
 
@@ -1402,13 +1489,15 @@ impl ObjectMenuState {
         }
 
         if let Some(hint) = hint {
-            font.draw_text(
+            lc_frontend::draw_text_with_gamma(
+                font,
                 surface,
                 (panel_x + PANEL_PADDING) as f32,
                 (panel_y + panel_height - PANEL_PADDING - 18) as f32,
                 hint,
                 DETAIL_FONT_SIZE,
                 MUTED_TEXT_COLOR,
+                gamma,
             );
         }
     }
@@ -1753,7 +1842,7 @@ fn build_definition_summary(engine: &Engine, definition_id: &str) -> Option<Stri
     }
 }
 
-fn draw_menu_icon(surface: &mut Surface, rect: Rect, icon: &ImageData) {
+fn draw_menu_icon(surface: &mut Surface, rect: Rect, icon: &ImageData, gamma: Option<&GammaRamp>) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
@@ -1789,7 +1878,17 @@ fn draw_menu_icon(surface: &mut Surface, rect: Rect, icon: &ImageData) {
             if color.a == 0 {
                 continue;
             }
-            let result = if color.a == 255 {
+            let result = if let Some(gamma) = gamma {
+                let destination = surface
+                    .get_pixel(target_x as u32, target_y as u32)
+                    .unwrap_or_default();
+                let output = if color.a == 255 {
+                    lc_frontend::gamma_encode_fragment(color, gamma)
+                } else {
+                    lc_frontend::gamma_blend_fragment_over(color, destination, gamma)
+                };
+                surface.set_pixel(target_x as u32, target_y as u32, output)
+            } else if color.a == 255 {
                 surface.set_pixel(target_x as u32, target_y as u32, color)
             } else {
                 surface.blend_pixel(target_x as u32, target_y as u32, color)
@@ -1801,24 +1900,11 @@ fn draw_menu_icon(surface: &mut Surface, rect: Rect, icon: &ImageData) {
     }
 }
 
-fn fill_rect(surface: &mut Surface, rect: Rect, color: Color) {
-    if let Some(clipped) = rect.intersection(surface.bounds()) {
-        for y in clipped.y..(clipped.y + clipped.height as i32) {
-            for x in clipped.x..(clipped.x + clipped.width as i32) {
-                let result = if color.a == 255 {
-                    surface.set_pixel(x as u32, y as u32, color)
-                } else {
-                    surface.blend_pixel(x as u32, y as u32, color)
-                };
-                if result.is_err() {
-                    break;
-                }
-            }
-        }
-    }
+fn fill_rect(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
+    lc_frontend::draw_color_rect(surface, rect, color, gamma);
 }
 
-fn draw_border(surface: &mut Surface, rect: Rect, color: Color) {
+fn draw_border(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
@@ -1826,10 +1912,10 @@ fn draw_border(surface: &mut Surface, rect: Rect, color: Color) {
     let bottom = Rect::new(rect.x, rect.y + rect.height as i32 - 1, rect.width, 1);
     let left = Rect::new(rect.x, rect.y, 1, rect.height);
     let right = Rect::new(rect.x + rect.width as i32 - 1, rect.y, 1, rect.height);
-    fill_rect(surface, top, color);
-    fill_rect(surface, bottom, color);
-    fill_rect(surface, left, color);
-    fill_rect(surface, right, color);
+    fill_rect(surface, top, color, gamma);
+    fill_rect(surface, bottom, color, gamma);
+    fill_rect(surface, left, color, gamma);
+    fill_rect(surface, right, color, gamma);
 }
 
 #[cfg(test)]

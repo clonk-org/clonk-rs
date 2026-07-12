@@ -1167,6 +1167,18 @@ impl GraphicsSystem {
         self.active_gamma_control_points = Some(gamma.combined_control_points());
     }
 
+    /// Returns the gamma ramp installed while the current frame is drawn.
+    /// Callers that append GUI after [`Self::render_frame`] must capture this
+    /// before rendering, because `render_frame` latches `pending` for the next
+    /// pass at its tail just like `C4GraphicsSystem::Execute`
+    /// (`src/C4GraphicsSystem.cpp:167-199`).
+    pub fn active_gamma_ramp(&self, pending: &GammaControlState) -> lc_graphics::GammaRamp {
+        lc_graphics::GammaRamp::from_control_points(
+            self.active_gamma_control_points
+                .unwrap_or_else(|| pending.combined_control_points()),
+        )
+    }
+
     pub fn render_frame(
         &mut self,
         snapshot: &SimulationSnapshot,
@@ -1177,8 +1189,7 @@ impl GraphicsSystem {
         // render (C4Game.cpp:490). Later SetGamma calls set fSetGamma during
         // simulation and C4GraphicsSystem::Execute applies them only after it
         // has drawn the current pass (C4GraphicsSystem.cpp:195-199).
-        let active = self.active_gamma_control_points.unwrap_or(pending);
-        let gamma = lc_graphics::GammaRamp::from_control_points(active);
+        let gamma = self.active_gamma_ramp(&snapshot.environment.gamma);
         let snapshots = self.render_frame_with_gamma(snapshot, viewports, Some(&gamma));
         self.active_gamma_control_points = Some(pending);
         snapshots
@@ -4884,6 +4895,16 @@ fn draw_image_region_rotated(
 }
 
 pub fn draw_image(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
+    draw_image_with_gamma(surface, rect, image, None);
+}
+
+/// Nearest-neighbour GUI image draw with the active C++ fragment gamma ramp.
+pub fn draw_image_with_gamma(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
         return;
     }
@@ -4897,7 +4918,7 @@ pub fn draw_image(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
     let dest_x = rect.origin.x.round() as i32;
     let dest_y = rect.origin.y.round() as i32;
 
-    if dest_width == image.width() && dest_height == image.height() {
+    if gamma.is_none() && dest_width == image.width() && dest_height == image.height() {
         if let Ok(src_surface) = Surface::from_bytes(
             image.width(),
             image.height(),
@@ -4949,13 +4970,14 @@ pub fn draw_image(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
                 continue;
             }
 
-            let blended = if color.a == 255 {
-                color
-            } else {
-                let background = surface
-                    .get_pixel(target_x as u32, target_y as u32)
-                    .unwrap_or_default();
-                blend_colors(color, background)
+            let background = surface
+                .get_pixel(target_x as u32, target_y as u32)
+                .unwrap_or_default();
+            let blended = match gamma {
+                Some(gamma) if color.a == 255 => gamma_encode_fragment(color, gamma),
+                Some(gamma) => gamma_blend_fragment_over(color, background, gamma),
+                None if color.a == 255 => color,
+                None => blend_colors(color, background),
             };
 
             let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
@@ -5226,7 +5248,7 @@ fn store_channel(value: f32) -> u8 {
 
 /// Applies the C++ shader's independent normalized R16 lookups to one source
 /// fragment. Alpha bypasses gamma unchanged (StdGL.cpp:1081-1087).
-fn gamma_encode_fragment(color: Color, gamma: &lc_graphics::GammaRamp) -> Color {
+pub fn gamma_encode_fragment(color: Color, gamma: &lc_graphics::GammaRamp) -> Color {
     Color::new(
         store_channel(sample_channel(
             Some(gamma),
@@ -5250,7 +5272,7 @@ fn gamma_encode_fragment(color: Color, gamma: &lc_graphics::GammaRamp) -> Color 
 /// Gamma-samples the source in float, then performs source-alpha blending and
 /// rounds once on framebuffer store. A post-composite gamma pass is observably
 /// different (StdGL.cpp:908,1081-1087,1246-1263).
-fn gamma_blend_fragment_over(
+pub fn gamma_blend_fragment_over(
     source: Color,
     destination: Color,
     gamma: &lc_graphics::GammaRamp,
@@ -5283,6 +5305,90 @@ fn gamma_blend_fragment_over(
         ),
         blend_color_over(source, destination).a,
     )
+}
+
+/// Draws a solid or translucent GUI rectangle through the active fragment
+/// gamma lookup before alpha blending, matching `DrawBoxDw`/the GL shader.
+pub fn draw_color_rect(
+    surface: &mut Surface,
+    rect: SurfaceRect,
+    color: Color,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    let Some(clipped) = rect.intersection(surface.bounds()) else {
+        return;
+    };
+    for y in clipped.y..clipped.y + clipped.height as i32 {
+        for x in clipped.x..clipped.x + clipped.width as i32 {
+            let destination = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
+            let output = match gamma {
+                Some(gamma) if color.a == 255 => gamma_encode_fragment(color, gamma),
+                Some(gamma) => gamma_blend_fragment_over(color, destination, gamma),
+                None if color.a == 255 => color,
+                None => blend_colors(color, destination),
+            };
+            let _ = surface.set_pixel(x as u32, y as u32, output);
+        }
+    }
+}
+
+/// Draws fallback `TextFont` glyphs through the same source-fragment gamma
+/// path as `CStdDDraw::TextOut`. The temporary mask preserves glyph coverage
+/// so gamma is applied before, rather than after, alpha blending.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_text_with_gamma(
+    font: &dyn TextFont,
+    surface: &mut Surface,
+    x: f32,
+    y: f32,
+    text: &str,
+    size: f32,
+    color: Color,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    let Some(gamma) = gamma else {
+        font.draw_text(surface, x, y, text, size, color);
+        return;
+    };
+    let metrics = font.measure_text(text, size);
+    let padding = (size * 0.25).ceil() as i32 + 2;
+    let mask_width = (metrics.width.ceil() as i32 + 2 * padding).max(1) as u32;
+    let mask_height = (metrics.height.ceil() as i32 + 2 * padding).max(1) as u32;
+    let target_x = x.floor() as i32 - padding;
+    let target_y = y.floor() as i32 - padding;
+    let mut mask = Surface::new(mask_width, mask_height, surface.format());
+    font.draw_text(
+        &mut mask,
+        x - target_x as f32,
+        y - target_y as f32,
+        text,
+        size,
+        Color::new(255, 255, 255, color.a),
+    );
+    for mask_y in 0..mask.height() {
+        let pixel_y = target_y + mask_y as i32;
+        if pixel_y < 0 || pixel_y >= surface.height() as i32 {
+            continue;
+        }
+        for mask_x in 0..mask.width() {
+            let pixel_x = target_x + mask_x as i32;
+            if pixel_x < 0 || pixel_x >= surface.width() as i32 {
+                continue;
+            }
+            let Some(coverage) = mask.get_pixel(mask_x, mask_y).map(|pixel| pixel.a) else {
+                continue;
+            };
+            if coverage == 0 {
+                continue;
+            }
+            let destination = surface
+                .get_pixel(pixel_x as u32, pixel_y as u32)
+                .unwrap_or_default();
+            let source = Color::new(color.r, color.g, color.b, coverage);
+            let output = gamma_blend_fragment_over(source, destination, gamma);
+            let _ = surface.set_pixel(pixel_x as u32, pixel_y as u32, output);
+        }
+    }
 }
 
 /// Textured `C4GFXBLIT_ADDITIVE`: owner/source modulation and the optional

@@ -92,7 +92,7 @@ impl HudFont<'_> {
     }
 
     /// In-game `CStdDDraw::TextOut` with the active per-fragment gamma ramp.
-    pub(crate) fn draw_with_gamma(
+    pub fn draw_with_gamma(
         &self,
         surface: &mut Surface,
         x: i32,
@@ -154,32 +154,16 @@ fn draw_fallback_text_with_gamma(
     color: Color,
     gamma: &GammaRamp,
 ) {
-    // TextFont exposes drawing rather than glyph coverage. Rasterize an alpha
-    // mask with the same font first, then gamma-sample the unpremultiplied text
-    // colour before applying that coverage to the real framebuffer.
-    let mut mask = Surface::new(surface.width(), surface.height(), surface.format());
-    font.draw_text(
-        &mut mask,
+    crate::draw_text_with_gamma(
+        font,
+        surface,
         origin_x,
         origin_y,
         text,
         FALLBACK_FONT_SIZE,
-        Color::new(255, 255, 255, color.a),
+        color,
+        Some(gamma),
     );
-    for y in 0..surface.height() {
-        for x in 0..surface.width() {
-            let Some(coverage) = mask.get_pixel(x, y).map(|pixel| pixel.a) else {
-                continue;
-            };
-            if coverage == 0 {
-                continue;
-            }
-            let destination = surface.get_pixel(x, y).unwrap_or_default();
-            let source = Color::new(color.r, color.g, color.b, coverage);
-            let blended = crate::gamma_blend_fragment_over(source, destination, gamma);
-            let _ = surface.set_pixel(x, y, blended);
-        }
-    }
 }
 
 fn fill_hud_rect(
@@ -975,7 +959,7 @@ pub fn draw_command_image_cell(
     draw_command_image_cell_with_gamma(surface, hud, cell, image, None);
 }
 
-pub(crate) fn draw_command_image_cell_with_gamma(
+pub fn draw_command_image_cell_with_gamma(
     surface: &mut Surface,
     hud: &HudGraphics,
     cell: SurfaceRect,
