@@ -24220,6 +24220,32 @@ impl Engine {
         self.reset_action_to_default(idx, definition_id, true);
     }
 
+    /// `ReduceLineSegments` (C4Object.cpp:4683-4694): remove the first
+    /// redundant bend whose surrounding vertices have a clear direct path.
+    /// The alternate pass skips two vertices and removes both of them.
+    fn reduce_line_segments(
+        landscape: Option<&Landscape>,
+        vertices: &mut Vec<ObjectVertex>,
+        alternate: bool,
+    ) -> bool {
+        let skip = 2 + usize::from(alternate);
+        let redundant = (0..vertices.len().saturating_sub(skip)).find(|&index| {
+            let from = Vector2::new(vertices[index].x, vertices[index].y);
+            let to = Vector2::new(vertices[index + skip].x, vertices[index + skip].y);
+            landscape
+                .map(|landscape| landscape.path_is_clear(from, to))
+                .unwrap_or(true)
+        });
+        let Some(index) = redundant else {
+            return false;
+        };
+        if alternate {
+            vertices.remove(index + 2);
+        }
+        vertices.remove(index + 1);
+        true
+    }
+
     /// DFA_CONNECT (C4Object.cpp:5341-5420): a Line object's first
     /// vertex tracks Action.Target and its last vertex Action.Target2 —
     /// C4D_Line_Vertex (8) connects to the target's own vertex (index
@@ -24328,6 +24354,9 @@ impl Engine {
             return Ok(false);
         }
 
+        let reduce_segments = self.frame % 35 == 0;
+        let alternate_reduction = self.frame % 2 == 0;
+        let landscape = self.landscape.as_ref();
         let object = &mut self.objects[idx];
         if object.state.vertices.is_empty() {
             return Ok(true);
@@ -24353,6 +24382,16 @@ impl Engine {
                 object.state.vertices[last].x = point.x;
                 object.state.vertices[last].y = point.y;
             }
+        }
+        // ExecAction's CONNECT branch prunes at most one redundant run on
+        // !Tick35, alternating one- and two-bend skips with !Tick2
+        // (C4Object.cpp:5443-5445).
+        if reduce_segments {
+            Self::reduce_line_segments(
+                landscape,
+                &mut object.state.vertices,
+                alternate_reduction,
+            );
         }
         Ok(true)
     }
