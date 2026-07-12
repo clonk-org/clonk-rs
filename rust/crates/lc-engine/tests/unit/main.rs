@@ -1397,6 +1397,50 @@ mod tests {
     }
 
     #[test]
+    fn fire_decay_runs_docon_shape_and_bottom_update() -> Result<(), EngineError> {
+        // ExecFire delegates decay to DoCon(-100) (src/C4Object.cpp:776-778).
+        // DoCon then runs UpdateFace(true) and keeps a straight object's old
+        // shape bottom fixed (src/C4Object.cpp:1414-1483). Starting from a
+        // four-pixel full-con shape, the first decay crosses from construction
+        // step 100 to 99: Jolt shrinks the shape/vertex to three pixels and the
+        // integer center moves down one pixel so the bottom remains at y=8;
+        // UpdatePos does not touch the supplied fixed y=8.
+        let mut definition = simple_definition("BurningStructure");
+        definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 4)));
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 4).with_cnat(CNAT_BOTTOM)]);
+        definition.set_components(vec![DefinitionComponent {
+            id: "WOOD".to_string(),
+            count: 2,
+        }]);
+
+        let mut engine = Engine::with_seed(29);
+        engine.register_definition(definition)?;
+        let id = engine.spawn_object(
+            SpawnConfig::new("BurningStructure")
+                .with_position(Vector2::new(3, 8))
+                .with_construction(FULL_CON),
+        )?;
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].state.position.y, 4);
+        assert!(engine.incinerate_object(idx, 1, false, None)?);
+
+        engine.tick()?;
+
+        let object = engine.object_snapshot(id).expect("object survives");
+        assert_eq!(object.construction, FULL_CON - 100);
+        assert_eq!(object.position.y, 5, "DoCon preserves shape bottom");
+        assert_eq!(object.vertices[0].y, 3, "UpdateFace jolts vertices");
+        assert_eq!(object.components.get("WOOD"), Some(&1));
+        let idx = engine.find_object_index(id).expect("object survives");
+        assert_eq!(
+            engine.objects[idx].fixed_position.y,
+            itofix(8),
+            "UpdatePos does not resynchronize C4Fixed position"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fire_timer_extinguishes_in_extinguisher_material_and_kills_the_effect(
     ) -> Result<(), EngineError> {
         // ExecFire's Tick5 background arm (C4Object.cpp:797-806) calls
@@ -29424,6 +29468,234 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert_eq!(object.position, Vector2::new(3, 6));
         assert_eq!(object.vertices[0].y, 2);
         assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
+        Ok(())
+    }
+
+    #[test]
+    fn script_docon_bottom_adjust_does_not_resync_fixed_position() -> Result<(), EngineError> {
+        // GoldRush frame 3327: DHRS's Decay EndCall runs Decaying -> DoCon(-4)
+        // (content/Western.c4d/Animals.c4d/Horse.c4d/Dead.c4d/ActMap.txt and
+        // Script.c). C4Object::DoCon stretches the 25px shape to 24px and
+        // bottom-adjusts integer y through UpdatePos, which does not write
+        // fix_y (src/C4Object.cpp:1414-1515,346-354). Thus y moves 100->101
+        // while the already-snapped fixed position remains exactly 100.
+        let script = r#"#strict
+func Decaying() {
+    DoCon(-4);
+    return(1);
+}
+"#;
+        let mut definition = Definition::from_script("DHRS", "Dead Horse", script)?;
+        definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 10, 25)));
+        definition.set_stretch_growth(true);
+        definition.set_components(vec![
+            DefinitionComponent {
+                id: "SKIN".to_string(),
+                count: 2,
+            },
+            DefinitionComponent {
+                id: "BBON".to_string(),
+                count: 2,
+            },
+            DefinitionComponent {
+                id: "RMET".to_string(),
+                count: 3,
+            },
+        ]);
+
+        let mut engine = Engine::with_seed(73);
+        engine.register_definition(definition)?;
+        let id = engine.spawn_object(
+            SpawnConfig::new("DHRS")
+                .with_position(Vector2::new(20, 125))
+                .with_construction(FULL_CON),
+        )?;
+        engine.apply_object_update(id, ObjectUpdate::new().with_position(Vector2::new(20, 100)))?;
+        let idx = engine.find_object_index(id).expect("dead horse exists");
+
+        engine.call_object_function(idx, "Decaying", Vec::new())?;
+
+        let object = engine.object_snapshot(id).expect("dead horse survives");
+        assert_eq!(object.construction, 96_000);
+        assert_eq!(object.position.y, 101, "DoCon keeps the old shape bottom");
+        assert_eq!(object.components.get("SKIN"), Some(&1));
+        assert_eq!(object.components.get("BBON"), Some(&1));
+        assert_eq!(object.components.get("RMET"), Some(&2));
+        let idx = engine.find_object_index(id).expect("dead horse survives");
+        assert_eq!(
+            engine.objects[idx].fixed_position.y,
+            itofix(100),
+            "UpdatePos leaves fix_y stale"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn script_set_action_after_docon_resynchronizes_fixed_position() -> Result<(), EngineError> {
+        // Operation order matters inside one script call: DoCon first shifts
+        // only integer y, then C4Object::SetAction snaps fix_x/fix_y to that
+        // adjusted position (src/C4Object.cpp:1414-1515,4144). The staged Rust
+        // fold must not preserve DoCon's stale fixed coordinate past the later
+        // SetAction.
+        let script = r#"#strict
+func DecayThenExist() {
+    DoCon(-4);
+    SetAction("Exist");
+    return(1);
+}
+"#;
+        let mut definition = Definition::from_script("DHRS", "Dead Horse", script)?;
+        definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 10, 25)));
+        definition.set_stretch_growth(true);
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                ("Exist".to_string(), ActionSpec::default()),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(73);
+        engine.register_definition(definition)?;
+        let id = engine.spawn_object(
+            SpawnConfig::new("DHRS")
+                .with_position(Vector2::new(20, 125))
+                .with_construction(FULL_CON),
+        )?;
+        engine.apply_object_update(id, ObjectUpdate::new().with_position(Vector2::new(20, 100)))?;
+        let idx = engine.find_object_index(id).expect("dead horse exists");
+
+        engine.call_object_function(idx, "DecayThenExist", Vec::new())?;
+
+        let object = engine.object_snapshot(id).expect("dead horse survives");
+        assert_eq!(object.construction, 96_000);
+        assert_eq!(object.position.y, 101);
+        assert_eq!(object.action.name, "Exist");
+        let idx = engine.find_object_index(id).expect("dead horse survives");
+        assert_eq!(engine.objects[idx].fixed_position.y, itofix(101));
+        Ok(())
+    }
+
+    #[test]
+    fn script_docon_updates_an_explicit_foreign_object() -> Result<(), EngineError> {
+        // FnDoCon forwards its optional pObj directly to C4Object::DoCon
+        // (src/C4Script.cpp:480-484). GoldRush's Indian reproduction creates
+        // a child, enters it into the tipi, then calls DoCon(-40, pIndian);
+        // the foreign child must shrink synchronously, with DoCon preserving
+        // the fixed position established by Enter's CopyMotion.
+        let parent_script = r#"#strict
+func Reproduce() {
+    var child = CreateObject(CHLD, 0, 0, -1);
+    Enter(this(), child);
+    DoCon(-40, child);
+    return(1);
+}
+"#;
+        let parent = Definition::from_script("PARN", "Parent", parent_script)?;
+        let mut child = Definition::from_script("CHLD", "Child", "")?;
+        child.set_shape_rect(Some(DefinitionRect::new(0, -10, 10, 20)));
+        child.set_stretch_growth(true);
+        child.set_incomplete_activity(true);
+
+        let mut engine = Engine::with_seed(79);
+        engine.register_definition(parent)?;
+        engine.register_definition(child)?;
+        let parent_id = engine.spawn_object(
+            SpawnConfig::new("PARN").with_position(Vector2::new(20, 100)),
+        )?;
+        let parent_idx = engine
+            .find_object_index(parent_id)
+            .expect("parent exists");
+
+        engine.call_object_function(parent_idx, "Reproduce", Vec::new())?;
+
+        let child = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "CHLD")
+            .expect("child exists");
+        assert_eq!(child.state.container, Some(parent_id));
+        assert_eq!(child.state.construction, 60_000);
+        assert_eq!(child.state.position.y, 104);
+        assert_eq!(child.fixed_position.y, itofix(100));
+        Ok(())
+    }
+
+    #[test]
+    fn creation_action_precedes_initial_and_placed_docon_fixed_position() -> Result<(), EngineError>
+    {
+        // GoldRush frame 367, WMPF #1595. C4Game::NewObject constructs the
+        // raw y=516 object first, so Construction's SetAction snaps fix_y at
+        // 516. Initial DoCon(FullCon,true) moves integer y to 512 without
+        // touching fix_y; WMPF::Place then SetCon(10) moves integer y back to
+        // 516 and likewise preserves fix_y (C4Game.cpp:1102-1142;
+        // C4Object.cpp:1414-1515,4091-4169). Deferred creation must retain
+        // that exact order instead of replaying SetAction at intermediate y.
+        let parent = Definition::from_script(
+            "PARN",
+            "Parent",
+            r#"#strict
+func Seed() {
+    var child = CreateObject(CHLD, 0, 0, -1);
+    child->Place(this(), 10);
+    return(1);
+}
+"#,
+        )?;
+        let mut child = Definition::from_script(
+            "CHLD",
+            "Wompf",
+            r#"#strict
+func Construction() {
+    SetAction("Exist");
+    return(1);
+}
+func Place(tree, growth) {
+    SetCategory(1);
+    SetActionTargets(tree);
+    DoCon(growth - GetCon());
+    return(1);
+}
+"#,
+        )?;
+        child.set_shape_rect(Some(DefinitionRect::new(-4, -4, 8, 8)));
+        child.set_stretch_growth(true);
+        child.set_incomplete_activity(true);
+        child.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                ("Exist".to_string(), ActionSpec::default()),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(83);
+        engine.register_definition(parent)?;
+        engine.register_definition(child)?;
+        let parent_id = engine.spawn_object(
+            SpawnConfig::new("PARN").with_position(Vector2::new(2827, 516)),
+        )?;
+        let parent_idx = engine
+            .find_object_index(parent_id)
+            .expect("parent exists");
+
+        engine.call_object_function(parent_idx, "Seed", Vec::new())?;
+
+        let child = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "CHLD")
+            .expect("placed child exists");
+        assert_eq!(child.state.construction, 10_000);
+        assert_eq!(child.state.action.name, "Exist");
+        assert_eq!(child.state.action.target, Some(parent_id));
+        assert_eq!(child.state.category & CATEGORY_STATIC_BACK, CATEGORY_STATIC_BACK);
+        assert_eq!(child.state.position.y, 516);
+        assert_eq!(
+            child.fixed_position.y,
+            itofix(516),
+            "Construction SetAction snapped the raw pre-growth position"
+        );
         Ok(())
     }
 

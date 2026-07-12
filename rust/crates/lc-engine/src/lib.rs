@@ -187,6 +187,46 @@ pub type DefinitionId = String;
 pub const OWNER_NONE: i32 = -1;
 pub const FULL_CON: i32 = 100_000;
 
+/// The `C4Object::DoCon` gate for its expensive mass/face/component refresh
+/// (C4Object.cpp:1439-1447). Construction still changes between percent
+/// boundaries, but the component list only follows these refresh points.
+pub(crate) fn docon_refreshes_construction(before: i32, after: i32) -> bool {
+    let step_size = FULL_CON / 100;
+    before / step_size != after / step_size
+        || after >= FULL_CON
+        || after == 0
+        || before >= FULL_CON
+}
+
+/// `ComponentConCutoff` / `ComponentConGain` (C4Object.cpp:510-526).
+/// C++ iterates the object's existing component entries; it never inserts a
+/// definition component that the object no longer carries.
+pub(crate) fn docon_component_counts(
+    current: &HashMap<DefinitionId, u32>,
+    definition: &[(DefinitionId, u32)],
+    construction: i32,
+    change: i32,
+) -> HashMap<DefinitionId, u32> {
+    current
+        .iter()
+        .map(|(id, count)| {
+            let definition_count = definition
+                .iter()
+                .find_map(|(definition_id, count)| (definition_id == id).then_some(*count))
+                .unwrap_or(0);
+            let scaled = (u64::from(definition_count)
+                * construction.clamp(0, FULL_CON) as u64
+                / FULL_CON as u64) as u32;
+            let count = if change < 0 {
+                (*count).min(scaled)
+            } else {
+                (*count).max(scaled)
+            };
+            (id.clone(), count)
+        })
+        .collect()
+}
+
 /// Energy-loss cause types (C4Effects.h:59-67), passed to Fx*Damage.
 /// Damage cause types (C4Effects.h:53-56).
 pub const C4FX_CALL_DMG_SCRIPT: i32 = 0;
@@ -2809,9 +2849,9 @@ impl ObjectState {
                     self.menu = None;
                 }
             }
-            if let Some(components) = &delta.components {
-                self.components = components.clone();
-            }
+        }
+        if let Some(components) = &delta.components {
+            self.components = components.clone();
         }
         if let Some(local_vars) = &delta.local_vars {
             self.local_vars = local_vars.clone();
@@ -2896,6 +2936,12 @@ struct ObjectDelta {
     magic_energy: Option<i32>,
     magic_capacity: Option<i32>,
     construction: Option<i32>,
+    /// The construction write came from C4Object::DoCon and therefore keeps
+    /// DoCon-specific component/lifecycle semantics.
+    construction_via_docon: bool,
+    /// No later SetAction/position write resynchronized fix_x/fix_y after the
+    /// staged DoCon bottom adjustment.
+    construction_preserves_fixed_position: bool,
     direction: Option<Direction>,
     command_direction: Option<CommandDirection>,
     action: Option<ActionUpdate>,
@@ -2931,6 +2977,15 @@ struct ObjectDelta {
 
 impl ObjectDelta {
     fn merge_update(&mut self, update: ObjectUpdate) {
+        let writes_construction = update.construction.is_some();
+        let construction_via_docon = update.construction_via_docon;
+        let construction_preserves_fixed_position =
+            update.construction_preserves_fixed_position;
+        let resynchronizes_fixed_position = update.position.is_some()
+            || update
+                .action
+                .as_ref()
+                .is_some_and(|action| action.name.is_some());
         if let Some(custom_name) = update.custom_name {
             self.custom_name = Some(custom_name);
         }
@@ -2993,6 +3048,13 @@ impl ObjectDelta {
         }
         if let Some(construction) = update.construction {
             self.construction = Some(construction);
+        }
+        if writes_construction {
+            self.construction_via_docon = construction_via_docon;
+            self.construction_preserves_fixed_position =
+                construction_preserves_fixed_position;
+        } else if resynchronizes_fixed_position {
+            self.construction_preserves_fixed_position = false;
         }
         if let Some(damage) = update.damage {
             self.damage = Some(damage);
@@ -3108,6 +3170,9 @@ impl From<ObjectUpdate> for ObjectDelta {
             fire: update.fire,
             fire_flag: update.fire_flag,
             construction: update.construction,
+            construction_via_docon: update.construction_via_docon,
+            construction_preserves_fixed_position: update
+                .construction_preserves_fixed_position,
             damage: update.damage,
             magic_energy: update.magic_energy,
             magic_capacity: update.magic_capacity,
@@ -3233,6 +3298,14 @@ pub struct ObjectUpdate {
     pub magic_capacity: Option<i32>,
     #[serde(default)]
     pub construction: Option<i32>,
+    /// Internal provenance for a staged C4Object::DoCon write. Generic
+    /// construction assignments still resynchronize fixed position.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub construction_via_docon: bool,
+    /// Final fixed-position ordering for a staged DoCon. SetAction and
+    /// explicit position writes after DoCon clear this bit.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub construction_preserves_fixed_position: bool,
     pub action: Option<ActionUpdate>,
     #[serde(default)]
     pub direction: Option<Direction>,
@@ -4124,11 +4197,18 @@ impl Object {
             self.own_shape_vertices = Some(vertices.clone());
         }
         if shape_changed {
+            let fixed_position = self.fixed_position;
             self.refresh_shape_after_state_change(
                 previous_construction,
                 previous_rect,
                 delta.construction.is_some(),
             );
+            if delta.construction_preserves_fixed_position {
+                // DoCon's straight-con bottom adjustment calls UpdatePos,
+                // which updates sectors but never fix_x/fix_y
+                // (C4Object.cpp:1462-1495, C4Object::UpdatePos at :346-354).
+                self.fixed_position = fixed_position;
+            }
         }
         if let Some(vertices) = &delta.live_vertices {
             self.set_live_shape_vertices(vertices.clone());
@@ -19212,6 +19292,8 @@ impl Engine {
             energy_loss_cause,
             fire,
             construction,
+            construction_via_docon,
+            construction_preserves_fixed_position,
             damage,
             magic_energy,
             magic_capacity,
@@ -19462,7 +19544,11 @@ impl Engine {
                 object.set_owned_shape_vertices(vertices);
             }
             if let Some(construction) = construction {
+                let fixed_position = object.fixed_position;
                 object.set_construction(construction);
+                if construction_via_docon && construction_preserves_fixed_position {
+                    object.fixed_position = fixed_position;
+                }
             }
             if let Some(vertices) = live_vertices {
                 object.set_live_shape_vertices(vertices);
@@ -20197,6 +20283,7 @@ impl Engine {
                 .as_ref()
                 .is_some_and(ObjectUpdate::refreshes_ocf_like_cpp);
             let mut energy_died = false;
+            let mut delayed_docon_construction = None;
             // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply the
             // def change BEFORE the staged delta so a following
             // SetAction resolves against the NEW ActMap.
@@ -20213,7 +20300,19 @@ impl Engine {
                 .unwrap_or(action_library);
             {
                 let object = &mut self.objects[index];
-                if let Some(update) = outcome.update {
+                if let Some(mut update) = outcome.update {
+                    // A nested Enter/Exit followed by DoCon must copy the
+                    // container motion first and only then bottom-adjust the
+                    // new construction shape. The copy-in/out scope carries
+                    // both writes in one update, so delay just this ordered
+                    // DoCon fold until after apply_container_change below.
+                    if update.construction_preserves_fixed_position
+                        && update.container.is_some()
+                    {
+                        delayed_docon_construction = update.construction.take();
+                        update.construction_via_docon = false;
+                        update.construction_preserves_fixed_position = false;
+                    }
                     let callbacks_dispatched = update
                         .action
                         .as_ref()
@@ -20367,6 +20466,10 @@ impl Engine {
 
             for (previous, new) in container_changes {
                 self.apply_container_change(object_id, previous, new, false)?;
+            }
+            if let Some(construction) = delayed_docon_construction {
+                let change = construction - self.objects[index].state.construction;
+                self.do_con(index, change);
             }
             if solid_mask_changed
                 || self.objects[index].state.base_graphics != previous_base_graphics
@@ -27194,10 +27297,9 @@ impl Engine {
         // Decay: DoCon(-100) every frame (C4Object.cpp:776-778); burned away
         // at zero construction (C4Object::DoCon removal)
         if !no_burn_decay {
-            let object = &mut self.objects[idx];
-            object.state.construction = (object.state.construction - 100).clamp(0, FULL_CON);
-            if object.state.construction == 0 {
-                let _ = object.mark_destroyed();
+            self.do_con(idx, -100);
+            if self.objects[idx].state.construction == 0 {
+                let _ = self.objects[idx].mark_destroyed();
                 return stop_events;
             }
         }
@@ -27317,36 +27419,44 @@ impl Engine {
     /// the FXB1 bubble object (the synced `Random(5)` x-argument draw IS
     /// consumed), the DeepBreath callback's sound, and the corrosion/
     /// C4Object::DoCon on a live object (C4Object.cpp:1414-1483),
-    /// growth-path subset: clamp Con into [0, FullCon] (Oversize
+    /// shape/bottom subset: clamp Con into [0, FullCon] (Oversize
     /// unmodeled), keep the shape bottom anchored when unrotated
     /// (`strgt_con_b = y + Shape.y + Shape.Hgt` from the PRE-change
     /// stretched shape; on a shape resize `y = strgt_con_b - Hgt - y`).
-    /// Un-ported arms (rare for growth): component gain/cutoff,
-    /// contents loss below FullCon, rotated-structure lift, decay
-    /// solid-mask removal.
+    /// Un-ported arms: contents loss below FullCon, completion/removal
+    /// callbacks, and decay solid-mask removal.
     fn do_con(&mut self, idx: usize, change: i32) {
-        let (shape, stretch_growth, line, rotateable) = self
+        let definition_components = self
             .definitions
             .get(&self.objects[idx].definition_id)
             .map(|definition| {
-                (
-                    definition.shape_rect(),
-                    definition.stretch_growth(),
-                    definition.line(),
-                    definition.rotateable(),
-                )
+                definition
+                    .components()
+                    .iter()
+                    .map(|component| (component.id.clone(), component.count))
+                    .collect::<Vec<_>>()
             })
-            .unwrap_or((None, false, 0, 0));
+            .unwrap_or_default();
         let object = &self.objects[idx];
         let before = object.state.construction;
-        let after = (before + change).clamp(0, FULL_CON);
-        if after == before {
+        let after = before.saturating_add(change).clamp(0, FULL_CON);
+        let refresh = docon_refreshes_construction(before, after);
+        if after == before && !refresh {
             return;
         }
-        let _ = (shape, stretch_growth, line, rotateable);
         let previous_rect = self.objects[idx].current_shape_rect();
         self.objects[idx].state.construction = after;
         self.refresh_object_ocf(idx);
+        if !refresh {
+            return;
+        }
+        let components = docon_component_counts(
+            &self.objects[idx].state.components,
+            &definition_components,
+            after,
+            change,
+        );
+        self.objects[idx].state.components = components;
         // UpdateFace(true) re-derives the shape AND vertices at the new
         // Con (C4Object::UpdateShape stretch/jolt with bUpdateVertices,
         // C4Object.cpp:320-341 — trees grow their vertex rings too) and

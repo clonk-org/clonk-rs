@@ -28,10 +28,10 @@ use crate::LiquidSegment;
 #[cfg(test)]
 use crate::PlayerViewport;
 use crate::{
-    encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, AudioCommand,
-    CommandDirection, CrewSelectionState, DefinitionId, DefinitionRect, Direction, DrawTransform,
-    EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectBaseGraphics,
-    MenuRequest, MenuRequestKind, ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus,
+    encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionState, ActionUpdate,
+    AudioCommand, CommandDirection, CrewSelectionState, DefinitionId, DefinitionRect, Direction,
+    DrawTransform, EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, MenuRequest,
+    MenuRequestKind, ObjectBaseGraphics, ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus,
     ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate,
     PhysicsSettings, PlayerControlState, PlayerState, QueuedCommand, ShapeAttachRecord,
@@ -12306,25 +12306,34 @@ fn do_con(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
+    let active = active_object_id();
+    if let Some(target) = target_id {
+        if Some(target) != active {
+            return match call_world_object_function(
+                target,
+                "DoCon",
+                &[Value::Int(change_percent)],
+            ) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("DoCon requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
+        let target = match context.object_context().map(ObjectScopeContext::id) {
+            Some(target) => target,
             None => return Ok(Value::Bool(false)),
         };
 
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
-        }
-
         let delta = construction_delta_from_percent(change_percent);
-        object.adjust_construction(delta);
-        Ok(Value::Bool(true))
+        Ok(Value::Bool(
+            context.adjust_object_construction(target, delta).is_some(),
+        ))
     })
 }
 
@@ -13182,7 +13191,6 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     struct FireExecState {
         caused_by: i32,
         phase: i32,
-        construction: i32,
         no_burn_decay: bool,
         no_burn_damage: bool,
         position: Vector2,
@@ -13220,10 +13228,6 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(FireExecState {
             caused_by,
             phase,
-            construction: scope
-                .pending_update
-                .construction
-                .unwrap_or(scope.current_construction),
             no_burn_decay: fire_meta.no_burn_decay,
             no_burn_damage: fire_meta.no_burn_damage,
             position: scope.effective_position(),
@@ -13245,18 +13249,11 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     // Decay: DoCon(-100) every frame; burned away at zero construction
     // (C4Object.cpp:779-781 + the engine-side burn loop).
     if !state.no_burn_decay {
-        let next_con = (state.construction - 100).clamp(0, crate::FULL_CON);
         let destroyed = HOST_CONTEXT.with(|cell| {
             cell.borrow_mut()
                 .as_mut()
-                .and_then(|context| context.object_scope_mut(target))
-                .map(|scope| {
-                    scope.set_construction(next_con);
-                    if next_con == 0 {
-                        scope.destroy = true;
-                    }
-                    next_con == 0
-                })
+                .and_then(|context| context.adjust_object_construction(target, -100))
+                .map(|construction| construction == 0)
                 .unwrap_or(false)
         });
         if destroyed {
@@ -13529,6 +13526,10 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             .get_or_insert_with(ActionUpdate::default);
         update.set_name(name.clone());
         update.set_force(false);
+        // C4Object::SetAction snaps fix_x/fix_y after changing the action
+        // (C4Object.cpp:4144). If it follows DoCon in this staged call, that
+        // later snap wins over DoCon's stale-fixed UpdatePos behavior.
+        object.pending_update.construction_preserves_fixed_position = false;
 
         // SetActionByName carries the action targets, and C4Object::SetAction
         // assigns them ONLY when non-null (C4Object.cpp:4123-4125:
@@ -19993,6 +19994,18 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil);
     }
 
+    // Construction ran against the raw Con=0 object, before NewObject's
+    // initial DoCon. Commit its final action state into the pending spawn at
+    // that boundary instead of leaving the ActionUpdate to replay after the
+    // spawn has materialized at its post-growth integer position. SetAction
+    // synchronizes fix_x/fix_y immediately in C++; replaying it later changed
+    // WMPF's raw y=516 fixed coordinate to the intermediate growth y=512.
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.commit_creation_action(target);
+        }
+    });
+
     // Initial DoCon(FullCon,true) runs only after Construction. Its straight
     // growth keeps the old bottom fixed in integer coordinates and leaves
     // fix_y at the supplied raw center (C4Object.cpp:1428-1515).
@@ -25747,6 +25760,39 @@ impl EffectHostContext {
         self.pending_spawns.push(spawn);
     }
 
+    /// Fold the action mutations produced by Construction into a same-call
+    /// pending spawn before NewObject's initial DoCon. Other pending fields
+    /// remain live in the nested scope for subsequent arrow calls (for
+    /// example WMPF::Place's SetActionTargets and SetCon).
+    fn commit_creation_action(&mut self, target: ObjectId) {
+        let Some(spawn_index) = self
+            .pending_spawns
+            .iter()
+            .position(|spawn| spawn.id == Some(target))
+        else {
+            return;
+        };
+        let definition_id = self.pending_spawns[spawn_index].definition_id.clone();
+        let Some(library) = self
+            .definition_metadata(&definition_id)
+            .map(|metadata| metadata.action_library.clone())
+        else {
+            return;
+        };
+        let Some(update) = self
+            .object_scope_mut(target)
+            .and_then(|scope| scope.pending_update.action.take())
+        else {
+            return;
+        };
+        let mut action = self.pending_spawns[spawn_index]
+            .action
+            .take()
+            .unwrap_or_else(|| ActionState::new(library.default_action()));
+        action.apply_update_with_library(&update, &library);
+        self.pending_spawns[spawn_index].action = Some(action);
+    }
+
     fn register_particle(&mut self, command: ParticleCommand) {
         self.pending_particles.push(command);
     }
@@ -26480,6 +26526,67 @@ impl EffectHostContext {
         self.nested_objects
             .get_mut(&target)
             .map(|state| &mut state.scope)
+    }
+
+    /// Stage one C4Object::DoCon call, including its percent-step component
+    /// cutoff/gain. Keeping this at call time preserves multiple DoCon and
+    /// SetComponent ordering inside one script callback.
+    fn adjust_object_construction(&mut self, target: ObjectId, delta: i32) -> Option<i32> {
+        let scope = self.object_scope(target)?;
+        let before = scope.construction();
+        let definition_id = scope.definition_id.clone().or_else(|| {
+            self.get_world_object(target)
+                .map(|object| object.definition_id().to_string())
+        });
+        let definition_components = definition_id
+            .as_deref()
+            .and_then(|id| self.definition_metadata(id))
+            .map(|metadata| metadata.components.clone())
+            .unwrap_or_default();
+        let pending_components = scope.pending_update.components.clone();
+        let pending_spawn_components = self
+            .pending_spawns
+            .iter()
+            .find(|spawn| spawn.id == Some(target))
+            .map(|spawn| {
+                spawn.components.clone().unwrap_or_else(|| {
+                    definition_components
+                        .iter()
+                        .map(|(id, count)| {
+                            let scaled = (u64::from(*count)
+                                * before.clamp(0, FULL_CON) as u64
+                                / FULL_CON as u64) as u32;
+                            (id.clone(), scaled)
+                        })
+                        .collect()
+                })
+            });
+        let current_components = pending_components
+            .or(pending_spawn_components)
+            .or_else(|| {
+                self.get_world_object(target)
+                    .and_then(|object| object.full_state().map(|state| state.components.clone()))
+            })
+            .unwrap_or_default();
+
+        let after = self.object_scope_mut(target)?.adjust_construction(delta);
+        if crate::docon_refreshes_construction(before, after) {
+            let components = crate::docon_component_counts(
+                &current_components,
+                &definition_components,
+                after,
+                delta,
+            );
+            if let Some(scope) = self.object_scope_mut(target) {
+                scope.pending_update.components = Some(components);
+            }
+        }
+        if after == 0 {
+            if let Some(scope) = self.object_scope_mut(target) {
+                scope.destroy = true;
+            }
+        }
+        Some(after)
     }
 
     fn object_crew_disabled(&self, target: ObjectId) -> Option<bool> {
@@ -27859,6 +27966,9 @@ impl ObjectScopeContext {
         }
         self.current_container = container;
         self.pending_update.container = Some(container);
+        // Enter/Exit copy or explicitly assign position and therefore
+        // resynchronize fix_x/fix_y after any earlier DoCon in this call.
+        self.pending_update.construction_preserves_fixed_position = false;
         // C4Object::Enter/Exit force-close the moving object's menu
         // synchronously (CloseMenu(true), C4Object.cpp:1555 and :1594) —
         // staged here so a later same-call CreateMenu can still reopen one.
@@ -28110,6 +28220,8 @@ impl ObjectScopeContext {
             next = FULL_CON;
         }
         self.set_construction(next);
+        self.pending_update.construction_via_docon = true;
+        self.pending_update.construction_preserves_fixed_position = true;
         next
     }
 
@@ -28228,6 +28340,7 @@ impl ObjectScopeContext {
         self.current_position = position;
         self.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
         self.pending_update.position = Some(position);
+        self.pending_update.construction_preserves_fixed_position = false;
     }
 
     fn vertices(&self) -> &[ObjectVertex] {
