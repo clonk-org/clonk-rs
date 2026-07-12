@@ -10311,7 +10311,14 @@ impl GameApp {
         let mut result = Ok(());
         for control in controls {
             result = match control {
-                NetworkControl::PlayerInfo(_) | NetworkControl::JoinPlayer(_) => Ok(()),
+                NetworkControl::PlayerInfo(info) => {
+                    self.control_player_infos.apply(info);
+                    Ok(())
+                }
+                NetworkControl::JoinPlayer(join) => {
+                    self.apply_remote_embedded_join(join);
+                    Ok(())
+                }
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
@@ -10332,6 +10339,41 @@ impl GameApp {
         // changes so later local input cannot inherit a stale target tick.
         self.executing_ready_tick = None;
         result
+    }
+
+    fn apply_remote_embedded_join(&mut self, join: lc_engine::JoinPlayerControlData) {
+        let Some(info) = self.control_player_infos.get(join.info_id).cloned() else {
+            tracing::warn!(info_id = join.info_id, "ignoring join for missing player info");
+            return;
+        };
+        let resolved = match lc_engine::resolve_remote_embedded_player_data(&join, &info) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                tracing::warn!(info_id = join.info_id, %error, "failed to resolve embedded join");
+                return;
+            }
+        };
+        let player_file = match resolved {
+            lc_engine::RemoteEmbeddedPlayerData::PlayerFile(file) => Some(file),
+            lc_engine::RemoteEmbeddedPlayerData::ScriptWithoutFile => None,
+        };
+        let startup_player_count =
+            i32::try_from(self.control_player_infos.player_count().max(1)).unwrap_or(i32::MAX);
+        let config = match lc_engine::prepare_join_player_config(lc_engine::JoinPlayerPreparation {
+            join: &join,
+            info: &info,
+            player_file: player_file.as_ref(),
+            startup_player_count,
+        }) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(info_id = join.info_id, %error, "failed to prepare player join");
+                return;
+            }
+        };
+        if let Err(error) = self.engine.join_player(config) {
+            tracing::warn!(info_id = join.info_id, %error, "player join failed");
+        }
     }
 
     fn update(&mut self) -> Result<(), EngineError> {
@@ -20373,6 +20415,64 @@ mod tests {
             local_last_com,
             "a stale duplicate cannot dispatch its controls twice"
         );
+    }
+
+    #[test]
+    fn ready_tick_executes_player_info_then_embedded_join_before_simulation() {
+        // C4Control executes the complete list in packet order, so PlrInfo is
+        // visible to the following JoinPlr; only then does C4Game advance the
+        // simulation (src/C4Control.cpp:93-109; src/C4Game.cpp:797-805).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.engine.set_network_game(true);
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let initial_frame = app.engine.frame();
+        let info = lc_engine::ControlPlayerInfoEntry {
+            name: lc_engine::LegacyCString::from_bytes(b"Network Tyler".to_vec())
+                .expect("valid legacy name"),
+            id: 7,
+            color: 0x0011_2233,
+            ..Default::default()
+        };
+        let join = lc_engine::JoinPlayerControlData {
+            filename: lc_engine::LegacyCString::from_bytes(
+                b"/definitely/missing/RemotePlayer.c4p".to_vec(),
+            )
+            .expect("valid legacy filename"),
+            at_client: 0,
+            info_id: 7,
+            source: lc_engine::JoinPlayerSource::Embedded(
+                include_bytes!("../../lc-engine/tests/fixtures/embedded_player.c4p").to_vec(),
+            ),
+            by_client: 1,
+        };
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![
+                    NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
+                        client_id: 0,
+                        players: vec![info],
+                        by_client: 1,
+                        ..Default::default()
+                    }),
+                    NetworkControl::JoinPlayer(join),
+                ],
+            })
+            .expect("queue admission controls");
+
+        app.update().expect("execute admission tick");
+
+        assert_eq!(app.engine.frame(), initial_frame + 1);
+        let joined = app
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.player_info_id == 7)
+            .expect("embedded player joined before the simulation tick");
+        assert_eq!(joined.name, "Network Tyler");
+        assert_eq!((joined.score, joined.total_playing_time), (42, 99));
     }
 
     #[test]
