@@ -15220,7 +15220,11 @@ func Activate(inMat, inLength, inStrength)
     }
 
     #[test]
-    fn lightning_event_spawns_effect_and_calls_activate() {
+    fn lightning_event_initializes_at_cpp_default_origin_before_activate() {
+        // C4Weather::LaunchLightning creates FXL1 without x/y arguments and
+        // only passes the requested position to Activate afterwards
+        // (C4Weather.cpp:158-168). Initialize therefore observes the default
+        // origin, and a no-op Activate leaves the object there.
         let script = r#"
         func Initialize(state, random) { return nil; }
         func Step(state, frame, random) { return nil; }
@@ -15248,9 +15252,50 @@ func Activate(inMat, inLength, inStrength)
             .expect("lightning effect spawned");
         assert_eq!(
             engine.objects[index].state.position,
-            Vector2::new(120, 0),
-            "lightning effect should spawn at requested x position"
+            Vector2::ZERO,
+            "C++ creates FXL1 at the default origin before Activate"
         );
+    }
+
+    #[test]
+    fn volcano_event_initializes_at_cpp_default_origin_before_activate() {
+        // C4Weather::LaunchVolcano likewise creates FXV1 without x/y and
+        // supplies coordinates only to Activate (C4Weather.cpp:178-184).
+        let script = r#"
+        func Initialize(state, random) { return nil; }
+        func Step(state, frame, random) { return nil; }
+        func Activate(x, y, size, material) { return true; }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FXV1", "Volcano", script).expect("definition builds"),
+            )
+            .expect("definition registers");
+        engine.set_landscape(Landscape::flat(64, 40));
+        let mut environment = engine.environment();
+        environment.volcano = 100;
+        engine.set_environment(environment);
+
+        for frame in (10..=20_000).step_by(10) {
+            engine
+                .tick_weather_events(frame)
+                .expect("weather tick succeeds");
+            if let Some(volcano) = engine
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "FXV1")
+            {
+                assert_eq!(
+                    volcano.state.position,
+                    Vector2::ZERO,
+                    "C++ creates FXV1 at the default origin before Activate"
+                );
+                return;
+            }
+        }
+        panic!("seed should launch a volcano in the bounded weather sweep");
     }
 
     #[test]
