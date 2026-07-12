@@ -77,6 +77,34 @@ fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
         .any(|message| message.lines.iter().any(|line| line.contains(needle)))
 }
 
+fn wait_for_tutorial_message_lines(
+    engine: &mut Engine,
+    owner: i32,
+    expected: &[&str],
+    max_ticks: usize,
+) -> u64 {
+    let expected = expected
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect::<Vec<_>>();
+    for _ in 0..max_ticks {
+        let frame = engine.tick().expect("Tutorial08 script tick succeeds");
+        let lines = frame
+            .hud
+            .messages
+            .iter()
+            .filter(|message| {
+                message.player == Some(owner) && message.decoration.as_deref() == Some("DECO")
+            })
+            .flat_map(|message| message.lines.iter().cloned())
+            .collect::<Vec<_>>();
+        if lines == expected {
+            return frame.frame;
+        }
+    }
+    panic!("Tutorial08 did not reach tutorial message state {expected:?} in {max_ticks} ticks");
+}
+
 fn object_menu_identification(engine: &Engine, owner: i32) -> Option<lc_script::Value> {
     engine
         .cursor_object_menu(owner)
@@ -353,4 +381,50 @@ fn tutorial08_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         r"Tutorial.c4f\Tutorial09.c4s"
     );
     Ok(())
+}
+
+#[test]
+fn tutorial08_empty_messages_clear_each_instruction_at_cpp_timing() {
+    let (mut engine, owner) = load_tutorial08();
+
+    // The real Script2/4/6 sections display permanent TutorialMessage text;
+    // Script3/5/7 pass an explicit empty string to clear it, with waits of
+    // 20 and 5 script ticks between transitions
+    // (Tutorial08.c4s/Script.c:37-70; Tutorial.c:22-37).
+    let script2 = wait_for_tutorial_message_lines(
+        &mut engine,
+        owner,
+        &["These furry little creatures enjoy running and jumping around the place."],
+        500,
+    );
+    let script3 = wait_for_tutorial_message_lines(&mut engine, owner, &[], 250);
+    let script4 = wait_for_tutorial_message_lines(
+        &mut engine,
+        owner,
+        &["You can catch them either by hand or with the lorry."],
+        100,
+    );
+    let script5 = wait_for_tutorial_message_lines(&mut engine, owner, &[], 250);
+    let script6 = wait_for_tutorial_message_lines(
+        &mut engine,
+        owner,
+        &["Your goal is to catch all wipfs and sell them at your homebase."],
+        100,
+    );
+    let script7 = wait_for_tutorial_message_lines(&mut engine, owner, &[], 250);
+
+    // C4GameScriptHost invokes one ScriptN on each Tick10, and wait(n)
+    // resumes through Schedule after n*10 frames (C4ScriptHost.cpp:222-230;
+    // Tutorial.c:33-37). Each empty CustomMessage must first remove the
+    // same-player/same-position permanent message, then add nothing
+    // (C4Script.cpp:5995-6039; C4GameMessage.cpp:290-305,332-337).
+    assert_eq!(
+        (script2, script3, script4, script5, script6, script7),
+        (120, 320, 370, 570, 620, 820)
+    );
+    assert_eq!(script3 - script2, 200);
+    assert_eq!(script4 - script3, 50);
+    assert_eq!(script5 - script4, 200);
+    assert_eq!(script6 - script5, 50);
+    assert_eq!(script7 - script6, 200);
 }
