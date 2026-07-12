@@ -6,7 +6,7 @@ record of completed slices.
 ## Focus
 
 Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
-01–06 and select Tutorial 07. Finish exact tutorial
+01–06; Tutorial 07 reaches BALN production. Finish exact tutorial
 presentation/interaction before resuming Goldrush at its pinned frame-3327
 Decay/DoCon mismatch.
 
@@ -15,7 +15,7 @@ Decay/DoCon mismatch.
 ```sh
 cargo nextest run -p lc-engine -E 'test(/^(real_tutorial(0[1-9]|10)_(virtual_play|route)|real_tutorial02_balloon_platform)::/)'
 cargo nextest run -p lc-engine -E 'test(/^virtual_player_harness::/)'
-cargo nextest run -p lc-app -E 'test(/app_virtual_keyboard_(completes_real_tutorial0[1-3]|completes_tutorial0[46]|flings_tutorial05)/)'
+cargo nextest run -p lc-app -E 'test(/app_virtual_keyboard_(completes|flings|opens)/)'
 cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask engine-snapshots verify
