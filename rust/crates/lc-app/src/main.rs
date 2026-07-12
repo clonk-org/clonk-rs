@@ -21331,6 +21331,8 @@ mod tests {
             .expect("Tutorial05 creates the right-hill CATA");
         let wood = app_object_with_definition_near_x(&app, "WOOD", 280)
             .expect("Tutorial05 creates the valley WOOD");
+        let metal = app_object_with_definition_near_x(&app, "METL", 285)
+            .expect("Tutorial05 creates the valley METL");
         assert_ne!(hill_cata, valley_cata);
 
         advance_app_until(
@@ -21949,6 +21951,544 @@ mod tests {
             300,
             |app| app_tutorial_message_contains(app, "transport the remaining material"),
         );
+
+        // Script110 leaves the relay to the player and Script150 waits for the
+        // ELEC created only by the completed ELEV
+        // (content/Tutorial.c4f/Tutorial05.c4s/Script.c:248-258;
+        // content/Objects.c4d/Structures.c4d/Elevator.c4d/Script.c:8-15).
+        // Cycle to the real valley CLNK, ungrab its first-shot CATA with the
+        // C++ DownDouble path, and collect the untouched METL through ordinary
+        // movement/collection (src/C4Player.cpp:1261-1275,1522-1536;
+        // src/C4Object.cpp:3520-3567; src/C4GameObjects.cpp:140-196).
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E selects the valley CLNK for the second relay");
+        assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
+        if app
+            .engine
+            .object_snapshot(valley)
+            .is_some_and(|object| object.action.name == "Push")
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes valley DownSingle");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X ungrabs the valley CATA");
+        }
+        advance_app_until(&mut app, "valley CLNK releases its CATA", 80, |app| {
+            app.engine
+                .object_snapshot(valley)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        let valley_x = app
+            .engine
+            .object_snapshot(valley)
+            .expect("valley CLNK survives first relay")
+            .position
+            .x;
+        let metal_x = app
+            .engine
+            .object_snapshot(metal)
+            .expect("untouched Tutorial05 METL survives first relay")
+            .position
+            .x;
+        let collect_metal_key = if metal_x < valley_x {
+            VirtualKeyCode::Z
+        } else {
+            VirtualKeyCode::C
+        };
+        hold_app_key_until(
+            &mut app,
+            collect_metal_key,
+            "valley CLNK naturally collects the original METL",
+            240,
+            |app| {
+                app.engine
+                    .object_snapshot(metal)
+                    .is_some_and(|object| object.container == Some(valley))
+            },
+        );
+        assert_eq!(
+            app.engine
+                .object_snapshot(metal)
+                .expect("valley-collected METL survives")
+                .container,
+            Some(valley)
+        );
+
+        let valley_x = app
+            .engine
+            .object_snapshot(valley)
+            .expect("METL-carrying valley CLNK survives")
+            .position
+            .x;
+        let valley_cata_x = app
+            .engine
+            .object_snapshot(valley_cata)
+            .expect("valley CATA survives first shot")
+            .position
+            .x;
+        let return_to_valley_cata = if valley_cata_x < valley_x {
+            VirtualKeyCode::Z
+        } else {
+            VirtualKeyCode::C
+        };
+        hold_app_key_until(
+            &mut app,
+            return_to_valley_cata,
+            "METL-carrying valley CLNK returns to CATA",
+            240,
+            |app| {
+                app.engine
+                    .object_snapshot(valley)
+                    .zip(app.engine.object_snapshot(valley_cata))
+                    .is_some_and(|(clonk, cata)| {
+                        clonk.action.name == "Walk"
+                            && (clonk.position.x - cata.position.x).abs() <= 8
+                    })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X regrabs the valley CATA");
+        advance_app_until(&mut app, "valley CLNK regrabs its CATA", 80, |app| {
+            app.engine.object_snapshot(valley).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(valley_cata)
+            })
+        });
+        if app
+            .engine
+            .object_snapshot(valley_cata)
+            .is_some_and(|object| object.direction != Direction::Right)
+        {
+            hold_app_key_until(
+                &mut app,
+                VirtualKeyCode::C,
+                "valley CATA faces the right hill for its second shot",
+                40,
+                |app| {
+                    app.engine
+                        .object_snapshot(valley_cata)
+                        .is_some_and(|object| object.direction == Direction::Right)
+                },
+            );
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A loads the original METL into valley CATA");
+        advance_app_until(&mut app, "original METL enters valley CATA", 80, |app| {
+            app.engine
+                .object_snapshot(metal)
+                .is_some_and(|object| object.container == Some(valley_cata))
+        });
+        assert_eq!(app_object_contents_count(&app, valley_cata, "METL"), 1);
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::X)
+            .expect("hold physical X for the valley CATA's second shot");
+        advance_app_until(
+            &mut app,
+            "valley CATA restores full tension for METL",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(valley_cata)
+                    .is_some_and(|object| object.action.name == "Ready" && object.action.phase == 6)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::X)
+            .expect("release physical X at full valley METL tension");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A fires METL toward the right hill");
+        advance_app_until(
+            &mut app,
+            "real valley CATA flings the original METL to the right hill",
+            400,
+            |app| {
+                app.engine.object_snapshot(metal).is_some_and(|object| {
+                    object.container.is_none()
+                        && (460..640).contains(&object.position.x)
+                        && (150..290).contains(&object.position.y)
+                })
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "second-relay METL settles on the right hill",
+            300,
+            |app| {
+                app.engine.object_snapshot(metal).is_some_and(|object| {
+                    object.container.is_none()
+                        && !object.mobile
+                        && (460..640).contains(&object.position.x)
+                        && (150..290).contains(&object.position.y)
+                })
+            },
+        );
+
+        // Mirror the physical relay through the already-used hill CATA. Its
+        // script preserves iPhase across Fire -> Charge -> Ready, accepts the
+        // pushed Clonk's carried object on Throw, and ejects that exact object
+        // from Projectile (Catapult.c4d/Script.c:31-77,121-163;
+        // src/C4Object.cpp:3520-3567).
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E selects the right-hill CLNK for METL");
+        assert_eq!(
+            app.engine.crew_cursor(app.local_owner),
+            Some(catapult_clonk)
+        );
+        if app
+            .engine
+            .object_snapshot(catapult_clonk)
+            .is_some_and(|object| object.action.name == "Push")
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes hill DownSingle");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X ungrabs the hill CATA");
+        }
+        advance_app_until(&mut app, "right-hill CLNK releases its CATA", 80, |app| {
+            app.engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        let hill_clonk_x = app
+            .engine
+            .object_snapshot(catapult_clonk)
+            .expect("right-hill CLNK survives first relay")
+            .position
+            .x;
+        let landed_metal_x = app
+            .engine
+            .object_snapshot(metal)
+            .expect("right-hill METL survives landing")
+            .position
+            .x;
+        let collect_hill_metal = if landed_metal_x < hill_clonk_x {
+            VirtualKeyCode::Z
+        } else {
+            VirtualKeyCode::C
+        };
+        hold_app_key_until(
+            &mut app,
+            collect_hill_metal,
+            "right-hill CLNK naturally collects the original METL",
+            240,
+            |app| {
+                app.engine
+                    .object_snapshot(metal)
+                    .is_some_and(|object| object.container == Some(catapult_clonk))
+            },
+        );
+        assert_eq!(
+            app.engine
+                .object_snapshot(metal)
+                .expect("right-hill-collected METL survives")
+                .container,
+            Some(catapult_clonk)
+        );
+
+        let hill_clonk_x = app
+            .engine
+            .object_snapshot(catapult_clonk)
+            .expect("METL-carrying hill CLNK survives")
+            .position
+            .x;
+        let hill_cata_x = app
+            .engine
+            .object_snapshot(hill_cata)
+            .expect("hill CATA survives first shot")
+            .position
+            .x;
+        let return_to_hill_cata = if hill_cata_x < hill_clonk_x {
+            VirtualKeyCode::Z
+        } else {
+            VirtualKeyCode::C
+        };
+        hold_app_key_until(
+            &mut app,
+            return_to_hill_cata,
+            "METL-carrying hill CLNK returns to CATA",
+            240,
+            |app| {
+                app.engine
+                    .object_snapshot(catapult_clonk)
+                    .zip(app.engine.object_snapshot(hill_cata))
+                    .is_some_and(|(clonk, cata)| {
+                        clonk.action.name == "Walk"
+                            && (clonk.position.x - cata.position.x).abs() <= 8
+                    })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X regrabs the hill CATA");
+        advance_app_until(&mut app, "right-hill CLNK regrabs its CATA", 80, |app| {
+            app.engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| {
+                    object.action.name == "Push" && object.action.target == Some(hill_cata)
+                })
+        });
+        if app
+            .engine
+            .object_snapshot(hill_cata)
+            .is_some_and(|object| object.direction != Direction::Left)
+        {
+            hold_app_key_until(
+                &mut app,
+                VirtualKeyCode::Z,
+                "hill CATA faces the cabin for its METL shot",
+                40,
+                |app| {
+                    app.engine
+                        .object_snapshot(hill_cata)
+                        .is_some_and(|object| object.direction == Direction::Left)
+                },
+            );
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A loads the original METL into hill CATA");
+        advance_app_until(&mut app, "original METL enters hill CATA", 80, |app| {
+            app.engine
+                .object_snapshot(metal)
+                .is_some_and(|object| object.container == Some(hill_cata))
+        });
+        assert_eq!(app_object_contents_count(&app, hill_cata, "METL"), 1);
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::X)
+            .expect("hold physical X for the hill CATA's METL shot");
+        advance_app_until(
+            &mut app,
+            "hill CATA restores full tension for METL",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(hill_cata)
+                    .is_some_and(|object| object.action.name == "Ready" && object.action.phase == 6)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::X)
+            .expect("release physical X at full hill METL tension");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A fires METL toward the cabin hill");
+        advance_app_until(
+            &mut app,
+            "real hill CATA flings the original METL to the cabin hill",
+            400,
+            |app| {
+                app.engine.object_snapshot(metal).is_some_and(|object| {
+                    object.container.is_none()
+                        && (0..220).contains(&object.position.x)
+                        && (0..140).contains(&object.position.y)
+                })
+            },
+        );
+
+        // Wrap selection to constructor_clnk, collect the same METL, and use
+        // the same physical DownDouble build path. C++ consumes METL=2/2 and
+        // only then lets Build advance ELEV to FullCon, whose Initialize makes
+        // ELEC (src/C4Object.cpp:1682-1762; src/C4ObjectCom.cpp:573-589;
+        // Elevator.c4d/DefCore.txt:16; Elevator.c4d/Script.c:8-15).
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E wraps selection to constructor for METL");
+        assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
+        advance_app_until(
+            &mut app,
+            "second-relay METL settles on the cabin hill",
+            300,
+            |app| {
+                app.engine
+                    .object_snapshot(metal)
+                    .is_some_and(|object| object.container.is_some() || !object.mobile)
+            },
+        );
+        if app
+            .engine
+            .object_snapshot(metal)
+            .is_some_and(|object| object.container != Some(constructor))
+        {
+            let constructor_x = app
+                .engine
+                .object_snapshot(constructor)
+                .expect("constructor survives METL relay")
+                .position
+                .x;
+            let metal_x = app
+                .engine
+                .object_snapshot(metal)
+                .expect("cabin-hill METL survives landing")
+                .position
+                .x;
+            let collect_cabin_metal = if metal_x < constructor_x {
+                VirtualKeyCode::Z
+            } else {
+                VirtualKeyCode::C
+            };
+            hold_app_key_until(
+                &mut app,
+                collect_cabin_metal,
+                "constructor naturally collects the original METL",
+                240,
+                |app| {
+                    app.engine
+                        .object_snapshot(metal)
+                        .is_some_and(|object| object.container == Some(constructor))
+                },
+            );
+        }
+        assert_eq!(
+            app.engine
+                .object_snapshot(metal)
+                .expect("constructor-collected METL survives")
+                .container,
+            Some(constructor)
+        );
+        let constructor_x = app
+            .engine
+            .object_snapshot(constructor)
+            .expect("METL-carrying constructor survives")
+            .position
+            .x;
+        let elevator_x = app
+            .engine
+            .object_snapshot(elevator)
+            .expect("partial ELEV survives second relay")
+            .position
+            .x;
+        if (constructor_x - elevator_x).abs() > 4 {
+            let return_to_elevator = if elevator_x < constructor_x {
+                VirtualKeyCode::Z
+            } else {
+                VirtualKeyCode::C
+            };
+            hold_app_key_until(
+                &mut app,
+                return_to_elevator,
+                "METL-carrying constructor returns to ELEV",
+                240,
+                |app| {
+                    app.engine
+                        .object_snapshot(constructor)
+                        .zip(app.engine.object_snapshot(elevator))
+                        .is_some_and(|(clonk, elevator)| {
+                            (clonk.position.x - elevator.position.x).abs() <= 4
+                        })
+                },
+            );
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes final DownSingle");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X builds ELEV with METL");
+        }
+        advance_app_until(
+            &mut app,
+            "constructor contributes the exact METL to ELEV",
+            120,
+            |app| app.engine.object_snapshot(metal).is_none(),
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 creates its completed elevator carriage",
+            600,
+            |app| app_object_with_definition(app, "ELEC").is_some(),
+        );
+        let completed = app
+            .engine
+            .object_snapshot(elevator)
+            .expect("completed Tutorial05 ELEV survives");
+        assert_eq!(completed.components.get("WOOD"), Some(&4));
+        assert_eq!(completed.components.get("METL"), Some(&2));
+        assert_eq!(completed.construction, 100_000);
+        let carriage = app_object_with_definition(&app, "ELEC")
+            .expect("completed ELEV creates its real ELEC carriage");
+        assert_eq!(completed.action.target, Some(carriage));
+        advance_app_until(
+            &mut app,
+            "Tutorial05 Script160 asks for the completed elevator carriage",
+            400,
+            |app| app_tutorial_message_contains(app, "Grab the elevator case"),
+        );
+
+        // Script160-162 requires the constructor to grab that exact ELEC and
+        // hold Jump'n'Run Dig until its ControlDig starts Drill; only then are
+        // both tutorial confinement effects removed
+        // (content/Tutorial.c4f/Tutorial05.c4s/Script.c:265-286;
+        // Elevator.c4d/Case.c4d/Script.c:346-360,612-631;
+        // src/C4Object.cpp:3520-3567).
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs Tutorial05's real ELEC");
+        advance_app_until(
+            &mut app,
+            "constructor grabs the completed elevator carriage",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(constructor)
+                    .is_some_and(|object| {
+                        object.action.name == "Push" && object.action.target == Some(carriage)
+                    })
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 Script161 asks for shaft drilling",
+            300,
+            |app| app_tutorial_message_contains(app, "Hold the 'dig' key"),
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::D)
+            .expect("hold physical D to start ELEC shaft drilling");
+        advance_app_until(
+            &mut app,
+            "real ELEC enters Drill through ControlDig",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(carriage)
+                    .is_some_and(|object| object.action.name == "Drill")
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 Script162 releases its confinement effects",
+            300,
+            |app| {
+                app.engine
+                    .object_snapshot(constructor)
+                    .zip(app.engine.object_snapshot(catapult_clonk))
+                    .is_some_and(|(constructor, catapult_clonk)| {
+                        constructor
+                            .effects
+                            .iter()
+                            .all(|effect| effect.name != "StayNearElev")
+                            && catapult_clonk
+                                .effects
+                                .iter()
+                                .all(|effect| effect.name != "StayNearCata")
+                    })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::D)
+            .expect("release physical D after Tutorial05 accepts Drill");
     }
 
     #[test]
