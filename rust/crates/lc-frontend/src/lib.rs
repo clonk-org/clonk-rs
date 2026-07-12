@@ -1106,6 +1106,7 @@ impl GraphicsSystem {
             lighting,
             owner_colors,
             ObjectRenderPass::Background,
+            gamma,
         );
         let textured_landscape = self.draw_ground(
             environment.ambient_temperature,
@@ -1130,13 +1131,14 @@ impl GraphicsSystem {
         // objects. Weather precipitation reaches this same path after the
         // simulation creates rain/snow PXS; there is no procedural viewport
         // rain layer (C4Viewport.cpp:1056-1078; C4PXS.cpp:242-307).
-        self.draw_pxs(&snapshot.particles, lighting);
+        self.draw_pxs(&snapshot.particles, lighting, gamma);
         self.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
             lighting,
             owner_colors,
             ObjectRenderPass::Normal,
+            gamma,
         );
         self.draw_objects(
             &snapshot.objects,
@@ -1144,6 +1146,7 @@ impl GraphicsSystem {
             lighting,
             owner_colors,
             ObjectRenderPass::ForegroundNonParallax,
+            gamma,
         );
         // C4Object::Draw attaches no energy/magic bars to world objects —
         // energy presentation lives in the HUD corner (DrawCursorInfo,
@@ -1152,14 +1155,23 @@ impl GraphicsSystem {
         // (src/C4Object.cpp:2505-2510); NeedEnergy is not modeled in the
         // Rust engine yet, so nothing is drawn here.
         let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, input.focus.id);
-        self.draw_selection_marks(snapshot, &highlight_ids, input.owner, origin_x, origin_y, zoom);
-        self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom);
+        self.draw_selection_marks(
+            snapshot,
+            &highlight_ids,
+            input.owner,
+            origin_x,
+            origin_y,
+            zoom,
+            gamma,
+        );
+        self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom, gamma);
         self.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
             lighting,
             owner_colors,
             ObjectRenderPass::ForegroundParallax,
+            gamma,
         );
 
         let content_surface = std::mem::replace(&mut self.surface, main_surface);
@@ -1248,6 +1260,7 @@ impl GraphicsSystem {
         origin_x: f32,
         origin_y: f32,
         zoom: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let Some(image) = self.hud_graphics.select_mark.clone() else {
             return;
@@ -1307,7 +1320,16 @@ impl GraphicsSystem {
                     GuiPoint::new(px, py),
                     GuiSize::new(cell as f32, cell as f32),
                 );
-                draw_image_region(&mut self.surface, &rect, &image, None, &source, false, None);
+                draw_image_region(
+                    &mut self.surface,
+                    &rect,
+                    &image,
+                    None,
+                    &source,
+                    false,
+                    None,
+                    gamma,
+                );
             }
         }
     }
@@ -1733,7 +1755,12 @@ impl GraphicsSystem {
         }
     }
 
-    fn draw_pxs(&mut self, particles: &[ParticleSnapshot], lighting: f32) {
+    fn draw_pxs(
+        &mut self,
+        particles: &[ParticleSnapshot],
+        lighting: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
         // C4PXSSystem::Draw is deliberately two-pass: every old-style
         // pixel/velocity line first, then every material sprite. Thus a
         // graphical PXS overlays every old-style PXS regardless of slot
@@ -1756,7 +1783,7 @@ impl GraphicsSystem {
                 continue;
             }
             let material = material.clone();
-            self.draw_old_style_pxs(particle, &material, lighting);
+            self.draw_old_style_pxs(particle, &material, lighting, gamma);
         }
 
         let mut compacted_slot = 0u32;
@@ -1783,7 +1810,7 @@ impl GraphicsSystem {
                 continue;
             };
             let slot = particle.pxs_slot.unwrap_or(fallback_slot) as usize % 500;
-            self.draw_graphical_pxs(particle, &material, &texture, rect, slot, lighting);
+            self.draw_graphical_pxs(particle, &material, &texture, rect, slot, lighting, gamma);
         }
     }
 
@@ -1837,6 +1864,7 @@ impl GraphicsSystem {
         particle: &ParticleSnapshot,
         material: &MaterialRenderInfo,
         lighting: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let [x, y, xdir, ydir] = Self::pxs_fixed(particle);
         let moving = lc_engine::math::fixtoi(xdir) != 0 || lc_engine::math::fixtoi(ydir) != 0;
@@ -1861,9 +1889,15 @@ impl GraphicsSystem {
         let end = screen(x.to_float(), y.to_float());
         if moving {
             let start = screen((x - xdir).to_float(), (y - ydir).to_float());
-            draw_pxs_line(&mut self.surface, start, end, color);
+            draw_pxs_line(&mut self.surface, start, end, color, gamma);
         } else {
-            draw_pxs_pixel(&mut self.surface, end.0.round() as i32, end.1.round() as i32, color);
+            draw_pxs_pixel(
+                &mut self.surface,
+                end.0.round() as i32,
+                end.1.round() as i32,
+                color,
+                gamma,
+            );
         }
     }
 
@@ -1876,6 +1910,7 @@ impl GraphicsSystem {
         rect: [i32; 6],
         slot: usize,
         lighting: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let [x, y, _, _] = Self::pxs_fixed(particle);
         let facet_width = rect[2];
@@ -1883,7 +1918,7 @@ impl GraphicsSystem {
         let phases_x = texture.width() as i32 / facet_width;
         let phases_y = texture.height() as i32 / facet_height;
         if phases_x <= 0 || phases_y <= 0 {
-            self.draw_old_style_pxs(particle, material, lighting);
+            self.draw_old_style_pxs(particle, material, lighting, gamma);
             return;
         }
         let phase_count = (phases_x * phases_y).max(1) as usize;
@@ -1925,6 +1960,7 @@ impl GraphicsSystem {
             &source,
             modulation_transparency,
             lighting,
+            gamma,
         );
     }
 
@@ -2195,6 +2231,7 @@ impl GraphicsSystem {
         lighting: f32,
         owner_colors: &HashMap<i32, Color>,
         pass: ObjectRenderPass,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         // Engine snapshots keep object payloads in canonical ID order, while
         // C4ObjectList draws Last -> Prev in its mutable master-list order
@@ -2255,10 +2292,10 @@ impl GraphicsSystem {
         }
 
         for object in &selected {
-            self.paint_object(object, objects, lighting, owner_colors);
+            self.paint_object(object, objects, lighting, owner_colors, gamma);
         }
         for object in &selected {
-            self.paint_object_top_face(object, owner_colors);
+            self.paint_object_top_face(object, owner_colors, gamma);
         }
     }
 
@@ -2270,6 +2307,7 @@ impl GraphicsSystem {
         &mut self,
         object: &ObjectSnapshot,
         owner_colors: &HashMap<i32, Color>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         if object.construction != FULL_CON || object.rotation.rem_euclid(360) != 0 {
             return;
@@ -2326,6 +2364,7 @@ impl GraphicsSystem {
             self.viewport_zoom.max(MIN_VIEWPORT_ZOOM),
             0.0,
             object.draw_transform,
+            gamma,
         );
     }
 
@@ -2335,6 +2374,7 @@ impl GraphicsSystem {
         objects: &[ObjectSnapshot],
         lighting: f32,
         owner_colors: &HashMap<i32, Color>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let content_width = self.surface_width as f32;
@@ -2381,6 +2421,7 @@ impl GraphicsSystem {
                 zoom,
                 rotation_degrees,
                 base_transform,
+                gamma,
             );
             self.draw_object_overlays(
                 object,
@@ -2390,6 +2431,7 @@ impl GraphicsSystem {
                 zoom,
                 rotation_degrees,
                 base_transform,
+                gamma,
             );
             return;
         }
@@ -2450,6 +2492,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             base_transform,
+            gamma,
         );
     }
 
@@ -2498,6 +2541,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let con = object.construction.clamp(0, FULL_CON);
         let def_shape = Self::sprite_def_shape(sprite);
@@ -2517,6 +2561,7 @@ impl GraphicsSystem {
                 zoom,
                 rotation_degrees,
                 transform,
+                gamma,
             );
             return;
         };
@@ -2537,6 +2582,7 @@ impl GraphicsSystem {
                 zoom,
                 rotation_degrees,
                 transform,
+                gamma,
             );
         }
         let Some(facet) = &graphics.facet else {
@@ -2589,6 +2635,7 @@ impl GraphicsSystem {
                 zoom,
                 0.0,
                 None,
+                gamma,
             );
             return;
         }
@@ -2629,6 +2676,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             transform,
+            gamma,
         );
     }
 
@@ -2652,6 +2700,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let swdt = def_shape.width;
         let shgt = def_shape.height;
@@ -2690,6 +2739,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             transform,
+            gamma,
         );
     }
 
@@ -2713,6 +2763,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let (mut dest_x, mut dest_y, mut dest_w, mut dest_h) = dest;
         if dest_w <= 0.0 || dest_h <= 0.0 || source.width <= 0 || source.height <= 0 {
@@ -2781,6 +2832,7 @@ impl GraphicsSystem {
                 &source,
                 flip,
                 owner_color,
+                gamma,
             );
         } else {
             // The dest rect center orbits the shape center
@@ -2803,6 +2855,7 @@ impl GraphicsSystem {
                 flip,
                 owner_color,
                 rotation_degrees,
+                gamma,
             );
         }
     }
@@ -2819,6 +2872,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) -> bool {
         let Some(graphics) = sprite.actions.get(action_name) else {
             return false;
@@ -2925,6 +2979,7 @@ impl GraphicsSystem {
                 &source_rect,
                 final_flipped,
                 owner_color,
+                gamma,
             );
         } else {
             draw_image_region_rotated(
@@ -2939,6 +2994,7 @@ impl GraphicsSystem {
                 final_flipped,
                 owner_color,
                 rotation_degrees,
+                gamma,
             );
         }
         true
@@ -2953,6 +3009,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         base_transform: Option<DrawTransform>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         if object.graphics_overlays.is_empty() {
             return;
@@ -2974,6 +3031,7 @@ impl GraphicsSystem {
                     zoom,
                     rotation_degrees,
                     combined_transform,
+                    gamma,
                 ),
                 GraphicsOverlayMode::Base => self.draw_overlay_base(
                     object,
@@ -2984,6 +3042,7 @@ impl GraphicsSystem {
                     zoom,
                     rotation_degrees,
                     combined_transform,
+                    gamma,
                 ),
                 _ => {}
             }
@@ -3000,6 +3059,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let definition_id = overlay
             .definition
@@ -3045,6 +3105,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             transform,
+            gamma,
         );
     }
 
@@ -3058,6 +3119,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let definition_id = overlay
             .definition
@@ -3144,6 +3206,7 @@ impl GraphicsSystem {
                 &source_rect,
                 flip_x,
                 owner_color,
+                gamma,
             );
         } else {
             draw_image_region_rotated(
@@ -3158,6 +3221,7 @@ impl GraphicsSystem {
                 flip_x,
                 owner_color,
                 rotation_degrees,
+                gamma,
             );
         }
     }
@@ -3208,6 +3272,7 @@ impl GraphicsSystem {
         origin_x: f32,
         origin_y: f32,
         zoom: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let Some(image) = self.cursor_atlas.image_for_resolution(self.surface_width) else {
             return;
@@ -3290,7 +3355,16 @@ impl GraphicsSystem {
             GuiPoint::new(screen_x - cursor_size / 2.0, mark_top),
             GuiSize::new(cursor_size, cursor_size),
         );
-        draw_image_region(&mut self.surface, &rect, &image, None, &source, false, None);
+        draw_image_region(
+            &mut self.surface,
+            &rect,
+            &image,
+            None,
+            &source,
+            false,
+            None,
+            gamma,
+        );
 
         // Cursor name label (src/C4Game.cpp:1873-1887): with cursor->Info,
         // the crew name — prefixed by a `sRankName` line when Rank > 0 —
@@ -3946,7 +4020,13 @@ fn object_color(object: &ObjectSnapshot) -> Color {
     Color::opaque(r, g, b)
 }
 
-fn draw_pxs_pixel(surface: &mut Surface, x: i32, y: i32, color: Color) {
+fn draw_pxs_pixel(
+    surface: &mut Surface,
+    x: i32,
+    y: i32,
+    color: Color,
+    _gamma: Option<&lc_graphics::GammaRamp>,
+) {
     if x < 0 || y < 0 || x >= surface.width() as i32 || y >= surface.height() as i32 {
         return;
     }
@@ -3959,6 +4039,7 @@ fn draw_pxs_line(
     start: (f32, f32),
     end: (f32, f32),
     color: Color,
+    gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     // Integer raster counterpart of CStdGL::DrawLineDw's GL_LINES call. Its
     // vertices are shifted by 0.5, and GL's diamond-exit rule makes the
@@ -3969,7 +4050,7 @@ fn draw_pxs_line(
     let (mut x0, mut y0) = (start.0.round() as i32, start.1.round() as i32);
     let (x1, y1) = (end.0.round() as i32, end.1.round() as i32);
     if x0 == x1 && y0 == y1 {
-        draw_pxs_pixel(surface, x0, y0, color);
+        draw_pxs_pixel(surface, x0, y0, color, gamma);
         return;
     }
     let dx = (x1 - x0).abs();
@@ -3978,7 +4059,7 @@ fn draw_pxs_line(
     let sy = if y0 < y1 { 1 } else { -1 };
     let mut error = dx + dy;
     while x0 != x1 || y0 != y1 {
-        draw_pxs_pixel(surface, x0, y0, color);
+        draw_pxs_pixel(surface, x0, y0, color, gamma);
         let doubled = error * 2;
         if doubled >= dy {
             error += dy;
@@ -4045,6 +4126,7 @@ fn draw_pxs_image_region(
     source: &SourceRect,
     modulation_transparency: u8,
     lighting: f32,
+    _gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     if target.size.width <= 0.0
         || target.size.height <= 0.0
@@ -4244,6 +4326,7 @@ fn draw_image_region(
     source: &SourceRect,
     flip_x: bool,
     owner_color: Option<Color>,
+    _gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
         return;
@@ -4351,6 +4434,7 @@ fn draw_image_region_rotated(
     flip_x: bool,
     owner_color: Option<Color>,
     rotation_degrees: f32,
+    _gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     if dest_width <= 0.0 || dest_height <= 0.0 {
         return;
@@ -5341,6 +5425,61 @@ mod tests {
     }
 
     #[test]
+    fn object_and_pxs_gamma_seams_are_structural_until_fragment_encoding_lands() {
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x102030, 0x405060, 0x708090,
+        ]);
+        let render = |gamma: Option<&lc_graphics::GammaRamp>| {
+            let snapshot = make_snapshot();
+            let sprites = solid_sprite(
+                "TestObject",
+                1,
+                1,
+                Color::opaque(240, 80, 20),
+                Some(DefinitionRect::new(0, 0, 1, 1)),
+                false,
+            );
+            let mut graphics = GraphicsSystem::new(
+                128,
+                128,
+                128,
+                "Gamma Object/PXS Seam",
+                test_font(),
+                sprites,
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(Color::opaque(7, 11, 13));
+            graphics.set_material_render_info(Arc::new(HashMap::from([(
+                "rain".to_string(),
+                MaterialRenderInfo::new(
+                    [40, 120, 200, 0, 0, 0, 0, 0, 0],
+                    [0; 6],
+                    None,
+                    0,
+                    25,
+                ),
+            )])));
+            graphics.draw_pxs(
+                &[pxs_particle("rain", [96 << 16, 100 << 16, 0, 0], 0)],
+                1.0,
+                gamma,
+            );
+            graphics.draw_objects(
+                &snapshot.objects,
+                &snapshot.render_order,
+                1.0,
+                &HashMap::new(),
+                ObjectRenderPass::Normal,
+                gamma,
+            );
+            graphics.surface().pixels().to_vec()
+        };
+
+        assert_eq!(render(Some(&gamma)), render(None));
+    }
+
+    #[test]
     fn viewport_point_at_maps_screen_to_world() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
@@ -5480,7 +5619,7 @@ mod tests {
         )])));
         let particle = pxs_particle("rain", [8 << 16, 8 << 16, 2 << 16, 0], 3);
 
-        graphics.draw_pxs(std::slice::from_ref(&particle), 1.0);
+        graphics.draw_pxs(std::slice::from_ref(&particle), 1.0, None);
 
         assert_eq!(
             graphics.surface().get_pixel(6, 8),
@@ -5517,7 +5656,7 @@ mod tests {
         )])));
         let particle = pxs_particle("rain", [100 << 16, 6 << 16, 100 << 16, 0], 3);
 
-        graphics.draw_pxs(std::slice::from_ref(&particle), 1.0);
+        graphics.draw_pxs(std::slice::from_ref(&particle), 1.0, None);
 
         assert!(graphics
             .surface()
@@ -5574,7 +5713,7 @@ mod tests {
         let graphical = pxs_particle("snow", [4 << 16, 4 << 16, 0, 0], 507);
         let fallback = pxs_particle("ash", [10 << 16, 10 << 16, 0, 0], 1);
 
-        graphics.draw_pxs(&[graphical, fallback], 1.0);
+        graphics.draw_pxs(&[graphical, fallback], 1.0, None);
 
         // 507 % 500 = 7: phase x=1; z=1; tx=6 shifts x by one. Texture
         // transparency 127 plus modulation 16 gives 143, i.e. source opacity
@@ -5611,6 +5750,7 @@ mod tests {
             &SourceRect::new(1, 0, 2, 4),
             0,
             1.0,
+            None,
         );
 
         assert_eq!(surface.get_pixel(0, 1), Some(Color::opaque(64, 0, 0)));
