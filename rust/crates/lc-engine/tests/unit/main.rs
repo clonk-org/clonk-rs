@@ -2725,6 +2725,93 @@ mod tests {
     }
 
     #[test]
+    fn insert_material_reaction_probe_follows_negative_gravity_like_cpp() {
+        // C4Landscape::InsertMaterial probes the reaction at
+        // `ty + Sign(GravAccel)` and passes that same coordinate to the
+        // reaction (C4Landscape.cpp:1185-1193). With negative gravity the
+        // material ABOVE the insertion point reacts; the material below
+        // must not be substituted for it.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Acid]
+            Name=Acid
+            Density=25
+            Friction=0
+            MaxSlide=0
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=Oil
+            CheckSlide=0
+
+            [Material Oil]
+            Name=Oil
+            Density=100
+            Friction=20
+            MaxSlide=0
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let acid = materials.id_of("Acid").expect("acid exists");
+        let oil = materials.id_of("Oil").expect("oil exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(7);
+        engine.set_materials(materials);
+        engine.set_physics(PhysicsSettings::new(-1, 12, -20));
+
+        // Oil at (3,4), sky insertion point (3,5), Earth below at (3,6).
+        // MaxSlide=0 and the solid floor force InsertMaterial into its
+        // reaction step without first re-creating a falling PXS.
+        let mut densities = vec![0i32; 128];
+        densities[20] = 100;
+        densities[30] = 100;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[20] = Some("Oil".into());
+        names[30] = Some("Earth".into());
+        let mut bytes = vec![0u8; 7 * 10];
+        bytes[4 * 7 + 3] = 20;
+        for y in 6..10 {
+            for x in 0..7 {
+                bytes[y * 7 + x] = 30;
+            }
+        }
+        let grid =
+            landscape::PixelGrid::new(7, 10, bytes, densities, names, vec![None; 128]);
+        let mut world =
+            Landscape::with_default_material(7, vec![6; 7], Some(earth)).expect("builds");
+        world.set_world_height(10);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|world| world.material_at(3, 4)),
+            Some(oil)
+        );
+        engine.apply_landscape_operations(vec![LandscapeOperation::InsertMaterial {
+            material: acid.index() as i32,
+            position: Vector2::new(3, 5),
+            velocity: Vector2::new(0, 0),
+        }]);
+
+        let world = engine.landscape().expect("landscape remains set");
+        assert_eq!(world.material_at(3, 4), None, "Oil above was poofed");
+        assert_eq!(
+            world.material_at(3, 5),
+            None,
+            "the reacting Acid was not inserted"
+        );
+        assert_eq!(engine.pxs_system.count(), 0);
+    }
+
+    #[test]
     fn user_convert_reaction_fires_on_pxs_move_like_cpp() {
         // mrfConvert: hardcoded InMatConvert has no collision proc, but
         // USER-defined conversions also convert upon hitting materials —
