@@ -223,22 +223,27 @@ impl PackedGroup {
         mem_unscramble(&mut header_bytes);
         let header = parse_header(&header_bytes)?;
 
-        let mut entries = Vec::with_capacity(header.entry_count);
+        let mut entries: Vec<PackedEntry> = Vec::with_capacity(header.entry_count);
         for _ in 0..header.entry_count {
             let mut entry_bytes = [0u8; GROUP_ENTRY_SIZE];
             reader.read_exact(&mut entry_bytes)?;
             let entry = parse_entry(&entry_bytes)?;
+            let entry_key = case_fold_group_path(&entry.relative_path);
+            if let Some(existing) = entries
+                .iter()
+                .position(|candidate| case_fold_group_path(&candidate.relative_path) == entry_key)
+            {
+                entries.remove(existing);
+            }
             entries.push(entry);
         }
 
         let data_offset = reader.stream_position()?;
-        let mut index = HashMap::new();
-        for (idx, entry) in entries.iter().enumerate() {
-            // C4Group::GetEntry returns the first case-insensitive match.
-            index
-                .entry(case_fold_group_path(&entry.relative_path))
-                .or_insert(idx);
-        }
+        let index = entries
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| (case_fold_group_path(&entry.relative_path), idx))
+            .collect();
 
         Ok(Self {
             path,
@@ -719,6 +724,25 @@ mod tests {
 
         assert!(group.exists("HELLO.TXT"));
         assert_eq!(group.read_file("Hello.Txt").unwrap(), b"world");
+    }
+
+    #[test]
+    fn packed_duplicate_entry_replaces_earlier_case_insensitive_name() {
+        // C4Group::AddEntry marks an existing same-name entry deleted before
+        // appending the replacement (src/C4Group.cpp:849-891). GetEntry uses
+        // case-insensitive WildcardMatch (src/C4Group.cpp:896-904;
+        // src/StdFile.cpp:337-367), so the later casing and payload win.
+        let image = packed_group_image_with_entries(&[
+            ("Same.txt", false, b"first"),
+            ("same.TXT", false, b"second"),
+        ]);
+        let group =
+            Group::from_memory(PathBuf::from("test.c4group"), image).expect("valid packed group");
+
+        let entries = group.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].relative_path, Path::new("same.TXT"));
+        assert_eq!(group.read_file("SAME.txt").unwrap(), b"second");
     }
 
     #[test]
