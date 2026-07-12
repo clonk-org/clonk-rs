@@ -9,6 +9,7 @@
 #include <C4Application.h>
 #include <C4Control.h>
 #include <C4Game.h>
+#include <C4GameControlNetwork.h>
 #include <C4GraphicsSystem.h>
 #include <C4Log.h>
 #include <C4Object.h>
@@ -26,8 +27,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -1790,6 +1793,55 @@ void ExportRuntimeState() {
 } // namespace
 
 namespace RustEngineBridge {
+
+int RunControlCodecOracle(int argc, char *const argv[]) {
+    constexpr std::string_view flag = "--control-codec-oracle";
+    if (argc < 2 || std::string_view(argv[1]) != flag) {
+        return -1;
+    }
+    if (argc != 6) {
+        std::fprintf(
+            stderr,
+            "usage: %s %s <client> <tick> <control.ini> <output.bin>\n",
+            argv[0],
+            flag.data());
+        return 2;
+    }
+
+    const auto parse_int32 = [](std::string_view value, int32_t &result) {
+        const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+        return parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size();
+    };
+    int32_t client = 0;
+    int32_t tick = 0;
+    if (!parse_int32(argv[2], client) || !parse_int32(argv[3], tick)) {
+        std::fprintf(stderr, "control codec oracle client and tick must be int32 values\n");
+        return 2;
+    }
+
+    StdStrBuf input;
+    if (!input.LoadFromFile(argv[4])) {
+        std::fprintf(stderr, "control codec oracle could not read %s\n", argv[4]);
+        return 2;
+    }
+
+    try {
+        C4Control control;
+        CompileFromBuf<StdCompilerINIRead>(mkNamingAdapt(control, "Control"), input);
+        C4GameControlPacket packet;
+        packet.Set(client, tick, control);
+        const StdBuf output = DecompileToBuf<StdCompilerBinWrite>(packet);
+        if (!output.SaveToFile(argv[5])) {
+            std::fprintf(stderr, "control codec oracle could not write %s\n", argv[5]);
+            return 2;
+        }
+    } catch (const std::exception &exception) {
+        std::fprintf(stderr, "control codec oracle failed: %s\n", exception.what());
+        return 2;
+    }
+
+    return 0;
+}
 
 bool IsActive() {
     std::lock_guard<std::mutex> lock(g_mutex);

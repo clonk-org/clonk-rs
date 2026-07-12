@@ -10,6 +10,7 @@ class C4Control;
 
 namespace RustEngineBridge {
 
+int RunControlCodecOracle(int argc, char *const argv[]);
 void OnFrame(C4Game &game);
 void OnGameStart(C4Game &game);
 void OnControlFrame(const C4Control &control, uint64_t frame);
@@ -39,6 +40,7 @@ bool FindPath(
 
 namespace RustEngineBridge {
 
+inline int RunControlCodecOracle(int, char *const[]) { return -1; }
 inline void OnFrame(C4Game &) {}
 inline void OnGameStart(C4Game &) {}
 inline void OnControlFrame(const C4Control &, uint64_t) {}

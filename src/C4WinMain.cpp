@@ -23,6 +23,8 @@
 #include <C4FullScreen.h>
 #include <C4Log.h>
 
+#include "rust/RustEngineBridge.h"
+
 #ifdef WITH_DEVELOPER_MODE
 #include <gtk/gtk.h>
 #endif
@@ -60,6 +62,11 @@ void InstallCrashHandler();
 
 int ClonkMain(const HINSTANCE instance, const int cmdShow, const int argc, char **const argv, const LPSTR commandLine)
 {
+	if (const int oracle_result = RustEngineBridge::RunControlCodecOracle(argc, argv); oracle_result >= 0)
+	{
+		return oracle_result;
+	}
+
 #if defined(_MSC_VER)
 	// enable debugheap!
 	_CrtSetDbgFlag(_CrtSetDbgFlag(_CRTDBG_REPORT_FLAG) | _CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
@@ -247,6 +254,10 @@ int main(int argc, char *argv[])
 		}
 	}
 #endif
+	if (const int oracle_result = RustEngineBridge::RunControlCodecOracle(argc, argv); oracle_result >= 0)
+	{
+		return oracle_result;
+	}
 
 	if (!geteuid())
 	{
