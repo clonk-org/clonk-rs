@@ -2186,7 +2186,7 @@ impl GraphicsSystem {
 
         sort_for_render(&mut selected);
         for object in &selected {
-            self.paint_object(object, lighting, owner_colors);
+            self.paint_object(object, objects, lighting, owner_colors);
         }
         for object in &selected {
             self.paint_object_top_face(object, owner_colors);
@@ -2263,6 +2263,7 @@ impl GraphicsSystem {
     fn paint_object(
         &mut self,
         object: &ObjectSnapshot,
+        objects: &[ObjectSnapshot],
         lighting: f32,
         owner_colors: &HashMap<i32, Color>,
     ) {
@@ -2305,6 +2306,7 @@ impl GraphicsSystem {
         if let Some(sprite) = sprite {
             self.draw_object_face(
                 object,
+                objects,
                 &sprite,
                 owner_color,
                 zoom,
@@ -2421,6 +2423,7 @@ impl GraphicsSystem {
     fn draw_object_face(
         &mut self,
         object: &ObjectSnapshot,
+        objects: &[ObjectSnapshot],
         sprite: &DefinitionSprite,
         owner_color: Option<Color>,
         zoom: f32,
@@ -2473,6 +2476,53 @@ impl GraphicsSystem {
         if facet.width <= 0 || facet.height <= 0 {
             return;
         }
+        let cox = (object.position.x + inst_shape.x) as f32;
+        let coy = (object.position.y + inst_shape.y) as f32;
+        // FacetTargetStretch bypasses action phase/direction and object
+        // transforms: DrawX scales the declared source from FacetY exactly
+        // to Target->y + Target->Shape.y (src/C4Object.cpp:2426-2438).
+        if graphics.facet_target_stretch {
+            let Some(target) = object
+                .action
+                .target
+                .and_then(|target| objects.iter().find(|object| object.id == target))
+            else {
+                return;
+            };
+            let Some(target_sprite) = self
+                .object_sprites
+                .get(&sprite_map_key(&target.definition_id, None))
+            else {
+                return;
+            };
+            let target_shape = Self::con_scaled_shape(
+                Self::sprite_def_shape(target_sprite),
+                target.construction.clamp(0, FULL_CON),
+                target_sprite.stretch_growth,
+            );
+            let dest_y = coy + facet.target_y as f32;
+            let dest_height = (target.position.y + target_shape.y) as f32 - dest_y;
+            self.blit_face(
+                sprite,
+                SourceRect::new(facet.x, facet.y, facet.width, facet.height),
+                (
+                    cox + facet.target_x as f32,
+                    dest_y,
+                    facet.width as f32,
+                    dest_height,
+                ),
+                (
+                    cox + inst_shape.width as f32 / 2.0,
+                    coy + inst_shape.height as f32 / 2.0,
+                ),
+                false,
+                owner_color,
+                zoom,
+                0.0,
+                None,
+            );
+            return;
+        }
         // Drawing phase; Reverse mirrors it (src/C4Object.cpp:2419-2420).
         let length = (graphics.length.unwrap_or(1).max(1) as i32).max(1);
         let mut phase = object.action.phase.rem_euclid(length);
@@ -2487,8 +2537,6 @@ impl GraphicsSystem {
         );
         // Full con: the facet at cox+FacetX/coy+FacetY; growing: the
         // con-scaled shape rect at cox/coy (src/C4Object.cpp:2450-2467).
-        let cox = (object.position.x + inst_shape.x) as f32;
-        let coy = (object.position.y + inst_shape.y) as f32;
         let dest = if con == FULL_CON {
             (
                 cox + facet.target_x as f32,
@@ -6294,6 +6342,121 @@ mod tests {
             graphics.surface().get_pixel((sx - 3) as u32, (sy - 3) as u32),
             Some(green),
             "facet must not be centered on the position"
+        );
+    }
+
+    #[test]
+    fn action_facet_target_stretches_exactly_to_target_shape_top() {
+        // C4Object::Draw stretches FacetTargetStretch from
+        // coy + Action.FacetY through, but not beyond,
+        // (Target->y + Target->Shape.y) (src/C4Object.cpp:2426-2438).
+        // C4Facet::DrawX scales the declared 2x4 source into that rectangle
+        // (src/C4Facet.cpp:296-303).
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 60);
+        snapshot.objects[0].definition_id = "FocusDummy".to_string();
+
+        let case_id = ObjectId::new(3);
+        let mut elevator = snapshot.objects[0].clone();
+        elevator.id = ObjectId::new(2);
+        elevator.definition_id = "ELEV".to_string();
+        elevator.position = Vector2::new(64, 60);
+        elevator.crew_member = false;
+        elevator.action = lc_engine::ActionState::new("LiftCase");
+        elevator.action.target = Some(case_id);
+
+        let mut case = snapshot.objects[0].clone();
+        case.id = case_id;
+        case.definition_id = "ELEC".to_string();
+        case.position = Vector2::new(64, 95);
+        case.crew_member = false;
+        case.container = Some(ObjectId::new(99));
+        snapshot.objects.extend([elevator, case]);
+        snapshot.landscape = Some(Landscape::flat(128, 120));
+
+        let green = Color::opaque(0, 200, 0);
+        let mut elevator_pixels = vec![0; 60 * 9 * 4];
+        for y in 5..9 {
+            for x in 58..60 {
+                let offset = (y * 60 + x) * 4;
+                elevator_pixels[offset..offset + 4]
+                    .copy_from_slice(&[green.r, green.g, green.b, green.a]);
+            }
+        }
+        let lift_case = DefinitionActionGraphics {
+            facet: Some(lc_engine::DefinitionActionFacet {
+                x: 58,
+                y: 5,
+                width: 2,
+                height: 4,
+                target_x: 13,
+                target_y: 13,
+            }),
+            directions: 1,
+            facet_base: false,
+            facet_target_stretch: true,
+            length: Some(1),
+            ..DefinitionActionGraphics::default()
+        };
+        let mut sprites = HashMap::new();
+        sprites.insert(
+            sprite_map_key("ELEV", None),
+            DefinitionSprite {
+                image: ImageData::new(60, 9, elevator_pixels),
+                actions: HashMap::from([("LiftCase".to_string(), lift_case)]),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(-14, -28, 28, 56)),
+                stretch_growth: false,
+                top_face: None,
+            },
+        );
+        sprites.insert(
+            sprite_map_key("ELEC", None),
+            DefinitionSprite {
+                image: ImageData::new(24, 26, vec![0; 24 * 26 * 4]),
+                actions: HashMap::new(),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(-12, -13, 24, 26)),
+                stretch_growth: false,
+                top_face: None,
+            },
+        );
+
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Facet target stretch",
+            test_font(),
+            Arc::new(sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        // ELEV: cox=64-14, coy=60-28. Facet target starts at (63,45).
+        // ELEC target Shape.y=-13, so the exclusive bottom is 95-13=82.
+        let cable_x = (63 - viewport_x) as u32;
+        let cable_top = (45 - viewport_y) as u32;
+        let cable_last = (81 - viewport_y) as u32;
+        let cable_bottom = (82 - viewport_y) as u32;
+        assert_eq!(graphics.surface().get_pixel(cable_x, cable_top), Some(green));
+        assert_eq!(graphics.surface().get_pixel(cable_x, cable_last), Some(green));
+        assert_eq!(
+            graphics.surface().get_pixel(cable_x + 1, cable_last),
+            Some(green)
+        );
+        assert_ne!(
+            graphics.surface().get_pixel(cable_x + 2, cable_last),
+            Some(green),
+            "the stretched target keeps the source facet's two-pixel width"
+        );
+        assert_ne!(
+            graphics.surface().get_pixel(cable_x, cable_bottom),
+            Some(green),
+            "FacetTargetStretch must stop at the target shape's top edge"
         );
     }
 
