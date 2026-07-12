@@ -5879,6 +5879,11 @@ pub struct SimulationSnapshot {
     #[serde(default)]
     pub physics: Option<PhysicsSettings>,
     pub objects: Vec<ObjectSnapshot>,
+    /// C++ `C4ObjectList` order as consumed by Draw's Last -> Prev passes
+    /// (C4ObjectList.cpp:387-396). Object snapshots remain ID-sorted for
+    /// deterministic consumers; an empty list is the legacy fallback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub render_order: Vec<ObjectId>,
     #[serde(default)]
     pub environment: EnvironmentFrame,
     #[serde(default)]
@@ -6096,7 +6101,7 @@ impl EngineState {
             next_object_id,
             landscape: snapshot.landscape.clone(),
             objects,
-            object_order: Vec::new(),
+            object_order: snapshot.render_order.clone(),
             particles: snapshot.particles.clone(),
             players: snapshot.players.clone(),
             last_player_info_id: snapshot
@@ -20290,6 +20295,7 @@ impl Engine {
             round_results: self.round_results.clone(),
             physics: Some(self.physics),
             objects,
+            render_order: self.exec_list.clone(),
             environment,
             sky: sky_snapshot,
             weather_events,

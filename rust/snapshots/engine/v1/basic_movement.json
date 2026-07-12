@@ -71,6 +71,9 @@
         }
       }
     ],
+    "render_order": [
+      1
+    ],
     "environment": {
       "settings": {
         "wind": 0,
@@ -715,6 +718,9 @@
           "y": -524026
         }
       }
+    ],
+    "render_order": [
+      1
     ],
     "environment": {
       "settings": {
@@ -1418,6 +1424,10 @@
         "last_energy_loss_cause": -1
       }
     ],
+    "render_order": [
+      2,
+      1
+    ],
     "environment": {
       "settings": {
         "wind": 0,
@@ -2119,6 +2129,10 @@
         "breath": 0,
         "last_energy_loss_cause": -1
       }
+    ],
+    "render_order": [
+      2,
+      1
     ],
     "environment": {
       "settings": {
@@ -2822,6 +2836,10 @@
         "last_energy_loss_cause": -1
       }
     ],
+    "render_order": [
+      2,
+      1
+    ],
     "environment": {
       "settings": {
         "wind": 0,
@@ -3405,6 +3423,10 @@
       "max_horizontal_speed": 12
     },
     "objects": [],
+    "render_order": [
+      2,
+      1
+    ],
     "environment": {
       "settings": {
         "wind": 0,

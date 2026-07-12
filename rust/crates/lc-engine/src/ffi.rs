@@ -1353,6 +1353,7 @@ unsafe fn make_snapshot(
         round_results: Default::default(),
         physics: None,
         objects: snapshots,
+        render_order: Vec::new(),
         environment: EnvironmentFrame::default(),
         sky: None,
         weather_events: Vec::new(),

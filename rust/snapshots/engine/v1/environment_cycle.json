@@ -67,6 +67,9 @@
         "last_energy_loss_cause": -1
       }
     ],
+    "render_order": [
+      1
+    ],
     "environment": {
       "settings": {
         "wind": 6,
@@ -1206,6 +1209,9 @@
         "breath": 0,
         "last_energy_loss_cause": -1
       }
+    ],
+    "render_order": [
+      1
     ],
     "environment": {
       "settings": {
@@ -2347,6 +2353,9 @@
         "last_energy_loss_cause": -1
       }
     ],
+    "render_order": [
+      1
+    ],
     "environment": {
       "settings": {
         "wind": 6,
@@ -3486,6 +3495,9 @@
         "breath": 0,
         "last_energy_loss_cause": -1
       }
+    ],
+    "render_order": [
+      1
     ],
     "environment": {
       "settings": {
@@ -4627,6 +4639,9 @@
         "last_energy_loss_cause": -1
       }
     ],
+    "render_order": [
+      1
+    ],
     "environment": {
       "settings": {
         "wind": 6,
@@ -5766,6 +5781,9 @@
         "breath": 0,
         "last_energy_loss_cause": -1
       }
+    ],
+    "render_order": [
+      1
     ],
     "environment": {
       "settings": {
@@ -6907,6 +6925,9 @@
         "last_energy_loss_cause": -1
       }
     ],
+    "render_order": [
+      1
+    ],
     "environment": {
       "settings": {
         "wind": 6,
@@ -8046,6 +8067,9 @@
         "breath": 0,
         "last_energy_loss_cause": -1
       }
+    ],
+    "render_order": [
+      1
     ],
     "environment": {
       "settings": {

@@ -28,7 +28,7 @@ use lc_engine::{
     EnvironmentFrame, EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape,
     ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, ParticleSnapshot, RgbColor,
     SimulationSnapshot, SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2,
-    WeatherEvent, CATEGORY_SORT_LIMIT, FULL_CON, OWNER_NONE,
+    WeatherEvent, FULL_CON, OWNER_NONE,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -1074,6 +1074,7 @@ impl GraphicsSystem {
         // sky and landscape (C4Viewport.cpp:1051-1063).
         self.draw_objects(
             &snapshot.objects,
+            &snapshot.render_order,
             lighting,
             owner_colors,
             ObjectRenderPass::Background,
@@ -1102,12 +1103,14 @@ impl GraphicsSystem {
         self.draw_pxs(&snapshot.particles, lighting);
         self.draw_objects(
             &snapshot.objects,
+            &snapshot.render_order,
             lighting,
             owner_colors,
             ObjectRenderPass::Normal,
         );
         self.draw_objects(
             &snapshot.objects,
+            &snapshot.render_order,
             lighting,
             owner_colors,
             ObjectRenderPass::ForegroundNonParallax,
@@ -1123,6 +1126,7 @@ impl GraphicsSystem {
         self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom);
         self.draw_objects(
             &snapshot.objects,
+            &snapshot.render_order,
             lighting,
             owner_colors,
             ObjectRenderPass::ForegroundParallax,
@@ -2130,13 +2134,32 @@ impl GraphicsSystem {
     fn draw_objects(
         &mut self,
         objects: &[ObjectSnapshot],
+        render_order: &[ObjectId],
         lighting: f32,
         owner_colors: &HashMap<i32, Color>,
         pass: ObjectRenderPass,
     ) {
+        // Engine snapshots keep object payloads in canonical ID order, while
+        // C4ObjectList draws Last -> Prev in its mutable master-list order
+        // (src/C4ObjectList.cpp:387-396). Empty is the legacy snapshot
+        // fallback; a partial sidecar appends omitted objects canonically.
+        let mut ordered = Vec::with_capacity(objects.len());
+        let mut seen = HashSet::with_capacity(objects.len());
+        if render_order.is_empty() {
+            ordered.extend(objects);
+        } else {
+            let by_id: HashMap<_, _> = objects.iter().map(|object| (object.id, object)).collect();
+            ordered.extend(
+                render_order
+                    .iter()
+                    .filter(|id| seen.insert(**id))
+                    .filter_map(|id| by_id.get(id).copied()),
+            );
+            ordered.extend(objects.iter().filter(|object| seen.insert(object.id)));
+        }
         let mut selected = Vec::new();
 
-        for object in objects {
+        for object in ordered {
             if object.status != ObjectStatus::Normal {
                 continue;
             }
@@ -2174,17 +2197,6 @@ impl GraphicsSystem {
             }
         }
 
-        fn sort_for_render(list: &mut Vec<&ObjectSnapshot>) {
-            list.sort_by(|lhs, rhs| {
-                (lhs.category & CATEGORY_SORT_LIMIT)
-                    .cmp(&(rhs.category & CATEGORY_SORT_LIMIT))
-                    .then_with(|| lhs.position.y.cmp(&rhs.position.y))
-                    .then_with(|| lhs.position.x.cmp(&rhs.position.x))
-                    .then_with(|| lhs.id.as_u64().cmp(&rhs.id.as_u64()))
-            });
-        }
-
-        sort_for_render(&mut selected);
         for object in &selected {
             self.paint_object(object, objects, lighting, owner_colors);
         }
@@ -4960,6 +4972,7 @@ mod tests {
                 rotation_velocity: None,
                 fixed_rotation: None,
             }],
+            render_order: Vec::new(),
             environment: EnvironmentFrame::default(),
             sky: None,
             weather_events: Vec::new(),
@@ -6010,6 +6023,91 @@ mod tests {
         let y = (100 - viewport_y) as u32;
         assert_eq!(graphics.surface().get_pixel(x, y), Some(green));
         assert_ne!(graphics.surface().get_pixel(x, y), Some(blue));
+    }
+
+    #[test]
+    fn snapshot_order_keeps_elevator_case_over_base_when_y_sort_conflicts() {
+        // C4ObjectList draws both its base and TopFace passes Last -> Prev
+        // without positional sorting (src/C4ObjectList.cpp:387-396).
+        // ELEV explicitly orders ELEC over itself (Elevator/Script.c:12-14),
+        // which must still hold after the carriage rises above the base.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 50);
+        snapshot.objects[0].container = Some(ObjectId::new(99));
+
+        let elevator_id = ObjectId::new(3);
+        let case_id = ObjectId::new(2);
+        let mut elevator = snapshot.objects[0].clone();
+        elevator.id = elevator_id;
+        elevator.definition_id = "ELEV".to_string();
+        elevator.position = Vector2::new(64, 50);
+        elevator.container = None;
+        elevator.crew_member = false;
+        elevator.action = lc_engine::ActionState::new("Active");
+
+        let mut case = elevator.clone();
+        case.id = case_id;
+        case.definition_id = "ELEC".to_string();
+        case.position.y = 40;
+        // Object payloads remain canonical by ID; the sidecar is C++'s
+        // Last->Prev draw order: ELEV, then ELEC.
+        snapshot.objects.extend([case, elevator]);
+        snapshot.render_order = vec![ObjectId::new(1), elevator_id, case_id];
+        snapshot.landscape = Some(Landscape::flat(128, 100));
+
+        let red = Color::opaque(200, 0, 0);
+        let green = Color::opaque(0, 200, 0);
+        let mut sprites = HashMap::new();
+        sprites.insert(
+            sprite_map_key("ELEV", None),
+            DefinitionSprite {
+                image: ImageData::new(1, 1, vec![red.r, red.g, red.b, red.a]),
+                actions: HashMap::from([(
+                    "Active".to_string(),
+                    DefinitionActionGraphics::default(),
+                )]),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                stretch_growth: false,
+                top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
+            },
+        );
+        sprites.insert(
+            sprite_map_key("ELEC", None),
+            DefinitionSprite {
+                image: ImageData::new(1, 1, vec![green.r, green.g, green.b, green.a]),
+                actions: HashMap::from([(
+                    "Active".to_string(),
+                    DefinitionActionGraphics::default(),
+                )]),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                stretch_growth: false,
+                top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 10)),
+            },
+        );
+
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Elevator object order",
+            test_font(),
+            Arc::new(sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        assert_eq!(
+            graphics
+                .surface()
+                .get_pixel((64 - viewport_x) as u32, (50 - viewport_y) as u32),
+            Some(green),
+            "SetObjectOrder keeps the raised ELEC TopFace over ELEV"
+        );
     }
 
     #[test]

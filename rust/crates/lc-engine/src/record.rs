@@ -493,6 +493,7 @@ mod tests {
                 rotation_velocity: None,
                 fixed_rotation: None,
             }],
+            render_order: Vec::new(),
             environment: EnvironmentFrame::default(),
             sky: None,
             weather_events: Vec::new(),

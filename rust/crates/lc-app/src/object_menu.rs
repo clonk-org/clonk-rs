@@ -1926,6 +1926,7 @@ mod tests {
             round_results: Default::default(),
             physics: None,
             objects,
+            render_order: Vec::new(),
             environment: Default::default(),
             sky: None,
             weather_events: Vec::new(),

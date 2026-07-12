@@ -210,6 +210,9 @@
         }
       }
     ],
+    "render_order": [
+      1
+    ],
     "environment": {
       "settings": {
         "wind": 0,
@@ -1214,6 +1217,10 @@
         "breath": 0,
         "last_energy_loss_cause": -1
       }
+    ],
+    "render_order": [
+      1,
+      2
     ],
     "environment": {
       "settings": {
@@ -2228,6 +2235,10 @@
         }
       }
     ],
+    "render_order": [
+      1,
+      2
+    ],
     "environment": {
       "settings": {
         "wind": 0,
@@ -3241,6 +3252,10 @@
         }
       }
     ],
+    "render_order": [
+      1,
+      2
+    ],
     "environment": {
       "settings": {
         "wind": 0,
@@ -4146,6 +4161,10 @@
         }
       }
     ],
+    "render_order": [
+      1,
+      2
+    ],
     "environment": {
       "settings": {
         "wind": 0,
@@ -5050,6 +5069,9 @@
           "y": -65012
         }
       }
+    ],
+    "render_order": [
+      2
     ],
     "environment": {
       "settings": {

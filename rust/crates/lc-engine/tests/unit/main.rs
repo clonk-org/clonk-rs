@@ -31874,6 +31874,21 @@ func Reorder(pRelative, pSort, fAfter) {
 
         let state = engine.capture_state();
         assert_eq!(state.object_order, vec![c, a, b]);
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot
+                .objects
+                .iter()
+                .map(|object| object.id)
+                .collect::<Vec<_>>(),
+            vec![a, b, c],
+            "deterministic snapshot consumers keep canonical id order"
+        );
+        assert_eq!(
+            snapshot.render_order,
+            vec![c, a, b],
+            "rendering follows C++ Last -> Prev after SetObjectOrder"
+        );
         let mut restored = Engine::with_seed(0);
         restored.set_landscape(Landscape::flat(100, 100));
         restored
