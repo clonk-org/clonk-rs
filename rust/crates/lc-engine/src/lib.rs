@@ -32624,11 +32624,14 @@ impl Engine {
                 return true;
             }
         }
-        // Try reaction with the material below (C4Landscape.cpp:1199-1209)
-        let below_mat = self.landscape_material(tx, ty + 1);
+        // Try the reaction in gravity direction. The preceding slide remains
+        // hardcoded downward, but C++ probes `ty + Sign(GravAccel)` here
+        // (C4Landscape.cpp:1185-1193).
+        let reaction_y = ty + self.physics.gravity_as_c4fixed().val().signum();
+        let reaction_mat = self.landscape_material(tx, reaction_y);
         let reaction = self.materials.reaction_for_event(
             Some(mat),
-            below_mat,
+            reaction_mat,
             MaterialInteractionEvent::PxsPos,
         );
         if !matches!(reaction.kind, MaterialReactionKind::None) || reaction.user_defined {
@@ -32646,14 +32649,14 @@ impl Engine {
                 &mut rx,
                 &mut ry,
                 tx,
-                ty + 1,
+                reaction_y,
                 &mut probe,
-                below_mat,
+                reaction_mat,
                 MaterialInteractionEvent::PxsPos,
                 &mut pos_changed,
             ) {
                 // the material to be inserted killed itself in some
-                // material reaction below
+                // material reaction in gravity direction
                 return true;
             }
         }
