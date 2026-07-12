@@ -22278,11 +22278,15 @@ impl Engine {
     /// Contact* callback dispatch for ContactCalls definitions (:503).
     fn stabilize_object(&mut self, idx: usize, solid_mask_indices: &[usize]) {
         let rotation = self.objects[idx].state.rotation;
-        let signed = if rotation > 180 {
-            rotation - 360
-        } else {
-            rotation
-        };
+        // C++ repeatedly folds arbitrary saved/scripted angles into
+        // [-180, 180] (C4Movement.cpp:493-494). `% 360` plus one boundary
+        // adjustment is equivalent without a potentially huge loop.
+        let mut signed = rotation % 360;
+        if signed < -180 {
+            signed += 360;
+        } else if signed > 180 {
+            signed -= 360;
+        }
         if signed == 0 || !(-math::STABLE_RANGE..=math::STABLE_RANGE).contains(&signed) {
             return;
         }
