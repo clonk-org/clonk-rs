@@ -33592,6 +33592,156 @@ public func Board(pTarget)
     }
 
     #[test]
+    fn exec_base_tick35_digs_snow_and_fly_ashes_out_of_upright_structures(
+    ) -> Result<(), EngineError> {
+        // C4Object::ExecBase clears exactly Snow and FlyAshes from an
+        // upright structure's current shape rectangle on Tick35 when the
+        // StructuresSnowIn rule is absent (C4Object.cpp:1033-1044).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Snow]
+            Name=Snow
+            Density=25
+            DigFree=1
+
+            [Material FlyAshes]
+            Name=FlyAshes
+            Density=25
+            DigFree=1
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            DigFree=0
+            "#,
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let snow = materials.id_of("Snow").expect("Snow exists");
+        let fly_ashes = materials.id_of("FlyAshes").expect("FlyAshes exists");
+        let earth = materials.id_of("Earth").expect("Earth exists");
+        assert!(materials.get_by_id(snow).unwrap().dig_free());
+        assert!(materials.get_by_id(fly_ashes).unwrap().dig_free());
+
+        let mut engine = Engine::new();
+        engine.set_materials(materials);
+        let mut structure = Definition::from_script("HUT1", "Hut", BASIC_OBJECT_SCRIPT)?;
+        structure.set_shape_rect(Some(DefinitionRect::new(-1, -1, 3, 3)));
+        engine.register_definition(structure)?;
+
+        let mut bytes = vec![0_u8; 7 * 7];
+        bytes[2 * 7 + 2] = 10;
+        bytes[3 * 7 + 4] = 20;
+        bytes[3 * 7 + 3] = 30;
+        let mut densities = vec![0_i32; 128];
+        densities[10] = 25;
+        densities[20] = 25;
+        densities[30] = 100;
+        let mut names = vec![None; 128];
+        names[10] = Some("Snow".to_string());
+        names[20] = Some("FlyAshes".to_string());
+        names[30] = Some("Earth".to_string());
+        let grid = landscape::PixelGrid::new(7, 7, bytes, densities, names, vec![None; 128]);
+        let mut landscape = Landscape::new(7, vec![7; 7]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+        engine.spawn_object(
+            SpawnConfig::new("HUT1")
+                .with_position(Vector2::new(3, 3))
+                .with_category(CATEGORY_STRUCTURE),
+        )?;
+
+        for _ in 0..34 {
+            engine.tick()?;
+        }
+        assert_eq!(engine.landscape().unwrap().material_at(2, 2), Some(snow));
+        assert_eq!(
+            engine.landscape().unwrap().material_at(4, 3),
+            Some(fly_ashes)
+        );
+
+        engine.tick()?;
+        assert_eq!(engine.landscape().unwrap().material_at(2, 2), None);
+        assert_eq!(engine.landscape().unwrap().material_at(4, 3), None);
+        assert_eq!(
+            engine.landscape().unwrap().material_at(3, 3),
+            Some(earth),
+            "DigFreeMat only targets Snow and FlyAshes"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn structures_snow_in_rule_preserves_snow_inside_structures() -> Result<(), EngineError> {
+        // C4Game::UpdateRules maps a live STSN object to
+        // C4RULE_StructuresSnowIn (C4Game.cpp:4038-4047), which suppresses
+        // ExecBase's Tick35 DigFreeMat calls (C4Object.cpp:1033-1044).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Snow]
+            Name=Snow
+            Density=25
+            DigFree=1
+            "#,
+        )
+        .expect("Snow parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let snow = materials.id_of("Snow").expect("Snow exists");
+        let mut engine = Engine::new();
+        engine.set_materials(materials.clone());
+
+        let mut structure = Definition::from_script("HUT1", "Hut", BASIC_OBJECT_SCRIPT)?;
+        structure.set_shape_rect(Some(DefinitionRect::new(-1, -1, 3, 3)));
+        engine.register_definition(structure)?;
+        engine.register_definition(Definition::from_script(
+            "STSN",
+            "Structures Snow In",
+            BASIC_OBJECT_SCRIPT,
+        )?)?;
+
+        let mut bytes = vec![0_u8; 7 * 7];
+        bytes[2 * 7 + 2] = 10;
+        let mut densities = vec![0_i32; 128];
+        densities[10] = 25;
+        let mut names = vec![None; 128];
+        names[10] = Some("Snow".to_string());
+        let grid = landscape::PixelGrid::new(7, 7, bytes, densities, names, vec![None; 128]);
+        let mut landscape = Landscape::new(7, vec![7; 7]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+        engine.spawn_object(
+            SpawnConfig::new("HUT1")
+                .with_position(Vector2::new(3, 3))
+                .with_category(CATEGORY_STRUCTURE),
+        )?;
+        engine.spawn_object(SpawnConfig::new("STSN"))?;
+
+        for _ in 0..34 {
+            engine.tick()?;
+        }
+        let saved = engine.capture_state();
+
+        let mut restored = Engine::new();
+        restored.set_materials(materials);
+        let mut structure = Definition::from_script("HUT1", "Hut", BASIC_OBJECT_SCRIPT)?;
+        structure.set_shape_rect(Some(DefinitionRect::new(-1, -1, 3, 3)));
+        restored.register_definition(structure)?;
+        restored.register_definition(Definition::from_script(
+            "STSN",
+            "Structures Snow In",
+            BASIC_OBJECT_SCRIPT,
+        )?)?;
+        restored.restore_state(&saved)?;
+        restored.tick()?;
+        assert_eq!(
+            restored.landscape().unwrap().material_at(2, 2),
+            Some(snow),
+            "the saved STSN rule bit disables frame-35 structure snow clearing"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn exec_base_flybase_start_call_sees_base_target() -> Result<(), EngineError> {
         // ExecBase passes the base as FlyBase's action target
         // (C4Object.cpp:1010-1012). SetAction installs that target first
