@@ -21584,6 +21584,83 @@ mod tests {
         );
     }
 
+    #[test]
+    fn app_virtual_keyboard_collects_tutorial06_crystal_and_opens_pit() {
+        // Tutorial06 creates the real CRYS, waits for it to become contained,
+        // then launches FXQ1 and calls ShakeFree(60,160,50) before displaying
+        // the instability warning
+        // (content/Tutorial.c4f/Tutorial06.c4s/Script.c:8-37).
+        // Keep collection behind GameApp::handle_key: C++ collects when the
+        // carryable crosses the crew member's collection rectangle, and
+        // ShakeFree clears every DigFree pixel in its circle
+        // (src/C4GameObjects.cpp:155-196; src/C4Landscape.cpp:928-938,999-1009).
+        let mut app = real_tutorial_app(6, "Tutorial 6 app virtual player");
+        let first_clonk = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("Tutorial06 starts with a crew cursor");
+        let crystal = app_object_with_definition(&app, "CRYS")
+            .expect("Tutorial06 creates its real collectible CRYS");
+        assert_eq!(
+            app.engine
+                .object_snapshot(crystal)
+                .expect("Tutorial06 CRYS survives initialization")
+                .container,
+            None
+        );
+        assert!(
+            app.engine.debug_landscape_is_solid(60, 150),
+            "Tutorial06 pit probe must start as solid Earth"
+        );
+
+        advance_app_until(
+            &mut app,
+            "Tutorial06 asks the first CLNK to collect CRYS",
+            400,
+            |app| app_tutorial_message_contains(app, "collect the crystal"),
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "the first CLNK naturally collects the exact Tutorial06 CRYS",
+            800,
+            |app| {
+                app.engine
+                    .object_snapshot(crystal)
+                    .is_some_and(|object| object.container == Some(first_clonk))
+            },
+        );
+        assert_eq!(
+            app.engine
+                .object_snapshot(crystal)
+                .expect("collected Tutorial06 CRYS survives")
+                .container,
+            Some(first_clonk),
+            "physical Z must collect Tutorial06's original CRYS"
+        );
+
+        advance_app_until(
+            &mut app,
+            "Tutorial06 ShakeFree opens its scripted pit",
+            120,
+            |app| !app.engine.debug_landscape_is_solid(60, 150),
+        );
+        assert!(
+            !app.engine.debug_landscape_is_solid(60, 150),
+            "ShakeFree(60,160,50) must clear the (60,150) Earth pixel"
+        );
+        assert!(
+            app_object_with_definition(&app, "FXQ1").is_some(),
+            "Tutorial06 must launch its real earthquake object"
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial06 advances to its instability warning",
+            300,
+            |app| app_tutorial_message_contains(app, "area seems to be unstable"),
+        );
+    }
+
     fn two_item_script_menu(cursor: ObjectId) -> lc_engine::ObjectMenuState {
         lc_engine::ObjectMenuState {
             caption: "Choose".to_string(),
