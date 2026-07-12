@@ -5,8 +5,8 @@ use std::error::Error;
 use crate::support::real_scenario::load_tutorial;
 use crate::support::virtual_player::VirtualPlayer;
 use lc_engine::{
-    ActionUpdate, Direction, EffectVarValue, Engine, JoinPlayerConfig, ObjectId, ObjectUpdate,
-    COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
+    Direction, EffectVarValue, Engine, JoinPlayerConfig, ObjectId, COM_CURSOR_RIGHT,
+    COM_CURSOR_TOGGLE, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
 };
 
 fn load_tutorial05_with_controls(control_style: bool, auto_context_menu: bool) -> (Engine, i32) {
@@ -89,33 +89,90 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
     let constructor = engine
         .crew_cursor(owner)
         .expect("Tutorial05 starts on its constructor CLNK");
-    engine
-        .player_in_com(owner, COM_CURSOR_RIGHT, 0)
-        .expect("real CursorRight selects the valley CLNK");
-    let valley = engine
-        .crew_cursor(owner)
-        .expect("Tutorial05 has a valley CLNK");
-    assert_ne!(valley, constructor);
-
+    let elevator = object_with_definition(&engine, "ELEV").expect("Tutorial05 creates ELEV");
     let valley_cata = object_with_definition_near_x(&engine, "CATA", 240)
         .expect("Tutorial05 creates its valley CATA");
     let wood = object_with_definition_near_x(&engine, "WOOD", 280)
         .expect("Tutorial05 creates its valley WOOD");
-    // Grabbing/loading are covered by the Classic route below and are not the
-    // subject of this regression. Preserve the real CLNK/WOOD/CATA objects
-    // and scripts while arranging the two prerequisites for the held-control
-    // seam and eventual ControlThrow -> Fire -> Projectile assertion.
-    engine.apply_object_update(wood, ObjectUpdate::new().with_container(valley_cata))?;
-    engine.apply_object_update(
-        valley,
-        ObjectUpdate::new().with_action_update(
-            ActionUpdate::default()
-                .with_name("Push")
-                .with_target(Some(valley_cata)),
-        ),
+    let mut player = VirtualPlayer::new(&mut engine, owner);
+
+    player.wait_until(
+        "Tutorial05 teaches selection after ELEV stalls at eighty percent",
+        800,
+        |engine| {
+            tutorial_message_contains(engine, "'select right'")
+                && engine
+                    .object_snapshot(elevator)
+                    .is_some_and(|object| object.construction == 80_000)
+        },
+    )?;
+    player.tap(COM_CURSOR_RIGHT)?;
+    let valley = player
+        .engine()
+        .crew_cursor(owner)
+        .expect("physical CursorRight selects the valley CLNK");
+    player.assert_milestone("physical CursorRight selects the real valley CLNK", |engine| {
+        valley != constructor
+            && engine.object_snapshot(valley).is_some_and(|object| {
+                (200..300).contains(&object.position.x) && object.position.y >= 350
+            })
+    })?;
+
+    player.wait_until(
+        "Tutorial05 asks the valley CLNK to collect material",
+        240,
+        |engine| tutorial_message_contains(engine, "collect either the wood or the metal"),
+    )?;
+    player.hold_until(
+        COM_RIGHT,
+        "the AutoStop valley CLNK naturally collects the exact WOOD",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(wood)
+                .is_some_and(|object| object.container == Some(valley))
+        },
+    )?;
+    player.wait_until("Tutorial05 points back to the valley CATA", 240, |engine| {
+        tutorial_message_contains(engine, "stand in front of the catapult")
+    })?;
+    player.hold_until(
+        COM_LEFT,
+        "the WOOD-carrying AutoStop CLNK reaches the valley CATA",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(valley)
+                .zip(engine.object_snapshot(valley_cata))
+                .is_some_and(|(clonk, cata)| {
+                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 12
+                })
+        },
+    )?;
+    player.tap(COM_DOWN)?;
+    player.wait_until("single AutoStop Down grabs the real valley CATA", 80, |engine| {
+        engine.object_snapshot(valley).is_some_and(|object| {
+            object.action.name == "Push" && object.action.target == Some(valley_cata)
+        })
+    })?;
+
+    player.wait_until(
+        "Tutorial05 asks the AutoStop CLNK to load CATA",
+        300,
+        |engine| tutorial_message_contains(engine, "Press 'throw' to load the catapult"),
+    )?;
+    player.tap(COM_THROW)?;
+    player.wait_until("physical Throw loads the exact WOOD into CATA", 80, |engine| {
+        engine
+            .object_snapshot(wood)
+            .is_some_and(|object| object.container == Some(valley_cata))
+    })?;
+    player.wait_until(
+        "Tutorial05 asks the AutoStop CLNK to tension CATA",
+        300,
+        |engine| tutorial_message_contains(engine, "fully tensioned"),
     )?;
 
-    let mut player = VirtualPlayer::new(&mut engine, owner);
     player.assert_milestone("the selected valley CLNK pushes the real CATA", |engine| {
         engine.object_snapshot(valley).is_some_and(|object| {
             object.action.name == "Push" && object.action.target == Some(valley_cata)
@@ -250,6 +307,49 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
             engine
                 .object_snapshot(wood)
                 .is_some_and(|object| object.container.is_none())
+        },
+    )?;
+    let launched = player
+        .engine()
+        .object_snapshot(wood)
+        .expect("the exact loaded WOOD survives Projectile");
+    assert_eq!(
+        launched.controller, owner,
+        "CATA::Projectile assigns the firing player to its exact payload"
+    );
+    assert!(
+        launched.container.is_none()
+            && launched.mobile
+            && launched.velocity.x > 0
+            && launched.velocity.y < 0,
+        "full right-facing tension must eject the exact WOOD up and right; WOOD={launched:?}"
+    );
+
+    // Projectile exits the exact contained object with full-phase (+8,-12)
+    // velocity, then applies its one synchronized RandomX deviation before
+    // ordinary FLIGHT movement settles it on the right hill
+    // (Catapult.c4d/Script.c:48-77; C4Movement.cpp:220-445).
+    player.wait_until(
+        "the AutoStop-fired WOOD crosses Tutorial05's right-hill rectangle",
+        400,
+        |engine| {
+            engine.object_snapshot(wood).is_some_and(|object| {
+                object.container.is_none()
+                    && (460..640).contains(&object.position.x)
+                    && (150..290).contains(&object.position.y)
+            })
+        },
+    )?;
+    player.wait_until(
+        "the exact AutoStop-fired WOOD settles on the right hill",
+        300,
+        |engine| {
+            engine.object_snapshot(wood).is_some_and(|object| {
+                object.container.is_none()
+                    && !object.mobile
+                    && (460..640).contains(&object.position.x)
+                    && (150..290).contains(&object.position.y)
+            })
         },
     )?;
 
