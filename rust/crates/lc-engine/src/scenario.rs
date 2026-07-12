@@ -13184,9 +13184,11 @@ mod game_start_sync {
         );
     }
 
-    // C4Game::Synchronize's tail broadcasts ~UpdateTransferZone to EVERY
-    // object (C4Game.cpp:3710, C4ObjectList.cpp:734-739) AFTER the
-    // FixRandom re-fix. GoldRush oracle: the placed cannon's handler
+    // C4Game::Synchronize's tail broadcasts ~UpdateTransferZone to every
+    // active Game.Objects entry (C4Game.cpp:3713-3714,3727-3729;
+    // C4GameObjects.cpp:54-58; C4ObjectList.cpp:734-739) AFTER the FixRandom
+    // re-fix. GoldRush oracle:
+    // the placed cannon's handler
     // (Cannon.c4d/Script.c:20-25) re-runs Initialize() because the stale
     // saved Action=Stand loaded as Idle - SetAction("Ready") +
     // SetDir(Random(2)) (the first draw of the fresh ledger) + the GC4V

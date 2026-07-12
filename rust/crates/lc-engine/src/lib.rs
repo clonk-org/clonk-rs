@@ -28121,13 +28121,19 @@ impl Engine {
         // set and reset CreatePtr (C4MassMover.cpp:249-252).
         self.mass_movers.synchronize();
         // C4Game::Synchronize's tail: TransferZones.Synchronize()
-        // broadcasts ~UpdateTransferZone to EVERY object AFTER the
-        // FixRandom re-fix (C4Game.cpp:3695,3710; C4ObjectList.cpp:
-        // 734-739). GoldRush's placed cannon re-runs Initialize() here
+        // broadcasts ~UpdateTransferZone to every active Game.Objects entry
+        // AFTER the FixRandom re-fix (C4Game.cpp:3713-3714,3727-3729;
+        // C4GameObjects.cpp:50-59; C4ObjectList.cpp:734-739). GoldRush's
+        // placed cannon re-runs Initialize() here
         // (Cannon.c4d/Script.c:20-25) — SetAction Ready, SetDir(Random(2))
         // as the fresh ledger's first draw, and the GC4V crosshair as the
         // first created object.
-        let ids: Vec<ObjectId> = self.objects.iter().map(|object| object.id).collect();
+        let ids: Vec<ObjectId> = self
+            .objects
+            .iter()
+            .filter(|object| !object.destroyed && object.state.status.is_active())
+            .map(|object| object.id)
+            .collect();
         for id in ids {
             let Some(index) = self.find_object_index(id) else {
                 continue;

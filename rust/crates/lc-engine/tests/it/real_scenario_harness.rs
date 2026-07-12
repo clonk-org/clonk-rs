@@ -296,3 +296,53 @@ fn dragon_rock_objects_restore_serialized_c4id_named_locals() {
         );
     }
 }
+
+#[test]
+fn dragon_rock_scroll_transfer_zone_callbacks_persist_cpp_names() {
+    let engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+
+    // C4Game::Synchronize reaches UpdateTransferZone through
+    // TransferZones::Synchronize and Game.Objects.UpdateTransferZones
+    // (C4Game.cpp:3727-3729; C4TransferZone.cpp:110-114;
+    // C4ObjectList.cpp:734-739). Game.Objects excludes Status=2 objects
+    // (C4GameObjects.cpp:54-58), so only Dragon Rock's three active SCRL
+    // objects execute the shipped UpdateName call (Scroll.c4d/Script.c:
+    // 141-153); the two inactive scrolls retain their serialized names.
+    //
+    // SetName resolves to the engine-global function after the definition
+    // scope (C4Aul.cpp:130-148). With no explicit target it writes the
+    // calling object, and GetName then observes CustomName before the
+    // definition fallback (C4Script.cpp:993-1005,1008-1060;
+    // C4Object.cpp:2103-2115). Because SetName is UpdateName's final call,
+    // these changed names prove every relevant shipped callback completed.
+    for (number, expected_name) in [
+        (1781, "Scroll: Fiery lump"),
+        (3714, "Scroll: Recovery"),
+        (5064, "Scroll: Fireball"),
+    ] {
+        let object = engine
+            .object_snapshot(ObjectId::new(number))
+            .unwrap_or_else(|| panic!("active Dragon Rock scroll #{number} loads"));
+        assert!(object.status.is_active(), "scroll #{number} is active");
+        assert_eq!(
+            object.custom_name.as_deref(),
+            Some(expected_name),
+            "scroll #{number} persists UpdateName's SetName result"
+        );
+    }
+
+    for (number, saved_name) in [
+        (1779, "Schriftrolle: Reinkarnation"),
+        (1780, "Schriftrolle: Reinkarnation"),
+    ] {
+        let object = engine
+            .object_snapshot(ObjectId::new(number))
+            .unwrap_or_else(|| panic!("inactive Dragon Rock scroll #{number} loads"));
+        assert!(!object.status.is_active(), "scroll #{number} is inactive");
+        assert_eq!(
+            object.custom_name.as_deref(),
+            Some(saved_name),
+            "inactive scroll #{number} is outside C++ Game.Objects broadcast"
+        );
+    }
+}
