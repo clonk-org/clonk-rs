@@ -32041,6 +32041,73 @@ public func Probe(object target) {
         );
     }
 
+    #[test]
+    fn stabilize_contact_probe_dispatches_contact_callbacks_like_cpp() {
+        // C4Object::Stabilize temporarily installs the upright shape and
+        // calls the ordinary ContactCheck (C4Movement.cpp:498-507), which
+        // dispatches ContactLeft/Right/Top/Bottom when ContactCalls is set
+        // (:112-121,166-182). The callback runs even though stabilization is
+        // rejected and the original tilt is restored.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=50
+            "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut definition = Definition::from_script(
+            "CBST",
+            "Callback stabilizer",
+            r#"
+            #strict
+            local touched;
+            public func ContactBottom() { touched = 1; return 0; }
+            public func ReadTouched() { return touched; }
+            "#,
+        )
+        .expect("definition compiles");
+        definition.set_shape_vertices(vec![
+            ObjectVertex::new(0, 6)
+                .with_cnat(CNAT_BOTTOM)
+                .with_friction(100),
+        ]);
+        definition.set_contact_density(50);
+        definition.set_rotateable(1);
+        definition.set_contact_function_calls(true);
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(20, 12, Some(earth)));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("CBST")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 7))
+                    .with_rotation(356),
+            )
+            .expect("object spawns");
+
+        engine.tick().expect("tick succeeds");
+        let index = engine.find_object_index(object).expect("object remains");
+        assert_eq!(engine.objects[index].state.rotation, 356, "contact keeps tilt");
+        assert_eq!(
+            engine
+                .call_object_function(index, "ReadTouched", Vec::new())
+                .expect("read succeeds"),
+            Value::Int(1),
+            "Stabilize's ContactCheck dispatches ContactBottom"
+        );
+    }
+
     // Mirrors the ExecAction upright-attachment check
     // (C4Object.cpp:4698-4705): a resting (non-Mobile) object whose def
     // sets UprightAttach re-arms Mobile every frame while standing within
