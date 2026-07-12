@@ -539,6 +539,70 @@ fn script_jump_native_uses_object_com_jump_deep_water_dive() {
 }
 
 #[test]
+fn script_jump_native_missing_dive_action_falls_back_to_jump() {
+    // ObjectComJump only returns from the predicted-liquid branch when
+    // ObjectActionDive succeeds. A definition without a Dive ActMap entry
+    // must continue to ObjectActionJump (C4ObjectCom.cpp:297-312;
+    // C4Object::SetActionByName miss returns false, C4Object.cpp:4218-4234).
+    // Gold Rush BISO has Walk/Jump but no Dive and reaches this path at the
+    // pinned frame-3902 TimerCall.
+    let mut actions = HashMap::new();
+    actions.insert(
+        "Walk".to_string(),
+        ActionSpec::default().with_procedure("walk"),
+    );
+    actions.insert(
+        "Jump".to_string(),
+        ActionSpec::default().with_procedure("flight"),
+    );
+    let mut definition = Definition::from_script(
+        "NDVE",
+        "No Dive jump probe",
+        "#strict\nfunc Probe() { return Jump(); }\n",
+    )
+    .expect("probe compiles");
+    definition.configure_actions(Some("Walk".to_string()), actions);
+    definition.set_shape_vertices(vec![ObjectVertex::new(0, 9).with_cnat(CNAT_BOTTOM)]);
+    definition.set_physical(PhysicalInfo {
+        walk: 70_000,
+        jump: 40_000,
+        ..Default::default()
+    });
+
+    let mut engine = Engine::new();
+    engine.set_landscape(raster_landscape_with_densities(
+        240,
+        100,
+        vec![0, 25],
+        |_, y| u8::from(y >= 50),
+    ));
+    engine.set_physics(PhysicsSettings::new(100, 20, -20));
+    engine
+        .register_definition(definition)
+        .expect("probe registers");
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("NDVE")
+                .with_position(Vector2::new(120, 41))
+                .with_action(ActionState::new("Walk"))
+                .with_direction(Direction::Right)
+                .with_command_direction(CommandDirection::Right),
+        )
+        .expect("probe spawns");
+    let index = engine.find_object_index(object).expect("probe exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "Probe", Vec::new())
+            .expect("Probe calls native Jump"),
+        Value::Bool(true)
+    );
+    let snapshot = engine.object_snapshot(object).expect("probe survives");
+    assert_eq!(snapshot.action.name, "Jump");
+    assert_eq!(snapshot.velocity, Vector2::new(2, -4));
+}
+
+#[test]
 fn script_jump_native_respects_contact_density_dive_gate() {
     // ObjectComJump only attempts SimFlightHitsLiquid when the live shape's
     // ContactDensity is greater than C4M_Liquid (C4ObjectCom.cpp:297-305).

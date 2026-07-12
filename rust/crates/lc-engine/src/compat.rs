@@ -13842,6 +13842,11 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(name) => name,
         None => return Ok(Value::Bool(false)),
     };
+    let name = if name == "ActIdle" {
+        "Idle".to_string()
+    } else {
+        name
+    };
 
     let mut sync_callbacks: Option<(ObjectId, Option<String>, Option<String>)> = None;
     let staged = HOST_CONTEXT.with(|cell| {
@@ -13849,6 +13854,24 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetAction requires an active engine context"))?;
+        // SetActionByName returns false without changing anything when the
+        // requested name is absent from the ActMap (C4Object.cpp:4218-4234).
+        // "Idle"/"ActIdle" are the one sentinel exception. ChangeDef swaps
+        // Def inline in C++, so a later same-call SetAction resolves against
+        // the pending NEW definition (the horse Death -> Dead path).
+        let action_exists = context.object_context().is_some_and(|object| {
+            name == "Idle"
+                || object
+                    .pending_update
+                    .change_def
+                    .as_deref()
+                    .and_then(|definition| context.world.definition_metadata(definition))
+                    .map(|metadata| metadata.action_library.contains(&name))
+                    .unwrap_or_else(|| object.action_library.contains(&name))
+        });
+        if !action_exists {
+            return Ok(Value::Bool(false));
+        }
         let object = match context.object_context_mut() {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
@@ -29616,6 +29639,46 @@ mod tests {
         with_object_host_context_with_world(HostWorldContext::default(), func)
     }
 
+    fn with_object_host_context_actions<F, T>(
+        actions: &[&str],
+        func: F,
+    ) -> (Result<T, RuntimeError>, EffectContextOutcome)
+    where
+        F: FnOnce() -> Result<T, RuntimeError>,
+    {
+        let specs = actions
+            .iter()
+            .map(|name| ((*name).to_string(), ActionSpec::default()))
+            .collect();
+        with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                None,
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                0,
+                ActionLibrary::new(None, specs),
+                Direction::Left,
+                CommandDirection::Stop,
+                0,
+                None,
+                None,
+                &[],
+                crate::FULL_CON,
+            )),
+            &[],
+            HostWorldContext::default(),
+            1,
+            func,
+        )
+    }
+
     fn with_object_host_context_with_world<F, T>(
         world: HostWorldContext,
         func: F,
@@ -38550,7 +38613,8 @@ func Missing() { return ComponentAll(nil, WOOD); }
     #[test]
     fn set_action_records_object_update() {
         let args = vec![Value::String("Walk".into())];
-        let (result, outcome) = with_object_host_context(|| set_action(&args));
+        let (result, outcome) =
+            with_object_host_context_actions(&["Walk"], || set_action(&args));
         let value = result.expect("SetAction should succeed");
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("action update present");
@@ -38568,7 +38632,8 @@ func Missing() { return ComponentAll(nil, WOOD); }
         let mut target_map = HashMap::new();
         target_map.insert("id".into(), Value::Int(2));
         let args = vec![Value::String("Jump".into()), Value::Proplist(target_map)];
-        let (result, outcome) = with_object_host_context(|| set_action(&args));
+        let (result, outcome) =
+            with_object_host_context_actions(&["Jump"], || set_action(&args));
         let value = result.expect("SetAction returns bool");
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("action update recorded");
@@ -38583,7 +38648,8 @@ func Missing() { return ComponentAll(nil, WOOD); }
         // — SetAction(name, nil, nil) keeps the previous targets, for
         // explicit nils and omitted arguments alike.
         let args = vec![Value::String("Jump".into()), Value::Nil, Value::Nil];
-        let (result, outcome) = with_object_host_context(|| set_action(&args));
+        let (result, outcome) =
+            with_object_host_context_actions(&["Jump"], || set_action(&args));
         let value = result.expect("SetAction returns bool");
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("action update recorded");
