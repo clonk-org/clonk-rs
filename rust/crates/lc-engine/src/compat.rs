@@ -10438,17 +10438,8 @@ fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
             target_id = context.object_context().map(|object| object.id());
         }
 
-        let audio = context.audio_mut();
-        if level <= 0 {
-            audio.stop_sound(&name, target_id);
-            return Ok(Value::Bool(true));
-        }
-
         let volume = level.clamp(0, 100) as u8;
-        let existed = audio.set_volume(&name, target_id, volume, None);
-        if !existed {
-            audio.play_sound(&name, target_id, volume, true, false, None);
-        }
+        context.audio_mut().sound_level(&name, target_id, volume);
         Ok(Value::Bool(true))
     })
 }
@@ -25058,30 +25049,31 @@ impl AudioRegistry {
             name: normalize_sound_name(name),
             target,
         };
-        let existed = if let Some(instance) = self.looping.get_mut(&key) {
-            if let Some(falloff) = custom_falloff {
-                instance.custom_falloff = Some(falloff);
-            }
-            instance.volume = volume;
-            true
-        } else {
-            self.looping.insert(
-                key,
-                AudioInstance {
-                    volume,
-                    custom_falloff,
-                },
-            );
-            false
+        let Some(instance) = self.looping.get_mut(&key) else {
+            return false;
         };
-        if existed {
-            self.events.push(AudioCommand::SetSoundVolume {
-                name: name.to_string(),
-                target,
-                volume,
-            });
+        if let Some(falloff) = custom_falloff {
+            instance.custom_falloff = Some(falloff);
         }
-        existed
+        instance.volume = volume;
+        self.events.push(AudioCommand::SetSoundVolume {
+            name: name.to_string(),
+            target,
+            volume,
+        });
+        true
+    }
+
+    pub(crate) fn sound_level(&mut self, name: &str, target: Option<ObjectId>, volume: u8) {
+        if volume == 0 {
+            if self.is_looping(name, target) {
+                self.stop_sound(name, target);
+            }
+            return;
+        }
+        if !self.set_volume(name, target, volume, None) {
+            self.play_sound(name, target, volume, true, false, None);
+        }
     }
 
     pub fn take_events(&mut self) -> Vec<AudioCommand> {

@@ -17298,6 +17298,18 @@ impl Engine {
         Ok(true)
     }
 
+    /// Wind audio from `C4Weather::Execute` (C4Weather.cpp:94-104), after
+    /// the Tick10 wind step and before any disaster RNG draws.
+    fn tick_weather_wind_audio(&mut self, frame: u64) {
+        if frame % 10 != 0 {
+            return;
+        }
+        let volume = self.environment.wind.abs().saturating_sub(30) * 2;
+        self.audio_registry
+            .sound_level("Wind", None, volume as u8);
+        self.pending_audio.extend(self.audio_registry.take_events());
+    }
+
     /// Disaster launch from `C4Weather::Execute` (C4Weather.cpp:104-148),
     /// run on Tick10 frames. The gate Random draws are unconditional — the
     /// configured levels only decide whether a launch follows — so the synced
@@ -18899,6 +18911,7 @@ impl Engine {
         if let Some(points) = self.environment.advance_frame(&mut self.rng, frame) {
             let _ = self.gamma.set_ramp(1, points);
         }
+        self.tick_weather_wind_audio(frame);
         self.tick_weather_events(frame)?;
         if let Some(sky) = &mut self.sky {
             sky.advance(&self.environment);

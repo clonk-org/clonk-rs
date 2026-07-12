@@ -45,3 +45,4 @@ mod test_object_id_reservation;
 mod test_transitive_includes;
 mod virtual_player_harness;
 mod walk_movement;
+mod weather_audio;

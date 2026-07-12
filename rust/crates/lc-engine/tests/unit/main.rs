@@ -2262,6 +2262,71 @@ mod tests {
     }
 
     #[test]
+    fn weather_wind_sound_level_starts_updates_and_stops_one_global_loop() {
+        // C4Weather::Execute first steps Wind on Tick10, then calls
+        // SoundLevel("Wind", nullptr, max(Abs(Wind)-30, 0)*2), before the
+        // disaster RNG block (C4Weather.cpp:94-104; C4SoundSystem.cpp:38-51).
+        // Tutorial07's fixed Wind=50 therefore produces one global loop at
+        // volume 40, updates that instance, and stops it once wind is calm.
+        let mut engine = Engine::with_seed(18);
+        engine.set_environment(EnvironmentSettings::new(50));
+
+        for _ in 0..9 {
+            assert!(engine.tick().expect("pre-Tick10 frame succeeds").audio.is_empty());
+        }
+        assert_eq!(
+            engine.tick().expect("Tick10 weather succeeds").audio,
+            vec![AudioCommand::PlaySound {
+                name: "Wind".to_string(),
+                target: None,
+                volume: 40,
+                looped: true,
+                multiple: false,
+                custom_falloff: None,
+            }]
+        );
+
+        for _ in 0..9 {
+            assert!(engine.tick().expect("pre-Tick20 frame succeeds").audio.is_empty());
+        }
+        let mut rising = EnvironmentSettings::new(49).with_wind_variation(1, 1_000);
+        rising.wind_target = 50;
+        engine.set_environment(rising);
+        assert_eq!(
+            engine.tick().expect("Tick20 weather succeeds").audio,
+            vec![AudioCommand::SetSoundVolume {
+                name: "Wind".to_string(),
+                target: None,
+                volume: 40,
+            }],
+            "SoundLevel observes the Tick10 wind step before updating volume"
+        );
+
+        engine.set_environment(EnvironmentSettings::new(30));
+        for _ in 0..9 {
+            assert!(engine.tick().expect("pre-Tick30 frame succeeds").audio.is_empty());
+        }
+        assert_eq!(
+            engine.tick().expect("Tick30 weather succeeds").audio,
+            vec![AudioCommand::StopSound {
+                name: "Wind".to_string(),
+                target: None,
+            }]
+        );
+
+        for _ in 0..10 {
+            assert!(
+                engine
+                    .tick()
+                    .expect("calm weather frame succeeds")
+                    .audio
+                    .is_empty(),
+                "a stopped global loop must not emit duplicate stop/play events"
+            );
+        }
+    }
+
+    #[test]
     fn mrf_insert_check_splash_matches_cpp() {
         // mrfInsertCheck splash (C4Material.cpp:572-579): with fYDir >
         // itofix(1) and SplashRate set, !Random(SplashRate) bounces the PXS:
