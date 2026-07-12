@@ -117,7 +117,8 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowBuilder};
 
 const PLAYER_OWNER: i32 = 1;
-const FRAME_INTERVAL: Duration = Duration::from_micros(16_666); // ~60 FPS
+const STARTUP_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const INGAME_FRAME_INTERVAL: Duration = Duration::from_millis(28);
 const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
 const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
@@ -1570,6 +1571,7 @@ fn main() -> Result<()> {
     let mut previous_instant = Instant::now();
     let mut accumulator = Duration::ZERO;
     let mut game_clock_accumulator = Duration::ZERO;
+    let mut frame_interval = frame_interval_for_mode(app.mode);
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -1605,10 +1607,16 @@ fn main() -> Result<()> {
                     &mut game_clock_accumulator,
                     frame_time,
                 );
+                // SetGameTickDelay installs a new timer when C++ enters or
+                // leaves the running game. Do not carry a fractional tick
+                // from the old cadence across that boundary
+                // (C4Application.cpp:510-531; C4Game.cpp:443).
+                synchronize_frame_interval(app.mode, &mut frame_interval, &mut accumulator);
                 let clamped = frame_time.min(MAX_ACCUMULATED_TIME);
                 accumulator = (accumulator + clamped).min(MAX_ACCUMULATED_TIME);
 
-                while accumulator >= FRAME_INTERVAL {
+                while accumulator >= frame_interval {
+                    let executed_interval = frame_interval;
                     if let Err(err) = app.update() {
                         // Script errors during the simulation tick show in
                         // the log and the game keeps running, like the C++
@@ -1622,15 +1630,23 @@ fn main() -> Result<()> {
                             return;
                         }
                     }
-                    accumulator -= FRAME_INTERVAL;
+                    accumulator -= executed_interval;
                     did_update = true;
+
+                    if synchronize_frame_interval(
+                        app.mode,
+                        &mut frame_interval,
+                        &mut accumulator,
+                    ) {
+                        break;
+                    }
                 }
 
                 if did_update {
                     window.request_redraw();
                 }
 
-                let wait_duration = FRAME_INTERVAL.saturating_sub(accumulator);
+                let wait_duration = frame_interval.saturating_sub(accumulator);
                 *control_flow = ControlFlow::WaitUntil(now + wait_duration);
             }
             Event::RedrawRequested(id) if id == window.id() => {
@@ -3446,6 +3462,27 @@ enum AppMode {
     Menu,
     Loading,
     Running,
+}
+
+fn frame_interval_for_mode(mode: AppMode) -> Duration {
+    match mode {
+        AppMode::Running => INGAME_FRAME_INTERVAL,
+        AppMode::Menu | AppMode::Loading => STARTUP_FRAME_INTERVAL,
+    }
+}
+
+fn synchronize_frame_interval(
+    mode: AppMode,
+    frame_interval: &mut Duration,
+    accumulator: &mut Duration,
+) -> bool {
+    let next_interval = frame_interval_for_mode(mode);
+    if next_interval == *frame_interval {
+        return false;
+    }
+    *frame_interval = next_interval;
+    *accumulator = Duration::ZERO;
+    true
 }
 
 struct MenuState {
@@ -15411,6 +15448,51 @@ mod tests {
         // but still only observe the already-consumed bool latch.
         advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_secs(2));
         assert_eq!(app.game_time_seconds(), 1);
+    }
+
+    #[test]
+    fn event_loop_uses_cpp_startup_and_ingame_tick_delays() {
+        // C4Application starts and returns to startup at 16 ms, while
+        // C4Game::Init switches the running simulation to 28 ms
+        // (C4Application.cpp:44,234; C4Game.cpp:63,443).
+        assert_eq!(
+            frame_interval_for_mode(AppMode::Menu),
+            Duration::from_millis(16)
+        );
+        assert_eq!(
+            frame_interval_for_mode(AppMode::Loading),
+            Duration::from_millis(16)
+        );
+        assert_eq!(
+            frame_interval_for_mode(AppMode::Running),
+            Duration::from_millis(28)
+        );
+
+        let mut interval = STARTUP_FRAME_INTERVAL;
+        let mut accumulator = Duration::from_millis(15);
+        assert!(synchronize_frame_interval(
+            AppMode::Running,
+            &mut interval,
+            &mut accumulator,
+        ));
+        assert_eq!(interval, INGAME_FRAME_INTERVAL);
+        assert_eq!(accumulator, Duration::ZERO);
+
+        accumulator = Duration::from_millis(27);
+        assert!(!synchronize_frame_interval(
+            AppMode::Running,
+            &mut interval,
+            &mut accumulator,
+        ));
+        assert_eq!(accumulator, Duration::from_millis(27));
+
+        assert!(synchronize_frame_interval(
+            AppMode::Menu,
+            &mut interval,
+            &mut accumulator,
+        ));
+        assert_eq!(interval, STARTUP_FRAME_INTERVAL);
+        assert_eq!(accumulator, Duration::ZERO);
     }
 
     #[test]
