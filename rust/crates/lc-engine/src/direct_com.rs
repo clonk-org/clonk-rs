@@ -2622,9 +2622,9 @@ impl Engine {
 
     /// `C4Object::ShiftContents` (C4Object.cpp:5751-5775): walk First->Next
     /// (or Last->Prev with `shift_back`) for the first ACTIVE item the
-    /// current front cannot concat-picture with — approximated as a
-    /// different definition, matching the FnShiftContents host semantics —
-    /// and select it via DirectComContents.
+    /// current front cannot concat-picture with, using the full definition,
+    /// color, graphics, name, and overlay rules; select it via
+    /// DirectComContents.
     fn object_shift_contents(
         &mut self,
         index: usize,
@@ -2635,10 +2635,7 @@ impl Engine {
         let Some(front_id) = contents.first().copied() else {
             return Ok(false);
         };
-        let Some(front_definition) = self
-            .find_object_index(front_id)
-            .map(|front_index| self.objects[front_index].definition_id.clone())
-        else {
+        let Some(front) = self.object_snapshot(front_id) else {
             return Ok(false);
         };
         let mut candidates: Vec<ObjectId> = contents[1..].to_vec();
@@ -2652,7 +2649,10 @@ impl Engine {
             if !self.objects[candidate_index].state.status.is_active() {
                 continue;
             }
-            if self.objects[candidate_index].definition_id != front_definition {
+            let Some(candidate) = self.object_snapshot(candidate_id) else {
+                continue;
+            };
+            if !self.can_concat_picture_with(&front, &candidate) {
                 // Object different: shift to this (C4Object.cpp:5768).
                 self.object_direct_com_contents(index, candidate_id, do_calls)?;
                 return Ok(true);
@@ -5886,6 +5886,44 @@ protected func ContainedDown(pByClonk) { return(1); }
 
         engine.player_in_com(1, COM_WHEEL_DOWN, 0).expect("wheel");
         assert_eq!(contents(&engine, crew), vec![gold, skul, rock]);
+    }
+
+    #[test]
+    fn wheel_shift_separates_same_definition_pictures_that_cannot_concat() {
+        // ShiftContents does not merely compare definition IDs: it advances
+        // to the first item for which C4Object::CanConcatPictureWith is false
+        // (C4Object.cpp:5751-5775,6173-6213). Different ColorMod values split
+        // an otherwise identical stack when APS_Color is not enabled.
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        engine
+            .register_definition(
+                Definition::from_script("ROCK", "Rock", "#strict\n").expect("item compiles"),
+            )
+            .expect("item registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let plain = engine
+            .spawn_object(SpawnConfig::new("ROCK").with_container(crew))
+            .expect("plain rock spawns");
+        let tinted = engine
+            .spawn_object(
+                SpawnConfig::new("ROCK")
+                    .with_container(crew)
+                    .with_color_modulation(0x0080_8080),
+            )
+            .expect("tinted rock spawns");
+        let index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[index].state.contents = vec![plain, tinted];
+
+        engine.player_in_com(1, COM_WHEEL_DOWN, 0).expect("wheel");
+        assert_eq!(
+            contents(&engine, crew),
+            vec![tinted, plain],
+            "non-concatenable same-definition picture becomes the new front"
+        );
     }
 
     #[test]
