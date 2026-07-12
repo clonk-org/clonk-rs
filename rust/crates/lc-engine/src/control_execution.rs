@@ -80,6 +80,8 @@ pub enum RemoteEmbeddedPlayerData {
 pub enum ResolveRemoteEmbeddedPlayerDataError {
     #[error("player {info_id} join is resource-backed, not embedded")]
     ResourceBacked { info_id: i32 },
+    #[error("user player {info_id} has no embedded player file data")]
+    MissingPlayerData { info_id: i32 },
     #[error("embedded player data for player {info_id} is not a gzip archive")]
     UnsupportedArchiveMagic { info_id: i32 },
     #[error("failed to load embedded player data for player {info_id}: {source}")]
@@ -97,6 +99,9 @@ pub fn resolve_remote_embedded_player_data(
     let JoinPlayerSource::Embedded(data) = &join.source else {
         return Err(ResolveRemoteEmbeddedPlayerDataError::ResourceBacked { info_id: info.id });
     };
+    if data.is_empty() {
+        return Err(ResolveRemoteEmbeddedPlayerDataError::MissingPlayerData { info_id: info.id });
+    }
     if !matches!(data.as_slice(), [0x1e, 0x8c, ..] | [0x1f, 0x8b, ..]) {
         return Err(
             ResolveRemoteEmbeddedPlayerDataError::UnsupportedArchiveMagic { info_id: info.id },
@@ -337,6 +342,29 @@ mod tests {
         assert!(matches!(
             error,
             ResolveRemoteEmbeddedPlayerDataError::UnsupportedArchiveMagic { info_id: 7 }
+        ));
+    }
+
+    #[test]
+    fn remote_user_join_requires_embedded_player_data() {
+        // A remote non-resource user join with empty PlrData is rejected as a
+        // ghost player (src/C4Control.cpp:750-755).
+        let join = JoinPlayerControlData {
+            info_id: 7,
+            source: crate::JoinPlayerSource::Embedded(Vec::new()),
+            ..Default::default()
+        };
+        let info = ControlPlayerInfoEntry {
+            id: 7,
+            ..Default::default()
+        };
+
+        let error = resolve_remote_embedded_player_data(&join, &info)
+            .expect_err("empty user player data must be rejected");
+
+        assert!(matches!(
+            error,
+            ResolveRemoteEmbeddedPlayerDataError::MissingPlayerData { info_id: 7 }
         ));
     }
 }
