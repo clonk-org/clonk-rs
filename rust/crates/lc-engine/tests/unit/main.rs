@@ -2653,6 +2653,78 @@ mod tests {
     }
 
     #[test]
+    fn failed_pxs_corrosion_uses_full_insert_material_slide_like_cpp() {
+        // C++ mrfCorrode's failed-corrosion branch calls the full
+        // C4Landscape::InsertMaterial routine (C4Material.cpp:737-740).
+        // InsertMaterial follows FindMatSlide and re-creates a falling PXS
+        // at an open ledge (C4Landscape.cpp:1179-1184); directly extending a
+        // landscape column at the contact point loses that droplet.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Acid]
+            Name=Acid
+            Density=25
+            Friction=0
+            MaxSlide=10
+
+            [Reaction]
+            Type=Corrode
+            TargetSpec=Earth
+            CheckSlide=0
+            CorrosionRate=0
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let acid = materials.id_of("Acid").expect("acid exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(21);
+        engine.set_materials(materials);
+
+        // Earth floor through x=6, with an open drop at x=7. The acid PXS
+        // hits Earth at (3, 6); failed corrosion inserts from (3, 5), whose
+        // nearest valid slide is the open ledge at x=7.
+        let mut densities = vec![0i32; 128];
+        densities[30] = 100;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[30] = Some("Earth".into());
+        let mut bytes = vec![0u8; 12 * 12];
+        for y in 6..12 {
+            for x in 0..=6 {
+                bytes[y * 12 + x] = 30;
+            }
+        }
+        let grid = landscape::PixelGrid::new(12, 12, bytes, densities, names, vec![None; 128]);
+        let mut world =
+            Landscape::with_default_material(12, vec![6; 12], Some(earth)).expect("builds");
+        world.set_world_height(12);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        assert!(engine.pxs_system.create(
+            acid,
+            math::itofix(3),
+            math::itofix(5),
+            math::C4Fixed::ZERO,
+            math::itofix(1),
+        ));
+        engine.tick_pxs();
+
+        let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
+        assert_eq!(survivors.len(), 1, "InsertMaterial re-created the droplet");
+        assert_eq!(
+            fixtoi(survivors[0].x),
+            7,
+            "failed-corrosion liquid slid to the open ledge"
+        );
+    }
+
+    #[test]
     fn user_convert_reaction_fires_on_pxs_move_like_cpp() {
         // mrfConvert: hardcoded InMatConvert has no collision proc, but
         // USER-defined conversions also convert upon hitting materials —

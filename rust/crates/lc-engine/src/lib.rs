@@ -32212,9 +32212,10 @@ impl Engine {
                         self.spawn_smoke(*x, *y, level);
                     }
                     let _ = self.rng.random(20);
-                } else if let Some(landscape) = self.landscape.as_mut() {
-                    // Else: dead. Insert material here (C4Material.cpp:739)
-                    landscape.insert_material_at(*x, *y, pixel.mat);
+                } else {
+                    // Else: dead. C++ routes through the full InsertMaterial
+                    // slide/reaction/thrust path (C4Material.cpp:737-740).
+                    let _ = self.insert_material(pixel.mat, *x, *y, 0, 0);
                 }
                 true
             }
