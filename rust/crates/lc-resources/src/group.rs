@@ -533,6 +533,10 @@ mod tests {
     /// The raw (uncompressed) packed-group image used by the packed tests:
     /// scrambled header + one entry ("hello.txt" -> b"world").
     fn packed_group_image() -> Vec<u8> {
+        packed_group_image_with_entry("hello.txt", false, b"world")
+    }
+
+    fn packed_group_image_with_entry(name: &str, child: bool, data: &[u8]) -> Vec<u8> {
         let mut image = Vec::new();
 
         let mut header = [0u8; GROUP_HEADER_SIZE];
@@ -553,12 +557,14 @@ mod tests {
         let mut entry = [0u8; GROUP_ENTRY_SIZE];
         {
             let mut cursor = Cursor::new(&mut entry[..]);
-            let mut name = [0u8; 260];
-            name[..b"hello.txt".len()].copy_from_slice(b"hello.txt");
-            cursor.write_all(&name).unwrap();
+            let mut name_bytes = [0u8; 260];
+            name_bytes[..name.len()].copy_from_slice(name.as_bytes());
+            cursor.write_all(&name_bytes).unwrap();
             cursor.write_i32::<LittleEndian>(0).unwrap();
-            cursor.write_i32::<LittleEndian>(0).unwrap();
-            cursor.write_i32::<LittleEndian>(5).unwrap();
+            cursor.write_i32::<LittleEndian>(i32::from(child)).unwrap();
+            cursor
+                .write_i32::<LittleEndian>(i32::try_from(data.len()).unwrap())
+                .unwrap();
             cursor.write_i32::<LittleEndian>(0).unwrap();
             cursor.write_i32::<LittleEndian>(0).unwrap();
             cursor.write_u32::<LittleEndian>(0).unwrap();
@@ -568,7 +574,7 @@ mod tests {
             cursor.write_all(&[0u8; 26]).unwrap();
         }
         image.extend_from_slice(&entry);
-        image.extend_from_slice(b"world");
+        image.extend_from_slice(data);
         image
     }
 
