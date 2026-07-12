@@ -574,6 +574,10 @@ mod tests {
     }
 
     fn packed_group_image_with_entry(name: &str, child: bool, data: &[u8]) -> Vec<u8> {
+        packed_group_image_with_entries(&[(name, child, data)])
+    }
+
+    fn packed_group_image_with_entries(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
         let mut image = Vec::new();
 
         let mut header = [0u8; GROUP_HEADER_SIZE];
@@ -584,34 +588,44 @@ mod tests {
             cursor.write_all(&id_bytes).unwrap();
             cursor.write_i32::<LittleEndian>(1).unwrap();
             cursor.write_i32::<LittleEndian>(2).unwrap();
-            cursor.write_i32::<LittleEndian>(1).unwrap();
+            cursor
+                .write_i32::<LittleEndian>(i32::try_from(entries.len()).unwrap())
+                .unwrap();
             cursor.write_all(&[0u8; 32]).unwrap(); // maker
             cursor.write_all(&[0u8; 32 + 4 + 4 + 92]).unwrap();
         }
         mem_unscramble(&mut header);
         image.extend_from_slice(&header);
 
-        let mut entry = [0u8; GROUP_ENTRY_SIZE];
-        {
-            let mut cursor = Cursor::new(&mut entry[..]);
-            let mut name_bytes = [0u8; 260];
-            name_bytes[..name.len()].copy_from_slice(name.as_bytes());
-            cursor.write_all(&name_bytes).unwrap();
-            cursor.write_i32::<LittleEndian>(0).unwrap();
-            cursor.write_i32::<LittleEndian>(i32::from(child)).unwrap();
-            cursor
-                .write_i32::<LittleEndian>(i32::try_from(data.len()).unwrap())
-                .unwrap();
-            cursor.write_i32::<LittleEndian>(0).unwrap();
-            cursor.write_i32::<LittleEndian>(0).unwrap();
-            cursor.write_u32::<LittleEndian>(0).unwrap();
-            cursor.write_u8(0).unwrap();
-            cursor.write_u32::<LittleEndian>(0).unwrap();
-            cursor.write_u8(0).unwrap();
-            cursor.write_all(&[0u8; 26]).unwrap();
+        let mut offset = 0usize;
+        for (name, child, data) in entries {
+            let mut entry = [0u8; GROUP_ENTRY_SIZE];
+            {
+                let mut cursor = Cursor::new(&mut entry[..]);
+                let mut name_bytes = [0u8; 260];
+                name_bytes[..name.len()].copy_from_slice(name.as_bytes());
+                cursor.write_all(&name_bytes).unwrap();
+                cursor.write_i32::<LittleEndian>(0).unwrap();
+                cursor.write_i32::<LittleEndian>(i32::from(*child)).unwrap();
+                cursor
+                    .write_i32::<LittleEndian>(i32::try_from(data.len()).unwrap())
+                    .unwrap();
+                cursor.write_i32::<LittleEndian>(0).unwrap();
+                cursor
+                    .write_i32::<LittleEndian>(i32::try_from(offset).unwrap())
+                    .unwrap();
+                cursor.write_u32::<LittleEndian>(0).unwrap();
+                cursor.write_u8(0).unwrap();
+                cursor.write_u32::<LittleEndian>(0).unwrap();
+                cursor.write_u8(0).unwrap();
+                cursor.write_all(&[0u8; 26]).unwrap();
+            }
+            image.extend_from_slice(&entry);
+            offset += data.len();
         }
-        image.extend_from_slice(&entry);
-        image.extend_from_slice(data);
+        for (_, _, data) in entries {
+            image.extend_from_slice(data);
+        }
         image
     }
 
