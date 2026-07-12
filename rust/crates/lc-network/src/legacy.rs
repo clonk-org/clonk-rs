@@ -30,8 +30,6 @@ pub enum LegacyControlError {
     UnsupportedPacket(u8),
     #[error("resource SHA contains an invalid hexadecimal byte")]
     InvalidResourceSha,
-    #[error("resource-backed PlayerInfo entries are not supported yet")]
-    UnsupportedPlayerInfoResource,
     #[error("PlayerInfo count {0} is outside the C++ range")]
     PlayerInfoCountOutOfRange(i32),
     #[error("control payload contained negative client id {0}")]
@@ -288,9 +286,9 @@ fn decode_player_info_entry(
     let clan_tag = reader.read_c_string()?;
     let league_performance = reader.read_int32()?;
     let league_progress_data = reader.read_c_string()?;
-    if flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 {
-        return Err(LegacyControlError::UnsupportedPlayerInfoResource);
-    }
+    let resource = (flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0)
+        .then(|| reader.read_network_resource_core())
+        .transpose()?;
 
     Ok(ControlPlayerInfoEntry {
         name,
@@ -316,7 +314,7 @@ fn decode_player_info_entry(
         clan_tag,
         league_performance,
         league_progress_data,
-        resource: None,
+        resource,
     })
 }
 

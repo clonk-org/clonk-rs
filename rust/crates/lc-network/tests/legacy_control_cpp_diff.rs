@@ -2,7 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use lc_engine::{ControlPacket as EngineControlPacket, JoinPlayerSource};
+use lc_engine::{
+    ControlPacket as EngineControlPacket, JoinPlayerSource, PLAYER_INFO_FLAG_HAS_RESOURCE,
+};
 use lc_network::{decode_control_payload, encode_control_payload};
 
 #[test]
@@ -233,4 +235,62 @@ fn sha_resource_join_player_matches_cpp_control_codec() {
         encode_control_payload(&frame).expect("Rust re-encodes the C++ SHA resource control"),
         cpp_bytes
     );
+}
+
+#[test]
+#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
+fn resource_player_info_matches_cpp_control_codec() {
+    // C4PlayerInfo serializes ResCore after the league fields whenever its
+    // synchronized HasResource flag is set (src/C4PlayerInfo.cpp:177-268).
+    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
+        .map(PathBuf::from)
+        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/player_info_resource.ini")
+        .canonicalize()
+        .expect("C++ resource PlayerInfo fixture exists");
+    let output = std::env::temp_dir().join(format!(
+        "legacyclonk-control-codec-player-info-resource-{}.bin",
+        std::process::id()
+    ));
+
+    let result = Command::new(oracle)
+        .args(["--control-codec-oracle", "4", "7"])
+        .arg(fixture)
+        .arg(&output)
+        .output()
+        .expect("C++ control codec oracle starts");
+    assert!(
+        result.status.success(),
+        "C++ oracle failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
+    let _ = fs::remove_file(&output);
+
+    let frame = decode_control_payload(&cpp_bytes).expect("Rust decodes live C++ PlayerInfo bytes");
+    let [EngineControlPacket::PlayerInfo(info)] = frame.controls.as_slice() else {
+        panic!("expected one PlayerInfo control, got {:?}", frame.controls);
+    };
+    let [player] = info.players.as_slice() else {
+        panic!("expected one player info, got {:?}", info.players);
+    };
+    assert_ne!(player.flags & PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+    let resource = player.resource.as_ref().expect("player resource core");
+    assert_eq!(
+        (resource.resource_type, resource.id, resource.derived_id),
+        (3, 17, -1)
+    );
+    assert_eq!(
+        (
+            resource.file_size,
+            resource.file_crc,
+            resource.chunk_size,
+            resource.contents_crc,
+        ),
+        (1234, 0x1234_5678, 1024, 0x9abc_def0)
+    );
+    assert_eq!(resource.file_sha, None);
+    assert_eq!(resource.filename.as_bytes(), b"Players/Tyler.c4p");
+    assert_eq!(resource.author.as_bytes(), b"Host/Tyler");
 }
