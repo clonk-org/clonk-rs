@@ -182,3 +182,51 @@ fn resource_join_player_matches_cpp_control_codec() {
         cpp_bytes
     );
 }
+
+#[test]
+#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
+fn sha_resource_join_player_matches_cpp_control_codec() {
+    // C4Network2ResCore prefixes the optional SHA with a packed naming count,
+    // then StdHexAdapt serializes its 20-byte digest
+    // (src/C4Network2Res.cpp:137-142; src/StdAdaptors.h:1001-1055).
+    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
+        .map(PathBuf::from)
+        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/join_player_resource_sha.ini")
+        .canonicalize()
+        .expect("C++ SHA resource fixture exists");
+    let output = std::env::temp_dir().join(format!(
+        "legacyclonk-control-codec-resource-sha-{}.bin",
+        std::process::id()
+    ));
+
+    let result = Command::new(oracle)
+        .args(["--control-codec-oracle", "4", "7"])
+        .arg(fixture)
+        .arg(&output)
+        .output()
+        .expect("C++ control codec oracle starts");
+    assert!(
+        result.status.success(),
+        "C++ oracle failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
+    let _ = fs::remove_file(&output);
+
+    let frame = decode_control_payload(&cpp_bytes).expect("Rust decodes live C++ SHA bytes");
+    let [EngineControlPacket::JoinPlayer(join)] = frame.controls.as_slice() else {
+        panic!("expected one JoinPlayer control, got {:?}", frame.controls);
+    };
+    let JoinPlayerSource::Resource(resource) = &join.source else {
+        panic!("expected resource-backed join, got {:?}", join.source);
+    };
+    assert_eq!(
+        resource.file_sha,
+        Some([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff, 0x10, 0x20, 0x30, 0x40,
+        ])
+    );
+}

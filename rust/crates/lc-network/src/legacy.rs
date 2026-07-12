@@ -28,8 +28,8 @@ pub enum LegacyControlError {
     VarintOverflow,
     #[error("control packet {0:#x} is not supported yet")]
     UnsupportedPacket(u8),
-    #[error("resource-backed JoinPlayer controls with SHA data are not supported yet")]
-    UnsupportedResourceSha,
+    #[error("resource SHA contains an invalid hexadecimal byte")]
+    InvalidResourceSha,
     #[error("resource-backed PlayerInfo entries are not supported yet")]
     UnsupportedPlayerInfoResource,
     #[error("PlayerInfo count {0} is outside the C++ range")]
@@ -468,9 +468,9 @@ impl<'a> Reader<'a> {
             (defaults.file_size, defaults.file_crc, defaults.chunk_size)
         };
         let contents_crc = self.read_raw_u32()?;
-        if self.read_uint32()? != 0 {
-            return Err(LegacyControlError::UnsupportedResourceSha);
-        }
+        let file_sha = (self.read_uint32()? != 0)
+            .then(|| self.read_network_resource_sha())
+            .transpose()?;
         let filename = self.read_network_filename()?;
         let author = self.read_network_filename()?;
 
@@ -483,10 +483,28 @@ impl<'a> Reader<'a> {
             file_crc,
             chunk_size,
             contents_crc,
-            file_sha: None,
+            file_sha,
             filename,
             author,
         })
+    }
+
+    fn read_network_resource_sha(&mut self) -> Result<[u8; 20], LegacyControlError> {
+        // StdHexAdapt first compiles the raw digest and then, without returning,
+        // compiles 20 NUL-terminated two-digit strings. On read, those strings
+        // overwrite the raw bytes (src/StdAdaptors.h:1029-1050).
+        self.read_bytes(20)?;
+        let mut digest = [0; 20];
+        for byte in &mut digest {
+            let encoded = self.read_c_string()?;
+            let [high, low] = encoded.as_bytes() else {
+                return Err(LegacyControlError::InvalidResourceSha);
+            };
+            let high = decode_hex_nibble(*high).ok_or(LegacyControlError::InvalidResourceSha)?;
+            let low = decode_hex_nibble(*low).ok_or(LegacyControlError::InvalidResourceSha)?;
+            *byte = (high << 4) | low;
+        }
+        Ok(digest)
     }
 
     fn read_uint32(&mut self) -> Result<u32, LegacyControlError> {
@@ -567,6 +585,15 @@ impl<'a> Reader<'a> {
 
 fn clear_upper_i32(value: i32) -> i32 {
     (value << 25) >> 25
+}
+
+fn decode_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn encode_int32(mut value: i32) -> Vec<u8> {
