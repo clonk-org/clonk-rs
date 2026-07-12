@@ -9461,7 +9461,9 @@ func Trigger() {
         let oil = materials.id_of("Oil").expect("oil exists");
         let mut engine = Engine::with_seed(0);
         engine.set_materials(materials);
-        engine.set_landscape(Landscape::flat_with_material(17, 40, Some(oil)));
+        let mut landscape = Landscape::flat_with_material(17, 40, Some(oil));
+        landscape.set_world_height(80);
+        engine.set_landscape(landscape);
         engine
             .register_definition(
                 Definition::from_script("FLAM", "Fire", "#strict\n").expect("flam compiles"),
