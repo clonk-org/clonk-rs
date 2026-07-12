@@ -15,6 +15,7 @@ mod get_inventory;
 mod hangle_movement;
 mod legacy_scenario_loading;
 mod manifest_definitions;
+mod real_alchemy_revision;
 mod real_clonk_hangle;
 mod real_scenario_harness;
 mod real_tutorial01_virtual_play;

@@ -4216,6 +4216,330 @@ global func MenuCommand(state, kind, selection)
     }
 
     #[test]
+    fn value_host_reads_raw_defcore_value_and_returns_nil_for_unknown_id() {
+        // FnValue is deliberately narrower than GetValue: it returns the raw
+        // C4Def::Value for a loaded ID and null for an unloaded/zero ID
+        // (C4Script.cpp:1385-1389,6896). MagiClonk uses this exact helper for
+        // both mana checks and the post-Activate energy deduction.
+        let mut spell =
+            Definition::from_script("MBRG", "Bridge spell", "").expect("spell compiles");
+        spell.set_value(10);
+        let caller = Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"
+func Probe(known, missing)
+{
+  return [Value(known), Value(missing), Value()];
+}
+"#,
+        )
+        .expect("caller compiles");
+
+        let mut engine = Engine::new();
+        engine.register_definition(spell).expect("spell registers");
+        engine.register_definition(caller).expect("caller registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let index = engine.find_object_index(object).expect("caller index");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    index,
+                    "Probe",
+                    vec![
+                        Value::C4Id("MBRG".to_string()),
+                        Value::C4Id("MISS".to_string()),
+                    ],
+                )
+                .expect("Value host calls run"),
+            Value::Array(vec![Value::Int(10), Value::Nil, Value::Nil])
+        );
+    }
+
+    #[test]
+    fn check_effect_matches_empty_priority_and_callback_merge_semantics() {
+        // FnCheckEffect returns null before C4Effect::Check when the selected
+        // list has no head; with a list, priority 1 bypasses callbacks. Other
+        // priorities synchronously run Fx<Name>Effect and an annul result
+        // (-2) calls the accepting effect's Fx<Name>Add, returning its number
+        // (C4Script.cpp:5546-5556; C4Effect.cpp:271-317).
+        let definition = Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"
+func EmptyGlobal() { return CheckEffect("Probe", nil, 100, 0); }
+func Install()
+{
+  AddEffect("World", nil, 200, 0, this());
+  return AddEffect("Shield", this(), 200, 0, this());
+}
+func Probe()
+{
+  return [
+    CheckEffect("PriorityOne", nil, 1, 0),
+    CheckEffect("GlobalDenied", nil, 100, 0),
+    CheckEffect("Denied", this(), 100, 7, 42),
+    CheckEffect("Merge", this(), 100, 9, 6),
+    CheckEffect("Clean", this(), 300, 0)
+  ];
+}
+func FxWorldEffect() { SetOwner(99); return(-1); }
+func FxShieldEffect(szNew, pTarget, iNumber, iUnused, iValue)
+{
+  if (szNew == "Denied" && pTarget == this() && iNumber > 0 && !iUnused && iValue == 42) return(-1);
+  if (szNew == "Merge") return(-2);
+  return(0);
+}
+func FxShieldAdd(pTarget, iNumber, szNew, iInterval, iValue)
+{
+  if (pTarget == this() && szNew == "Merge" && iInterval == 9) SetOwner(iValue);
+  return(0);
+}
+"#,
+        )
+        .expect("caller compiles");
+
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("caller registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("CALL").with_owner(1))
+            .expect("caller spawns");
+        let index = engine.find_object_index(object).expect("caller index");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "EmptyGlobal", vec![])
+                .expect("empty global check runs"),
+            Value::Nil,
+            "a missing effect-list head returns null, not integer zero"
+        );
+        let shield = engine
+            .call_object_function(index, "Install", vec![])
+            .expect("effects install");
+        let shield_number = match shield {
+            Value::Int(number) if number > 0 => number,
+            other => panic!("AddEffect returns the Shield number, got {other:?}"),
+        };
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Probe", vec![])
+                .expect("CheckEffect callback chain runs"),
+            Value::Array(vec![
+                Value::Int(0),
+                Value::Int(-1),
+                Value::Int(-1),
+                Value::Int(shield_number),
+                Value::Int(0),
+            ])
+        );
+        assert_eq!(
+            engine.object_snapshot(object).expect("caller remains live").owner,
+            6,
+            "FxShieldAdd received the proposed interval/value and ran synchronously"
+        );
+    }
+
+    #[test]
+    fn check_effect_preserves_dead_head_zero_and_skips_removed_later_checker() {
+        // C4Effect nodes are only unlinked by Execute. Within one VM call a
+        // removed final node still means FnCheckEffect had a non-null head,
+        // so Check returns integer zero; a truly empty list returns nil. The
+        // checker walk also re-tests IsDead at each node, so Killer removing
+        // the later Victim prevents Victim's callback from running.
+        let definition = Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"
+func RemoveOnlyThenCheck()
+{
+  var iOnly = AddEffect("Only", this(), 200, 0, this());
+  RemoveEffect(nil, this(), iOnly, true);
+  return CheckEffect("AfterRemove", this(), 100, 0);
+}
+func InstallWalk()
+{
+  AddEffect("Killer", this(), 100, 0, this());
+  return AddEffect("Victim", this(), 200, 0, this());
+}
+func Walk() { return CheckEffect("Probe", this(), 50, 0); }
+func FxKillerEffect(szNew, pTarget)
+{
+  RemoveEffect("Victim", this(), 0, true);
+  return(0);
+}
+func FxVictimEffect(szNew) { if (szNew == "Probe") { SetOwner(9); return(-1); } return(0); }
+"#,
+        )
+        .expect("caller compiles");
+
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("caller registers");
+        let removed = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("first caller spawns");
+        let removed_index = engine.find_object_index(removed).expect("first caller index");
+        assert_eq!(
+            engine
+                .call_object_function(removed_index, "RemoveOnlyThenCheck", vec![])
+                .expect("same-call removal check runs"),
+            Value::Int(0),
+            "a dead-but-not-yet-cleaned list head reaches C4Effect::Check"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(removed_index, "Walk", vec![])
+                .expect("later empty-list check runs"),
+            Value::Nil,
+            "after command folding, a new call sees the truly null list head"
+        );
+
+        let walked = engine
+            .spawn_object(SpawnConfig::new("CALL").with_owner(1))
+            .expect("second caller spawns");
+        let walked_index = engine.find_object_index(walked).expect("second caller index");
+        engine
+            .call_object_function(walked_index, "InstallWalk", vec![])
+            .expect("checker chain installs");
+        assert_eq!(
+            engine
+                .call_object_function(walked_index, "Walk", vec![])
+                .expect("live checker walk runs"),
+            Value::Int(0)
+        );
+        assert_eq!(
+            engine.object_snapshot(walked).expect("caller remains live").owner,
+            1,
+            "the removed later Victim checker was not dispatched from a stale snapshot"
+        );
+    }
+
+    #[test]
+    fn check_effect_add_deny_kills_last_same_name_acceptor_once_by_number() {
+        // Multiple same-name effects coexist. The last -2 checker wins; when
+        // its FxAdd returns -1, Check performs one full Kill of THAT numbered
+        // acceptor and returns -2. The lower same-name peer must survive and
+        // FxStop must run exactly once.
+        let definition = Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"
+func Install()
+{
+  var iFirst = AddEffect("Shield", this(), 100, 0, this());
+  var iSecond = AddEffect("Shield", this(), 200, 0, this());
+  return [iFirst, iSecond];
+}
+func Probe() { return CheckEffect("Merge", this(), 50, 0); }
+func FxShieldEffect(szNew) { if (szNew == "Merge") return(-2); return(0); }
+func FxShieldAdd() { return(-1); }
+func FxShieldStop() { SetOwner(GetOwner() + 1); return(0); }
+"#,
+        )
+        .expect("caller compiles");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("caller registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("CALL").with_owner(1))
+            .expect("caller spawns");
+        let index = engine.find_object_index(object).expect("caller index");
+        let installed = engine
+            .call_object_function(index, "Install", vec![])
+            .expect("same-name effects install");
+        let Value::Array(numbers) = installed else {
+            panic!("Install returns effect numbers")
+        };
+        let first = match numbers.first() {
+            Some(Value::Int(number)) => *number,
+            other => panic!("first effect number missing: {other:?}"),
+        };
+        let second = match numbers.get(1) {
+            Some(Value::Int(number)) => *number,
+            other => panic!("second effect number missing: {other:?}"),
+        };
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Probe", vec![])
+                .expect("annul/add-deny check runs"),
+            Value::Int(-2)
+        );
+        let snapshot = engine.object_snapshot(object).expect("caller remains live");
+        assert_eq!(snapshot.owner, 2, "the acceptor Stop ran exactly once");
+        assert_eq!(
+            snapshot
+                .effects
+                .iter()
+                .map(|effect| effect.number)
+                .collect::<Vec<_>>(),
+            vec![first],
+            "last-annul winner {second} is removed by number; its same-name peer survives"
+        );
+    }
+
+    #[test]
+    fn check_effect_annul_calls_temp_brackets_add_in_cpp_order() {
+        let definition = Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"
+func Install()
+{
+  var iShield = AddEffect("Shield", this(), 100, 0, this());
+  AddEffect("Upper", this(), 200, 0, this());
+  SetOwner(0);
+  return iShield;
+}
+func Probe() { return CheckEffect("Merge", this(), 50, 0); }
+func FxShieldEffect() { return(-3); }
+func FxShieldAdd() { SetOwner(GetOwner() * 10 + 2); return(0); }
+func FxUpperStop(pTarget, iNumber, iTemp, fTemp)
+{
+  if (iTemp == 1 && fTemp) SetOwner(GetOwner() * 10 + 1);
+  return(0);
+}
+func FxUpperStart(pTarget, iNumber, iTemp)
+{
+  if (iTemp == 1) SetOwner(GetOwner() * 10 + 3);
+  return(0);
+}
+"#,
+        )
+        .expect("caller compiles");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("caller registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let index = engine.find_object_index(object).expect("caller index");
+        let shield = engine
+            .call_object_function(index, "Install", vec![])
+            .expect("effects install");
+        assert_eq!(
+            engine
+                .call_object_function(index, "Probe", vec![])
+                .expect("annul-calls check runs"),
+            shield
+        );
+        assert_eq!(
+            engine.object_snapshot(object).expect("caller remains live").owner,
+            123,
+            "AnnulCalls orders Upper Stop, Shield Add, Upper Start"
+        );
+    }
+
+    #[test]
     fn scenario_init_builds_and_persists_cpp_ordered_magic_lists() {
         // C4Player::ScenarioInit copies the scenario list, removes unknown
         // definitions, loads every C4D_Magic definition when that result is
@@ -6563,6 +6887,58 @@ func EmptyContainer() { SetOwner(7); return 1; }
         assert!(handled, "return(1) is truthy like C++'s bool cast");
         let snapshot = engine.object_snapshot(id).expect("object snapshot");
         assert_eq!(snapshot.owner, 7, "the context function ran");
+        Ok(())
+    }
+
+    #[test]
+    fn player_context_menu_includes_and_executes_legacy_annotated_function(
+    ) -> Result<(), EngineError> {
+        // C4ObjectMenu::AddContextFunctions enumerates annotated Context*
+        // functions, evaluates their Condition with (menu crew, image id),
+        // and executes the selected function with that same menu crew object
+        // (C4ObjectMenu.cpp:398-399,650-682). MagiClonk::ContextMagic uses
+        // exactly this path and calls SetComDir on its pByObject argument.
+        let script = r#"
+#strict 2
+public func ContextMagic(object pByObject)
+{
+  [Magic|Image=MCMS|Condition=ReadyToMagic|Desc=Cast a spell.]
+  if (pByObject == this()) { SetOwner(7); return(1); }
+  SetOwner(8);
+  return(0);
+}
+protected func ReadyToMagic(object pByObject, id image)
+{
+  return(pByObject == this() && image == MCMS);
+}
+"#;
+        let definition =
+            Definition::from_script("MAGE", "Mage", script).expect("mage script compiles");
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        let mage = engine
+            .spawn_object(SpawnConfig::new("MAGE").with_owner(1))
+            .expect("mage spawns");
+
+        assert_eq!(
+            engine.context_menu_entries(mage)?,
+            vec![ContextMenuEntry {
+                function: "ContextMagic".to_string(),
+                label: "Magic".to_string(),
+                description: Some("Cast a spell.".to_string()),
+            }],
+            "the app-facing context list includes legacy ContextMagic"
+        );
+
+        assert!(
+            engine.execute_context_menu(mage, "ContextMagic")?,
+            "the legacy callback's integer return uses C4Value truthiness"
+        );
+        assert_eq!(
+            engine.object_snapshot(mage).expect("mage snapshot").owner,
+            7,
+            "ContextMagic receives the live menu crew object, not a state proplist"
+        );
         Ok(())
     }
 
@@ -16777,6 +17153,123 @@ func CrewSelection()
             "join baseline uses current game time"
         );
         assert_eq!(engine.last_player_info_id, 41);
+    }
+
+    #[test]
+    fn join_resolves_default_team_before_player_and_initialize_callback() {
+        // C4PlayerInfoList::AssignTeams resolves an unset player-info team
+        // before C4Player::Init constructs the live player. ScenarioInit then
+        // broadcasts that same team to InitializePlayer (C4PlayerInfo.cpp:
+        // 810-816; C4Teams.cpp:474-542; C4Player.cpp:261,769-774).
+        const SCRIPT: &str = r#"
+static callback_team;
+static live_player_team;
+
+protected func InitializePlayer(player, x, y, base, team)
+{
+  callback_team = team;
+  live_player_team = GetPlayerTeam(player);
+  return(1);
+}
+"#;
+
+        let config = |name: &str, team| JoinPlayerConfig {
+            name: name.to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
+            team,
+            color_dw: 0xff0000,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        };
+
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Left", 0),
+            TeamInfo::new(2, "Right", 0),
+        ]);
+        engine
+            .install_scenario_script_with_convention("Teams", SCRIPT, true)
+            .expect("scenario script installs");
+
+        let first = engine
+            .join_player(config("Default one", None))
+            .expect("first default player joins");
+        let first_team = engine
+            .player(first.number)
+            .and_then(Player::team)
+            .expect("first default player receives a team");
+        assert!([1, 2].contains(&first_team));
+        let first_globals = engine.snapshot().script_globals.named;
+        assert_eq!(
+            first_globals.get("callback_team"),
+            Some(&Value::Int(first_team))
+        );
+        assert_eq!(
+            first_globals.get("live_player_team"),
+            Some(&Value::Int(first_team)),
+            "the Player already owns the resolved team inside InitializePlayer"
+        );
+
+        let second = engine
+            .join_player(config("Default two", None))
+            .expect("second default player joins");
+        let second_team = engine
+            .player(second.number)
+            .and_then(Player::team)
+            .expect("second default player receives a team");
+        assert_ne!(
+            second_team, first_team,
+            "the least-used loaded team receives the next unset player"
+        );
+
+        let explicit = engine
+            .join_player(config("Explicit", Some(2)))
+            .expect("explicit-team player joins");
+        assert_eq!(
+            engine.player(explicit.number).and_then(Player::team),
+            Some(2),
+            "an explicit player-info team is preserved"
+        );
+        let explicit_globals = engine.snapshot().script_globals.named;
+        assert_eq!(explicit_globals.get("callback_team"), Some(&Value::Int(2)));
+        assert_eq!(
+            explicit_globals.get("live_player_team"),
+            Some(&Value::Int(2))
+        );
+
+        let zero = engine
+            .join_player(config("Legacy zero", Some(0)))
+            .expect("zero-team player joins");
+        let zero_team = engine
+            .player(zero.number)
+            .and_then(Player::team)
+            .expect("legacy team zero is reassigned");
+        assert!([1, 2].contains(&zero_team));
+        assert_eq!(
+            engine.snapshot().script_globals.named.get("callback_team"),
+            Some(&Value::Int(zero_team)),
+            "InitializePlayer receives the normalized team, never legacy zero"
+        );
+
+        let invalid = engine
+            .join_player(config("Invalid explicit", Some(99)))
+            .expect("invalid-team player joins");
+        let invalid_team = engine
+            .player(invalid.number)
+            .and_then(Player::team)
+            .expect("invalid explicit team is reassigned");
+        assert!([1, 2].contains(&invalid_team));
+        assert_eq!(
+            engine.snapshot().script_globals.named.get("callback_team"),
+            Some(&Value::Int(invalid_team)),
+            "InitializePlayer receives a loaded team, never the invalid request"
+        );
     }
 
     #[test]

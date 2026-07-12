@@ -29,7 +29,7 @@ use crate::LiquidSegment;
 use crate::PlayerViewport;
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, AudioCommand,
-    CommandDirection, CrewSelectionState, DefinitionId, DefinitionRect, Direction, DrawTransform,
+    CommandDirection, CrewObjectInfo, CrewSelectionState, DefinitionId, DefinitionRect, Direction, DrawTransform,
     EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectBaseGraphics,
     MenuRequest, MenuRequestKind, ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus,
     ObjectUpdate, ObjectVertex,
@@ -692,6 +692,8 @@ pub struct HostWorldContext {
     /// GetHiRank reads them, C4Player.cpp:1012). Objects without an entry
     /// behave like info-less crew (rank -1).
     crew_ranks: Rc<HashMap<u64, i32>>,
+    /// Full modeled C4ObjectInfoCore values for GetObjectInfoCoreVal.
+    crew_infos: Rc<HashMap<ObjectId, CrewObjectInfo>>,
     /// The scenario script, shared from `Engine.scenario_script`, for
     /// GameCall/GameCallEx mid-VM-call resolution (C++ resolves on
     /// `Game.Script`, C4Script.cpp:3483). `None` when no scenario script is
@@ -734,6 +736,7 @@ impl Default for HostWorldContext {
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
+            crew_infos: Rc::new(HashMap::new()),
             materials: None,
             frame: 0,
             base_buy_enabled: true,
@@ -907,6 +910,7 @@ impl HostWorldContext {
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
+            crew_infos: Rc::new(HashMap::new()),
             materials: None,
             frame: 0,
             base_buy_enabled: true,
@@ -1048,6 +1052,14 @@ impl HostWorldContext {
     /// Attach the engine's crew-info rank table (see `crew_ranks` docs).
     pub(crate) fn with_crew_ranks(mut self, ranks: Rc<HashMap<u64, i32>>) -> Self {
         self.crew_ranks = ranks;
+        self
+    }
+
+    pub(crate) fn with_crew_infos(
+        mut self,
+        infos: Rc<HashMap<ObjectId, CrewObjectInfo>>,
+    ) -> Self {
+        self.crew_infos = infos;
         self
     }
 
@@ -4937,6 +4949,31 @@ fn get_definition(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnValue (C4Script.cpp:1385-1389): the raw DefCore `Value` of a loaded
+/// definition. Unlike GetValue this does not run CalcDefValue/CalcBuyValue;
+/// an unloaded or zero ID returns null.
+fn definition_value(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "Value expects at most 1 argument: definition",
+        ));
+    }
+    let Some(definition) = parse_definition_argument(args.first(), "Value")? else {
+        return Ok(Value::Nil);
+    };
+    HOST_CONTEXT.with(|cell| {
+        Ok(cell
+            .borrow()
+            .as_ref()
+            .and_then(|context| {
+                context
+                    .world
+                    .definition_metadata(&DefinitionId::from(definition.as_str()))
+            })
+            .map_or(Value::Nil, |metadata| Value::Int(metadata.value)))
+    })
+}
+
 /// FnGetDefCoreVal (C4Script.cpp:4170-4180): DefCore reflection. The hot
 /// entries real content reads resolve from the definition metadata
 /// (Width/Height/Offset from the Shape rect, Value, Mass); anything else
@@ -6907,6 +6944,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     // (RegisterGlobalConstant, C4Script.cpp:6580-6581).
     crate::script_constants::register_script_constants(script);
     script.register_host_function("AddEffect", add_effect);
+    script.register_host_function("CheckEffect", check_effect);
     script.register_host_function("RemoveEffect", remove_effect);
     script.register_host_function("GetEffect", get_effect);
     script.register_host_function("GetEffectCount", get_effect_count);
@@ -6950,6 +6988,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetHiRank", get_hi_rank);
     script.register_host_function("SetComponent", set_component);
     script.register_host_function("GetDefinition", get_definition);
+    script.register_host_function("Value", definition_value);
     script.register_host_function("GetDefCoreVal", get_def_core_val);
     script.register_host_function("Enter", enter);
     script.register_host_function("Exit", exit_container);
@@ -7148,6 +7187,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CreateContents", create_contents);
     script.register_host_function("GetActMapVal", get_act_map_val);
     script.register_host_function("GetObjectVal", get_object_val);
+    script.register_host_function("GetObjectInfoCoreVal", get_object_info_core_val);
     // System.c4g/GetXVal.c:78-79 wrappers. The Rust loader does not yet
     // compile the engine-wide planet/System.c4g.
     script.register_host_function("GetObjWidth", get_obj_width);
@@ -9397,6 +9437,308 @@ fn redirect_foreign_effect_target(
         Some(result) => result,
         None => Ok(Value::Int(0)),
     })
+}
+
+/// Runs an effect callback with the fail-safe error policy used by C4Effect's
+/// temp/add/stop calls (`fPassErrors=false`). Missing callbacks and script
+/// errors both fold to integer zero; the latter are logged.
+fn dispatch_effect_fx_callback_fail_safe(
+    effect: &EffectState,
+    function: &str,
+    call_args: &[Value],
+) -> i32 {
+    match dispatch_effect_fx_callback(
+        effect.command_target,
+        effect.command_id.as_deref(),
+        function,
+        call_args,
+    ) {
+        None => 0,
+        Some(Ok(value)) => value_as_i32(&value),
+        Some(Err(error)) => {
+            tracing::warn!(%error, "script error in {function}; continuing like C++ fail-safe effect dispatch");
+            0
+        }
+    }
+}
+
+/// Temp-deactivates an acceptor's active `pNext` effects from high to low,
+/// exactly like `C4Effect::TempRemoveUpperEffects` (C4Effect.cpp:473-492).
+/// The returned low-to-high list is the matching reactivation order.
+fn temp_remove_upper_effects(
+    scope: EffectScope,
+    target: &Value,
+    effects: &[EffectState],
+    acceptor_number: i32,
+) -> Result<Vec<EffectState>, RuntimeError> {
+    let Some(acceptor_index) = effects
+        .iter()
+        .position(|effect| effect.number == acceptor_number)
+    else {
+        return Ok(Vec::new());
+    };
+    if effects[acceptor_index].priority == 1 {
+        return Ok(Vec::new());
+    }
+    let uppers: Vec<EffectState> = effects
+        .iter()
+        .skip(acceptor_index + 1)
+        .filter(|effect| effect.priority > 0 && effect.priority != 1)
+        .cloned()
+        .collect();
+    for upper in uppers.iter().rev() {
+        // FlipActive happens before Fx*Stop, so nested effect queries see the
+        // temporary negative priority just as they do in C++.
+        let flipped = with_context_mut(scope, |ctx| {
+            let Some(effect) = ctx
+                .effects
+                .iter_mut()
+                .find(|effect| effect.number == upper.number && effect.priority > 0)
+            else {
+                return false;
+            };
+            effect.priority = -effect.priority;
+            true
+        })?;
+        if flipped {
+            let function = format!("Fx{}Stop", upper.name);
+            dispatch_effect_fx_callback_fail_safe(
+                upper,
+                &function,
+                &[
+                    target.clone(),
+                    Value::Int(upper.number),
+                    Value::Int(1),
+                    Value::Bool(true),
+                ],
+            );
+        }
+    }
+    Ok(uppers)
+}
+
+fn temp_readd_upper_effects(
+    scope: EffectScope,
+    target: &Value,
+    uppers: &[EffectState],
+) -> Result<(), RuntimeError> {
+    for upper in uppers {
+        // C++ flips the effect active before its temp Start callback.
+        let flipped = with_context_mut(scope, |ctx| {
+            let Some(effect) = ctx
+                .effects
+                .iter_mut()
+                .find(|effect| effect.number == upper.number && effect.priority < 0)
+            else {
+                return false;
+            };
+            effect.priority = -effect.priority;
+            true
+        })?;
+        if flipped {
+            let function = format!("Fx{}Start", upper.name);
+            dispatch_effect_fx_callback_fail_safe(
+                upper,
+                &function,
+                &[target.clone(), Value::Int(upper.number), Value::Int(1)],
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `FnCheckEffect` / `C4Effect::Check` (C4Script.cpp:5546-5556;
+/// C4Effect.cpp:271-317). Unlike AddEffect, this does not create a pending
+/// effect: it asks the selected live list synchronously and returns deny,
+/// zero, or the accepting effect number.
+fn check_effect(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 8 {
+        return Err(RuntimeError::new("CheckEffect expects at most 8 arguments"));
+    }
+    let name = match effect_name_filter("CheckEffect", args.first().unwrap_or(&Value::Nil))? {
+        Some(name) => name.to_owned(),
+        None => return Ok(Value::Nil),
+    };
+    let target_state = args.get(1).unwrap_or(&Value::Nil);
+    let target_id = object_id_from_value(target_state);
+
+    // A typed object pointer whose Status is zero is rejected before its
+    // effect list is inspected (FnCheckEffect's safety guard).
+    if let Some(target_id) = target_id {
+        let (active, status) = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let Some(context) = borrow.as_ref() else {
+                return (None, None);
+            };
+            let active = context.object_context().map(|object| object.id());
+            let status = if active == Some(target_id) {
+                context.object_context().map(|object| object.status())
+            } else {
+                context.get_world_object(target_id).map(|object| object.status())
+            };
+            (active, status)
+        });
+        if status.is_none_or(|status| status == ObjectStatus::Deleted) {
+            return Ok(Value::Nil);
+        }
+        if active != Some(target_id) {
+            return call_world_object_function(target_id, "CheckEffect", args)
+                .unwrap_or(Ok(Value::Nil));
+        }
+    }
+
+    let scope = determine_scope_from_state(target_state)?;
+    if matches!(scope, EffectScope::Object)
+        && !matches!(target_state, Value::Object(_) | Value::Proplist(_))
+    {
+        return Err(RuntimeError::new(format!(
+            "CheckEffect: expected object or proplist for object state, got {}",
+            target_state.type_name()
+        )));
+    }
+    let priority = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "CheckEffect",
+        "priority",
+    )?;
+    let interval = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "CheckEffect",
+        "interval",
+    )?;
+    let values: Vec<Value> = (4..8)
+        .map(|index| args.get(index).cloned().unwrap_or(Value::Nil))
+        .collect();
+    let effects = match snapshot_effects_from_context(scope) {
+        Some(effects) => effects,
+        None => match scope {
+            EffectScope::Object => extract_effects_from_state(target_state)?,
+            EffectScope::Global => Vec::new(),
+        },
+    };
+    // FnCheckEffect returns C4VNull when there is no list head. This is
+    // observably distinct from C4Effect::Check's successful integer zero.
+    let had_list_head = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.effect_list_had_head(scope))
+    });
+    if !had_list_head.unwrap_or(!effects.is_empty()) {
+        return Ok(Value::Nil);
+    }
+    if priority == 1 {
+        return Ok(Value::Int(0));
+    }
+
+    let target = target_id.map(object_reference_value).unwrap_or(Value::Nil);
+    let mut acceptor: Option<(EffectState, bool)> = None;
+    let checker_numbers: Vec<i32> = effects.iter().map(|effect| effect.number).collect();
+    for checker_number in checker_numbers {
+        // C++ re-tests IsDead and signed priority as it reaches each linked
+        // node. An earlier checker may synchronously remove a later one, so
+        // never dispatch from the stale entry snapshot.
+        let Some(checker) = snapshot_effects_from_context(scope)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|effect| effect.number == checker_number)
+        else {
+            continue;
+        };
+        if checker.priority == 0 || checker.priority < priority {
+            continue;
+        }
+        let function = format!("Fx{}Effect", checker.name);
+        let mut call_args = vec![
+            Value::String(name.clone()),
+            target.clone(),
+            Value::Int(checker.number),
+            Value::Nil,
+        ];
+        call_args.extend(values.iter().cloned());
+        let result = match dispatch_effect_fx_callback(
+            checker.command_target,
+            checker.command_id.as_deref(),
+            &function,
+            &call_args,
+        ) {
+            None => 0,
+            Some(result) => value_as_i32(&result?),
+        };
+        match result {
+            -1 => return Ok(Value::Int(-1)),
+            -2 => acceptor = Some((checker.clone(), false)),
+            -3 => acceptor = Some((checker.clone(), true)),
+            _ => {}
+        }
+    }
+
+    let Some((acceptor, do_temp_calls)) = acceptor else {
+        return Ok(Value::Int(0));
+    };
+    let uppers = if do_temp_calls {
+        temp_remove_upper_effects(scope, &target, &effects, acceptor.number)?
+    } else {
+        Vec::new()
+    };
+    let function = format!("Fx{}Add", acceptor.name);
+    let mut add_args = vec![
+        target.clone(),
+        Value::Int(acceptor.number),
+        Value::String(name),
+        Value::Int(interval),
+    ];
+    add_args.extend(values);
+    let add_result =
+        dispatch_effect_fx_callback_fail_safe(&acceptor, &function, &add_args);
+    if do_temp_calls {
+        temp_readd_upper_effects(scope, &target, &uppers)?;
+    }
+
+    if add_result == -1 {
+        // Fx*Add returning C4Fx_Start_Deny kills the ACCEPTOR and Check
+        // reports Annul. The normal Stop call is fail-safe and may deny that
+        // removal, exactly like C4Effect::Kill.
+        let current = snapshot_effects_from_context(scope).unwrap_or_default();
+        let kill_uppers = temp_remove_upper_effects(scope, &target, &current, acceptor.number)?;
+        let previous_priority = with_context_mut(scope, |ctx| {
+            let effect = ctx
+                .effects
+                .iter_mut()
+                .find(|effect| effect.number == acceptor.number)?;
+            let priority = effect.priority;
+            effect.priority = 0;
+            Some(priority)
+        })?;
+        let stop_function = format!("Fx{}Stop", acceptor.name);
+        let stop_result = dispatch_effect_fx_callback_fail_safe(
+            &acceptor,
+            &stop_function,
+            &[target.clone(), Value::Int(acceptor.number)],
+        );
+        if let Some(previous_priority) = previous_priority {
+            if stop_result == -1 {
+                with_context_mut(scope, |ctx| {
+                    if let Some(effect) = ctx
+                        .effects
+                        .iter_mut()
+                        .find(|effect| effect.number == acceptor.number)
+                    {
+                        effect.priority = previous_priority;
+                    }
+                })?;
+            } else {
+                with_context_mut(scope, |ctx| {
+                    // The Stop callback already ran synchronously above.
+                    // Fold only the identity-keyed deletion, never another
+                    // deferred Stop dispatch.
+                    ctx.remove_effect(None, acceptor.number as usize, true);
+                })?;
+            }
+        }
+        temp_readd_upper_effects(scope, &target, &kill_uppers)?;
+        return Ok(Value::Int(-2));
+    }
+    Ok(Value::Int(acceptor.number))
 }
 
 fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -23191,6 +23533,61 @@ fn get_object_val(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetObjectInfoCoreVal (C4Script.cpp:4197-4214): reflect the linked
+/// C4ObjectInfoCore rather than the object's current definition. In
+/// particular, `id` remains the recruited crew's source definition across a
+/// ChangeDef; System.c4g/Magic.c uses that value for physical-training caps.
+fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 4 {
+        return Err(RuntimeError::new(
+            "GetObjectInfoCoreVal expects at most 4 arguments",
+        ));
+    }
+    let Some(entry) = parse_optional_string(args.first(), "GetObjectInfoCoreVal", "entry")?
+    else {
+        return Ok(Value::Nil);
+    };
+    let section = parse_optional_string(args.get(1), "GetObjectInfoCoreVal", "section")?;
+    let target = parse_object_reference_argument(
+        args.get(2).unwrap_or(&Value::Nil),
+        "GetObjectInfoCoreVal",
+        "target",
+    )?;
+    let _entry_number = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "GetObjectInfoCoreVal",
+        "entry number",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let target = target.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(info) = target.and_then(|target| context.world.crew_infos.get(&target)) else {
+            return Ok(Value::Nil);
+        };
+        if section
+            .as_deref()
+            .is_some_and(|section| section != "ObjectInfo")
+        {
+            tracing::debug!(?section, %entry, "GetObjectInfoCoreVal section not modeled; nil");
+            return Ok(Value::Nil);
+        }
+        Ok(match entry.as_str() {
+            "id" => Value::C4Id(info.definition_id.as_str().to_string()),
+            "Name" => Value::String(info.name.clone()),
+            "Rank" => Value::Int(info.rank),
+            "Experience" => Value::Int(info.experience),
+            other => {
+                tracing::debug!(entry = other, "GetObjectInfoCoreVal entry not modeled; nil");
+                Value::Nil
+            }
+        })
+    })
+}
+
 /// The live `C4Object::Shape` reflected by GetObjectVal. Same-call SetShape
 /// and persisted shape overrides win over the definition-derived shape.
 fn live_object_shape(context: &EffectHostContext, target: ObjectId) -> Option<DefinitionRect> {
@@ -26800,6 +27197,16 @@ impl EffectHostContext {
         }
     }
 
+    fn effect_list_had_head(&self, scope: EffectScope) -> Option<bool> {
+        match scope {
+            EffectScope::Object => self
+                .object
+                .as_ref()
+                .map(|ctx| ctx.effects.had_list_head),
+            EffectScope::Global => self.global.as_ref().map(|ctx| ctx.had_list_head),
+        }
+    }
+
     fn player_ids(&self) -> &[i32] {
         self.world.player_ids()
     }
@@ -27022,13 +27429,20 @@ impl EffectHostContext {
 struct EffectScopeContext {
     effects: Vec<EffectState>,
     commands: Vec<EffectCommand>,
+    /// C++ keeps dead effect nodes linked until the next Execute cleanup.
+    /// Once a list head existed in this VM call, a later CheckEffect reaches
+    /// C4Effect::Check and returns integer zero even if removals left no live
+    /// entries; a truly null head returns nil in FnCheckEffect.
+    had_list_head: bool,
 }
 
 impl EffectScopeContext {
     fn new(effects: Vec<EffectState>) -> Self {
+        let had_list_head = !effects.is_empty();
         Self {
             effects,
             commands: Vec::new(),
+            had_list_head,
         }
     }
 
@@ -27065,6 +27479,7 @@ impl EffectScopeContext {
         }
 
         self.effects.insert(insert_pos, effect.clone());
+        self.had_list_head = true;
         self.commands.push(EffectCommand::add(effect.clone()));
         effect.number
     }
@@ -27131,7 +27546,9 @@ impl EffectScopeContext {
         let position = position?;
 
         let effect = self.effects.remove(position);
-        let command = if no_callbacks {
+        let command = if name_filter.is_none() {
+            EffectCommand::remove_number(effect.number, no_callbacks)
+        } else if no_callbacks {
             EffectCommand::remove_without_callbacks(effect.name.clone())
         } else {
             EffectCommand::remove(effect.name.clone())
@@ -28393,6 +28810,7 @@ mod tests {
         "CastPXS",
         "CastParticles",
         "ChangeDef",
+        "CheckEffect",
         "CheckEnergyNeedChain",
         "ClearParticles",
         "CloseMenu",
@@ -28512,6 +28930,7 @@ mod tests {
         "GetObjHeight",
         "GetObjWidth",
         "GetObjectBlitMode",
+        "GetObjectInfoCoreVal",
         "GetObjectLayer",
         "GetObjectStatus",
         "GetObjectVal",
@@ -28707,6 +29126,7 @@ mod tests {
         "Sum",
         "TrainPhysical",
         "UnselectCrew",
+        "Value",
         "WildcardMatch",
         "goto",
     ];

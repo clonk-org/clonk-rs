@@ -1731,6 +1731,10 @@ fn handle_window_event(
         WindowEvent::CursorLeft { .. } => {
             app.pointer_left();
         }
+        WindowEvent::Focused(false) => {
+            app.handle_focus_lost()
+                .context("failed to clear controls after focus loss")?;
+        }
         WindowEvent::MouseInput { state, button, .. } => {
             if button == MouseButton::Left {
                 app.handle_mouse_button(state)
@@ -1769,12 +1773,8 @@ fn handle_window_event(
             app.handle_touch(touch.phase, position)
                 .context("failed to process touch input")?;
         }
-        WindowEvent::Focused(focused) => {
-            if focused {
-                window.request_redraw();
-            } else {
-                app.pointer_left();
-            }
+        WindowEvent::Focused(true) => {
+            window.request_redraw();
         }
         _ => {}
     }
@@ -3266,6 +3266,10 @@ struct GameApp {
     system_scripts: Vec<(String, String)>,
     input: InputDispatcher,
     bindings: KeyboardBindings,
+    /// Physical keys currently held by the window input backend. Winit's
+    /// repeated `Pressed` events must carry C++'s `fRepeated` semantics into
+    /// `LocalControlKey` rather than looking like deliberate double presses.
+    pressed_engine_keys: HashSet<VirtualKeyCode>,
     gamepads: GamepadManager,
     snapshot: SimulationSnapshot,
     focus_id: Option<ObjectId>,
@@ -6351,6 +6355,7 @@ impl GameApp {
             system_scripts,
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
+            pressed_engine_keys: HashSet::new(),
             gamepads: GamepadManager::new(),
             snapshot,
             focus_id: None,
@@ -7145,9 +7150,40 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        let repeated = match state {
+            ElementState::Pressed => !self.pressed_engine_keys.insert(key),
+            ElementState::Released => {
+                self.pressed_engine_keys.remove(&key);
+                false
+            }
+        };
         if let Some(event) = self.bindings.event_for_key(key, state) {
+            // C4Game::LocalControlKey consumes key-repeat for
+            // AutoStopControl players before the command reaches
+            // C4Player::InCom (C4Game.cpp:3560-3573). Classic control keeps
+            // receiving repeats, matching the original game's branch.
+            if repeated
+                && self
+                    .engine
+                    .player(self.local_owner)
+                    .is_some_and(|player| player.control_style())
+            {
+                return Ok(());
+            }
             self.dispatch_control_event(event)?;
         }
+        Ok(())
+    }
+
+    fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
+        // No key-up events are guaranteed after the window loses focus.
+        // Release synchronized controls and forget the physical repeat state
+        // so the first press after refocus is not discarded.
+        if matches!(self.mode, AppMode::Running) {
+            self.clear_local_controls()?;
+        }
+        self.pressed_engine_keys.clear();
+        self.pointer_left();
         Ok(())
     }
 
@@ -11647,6 +11683,7 @@ impl GameApp {
         self.engine.set_local_players([self.local_owner]);
         self.apply_material_library();
         self.input = InputDispatcher::new();
+        self.pressed_engine_keys.clear();
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.sky = None;
@@ -11836,6 +11873,7 @@ impl GameApp {
 
         self.engine = engine;
         self.input = InputDispatcher::new();
+        self.pressed_engine_keys.clear();
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.mouse_control_allowed = !scenario_data.disables_mouse();
@@ -11912,6 +11950,7 @@ impl GameApp {
         self.engine.set_network_game(self.network.is_some());
         self.apply_material_library();
         self.input = InputDispatcher::new();
+        self.pressed_engine_keys.clear();
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.mouse_control_allowed = true;
@@ -11993,6 +12032,7 @@ impl GameApp {
         self.engine.set_network_game(self.network.is_some());
         self.apply_material_library();
         self.input = InputDispatcher::new();
+        self.pressed_engine_keys.clear();
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.mouse_control_allowed = true;
@@ -15769,6 +15809,198 @@ mod tests {
     }
 
     #[test]
+    fn real_tutorial06_elevator_rider_view_target_and_camera_stay_continuous() {
+        // This is the short form of the real Tutorial06 app route below: use
+        // its shipped CLNK/ELEV/ELEC definitions and the normal app snapshot
+        // -> viewport -> renderer path, while opening only the test shaft so
+        // the carriage can run for a small deterministic frame window.
+        let mut app = real_tutorial_app(6, "Tutorial 6 elevator camera");
+        let owner = app.local_owner;
+        let rider = app
+            .engine
+            .crew_cursor(owner)
+            .expect("Tutorial06 starts with a selected CLNK");
+        advance_app_until(
+            &mut app,
+            "Tutorial06 selected CLNK completes its startup Exit",
+            160,
+            |app| {
+                app.engine.object_snapshot(rider).is_some_and(|object| {
+                    object.container.is_none() && object.action.name == "Walk"
+                })
+            },
+        );
+
+        app.engine
+            .execute_shake_circle_operation(Vector2::new(332, 250), 180);
+        let elevator = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new("ELEV")
+                    .with_position(Vector2::new(332, 150))
+                    .with_owner(owner),
+            )
+            .expect("spawn shipped Tutorial06 ELEV");
+        let first = app.engine.snapshot();
+        let elevator = first.object(elevator).expect("ELEV survives Initialize");
+        let case_id = elevator
+            .action
+            .target
+            .expect("real ELEV Initialize creates and targets ELEC");
+        let case = first.object(case_id).expect("real ELEC exists");
+        assert_eq!(case.definition_id, "ELEC");
+
+        // CLNK's bottom vertex is y+9 and ELEC's shipped mask begins at
+        // case y+11. Put the selected crew exactly on that platform and use
+        // the real PUSH action target. C4SolidMask then carries it by every
+        // case delta before its own movement pass (C4SolidMask.cpp:178-195,
+        // 276-305), just as in the full physical-key route.
+        let rider_offset = Vector2::new(0, 2);
+        let rider_action = lc_engine::ActionUpdate::default()
+            .with_name("Push")
+            .with_target(Some(case_id));
+        app.engine
+            .apply_object_update(
+                rider,
+                ObjectUpdate::new()
+                    .with_position(Vector2::new(
+                        case.position.x + rider_offset.x,
+                        case.position.y + rider_offset.y,
+                    ))
+                    .with_velocity(Vector2::ZERO)
+                    .with_command_direction(CommandDirection::Stop)
+                    .with_action_update(rider_action),
+            )
+            .expect("attach selected CLNK to real ELEC");
+        // Wait is the real ELEC FLOAT action. A downward comdir plus an
+        // initial live velocity exercises ordinary fixed-point movement and
+        // solid-mask rider restoration without invoking a test-only mover.
+        app.engine
+            .apply_object_update(
+                case_id,
+                ObjectUpdate::new()
+                    .with_action("Wait")
+                    .with_velocity(Vector2::new(0, 1))
+                    .with_command_direction(CommandDirection::Down),
+            )
+            .expect("start real ELEC moving down the opened shaft");
+
+        app.focus_id = Some(rider);
+        app.snapshot = app.engine.snapshot();
+        app.refresh_focus();
+        let initial_snapshot = app.snapshot.clone();
+        let initial_inputs =
+            collect_viewport_inputs(&initial_snapshot, app.local_owner, app.focus_id);
+        assert_eq!(initial_inputs.len(), 1);
+        assert_eq!(initial_inputs[0].focus.id, rider);
+        assert_eq!(
+            initial_inputs[0].center,
+            app.snapshot.object(rider).expect("initial rider").position,
+            "C4Player::UpdateView follows the live ViewCursor position"
+        );
+        app.graphics
+            .render_frame(&initial_snapshot, &initial_inputs);
+
+        let initial_case = app
+            .snapshot
+            .object(case_id)
+            .expect("initial moving ELEC")
+            .position;
+        let initial_rider = app
+            .snapshot
+            .object(rider)
+            .expect("initial attached CLNK")
+            .position;
+        let initial_world_origin = app
+            .graphics
+            .world_to_screen(owner, Vector2::ZERO)
+            .expect("initial viewport maps world origin")
+            .1;
+        let initial_rider_screen = app
+            .graphics
+            .world_to_screen(owner, initial_rider)
+            .expect("initial viewport maps rider")
+            .1;
+        let mut samples = vec![(
+            initial_case.y,
+            initial_rider.y,
+            initial_world_origin,
+            initial_rider_screen,
+        )];
+
+        for frame in 1..=12 {
+            app.update()
+                .unwrap_or_else(|error| panic!("advance elevator frame {frame}: {error}"));
+            let case = app
+                .snapshot
+                .object(case_id)
+                .unwrap_or_else(|| panic!("ELEC survives frame {frame}"))
+                .clone();
+            let rider_now = app
+                .snapshot
+                .object(rider)
+                .unwrap_or_else(|| panic!("CLNK survives frame {frame}"))
+                .clone();
+            assert_eq!(
+                (rider_now.action.name.as_str(), rider_now.action.target),
+                ("Push", Some(case_id)),
+                "real PUSH attachment survives frame {frame}"
+            );
+            assert!(
+                (rider_now.position.y - case.position.y - rider_offset.y).abs() <= 1,
+                "rider and carriage cannot diverge on frame {frame}: rider={rider_now:?}, case={case:?}"
+            );
+
+            let render_snapshot = app.snapshot.clone();
+            let inputs =
+                collect_viewport_inputs(&render_snapshot, app.local_owner, app.focus_id);
+            assert_eq!(inputs.len(), 1, "one local viewport on frame {frame}");
+            assert_eq!(inputs[0].focus.id, rider);
+            assert_eq!(
+                inputs[0].center, rider_now.position,
+                "the app must present the rider's current frame position to C4Viewport on frame {frame}"
+            );
+            app.graphics.render_frame(&render_snapshot, &inputs);
+            let world_origin = app
+                .graphics
+                .world_to_screen(owner, Vector2::ZERO)
+                .unwrap_or_else(|| panic!("viewport maps world origin on frame {frame}"))
+                .1;
+            let rider_screen = app
+                .graphics
+                .world_to_screen(owner, rider_now.position)
+                .unwrap_or_else(|| panic!("viewport maps rider on frame {frame}"))
+                .1;
+            samples.push((
+                case.position.y,
+                rider_now.position.y,
+                world_origin,
+                rider_screen,
+            ));
+        }
+
+        assert!(
+            samples.last().expect("final sample").0 > samples[0].0,
+            "the real ELEC must move during the sample: {samples:?}"
+        );
+        for pair in samples.windows(2) {
+            let [before, after] = pair else { unreachable!() };
+            assert!(
+                after.0 >= before.0 && after.1 >= before.1,
+                "carriage/rider reversed between frames: {before:?} -> {after:?}"
+            );
+            assert!(
+                after.2 <= before.2,
+                "the fixed-point C4Viewport camera reversed between frames: {before:?} -> {after:?}"
+            );
+            assert!(
+                after.3 >= before.3,
+                "the rider jittered backwards on screen: {before:?} -> {after:?}"
+            );
+        }
+    }
+
+    #[test]
     fn overlay_text_helper_respects_custom_text() {
         assert!(overlay_text_needs_update("", "FRAME "));
         assert!(overlay_text_needs_update("FRAME 00005", "FRAME "));
@@ -16089,6 +16321,154 @@ mod tests {
         // LocalControlKeyUp forwards key-up in AutoStopControl mode
         // (C4Game.cpp:3578-3592).
         assert_selected_player_horizontal_release(true);
+    }
+
+    #[test]
+    fn autostop_ignores_repeated_physical_keydown_until_release() {
+        // Winit reports the operating system's key-repeat as another Pressed
+        // event. C4Game::LocalControlKey swallows that repeat for
+        // AutoStopControl players before C4Player::InCom can turn it into a
+        // COM_Double (C4Game.cpp:3560-3573). A false Down_D makes DFA_PUSH
+        // ungrab its target, which is why holding Down while tensioning CATA
+        // could unexpectedly deselect the catapult.
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Repeat tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+
+        let mut definition =
+            Definition::from_script("WLKR", "Walker", walker_script()).expect("crew definition");
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([(
+                "Walk".to_string(),
+                ActionSpec::default().with_procedure("Walk"),
+            )]),
+        );
+        definition.set_movement_profile(MovementProfile::default());
+        definition.set_crew_member(true);
+        app.engine
+            .register_definition(definition)
+            .expect("register crew definition");
+        app.engine
+            .set_player_starts(vec![lc_engine::scenario::PlayerStart {
+                ready_crew: vec![("WLKR".to_string(), 1)],
+                ..Default::default()
+            }]);
+        app.join_local_player().expect("join fresh player");
+        app.mode = AppMode::Running;
+
+        let mut keyboard = AppVirtualKeyboard::new(&mut app);
+        keyboard
+            .press(VirtualKeyCode::X)
+            .expect("press physical Down");
+        let first_press = keyboard.player_control();
+        keyboard
+            .press(VirtualKeyCode::X)
+            .expect("receive repeated physical Down");
+        let repeated_press = keyboard.player_control();
+
+        assert_eq!(
+            repeated_press.last_com, first_press.last_com,
+            "OS key-repeat must not synthesize a gameplay COM_Down_D"
+        );
+        assert_eq!(
+            repeated_press.last_com_down_double, first_press.last_com_down_double,
+            "OS key-repeat must not arm the drop/double-down window"
+        );
+        keyboard
+            .release(VirtualKeyCode::X)
+            .expect("release physical Down");
+        assert_eq!(keyboard.player_control().pressed_coms, 0);
+    }
+
+    #[test]
+    fn focus_loss_clears_controls_repeat_tracking_and_pointer_state() {
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Focus tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+
+        let mut definition =
+            Definition::from_script("WLKR", "Walker", walker_script()).expect("crew definition");
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([(
+                "Walk".to_string(),
+                ActionSpec::default().with_procedure("Walk"),
+            )]),
+        );
+        definition.set_movement_profile(MovementProfile::default());
+        definition.set_crew_member(true);
+        app.engine
+            .register_definition(definition)
+            .expect("register crew definition");
+        app.engine
+            .set_player_starts(vec![lc_engine::scenario::PlayerStart {
+                ready_crew: vec![("WLKR".to_string(), 1)],
+                ..Default::default()
+            }]);
+        app.join_local_player().expect("join fresh player");
+        app.mode = AppMode::Running;
+        app.ingame_pointer = Some(ViewportPointer {
+            owner: app.local_owner,
+            world: FloatVector2::new(10.0, 20.0),
+            screen: GuiPoint::new(30.0, 40.0),
+        });
+
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::X)
+            .expect("press physical Down");
+        assert!(!app.pressed_engine_keys.is_empty());
+        assert_ne!(
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms,
+            0
+        );
+
+        app.handle_focus_lost().expect("handle focus loss");
+
+        assert!(app.pressed_engine_keys.is_empty());
+        assert_eq!(
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms,
+            0,
+            "focus loss clears synchronized held controls"
+        );
+        assert_eq!(
+            app.ingame_pointer, None,
+            "focus loss retains the old pointer_left lifecycle cleanup"
+        );
     }
 
     #[test]
@@ -23024,6 +23404,15 @@ mod tests {
         AppVirtualKeyboard::new(&mut app)
             .press(VirtualKeyCode::X)
             .expect("hold physical X to tension CATA");
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::X)
+            .expect("OS repeat while physical X remains held");
+        assert!(
+            app.engine.object_snapshot(valley).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(valley_cata)
+            }),
+            "repeated Down must not synthesize Down_D and ungrab the real CATA"
+        );
         advance_app_until(&mut app, "valley CATA reaches Ready phase six", 80, |app| {
             app.engine
                 .object_snapshot(valley_cata)

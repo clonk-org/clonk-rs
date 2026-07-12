@@ -810,6 +810,10 @@ pub struct JoinedPlayer {
 /// by GetHiRank.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrewObjectInfo {
+    /// Original C4ObjectInfoCore definition id. This deliberately survives a
+    /// runtime ChangeDef; System.c4g uses it to cap physical training by the
+    /// recruited crew's source definition.
+    pub definition_id: DefinitionId,
     pub name: String,
     pub rank: i32,
     pub experience: i32,
@@ -4866,6 +4870,16 @@ impl Object {
                 }
                 EffectCommand::Remove { name, no_callbacks } => {
                     if let Some(removed) = self.remove_effect(name) {
+                        if !no_callbacks {
+                            events.push(EffectEvent::stopped(removed, EffectStopReason::Removed));
+                        }
+                    }
+                }
+                EffectCommand::RemoveNumber {
+                    number,
+                    no_callbacks,
+                } => {
+                    if let Some(removed) = self.remove_effect_by_number(*number) {
                         if !no_callbacks {
                             events.push(EffectEvent::stopped(removed, EffectStopReason::Removed));
                         }
@@ -10834,7 +10848,7 @@ pub struct Engine {
     crew_rosters: HashMap<i32, Vec<player_file::CrewInfo>>,
     /// Crew object -> its C4ObjectInfo data (name/rank/experience), the
     /// `pObj->Info` link of CreateInfoObject (C4Game.cpp:1156-1170).
-    crew_object_infos: HashMap<ObjectId, CrewObjectInfo>,
+    crew_object_infos: Rc<HashMap<ObjectId, CrewObjectInfo>>,
     /// Shared rank view of `crew_object_infos` for host contexts
     /// (GetHiRank); rebuilt when crew infos change (joins are rare).
     crew_ranks: Rc<HashMap<u64, i32>>,
@@ -12568,7 +12582,7 @@ impl Engine {
             standard_names: None,
             map_zoom: scenario::LegacyC4SVal::new(10, 0, 5, 15),
             crew_rosters: HashMap::new(),
-            crew_object_infos: HashMap::new(),
+            crew_object_infos: Rc::new(HashMap::new()),
             crew_ranks: Rc::new(HashMap::new()),
             team_home_base_rule: false,
             construction_needs_material: false,
@@ -12706,6 +12720,37 @@ impl Engine {
     /// InitializePlayer. Script-player NoScenarioInit joins are not ported
     /// yet.
     pub fn join_player(&mut self, config: JoinPlayerConfig) -> Result<JoinedPlayer, EngineError> {
+        let mut config = config;
+        // C4PlayerInfoList::AssignTeams runs before C4PlayerList::Join, so an
+        // unset/invalid player-info team is already resolved when C4Player::Init
+        // copies it into the live player and ScenarioInit broadcasts
+        // InitializePlayer. Team zero means unset, and a requested team must
+        // exist in the loaded list before C++ accepts it (C4PlayerInfo.cpp:
+        // 810-816; C4Teams.cpp:474-542;
+        // C4Player.cpp:261,769-774). The C++ tie-break uses SafeRandom; use
+        // Teams.txt order for a deterministic unsynced tie while preserving
+        // its least-used-team rule. Valid explicit player-info teams win.
+        config.team = config.team.filter(|team| *team != 0);
+        if !self.teams.is_empty()
+            && config
+                .team
+                .is_some_and(|requested| !self.teams.iter().any(|team| team.id == requested))
+        {
+            config.team = None;
+        }
+        if config.team.is_none() {
+            config.team = self
+                .teams
+                .iter()
+                .min_by_key(|team| {
+                    self.players
+                        .values()
+                        .filter(|player| player.team() == Some(team.id))
+                        .count()
+                })
+                .map(|team| team.id);
+        }
+
         // C4PlayerList::GetFreeNumber: lowest unused player number.
         let number = (0..)
             .find(|candidate| !self.players.contains_key(candidate))
@@ -13356,9 +13401,10 @@ impl Engine {
                 ]);
             }
         }
-        self.crew_object_infos.insert(
+        Rc::make_mut(&mut self.crew_object_infos).insert(
             id,
             CrewObjectInfo {
+                definition_id: definition_id.clone(),
                 name: info.name.clone(),
                 rank: info.rank,
                 experience: info.experience,
@@ -14560,6 +14606,7 @@ impl Engine {
         }))
         .with_particle_defs(self.particle_system.def_names())
         .with_crew_ranks(Rc::clone(&self.crew_ranks))
+        .with_crew_infos(Rc::clone(&self.crew_object_infos))
         .with_materials(Some(self.materials_shared()))
         .with_definition_scripts(
             self.definitions
@@ -15623,11 +15670,17 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        // C4ObjectMenu::AddContextFunctions enumerates effective annotated
+        // Context* functions separately from the Rust-port MenuEntries hook
+        // (C4ObjectMenu.cpp:398-399,670-682). Keep a detached copy so their
+        // conditions can run through the live engine after MenuEntries releases
+        // the immutable definition borrow.
+        let legacy_context_functions = definition.script_context_functions();
         let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
-        let (entries, audio_state, new_rng) = definition.call_menu_entries(
+        let (mut entries, audio_state, new_rng) = definition.call_menu_entries(
             &state_snapshot,
             object_id,
             rng_state,
@@ -15641,6 +15694,34 @@ impl Engine {
         )?;
         self.rng = new_rng;
         self.audio_registry = audio_state;
+
+        // C++ calls each Condition on the context target with the menu object
+        // and annotation image id. The player-facing menu is built for its
+        // cursor, so the target and menu object are this same crew object.
+        for context in legacy_context_functions {
+            let image = context.image.as_deref().unwrap_or("NONE");
+            let enabled = match context.condition.as_deref() {
+                Some(condition) => {
+                    let value = self.call_object_function(
+                        index,
+                        condition,
+                        vec![
+                            compat::object_reference_value(object_id),
+                            Value::C4Id(image.to_owned()),
+                        ],
+                    )?;
+                    compat::value_raw_truthy(&value)
+                }
+                None => true,
+            };
+            if enabled {
+                entries.push(ContextMenuEntry {
+                    function: context.function,
+                    label: context.label,
+                    description: context.description,
+                });
+            }
+        }
         Ok(entries)
     }
 
@@ -15708,6 +15789,23 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let is_legacy_context = definition
+            .script_context_functions()
+            .iter()
+            .any(|context| context.function == function);
+        if is_legacy_context {
+            // C4ObjectMenu installs
+            // ProtectedCall(target, "Context*", menu_object): the selected
+            // legacy function receives a live object reference, not the state
+            // proplist used by the Rust-port MenuEntries callback convention
+            // (C4ObjectMenu.cpp:650-665,678-680).
+            let value = self.call_object_function(
+                index,
+                function,
+                vec![compat::object_reference_value(object_id)],
+            )?;
+            return Ok(compat::value_raw_truthy(&value));
+        }
         let definitions_ref = &self.definitions;
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
@@ -34819,6 +34917,9 @@ fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[Eff
                 if let Some(index) = target.iter().position(|existing| &existing.name == name) {
                     target.remove(index);
                 }
+            }
+            EffectCommand::RemoveNumber { number, .. } => {
+                remove_effect_from_stack(target, *number);
             }
             EffectCommand::Clear => target.clear(),
         }

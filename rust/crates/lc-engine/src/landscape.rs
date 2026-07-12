@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::mem;
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::material::TemperatureDirection;
 use crate::{EnvironmentSettings, MaterialId, MaterialSet, Vector2};
@@ -23,24 +24,32 @@ const C4M_MAX_TEX_INDEX: usize = 127;
 /// Hex-string serde for the pixel byte plane (a JSON number array would be
 /// ~10MB for a real map; hex keeps state exports tractable).
 mod hex_bytes {
+    use std::sync::Arc;
+
     use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        bytes: &Arc<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
         let mut text = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
+        for byte in bytes.iter() {
             text.push(char::from_digit((byte >> 4) as u32, 16).expect("nibble"));
             text.push(char::from_digit((byte & 0xf) as u32, 16).expect("nibble"));
         }
         serializer.serialize_str(&text)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Arc<Vec<u8>>, D::Error> {
         let text = String::deserialize(deserializer)?;
         if text.len() % 2 != 0 {
             return Err(D::Error::custom("odd hex length"));
         }
-        text.as_bytes()
+        let bytes = text
+            .as_bytes()
             .chunks(2)
             .map(|pair| {
                 let high = (pair[0] as char).to_digit(16);
@@ -50,7 +59,8 @@ mod hex_bytes {
                     _ => Err(D::Error::custom("invalid hex digit")),
                 }
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Arc::new(bytes))
     }
 }
 
@@ -65,14 +75,15 @@ mod hex_bytes {
 pub struct PixelGrid {
     width: u32,
     height: u32,
-    /// Row-major texmap-index bytes.
+    /// Row-major texmap-index bytes. Landscape clones made for script host
+    /// contexts and snapshots share this large plane until a terrain write.
     #[serde(with = "hex_bytes")]
-    bytes: Vec<u8>,
+    bytes: Arc<Vec<u8>>,
     /// TEXTURE name per texmap index (presentation only: the frontend
     /// samples the texture png per pixel).
     #[serde(default)]
     texture_names: Vec<Option<String>>,
-    /// Bumped on every pixel write — the frontend's render cache key.
+    /// Bumped on every pixel change — the frontend's render cache key.
     #[serde(default)]
     revision: u64,
     /// Pix2Dens: density per texmap index (IFT stripped); index 0 and
@@ -100,7 +111,7 @@ impl PixelGrid {
         Self {
             width,
             height,
-            bytes,
+            bytes: Arc::new(bytes),
             densities,
             material_names,
             materials,
@@ -127,7 +138,7 @@ impl PixelGrid {
     }
 
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.as_slice()
     }
 
     pub fn texture_names(&self) -> &[Option<String>] {
@@ -146,7 +157,7 @@ impl PixelGrid {
             .map(|index| index as u8)
     }
 
-    /// Raw plane write (C4SolidMask's _SBackPix): bumps the revision.
+    /// Raw plane write (C4SolidMask's _SBackPix): bumps the revision on change.
     pub fn write_byte(&mut self, x: i32, y: i32, byte: u8) {
         self.set_byte(x, y, byte);
     }
@@ -222,14 +233,14 @@ impl PixelGrid {
     /// rasterizer is already a line-faithful port of StdSurface8.cpp:306-404;
     /// move the byte plane through it without cloning a full landscape.
     fn draw_polygon(&mut self, vertices: &[(i32, i32)], byte: u8) {
-        let bytes = mem::take(&mut self.bytes);
+        let bytes = mem::take(Arc::make_mut(&mut self.bytes));
         let mut surface = crate::chunky::Surface8::from_bytes(
             self.width as i32,
             self.height as i32,
             bytes,
         );
         crate::chunky::polygon(&mut surface, vertices, byte);
-        self.bytes = surface.into_bytes();
+        self.bytes = Arc::new(surface.into_bytes());
         // The renderer only needs a changed cache key; C++ Surface8 itself
         // has no revision counter, so one bump per polygon is sufficient.
         self.revision = self.revision.wrapping_add(1);
@@ -261,7 +272,10 @@ impl PixelGrid {
 
     fn set_byte(&mut self, x: i32, y: i32, byte: u8) {
         if let Some(slot) = self.slot(x, y) {
-            self.bytes[slot] = byte;
+            if self.bytes[slot] == byte {
+                return;
+            }
+            Arc::make_mut(&mut self.bytes)[slot] = byte;
             self.revision = self.revision.wrapping_add(1);
         }
     }
@@ -3495,6 +3509,96 @@ mod tests {
         assert_eq!(state.map_seed(), 31337);
         assert_eq!(state.texmap().default_material_entry("earth"), Some(7));
         assert!(state.map_creator().is_none());
+    }
+
+    #[test]
+    fn identical_pixel_write_does_not_bump_render_revision() {
+        let mut grid = PixelGrid::new(2, 1, vec![7, 0], Vec::new(), Vec::new(), Vec::new());
+        let shared = grid.clone();
+        let revision = grid.revision();
+
+        grid.write_byte(0, 0, 7);
+
+        assert_eq!(
+            grid.bytes().as_ptr(),
+            shared.bytes().as_ptr(),
+            "an identical write must not detach shared pixel storage"
+        );
+        assert_eq!(
+            grid.revision(),
+            revision,
+            "an identical byte cannot invalidate the full terrain render cache"
+        );
+        grid.write_byte(0, 0, 8);
+        assert_ne!(grid.bytes().as_ptr(), shared.bytes().as_ptr());
+        assert_eq!(grid.revision(), revision + 1);
+        assert_eq!(grid.byte_at(0, 0), Some(8));
+        assert_eq!(shared.byte_at(0, 0), Some(7));
+    }
+
+    #[test]
+    fn pixel_grid_clone_shares_alchemy_sized_plane_until_mutation() {
+        // Alchemy's generated landscape is 1488x1536. HostWorldContext and
+        // SimulationSnapshot both clone Landscape, so this byte plane must
+        // stay shared until a real terrain write needs an independent copy.
+        const WIDTH: u32 = 1_488;
+        const HEIGHT: u32 = 1_536;
+        let original = PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            vec![7; WIDTH as usize * HEIGHT as usize],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let original_revision = original.revision();
+        let mut clone = original.clone();
+
+        assert_eq!(
+            original.bytes().as_ptr(),
+            clone.bytes().as_ptr(),
+            "cloning an Alchemy-sized grid must not copy its 2.2 MiB byte plane"
+        );
+        assert_eq!(clone, original, "shared storage preserves value equality");
+
+        clone.write_byte(0, 0, 8);
+
+        assert_ne!(
+            original.bytes().as_ptr(),
+            clone.bytes().as_ptr(),
+            "the first changed pixel detaches the clone"
+        );
+        assert_eq!(original.byte_at(0, 0), Some(7));
+        assert_eq!(clone.byte_at(0, 0), Some(8));
+        assert_eq!(original.revision(), original_revision);
+        assert_eq!(clone.revision(), original_revision + 1);
+    }
+
+    #[test]
+    fn simulation_snapshot_shares_landscape_plane_with_live_engine() {
+        let grid = PixelGrid::new(4, 2, vec![1; 8], Vec::new(), Vec::new(), Vec::new());
+        let mut landscape = Landscape::flat(4, 2);
+        landscape.set_pixel_grid(grid);
+        let mut engine = crate::Engine::new();
+        engine.set_landscape(landscape);
+
+        let snapshot = engine.snapshot();
+        let live = engine
+            .landscape()
+            .and_then(Landscape::pixel_grid)
+            .expect("live landscape has a pixel grid");
+        let captured = snapshot
+            .landscape
+            .as_ref()
+            .and_then(Landscape::pixel_grid)
+            .expect("snapshot carries the pixel grid");
+
+        assert_eq!(
+            live.bytes().as_ptr(),
+            captured.bytes().as_ptr(),
+            "capturing a simulation snapshot must not copy the byte plane"
+        );
+        assert_eq!(captured, live);
     }
 
     #[test]
