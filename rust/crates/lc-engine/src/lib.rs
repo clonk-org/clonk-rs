@@ -1837,14 +1837,13 @@ impl EnvironmentSettings {
             [0x0f0700, 0xa08067, 0xffffdf],
         ];
 
-        let mut season_index = season.rem_euclid(100);
-        if season_index < 0 {
-            season_index += 100;
-        }
-        let primary = ((season_index / 25) % 4) as usize;
+        // Preserve C++'s truncation-toward-zero division and signed
+        // remainder. This differs from Euclidean modulo for StartSeason
+        // values -1..-24 (C4Weather.cpp:263-264).
+        let primary = ((season / 25) % 4).rem_euclid(4) as usize;
         let secondary = (primary + 1) % 4;
 
-        let mut offset = season_index % 25;
+        let mut offset = season % 25;
         offset = offset.clamp(5, 19);
         let offset_primary = offset - 5;
         let offset_secondary = 15 - offset_primary;

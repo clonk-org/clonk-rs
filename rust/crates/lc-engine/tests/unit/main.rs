@@ -14917,6 +14917,21 @@ protected func Activity() { SetActionTargets(); return(1); }
     }
 
     #[test]
+    fn season_gamma_uses_cpp_truncating_remainder_for_small_negative_season() {
+        // Scenario C4SVal bounds are data, so a custom StartSeason may yield
+        // -1. C++ integer division truncates toward zero: -1/25 == 0 and the
+        // negative remainder is clamped to 5, selecting the exact winter
+        // start (C4Weather.cpp:263-264). Euclidean modulo would select fall.
+        let mut negative = EnvironmentSettings::new(0).with_gamma_enabled();
+        negative.season = -1;
+        let zero = EnvironmentSettings::new(0)
+            .with_season(0)
+            .with_gamma_enabled();
+
+        assert_eq!(negative.season_gamma(), zero.season_gamma());
+    }
+
+    #[test]
     fn season_gamma_suppressed_by_no_gamma() {
         // `if (NoGamma) return;` (C4Weather.cpp:261); C4Weather::Default
         // starts with NoGamma=true (:193).
