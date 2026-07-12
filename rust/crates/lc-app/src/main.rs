@@ -10309,6 +10309,7 @@ impl GameApp {
         let mut result = Ok(());
         for control in controls {
             result = match control {
+                NetworkControl::PlayerInfo(_) | NetworkControl::JoinPlayer(_) => Ok(()),
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
