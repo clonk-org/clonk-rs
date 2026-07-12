@@ -7131,6 +7131,137 @@ mod tests {
     }
 
     #[test]
+    fn real_tutorial_seven_acid_landscape_matches_cpp_material_color() {
+        // The shipped slot is Acid-Smooth, but C4TexMapEntry changes every
+        // liquid <mat>-Smooth primary pattern to Liquid. Acid's own Liquid
+        // overlay is then sampled at zoom two (C4Texture.cpp:68-99;
+        // C4Material.cpp:349-377), after which Tutorial07's three-channel
+        // gamma ramp is applied by the landscape shader (StdGL.cpp:1130-1148).
+        // The optional liquid-animation tint is off by C++ default
+        // (C4Config.cpp:451).
+        let mut engine = load_repository_tutorial(7);
+        let snapshot = engine.tick().expect("Tutorial07 first frame");
+        let grid = snapshot
+            .landscape
+            .as_ref()
+            .and_then(Landscape::pixel_grid)
+            .expect("Tutorial07 pixel landscape");
+
+        let local_material_group = Group::open(
+            crate::test_support::repo_root()
+                .join("content/Tutorial.c4f/Tutorial07.c4s/Material.c4g"),
+        )
+        .expect("Tutorial07 Material.c4g opens");
+        let texmap_source = local_material_group
+            .read_file("Texmap.txt")
+            .expect("Tutorial07 Texmap.txt reads");
+        let texmap = lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(
+            &texmap_source,
+        ));
+        let acid_slot = texmap.entry(22).expect("Tutorial07 Acid texmap slot");
+        assert_eq!(
+            (acid_slot.material.as_str(), acid_slot.texture.as_str()),
+            ("Acid", "Smooth"),
+        );
+        assert_eq!(grid.material_names()[22].as_deref(), Some("Acid"));
+        assert_eq!(grid.texture_names()[22].as_deref(), Some("Liquid"));
+
+        // C4Landscape::ApplyLighting shades material edges from Placement
+        // (C4Landscape.cpp:2534-2588). This real 16x16 interior plus its
+        // complete x/y comparison neighbourhood is Acid (Placement=10), so
+        // C++ applies neither edge lightening nor darkening here.
+        let acid_at = |x: i32, y: i32| {
+            grid.byte_at(x, y)
+                .and_then(|byte| grid.material_names().get((byte & 0x7f) as usize))
+                .and_then(|name| name.as_deref())
+                .is_some_and(|name| name.eq_ignore_ascii_case("Acid"))
+        };
+        assert!((0..16).all(|dy| {
+            (0..16).all(|dx| {
+                let x = 196 + dx;
+                let y = 349 + dy;
+                acid_at(x - 1, y)
+                    && acid_at(x + 1, y)
+                    && (-9..=8).all(|offset| acid_at(x, y + offset))
+            })
+        }));
+
+        let global_material_group = Group::open(
+            crate::test_support::repo_root().join("content/Material.c4g"),
+        )
+        .expect("installed Material.c4g opens");
+        let global_materials = MaterialLibrary::from_group(&global_material_group)
+            .expect("installed materials load");
+        let acid = global_materials.get("Acid").expect("Acid material");
+        let mut color = [0u8; 9];
+        for (target, source) in color
+            .iter_mut()
+            .zip(acid.int_list("Color").expect("Acid Color"))
+        {
+            *target = source as u8;
+        }
+        assert_eq!(color, [0, 190, 0, 0, 200, 0, 0, 210, 0]);
+        assert_eq!(acid.value("TextureOverlay"), Some("Liquid"));
+        assert_eq!(
+            (acid.int("Density"), acid.int("Placement")),
+            (Some(25), Some(10)),
+        );
+        let resource = lc_resources::graphics::GraphicsResource::from_group(global_material_group)
+            .expect("installed material graphics index");
+        let liquid = resource.load_image("LIQUID.png").expect("Liquid texture");
+        assert_eq!((liquid.width(), liquid.height()), (128, 128));
+        let liquid = ImageData::new(liquid.width(), liquid.height(), liquid.pixels().to_vec());
+        let material = MaterialRenderInfo::new(
+            color,
+            [0; 6],
+            acid.value("TextureOverlay").map(ToOwned::to_owned),
+            acid.int("OverlayType").unwrap_or(0),
+            acid.int("Density").unwrap_or(0),
+        );
+        let mut graphics = GraphicsSystem::new(
+            16,
+            16,
+            16,
+            "Tutorial 07 Acid",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.viewport_x = 196.0;
+        graphics.viewport_y = 349.0;
+        graphics.surface_mut().fill(Color::opaque(7, 11, 13));
+        graphics.set_material_textures(Arc::new(HashMap::from([(
+            "liquid".to_string(),
+            liquid,
+        )])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "acid".to_string(),
+            material,
+        )])));
+        let gamma_points = snapshot.environment.gamma.combined_control_points();
+        assert_eq!(gamma_points, [0x000000, 0x648064, 0xc8ffc8]);
+        assert_eq!(snapshot.environment.settings.time_of_day, 0);
+        assert_eq!(GraphicsSystem::lighting_factor(0), 1.0);
+        let gamma = lc_graphics::GammaRamp::from_control_points(gamma_points);
+        assert!(graphics.draw_ground_textured(snapshot.landscape.as_ref(), Some(&gamma)));
+
+        assert_eq!(
+            [(0, 0), (4, 0), (15, 0), (0, 8), (8, 8), (15, 15)]
+                .map(|(x, y)| graphics.surface().get_pixel(x, y)),
+            [
+                Some(Color::opaque(1, 192, 1)),
+                Some(Color::opaque(1, 188, 1)),
+                Some(Color::opaque(1, 190, 1)),
+                Some(Color::opaque(1, 190, 1)),
+                Some(Color::opaque(1, 192, 1)),
+                Some(Color::opaque(1, 182, 1)),
+            ],
+        );
+        assert_eq!(graphics.surface().snapshot().checksum(), 0x03df_cb2d);
+    }
+
+    #[test]
     fn viewport_point_at_maps_screen_to_world() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
