@@ -14412,6 +14412,34 @@ mod tests {
         })
     }
 
+    fn app_object_contents_count(
+        app: &GameApp,
+        container: ObjectId,
+        definition: &str,
+    ) -> usize {
+        app.engine.object_snapshot(container).map_or(0, |container| {
+            container
+                .contents
+                .iter()
+                .filter(|object_id| {
+                    app.engine
+                        .object_snapshot(**object_id)
+                        .is_some_and(|object| object.definition_id == definition)
+                })
+                .count()
+        })
+    }
+
+    fn app_selected_object_menu_item(app: &GameApp) -> Option<&lc_engine::ObjectMenuItem> {
+        app.engine
+            .cursor_object_menu(app.local_owner)
+            .and_then(|(_, menu)| {
+                usize::try_from(menu.selection)
+                    .ok()
+                    .and_then(|selection| menu.items.get(selection))
+            })
+    }
+
     fn app_collect_one_gold_around_blast_debris(app: &mut GameApp, clonk: ObjectId) {
         // Blasts also expose collectible ROCK. C++ CLNK has exactly one
         // nonspecial slot, so a real player must throw incidental debris away
@@ -19808,13 +19836,14 @@ mod tests {
     }
 
     #[test]
-    fn app_virtual_keyboard_sells_first_tutorial04_gold_after_real_elevator_route() {
+    fn app_virtual_keyboard_withdraws_tutorial04_replacement_flint_after_real_elevator_route() {
         // Tutorial04 teaches the complete physical-key route from HUT2 and
         // CNKT through construction, elevator operation, mining and the first
-        // GOLD sale. Keep every state transition behind GameApp::handle_key so
-        // this covers C++ key mapping, menu conversion, DigDouble synthesis,
-        // movement and one-slot inventory behavior at the actual app boundary
-        // (Tutorial04.c4s/Script.c:40-226; C4Player.cpp:1490-1554;
+        // GOLD sale and replacement-TFLN withdrawal. Keep every state
+        // transition behind GameApp::handle_key so this covers C++ key
+        // mapping, menu conversion, DigDouble synthesis, movement and one-slot
+        // inventory behavior at the actual app boundary
+        // (Tutorial04.c4s/Script.c:40-229; C4Player.cpp:1490-1554;
         // C4ObjectMenu.cpp:279-435).
         let mut app = real_tutorial_app(4, "Tutorial 4 app virtual player");
         assert!(
@@ -20771,6 +20800,143 @@ mod tests {
         assert!(
             !app_clonk_carries(&app, clonk, "GOLD"),
             "BaseAutoSell must remove the first GOLD from CLNK"
+        );
+
+        // Script200 creates three replacement TFLNs in HUT2 after the first
+        // sale, then Script201/250 asks the contained Clonk to take one and
+        // earn 25 gold points (Tutorial04.c4s/Script.c:214-231). Drive the
+        // actual context/Contents menus: Down selects the TFLN row and
+        // Special2 chooses Command2/EnterAll (C4Menu.cpp:433-440,498-523,
+        // 1047-1054).
+        advance_app_until(
+            &mut app,
+            "Tutorial04 creates three replacement TFLNs in HUT2",
+            400,
+            |app| {
+                app_tutorial_message_contains(app, "more T-Flints")
+                    && app_object_contents_count(app, hut, "TFLN") == 3
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial04 replacement-flint Contents prompt",
+            400,
+            |app| app_tutorial_message_contains(app, "Select 'Contents'"),
+        );
+        advance_app_until(&mut app, "HUT2 replacement-flint context menu", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
+        {
+            let (_, menu) = app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .expect("HUT2 replacement-flint context menu");
+            assert_eq!(menu.selection, 0);
+            assert_eq!(
+                menu.items.first().map(|item| item.caption.as_str()),
+                Some("Contents")
+            );
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A opens replacement-flint Contents");
+        advance_app_until(&mut app, "HUT2 replacement-flint Contents", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == contents_identification)
+        });
+
+        let contents_rows = app
+            .engine
+            .cursor_object_menu(app.local_owner)
+            .expect("replacement-flint Contents menu")
+            .1
+            .items
+            .len();
+        for _ in 0..contents_rows {
+            if app_selected_object_menu_item(&app)
+                .is_some_and(|item| item.item_id == "TFLN")
+            {
+                break;
+            }
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::X)
+                .expect("physical X selects the next Contents row");
+        }
+        assert_eq!(
+            app_selected_object_menu_item(&app).map(|item| item.item_id.as_str()),
+            Some("TFLN"),
+            "physical Down navigation must select the replacement TFLN row"
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::F)
+            .expect("physical F takes all replacement TFLNs that fit");
+        advance_app_until(
+            &mut app,
+            "C++ nonspecial capacity keeps one TFLN on CLNK and two in HUT2",
+            120,
+            |app| {
+                app_object_contents_count(app, clonk, "TFLN") == 1
+                    && app_object_contents_count(app, hut, "TFLN") == 2
+            },
+        );
+
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D closes replacement-flint Contents");
+        advance_app_until(&mut app, "HUT2 context restored after TFLN", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
+        {
+            let (_, menu) = app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .expect("HUT2 context restored around carried TFLN");
+            assert_eq!(menu.selection, 0);
+            assert_eq!(
+                menu.items.first().map(|item| item.caption.as_str()),
+                Some("Put")
+            );
+            assert_eq!(
+                menu.items.last().map(|item| item.caption.as_str()),
+                Some("Exit")
+            );
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S wraps replacement-flint context to Exit");
+            keyboard
+                .tap(VirtualKeyCode::A)
+                .expect("physical A exits HUT2 with replacement TFLN");
+        }
+        advance_app_until(&mut app, "replacement-TFLN CLNK exits HUT2", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container.is_none())
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial04 states its 25-gold objective",
+            640,
+            |app| app_tutorial_message_contains(app, "Gain 25"),
+        );
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player survives replacement-flint withdrawal")
+                .wealth(),
+            wealth_before_sale + 5,
+            "withdrawing replacement TFLN must not change the 25-gold objective's wealth"
+        );
+        assert!(
+            app_clonk_carries(&app, clonk, "TFLN"),
+            "CLNK must exit with exactly one usable replacement TFLN"
         );
     }
 
