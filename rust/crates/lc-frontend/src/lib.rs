@@ -1452,7 +1452,9 @@ impl GraphicsSystem {
                     Self::sky_color_for_temperature(environment.ambient_temperature)
                 });
             let tinted = Self::apply_lighting(base, lighting);
-            self.surface.fill(tinted);
+            self.surface.fill(
+                gamma.map_or(tinted, |gamma| gamma_encode_fragment(tinted, gamma)),
+            );
         }
     }
 
@@ -1471,7 +1473,9 @@ impl GraphicsSystem {
         if let Some(color) = settings.back_color {
             let base = Self::bgr_to_color(color);
             let tinted = Self::apply_lighting(base, lighting);
-            self.surface.fill(tinted);
+            self.surface.fill(
+                gamma.map_or(tinted, |gamma| gamma_encode_fragment(tinted, gamma)),
+            );
         } else if !settings.has_surface {
             self.fill_sky_gradient(settings, lighting, gamma);
         } else {
@@ -1543,7 +1547,7 @@ impl GraphicsSystem {
         top: Color,
         bottom: Color,
         lighting: f32,
-        _gamma: Option<&lc_graphics::GammaRamp>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         if self.surface_width == 0 || self.surface_height == 0 {
             return;
@@ -1553,6 +1557,7 @@ impl GraphicsSystem {
             let t = y as f32 / height as f32;
             let blended = Self::lerp_color(top, bottom, t);
             let tinted = Self::apply_lighting(blended, lighting);
+            let tinted = gamma.map_or(tinted, |gamma| gamma_encode_fragment(tinted, gamma));
             for x in 0..self.surface_width {
                 let _ = self.surface.set_pixel(x, y, tinted);
             }
@@ -1617,7 +1622,7 @@ impl GraphicsSystem {
         dest_y: i32,
         modulation: Option<u32>,
         lighting: f32,
-        _gamma: Option<&lc_graphics::GammaRamp>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let width = image.width();
         let height = image.height();
@@ -1649,7 +1654,16 @@ impl GraphicsSystem {
                     color = Self::apply_modulation(color, modulation);
                 }
                 color = color.modulate(lighting);
-                if color.a == 255 {
+                if let Some(gamma) = gamma {
+                    let background = self
+                        .surface
+                        .get_pixel(target_x as u32, target_y as u32)
+                        .unwrap_or_default();
+                    let blended = gamma_blend_fragment_over(color, background, gamma);
+                    let _ = self
+                        .surface
+                        .set_pixel(target_x as u32, target_y as u32, blended);
+                } else if color.a == 255 {
                     let _ = self
                         .surface
                         .set_pixel(target_x as u32, target_y as u32, color);
@@ -1922,7 +1936,7 @@ impl GraphicsSystem {
     fn draw_ground_textured(
         &mut self,
         landscape: Option<&Landscape>,
-        _gamma: Option<&lc_graphics::GammaRamp>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) -> bool {
         let Some(grid) = landscape.and_then(|landscape| landscape.pixel_grid()) else {
             return false;
@@ -2058,7 +2072,16 @@ impl GraphicsSystem {
                     cache_pixels[src + 2],
                     cache_pixels[src + 3],
                 );
-                let _ = self.surface.blend_pixel(screen_x, screen_y, color);
+                if let Some(gamma) = gamma {
+                    let destination = self
+                        .surface
+                        .get_pixel(screen_x, screen_y)
+                        .unwrap_or_default();
+                    let blended = gamma_blend_fragment_over(color, destination, gamma);
+                    let _ = self.surface.set_pixel(screen_x, screen_y, blended);
+                } else {
+                    let _ = self.surface.blend_pixel(screen_x, screen_y, color);
+                }
             }
         }
         true
@@ -2078,6 +2101,8 @@ impl GraphicsSystem {
             Self::ground_color_for_temperature(ambient_temperature),
             lighting,
         );
+        let ground_color =
+            gamma.map_or(ground_color, |gamma| gamma_encode_fragment(ground_color, gamma));
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let surface_height = self.surface_height as i32;
         let max_world_x = self.world_width.saturating_sub(1).max(0);
@@ -2106,7 +2131,7 @@ impl GraphicsSystem {
         ambient_temperature: i32,
         landscape: Option<&Landscape>,
         lighting: f32,
-        _gamma: Option<&lc_graphics::GammaRamp>,
+        gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let Some(landscape) = landscape else {
             return;
@@ -2149,9 +2174,13 @@ impl GraphicsSystem {
                 for screen_y in start..=end {
                     let x = screen_x as u32;
                     let y = screen_y as u32;
-                    let blended = match self.surface.get_pixel(x, y) {
-                        Some(existing) => blend_color_over(base_color, existing),
-                        None => base_color,
+                    let blended = match (self.surface.get_pixel(x, y), gamma) {
+                        (Some(existing), Some(gamma)) => {
+                            gamma_blend_fragment_over(base_color, existing, gamma)
+                        }
+                        (Some(existing), None) => blend_color_over(base_color, existing),
+                        (None, Some(gamma)) => gamma_encode_fragment(base_color, gamma),
+                        (None, None) => base_color,
                     };
                     let _ = self.surface.set_pixel(x, y, blended);
                 }
@@ -4799,6 +4828,67 @@ fn store_channel(value: f32) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
 }
 
+/// Applies the C++ shader's independent normalized R16 lookups to one source
+/// fragment. Alpha bypasses gamma unchanged (StdGL.cpp:1081-1087).
+fn gamma_encode_fragment(color: Color, gamma: &lc_graphics::GammaRamp) -> Color {
+    Color::new(
+        store_channel(sample_channel(
+            Some(gamma),
+            lc_graphics::gamma::GammaChannel::Red,
+            f32::from(color.r),
+        )),
+        store_channel(sample_channel(
+            Some(gamma),
+            lc_graphics::gamma::GammaChannel::Green,
+            f32::from(color.g),
+        )),
+        store_channel(sample_channel(
+            Some(gamma),
+            lc_graphics::gamma::GammaChannel::Blue,
+            f32::from(color.b),
+        )),
+        color.a,
+    )
+}
+
+/// Gamma-samples the source in float, then performs source-alpha blending and
+/// rounds once on framebuffer store. A post-composite gamma pass is observably
+/// different (StdGL.cpp:908,1081-1087,1246-1263).
+fn gamma_blend_fragment_over(
+    source: Color,
+    destination: Color,
+    gamma: &lc_graphics::GammaRamp,
+) -> Color {
+    if source.a == 0 {
+        return destination;
+    }
+    let alpha = f32::from(source.a) / 255.0;
+    let blend = |channel, source: u8, destination: u8| {
+        store_channel(
+            sample_channel(Some(gamma), channel, f32::from(source)) * alpha
+                + f32::from(destination) * (1.0 - alpha),
+        )
+    };
+    Color::new(
+        blend(
+            lc_graphics::gamma::GammaChannel::Red,
+            source.r,
+            destination.r,
+        ),
+        blend(
+            lc_graphics::gamma::GammaChannel::Green,
+            source.g,
+            destination.g,
+        ),
+        blend(
+            lc_graphics::gamma::GammaChannel::Blue,
+            source.b,
+            destination.b,
+        ),
+        blend_color_over(source, destination).a,
+    )
+}
+
 /// Stretches `image` into `rect` with GL_LINEAR-equivalent bilinear sampling
 /// (tiled textures, GL_REPEAT) and normal alpha-over blending. `gamma`
 /// mirrors the per-fragment gamma lookup of the C++ blit shader.
@@ -5105,7 +5195,7 @@ mod tests {
     }
 
     #[test]
-    fn gamma_render_seam_is_structural_until_fragment_encoding_lands() {
+    fn public_gamma_render_path_still_delegates_with_none() {
         let snapshot = make_snapshot();
         let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
         let make_graphics = || {
@@ -5122,16 +5212,132 @@ mod tests {
         };
         let mut public_path = make_graphics();
         let mut internal_path = make_graphics();
+        let public_atlas = public_path.render_frame(&snapshot, &viewports);
+        let internal_atlas = internal_path.render_frame_with_gamma(&snapshot, &viewports, None);
+
+        assert_eq!(internal_path.surface().pixels(), public_path.surface().pixels());
+        assert_eq!(internal_atlas, public_atlas);
+    }
+
+    #[test]
+    fn gamma_render_seam_encodes_sky_channels_independently() {
+        // C4Sky::Draw emits its solid/fade colours through DrawBoxDw/Fade;
+        // DummyShader samples three independent gamma textures before output
+        // (C4Sky.cpp:206-225; StdGL.cpp:1185-1200).
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            1,
+            "Gamma Sky",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let environment = EnvironmentFrame {
+            sky_color: Some(RgbColor::new(0, 0, 0)),
+            ..EnvironmentFrame::default()
+        };
         let gamma = lc_graphics::GammaRamp::from_control_points([
             0x102030, 0x405060, 0x708090,
         ]);
 
-        let public_atlas = public_path.render_frame(&snapshot, &viewports);
-        let internal_atlas =
-            internal_path.render_frame_with_gamma(&snapshot, &viewports, Some(&gamma));
+        graphics.draw_sky(None, &environment, &[], 1.0, Some(&gamma));
 
-        assert_eq!(internal_path.surface().pixels(), public_path.surface().pixels());
-        assert_eq!(internal_atlas, public_atlas);
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(Color::new(17, 33, 49, 255))
+        );
+    }
+
+    #[test]
+    fn gamma_render_seam_encodes_tutorial_six_sky_gradient() {
+        // DrawBoxFade interpolation is gamma sampled per fragment before the
+        // framebuffer store (C4Sky.cpp:219-225; StdGL.cpp:846-889,1193-1200).
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            1,
+            "Gamma Gradient",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+
+        graphics.fill_vertical_gradient(
+            Color::opaque(64, 128, 192),
+            Color::opaque(64, 128, 192),
+            1.0,
+            Some(&gamma),
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(Color::new(50, 100, 150, 255))
+        );
+    }
+
+    #[test]
+    fn gamma_render_seam_encodes_sky_image_before_alpha_blending() {
+        // C4Sky::Draw sends its tiled surface through BlitSurfaceTile2, whose
+        // shader gamma-samples the source before blending (C4Sky.cpp:210-218;
+        // StdGL.cpp:1068-1087).
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            1,
+            "Gamma Sky Image",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics
+            .surface_mut()
+            .set_pixel(0, 0, Color::opaque(200, 200, 200))
+            .expect("background pixel");
+        let image = ImageData::new(1, 1, vec![64, 128, 192, 128]);
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+
+        graphics.blit_sky_tile(&image, 0, 0, None, 1.0, Some(&gamma));
+
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(Color::new(125, 150, 175, 255))
+        );
+    }
+
+    #[test]
+    fn gamma_render_seam_encodes_fallback_landscape_fragments() {
+        // The fallback painter stands in for the same landscape presentation
+        // shader. Even black is sampled through MinGamma, yielding one rather
+        // than a raw zero (StdGL.cpp:1139-1148; StdDDraw2.cpp:237-271).
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            0,
+            "Gamma Fallback Ground",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+
+        assert!(!graphics.draw_ground(0, None, 0.0, Some(&gamma)));
+
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(Color::new(1, 1, 1, 255))
+        );
     }
 
     #[test]
@@ -7790,6 +7996,70 @@ mod tests {
         assert_eq!(
             graphics.surface().get_pixel(0, 0),
             Some(Color::opaque(130, 9, 14)),
+        );
+    }
+
+    #[test]
+    fn textured_landscape_gamma_samples_r16_before_alpha_blending() {
+        // BlitLandscape applies the per-channel R16 gamma lookup to its source
+        // fragment before fixed-function alpha blending (StdGL.cpp:578-618,
+        // 1139-1148,1246-1263).
+        let landscape: Landscape = serde_json::from_value(serde_json::json!({
+            "width": 1,
+            "surface": [1],
+            "world_height": 1,
+            "pixels": {
+                "width": 1,
+                "height": 1,
+                "bytes": "01",
+                "texture_names": [null, "Rough"],
+                "densities": [0, 50],
+                "material_names": [null, "Earth"]
+            }
+        }))
+        .expect("pixel landscape");
+        let revision = landscape
+            .pixel_grid()
+            .expect("pixel grid")
+            .revision();
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            1,
+            "Gamma Material",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_textures(Arc::new(HashMap::from([(
+            "rough".to_string(),
+            ImageData::new(1, 1, vec![255, 255, 255, 255]),
+        )])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
+        )])));
+        // Presentation is under test, not cache construction. Keeping the raw
+        // cached source unencoded also pins that later gamma changes do not
+        // require rebuilding the landscape cache.
+        graphics.landscape_cache = Some((
+            revision,
+            ImageData::new(1, 1, vec![64, 128, 192, 128]),
+        ));
+        graphics
+            .surface_mut()
+            .set_pixel(0, 0, Color::opaque(200, 200, 200))
+            .expect("sky pixel");
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+
+        assert!(graphics.draw_ground_textured(Some(&landscape), Some(&gamma)));
+
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(Color::new(125, 150, 175, 255))
         );
     }
 }
