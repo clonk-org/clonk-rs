@@ -33,7 +33,8 @@ live comparison.
   movement/collision/attachment, vehicles, lines, containers, and callback
   order.
 - Systems: strict C4Value/save semantics, synchronized controls/networking,
-  configuration/localization, and group I/O.
+  exact C4Teams/SafeRandom assignment, configuration/localization, and group
+  I/O.
 
 Comparator caveats: presentation RNG is opt-in; fields compare only when both
 bridges expose them. Tutorial 07's seed-zero Surface8 is byte-identical; broader

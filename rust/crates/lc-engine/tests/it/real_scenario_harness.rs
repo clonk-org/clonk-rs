@@ -27,6 +27,136 @@ fn tutorial_harness_boots_the_installed_cpp_global_script_layer() {
 }
 
 #[test]
+fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
+    let mut engine = load_installed_scenario("Races.c4f/MonsterRescue.c4s", 0);
+    let owner = join_local_player(&mut engine, "Monster Rescue magic parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Monster Rescue joins its Scenario.txt MAGE");
+    assert_eq!(
+        engine
+            .object_snapshot(mage)
+            .expect("joined mage remains live")
+            .definition_id,
+        "MAGE"
+    );
+
+    // MAGE inherits MagiClonk::ContextMagic through SCLK -> MCLK. C++ adds
+    // that annotated Context* function to the player's object menu and calls
+    // ReadyToMagic(menu crew, MCMS) before exposing it
+    // (MagiClonk.c4d/Script.c:190-199; C4ObjectMenu.cpp:670-682).
+    let entries = engine
+        .context_menu_entries(mage)
+        .expect("the real mage context menu builds");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.function == "ContextMagic"),
+        "the installed MagiClonk ContextMagic action is visible: {entries:?}"
+    );
+
+    // Monster Rescue's shipped JoinPlayer gives the Magus 30 energy and then
+    // caps its temporary Magic physical at the matching 30000 before putting
+    // it into MONS (Script.c:55-70). This is already enough for its sole MBRG
+    // spell (Scenario.txt:18-20; MBRG DefCore Value=10).
+    let energy_before = engine
+        .object_snapshot(mage)
+        .expect("mage snapshot after real scenario initialization")
+        .magic_energy;
+    assert_eq!(energy_before, 30_000);
+    let mage_index = engine.find_object_index(mage).expect("mage index");
+    assert_eq!(
+        engine
+            .call_object_function(
+                mage_index,
+                "CheckMagicRequirements",
+                vec![Value::C4Id("MBRG".to_string()), Value::Bool(true)],
+            )
+            .expect("the real spell requirement check runs"),
+        Value::Int(3),
+        "30 energy permits exactly three Value=10 MBRG casts"
+    );
+
+    assert!(
+        engine
+            .execute_context_menu(mage, "ContextMagic")
+            .expect("the real ContextMagic callback runs"),
+        "ContextMagic reports that it opened the spell menu"
+    );
+    let (_, menu) = engine
+        .cursor_object_menu(owner)
+        .expect("ContextMagic opens the real script-created spell menu");
+    assert_eq!(
+        menu.items
+            .iter()
+            .map(|item| item.item_id.as_str())
+            .collect::<Vec<_>>(),
+        ["MBRG"],
+        "OpenSpellMenu enumerates Monster Rescue's real player magic list"
+    );
+    let spell_command = menu.items[0].command.clone();
+
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw enters the selected MBRG menu item");
+    assert_eq!(
+        engine
+            .object_snapshot(mage)
+            .expect("mage begins casting")
+            .action
+            .name,
+        "Magic",
+        "the real menu command `{spell_command}` starts DoMagic; menu now {:?}, locals {:?}",
+        engine.cursor_object_menu(owner).map(|(_, menu)| menu.clone()),
+        engine
+            .object_snapshot(mage)
+            .expect("mage snapshot for failed cast diagnostics")
+            .local_vars
+    );
+
+    // Magic's Delay=1 PhaseCall invokes CheckMagic after each phase advance;
+    // phase five creates MBRG. Its shipped Activate creates FBRG; FBRG's own
+    // Initialize immediately expands into four persistent FBRS segments and
+    // removes both temporary bridge/spell objects.
+    for _ in 0..8 {
+        engine.tick().expect("the real magic action advances");
+    }
+    let snapshot = engine.snapshot();
+    let magic_objects = snapshot
+        .objects
+        .iter()
+        .filter(|object| matches!(object.definition_id.as_str(), "MBRG" | "FBRG" | "FBRS"))
+        .map(|object| {
+            (
+                object.id,
+                object.definition_id.clone(),
+                object.status,
+                object.owner,
+                object.action.name.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        snapshot
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "FBRS" && object.status.is_active())
+            .count(),
+        4,
+        "the shipped MBRG -> FBRG Initialize route creates four live bridge segments; magic objects: {magic_objects:?}; mage: {:?}",
+        snapshot.object(mage)
+    );
+    assert_eq!(
+        snapshot
+            .object(mage)
+            .expect("mage survives the cast")
+            .magic_energy,
+        energy_before - 10_000,
+        "ExecMagic deducts the spell's DefCore Value after successful Activate"
+    );
+}
+
+#[test]
 fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
     let owner = join_local_player(&mut engine, "Dragon Rock character parity");

@@ -131,6 +131,10 @@ pub enum EffectCommand {
     /// frame (C4Effect vars live inside the effect; death is final).
     Update(EffectState),
     Remove { name: String, no_callbacks: bool },
+    /// Identity-keyed removal for callers that address an effect by its C++
+    /// `iNumber`. Names are not unique, so folding this as `Remove { name }`
+    /// can delete the wrong same-name peer.
+    RemoveNumber { number: i32, no_callbacks: bool },
     Clear,
 }
 
@@ -154,6 +158,13 @@ impl EffectCommand {
         Self::Remove {
             name: name.into(),
             no_callbacks: true,
+        }
+    }
+
+    pub fn remove_number(number: i32, no_callbacks: bool) -> Self {
+        Self::RemoveNumber {
+            number,
+            no_callbacks,
         }
     }
 }

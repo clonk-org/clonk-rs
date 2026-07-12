@@ -420,6 +420,15 @@ fn split_c4_color(raw: u32) -> [u8; 4] {
     ]
 }
 
+/// The ClrByOwner tint passed by C4Object::DrawFace/DrawTopFace to
+/// C4DefGraphics::GetBitmap (C4Object.cpp:440-477,2617-2670). This is the
+/// live object color, which scripts may change independently of its owner.
+fn object_color_by_owner_tint(object: &ObjectSnapshot) -> u32 {
+    // C4Surface::SetClr substitutes the legacy blue value 0xff for zero
+    // (C4Surface.h:110).
+    if object.color == 0 { 0xff } else { object.color }
+}
+
 /// CPU-side `ModulateClr` used to fold global ColorMod into ClrByOwnerClr
 /// before the owner texture reaches the shader (StdDDraw2.cpp:773-777).
 fn modulate_c4_colors(dst: u32, src: u32) -> u32 {
@@ -470,15 +479,15 @@ fn shader_modulate_fragment(source: Color, modulation: u32, mod2: bool) -> Prepa
 fn prepare_sprite_fragment(
     source: Color,
     owner_mask: Option<u8>,
-    owner_color: Option<Color>,
+    owner_color: Option<u32>,
     blit: SpriteBlitState,
 ) -> PreparedSpriteFragment {
-    if let (Some(mask), Some(owner)) = (owner_mask.filter(|mask| *mask != 0), owner_color) {
+    if let (Some(mask), Some(mut modulation)) =
+        (owner_mask.filter(|mask| *mask != 0), owner_color)
+    {
         // The mask stores the grey ClrByOwner texture intensity. Its main-sfc
         // pixel was cleared when C4Surface::CreateColorByOwner split the image
         // (C4Surface.cpp:288-312).
-        let mut modulation =
-            (u32::from(owner.r) << 16) | (u32::from(owner.g) << 8) | u32::from(owner.b);
         if let Some(global) = blit.modulation {
             if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR == 0 {
                 modulation = modulate_c4_colors(modulation, global);
@@ -2570,7 +2579,7 @@ impl GraphicsSystem {
     fn paint_object_top_face(
         &mut self,
         object: &ObjectSnapshot,
-        owner_colors: &HashMap<i32, Color>,
+        _owner_colors: &HashMap<i32, Color>,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         if object.construction != FULL_CON || object.rotation.rem_euclid(360) != 0 {
@@ -2624,7 +2633,7 @@ impl GraphicsSystem {
                 coy as f32 + shape.height as f32 / 2.0,
             ),
             false,
-            owner_colors.get(&object.owner).copied(),
+            Some(object_color_by_owner_tint(object)),
             self.viewport_zoom.max(MIN_VIEWPORT_ZOOM),
             0.0,
             object.draw_transform,
@@ -2638,14 +2647,14 @@ impl GraphicsSystem {
         object: &ObjectSnapshot,
         objects: &[ObjectSnapshot],
         lighting: f32,
-        owner_colors: &HashMap<i32, Color>,
+        _owner_colors: &HashMap<i32, Color>,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let content_width = self.surface_width as f32;
         let content_height = self.surface_height as f32;
         let color = object_color(object).modulate(lighting);
-        let owner_color = owner_colors.get(&object.owner).copied();
+        let owner_color = Some(object_color_by_owner_tint(object));
         let rotation_degrees = (object.rotation.rem_euclid(360)) as f32;
 
         let screen_x = (object.position.x as f32 - self.viewport_x) * zoom;
@@ -2802,7 +2811,7 @@ impl GraphicsSystem {
         object: &ObjectSnapshot,
         objects: &[ObjectSnapshot],
         sprite: &DefinitionSprite,
-        owner_color: Option<Color>,
+        owner_color: Option<u32>,
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
@@ -2963,7 +2972,7 @@ impl GraphicsSystem {
         phase_x: i32,
         phase_y: i32,
         flipped: bool,
-        owner_color: Option<Color>,
+        owner_color: Option<u32>,
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
@@ -3027,7 +3036,7 @@ impl GraphicsSystem {
         dest: (f32, f32, f32, f32),
         shape_center: (f32, f32),
         flipped: bool,
-        owner_color: Option<Color>,
+        owner_color: Option<u32>,
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
@@ -3137,7 +3146,7 @@ impl GraphicsSystem {
         action_name: &str,
         phase: i32,
         direction: Direction,
-        owner_color: Option<Color>,
+        owner_color: Option<u32>,
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
@@ -3277,7 +3286,7 @@ impl GraphicsSystem {
     fn draw_object_overlays(
         &mut self,
         object: &ObjectSnapshot,
-        owner_color: Option<Color>,
+        owner_color: Option<u32>,
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
@@ -3332,7 +3341,7 @@ impl GraphicsSystem {
         &mut self,
         object: &ObjectSnapshot,
         overlay: &ObjectGraphicsOverlay,
-        owner_color: Option<Color>,
+        owner_color: Option<u32>,
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
@@ -3394,7 +3403,7 @@ impl GraphicsSystem {
         &mut self,
         object: &ObjectSnapshot,
         overlay: &ObjectGraphicsOverlay,
-        owner_color: Option<Color>,
+        owner_color: Option<u32>,
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
@@ -4670,7 +4679,7 @@ fn draw_image_region(
     mask: Option<&ColorByOwnerMask>,
     source: &SourceRect,
     flip_x: bool,
-    owner_color: Option<Color>,
+    owner_color: Option<u32>,
     blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) {
@@ -4765,7 +4774,7 @@ fn draw_image_region_rotated(
     mask: Option<&ColorByOwnerMask>,
     source: &SourceRect,
     flip_x: bool,
-    owner_color: Option<Color>,
+    owner_color: Option<u32>,
     rotation_degrees: f32,
     blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
@@ -6116,6 +6125,121 @@ mod tests {
     }
 
     #[test]
+    fn color_by_owner_uses_object_color_instead_of_owner_lookup() {
+        // C4Object::DrawFace passes the live C4Object::Color to GetBitmap
+        // (C4Object.cpp:440-477). This may differ from the current player
+        // color after SetColorDw, and unowned FISH explicitly sets white in
+        // Birth (Objects.c4d/Animals.c4d/Fish.c4d/Script.c:233-240).
+        let sprite = DefinitionSprite {
+            // CreateColorByOwner clears owner-only base pixels to black.
+            image: ImageData::new(1, 1, vec![0, 0, 0, 255]),
+            actions: HashMap::new(),
+            color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([128]))),
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut recolored = make_snapshot().objects.remove(0);
+        recolored.definition_id = "ObjectColor".to_string();
+        recolored.position = Vector2::new(1, 1);
+        recolored.owner = 7;
+        recolored.color = 0x00ff_0000;
+        recolored.crew_member = false;
+
+        let mut fish = recolored.clone();
+        fish.id = ObjectId::new(2);
+        fish.position = Vector2::new(2, 1);
+        fish.owner = OWNER_NONE;
+        fish.color = 0x00ff_ffff;
+
+        let mut graphics = GraphicsSystem::new(
+            4,
+            3,
+            3,
+            "Object ColorByOwner",
+            test_font(),
+            Arc::new(HashMap::from([(
+                sprite_map_key("ObjectColor", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        graphics.draw_objects(
+            &[recolored, fish],
+            &[],
+            1.0,
+            &HashMap::from([(7, Color::opaque(0, 0, 255))]),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(1, 1),
+            Some(Color::opaque(128, 0, 0)),
+            "SetColorDw red must win over the owner's blue player color"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(2, 1),
+            Some(Color::opaque(128, 128, 128)),
+            "an unowned white FISH must not expose its cleared black base"
+        );
+    }
+
+    #[test]
+    fn color_by_owner_preserves_packed_transparency_with_ownclr() {
+        // C4Surface::ClrByOwnerClr is passed to PerformBlt as the full packed
+        // C4 color. Its high byte is transparency, and bit 4 keeps this raw
+        // object color instead of folding in global ColorMod
+        // (StdDDraw2.cpp:773-777). ReleaseClonk uses this exact combination.
+        let sprite = DefinitionSprite {
+            image: ImageData::new(1, 1, vec![0, 0, 0, 255]),
+            actions: HashMap::new(),
+            color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([255]))),
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "OwnerTransparency".to_string();
+        object.position = Vector2::new(1, 1);
+        object.color = 0x80ff_0000;
+        object.color_modulation = 0x0000_ff00;
+        object.blit_mode = C4GFXBLIT_CLRSFC_OWNCLR;
+        object.crew_member = false;
+
+        let mut graphics = GraphicsSystem::new(
+            3,
+            3,
+            3,
+            "Packed owner transparency",
+            test_font(),
+            Arc::new(HashMap::from([(
+                sprite_map_key("OwnerTransparency", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 0, 200));
+        graphics.draw_objects(
+            &[object],
+            &[],
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(1, 1),
+            Some(Color::opaque(127, 0, 100)),
+            "0x80 transparency must blend raw red over blue; OWNCLR must ignore green ColorMod"
+        );
+    }
+
+    #[test]
     fn object_additive_bit_covers_base_action_and_top_face_after_gamma() {
         // C4Object::Draw brackets its base/action facet with PrepareDrawing
         // (C4Object.cpp:2410-2416,2498-2499), and DrawTopFace brackets the
@@ -6237,7 +6361,7 @@ mod tests {
         object.position = Vector2::new(1, 1);
         object.blit_mode = 1;
         let source = Color::new(10, 20, 30, 128);
-        let owner = Color::opaque(100, 120, 140);
+        let owner = 0x0064_788c;
         let sprite = DefinitionSprite {
             image: ImageData::new(1, 1, vec![source.r, source.g, source.b, source.a]),
             actions: HashMap::new(),
@@ -6590,6 +6714,7 @@ mod tests {
             object.definition_id = "OwnerModes".to_string();
             object.position = Vector2::new(1, 1);
             object.blit_mode = mode;
+            object.color = 0x0040_80c0;
             object.color_modulation = 0x0080_4020;
             object.crew_member = false;
             let mut graphics = GraphicsSystem::new(
