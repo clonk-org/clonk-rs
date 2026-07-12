@@ -1360,20 +1360,120 @@ fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .is_some_and(|object| object.position.x <= 570)
         },
     )?;
+    let first_gold = player
+        .engine()
+        .object_snapshot(clonk)
+        .and_then(|clonk| {
+            clonk.contents.into_iter().find(|item| {
+                player
+                    .engine()
+                    .object_snapshot(*item)
+                    .is_some_and(|item| item.definition_id == "GOLD")
+            })
+        })
+        .expect("the physically returning Clonk still carries the first GOLD");
+    let wealth_before_sale = player
+        .engine()
+        .player(owner)
+        .expect("Tutorial04 player remains live")
+        .wealth();
+    let gold_stock_before_sale = player
+        .engine()
+        .player(owner)
+        .expect("Tutorial04 player remains live")
+        .home_base_material()
+        .get("GOLD")
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        wealth_before_sale, 0,
+        "Tutorial04 reaches its first physical sale with zero wealth"
+    );
+    assert_eq!(
+        gold_stock_before_sale, 0,
+        "Tutorial04 has no pre-existing GOLD home-base stock"
+    );
+    assert_eq!(
+        player
+            .engine()
+            .object_snapshot(first_gold)
+            .and_then(|gold| gold.container),
+        Some(clonk),
+        "GOLD is still nested in CLNK immediately before the physical Up control"
+    );
+
+    // GOLD has BaseAutoSell=1 and Value=5 but no Rebuy flag. C++ runs
+    // RejectEntrance, Collection2 and Entrance before synchronously invoking
+    // the destination base's AutoSellContents inside the successful Enter
+    // call. AutoSellContents exits nested GOLD, Sell2Home adds its value,
+    // declines to introduce non-rebuyable stock, runs Sale, and removes it
+    // (C4Object.cpp:1577-1634,970-995; C4Player.cpp:866-902; GOLD DefCore).
     player.tap(COM_UP)?;
-    player.wait_until("the GOLD-carrying Clonk enters HUT2", 60, |engine| {
-        engine
+    let mut entry_frame = None;
+    for _ in 0..=60 {
+        if player
+            .engine()
             .object_snapshot(clonk)
             .is_some_and(|object| object.container == Some(hut))
-    })?;
-    player.wait_until("HUT2 sells the first GOLD chunk", 80, |engine| {
-        engine
-            .snapshot()
-            .hud
-            .players
-            .iter()
-            .any(|player| player.owner == owner && player.wealth >= 5)
-    })?;
+        {
+            entry_frame = Some(player.engine().frame());
+            break;
+        }
+        assert_eq!(
+            player
+                .engine()
+                .object_snapshot(first_gold)
+                .and_then(|gold| gold.container),
+            Some(clonk),
+            "before HUT2 entry, GOLD must remain carried"
+        );
+        assert_eq!(
+            player
+                .engine()
+                .player(owner)
+                .expect("Tutorial04 player remains live")
+                .wealth(),
+            wealth_before_sale,
+            "HUT2 cannot sell GOLD before the Clonk enters"
+        );
+        player.ticks(1)?;
+    }
+    let entry_frame = entry_frame.expect("the physical Up control enters HUT2 within 60 ticks");
+    assert!(
+        player.engine().object_snapshot(first_gold).is_none(),
+        "nested GOLD is removed in the same successful Enter call (frame {entry_frame})"
+    );
+    assert_eq!(
+        clonk_contents_count(player.engine(), clonk, "GOLD"),
+        0,
+        "the entered Clonk has no GOLD after the synchronous sale"
+    );
+    assert_eq!(
+        object_contents_count(player.engine(), hut, "GOLD"),
+        0,
+        "GOLD never remains as a live direct HUT2 content"
+    );
+    assert_eq!(
+        player
+            .engine()
+            .player(owner)
+            .expect("Tutorial04 player remains live")
+            .wealth(),
+        wealth_before_sale + 5,
+        "Sell2Home credits GOLD's exact definition value on the entry frame"
+    );
+    assert_eq!(
+        player
+            .engine()
+            .player(owner)
+            .expect("Tutorial04 player remains live")
+            .home_base_material()
+            .get("GOLD")
+            .copied()
+            .unwrap_or(0),
+        gold_stock_before_sale,
+        "non-rebuyable GOLD does not introduce a new home-base stock entry"
+    );
 
     // Script200 creates three replacement flints in HUT2 after the first
     // successful blast, then Script201 waits for the Clonk to be inside
