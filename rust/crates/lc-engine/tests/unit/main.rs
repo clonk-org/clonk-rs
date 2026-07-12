@@ -15228,7 +15228,11 @@ func Activate(inMat, inLength, inStrength)
         let script = r#"
         func Initialize(state, random) { return nil; }
         func Step(state, frame, random) { return nil; }
-        func Activate(x, y, xdir, xrange, ydir, yrange, gamma) { return true; }
+        func Activate(x, y, xdir, xrange, ydir, yrange, gamma)
+        {
+            MissingWeatherCallback();
+            return true;
+        }
         "#;
 
         let mut engine = Engine::with_seed(7);
@@ -15241,7 +15245,7 @@ func Activate(inMat, inLength, inStrength)
         assert!(
             engine
                 .trigger_lightning(120)
-                .expect("lightning trigger succeeds"),
+                .expect("C++ fail-safe lightning callback keeps the trigger running"),
             "lightning definition should spawn effect"
         );
 
@@ -15264,7 +15268,11 @@ func Activate(inMat, inLength, inStrength)
         let script = r#"
         func Initialize(state, random) { return nil; }
         func Step(state, frame, random) { return nil; }
-        func Activate(x, y, size, material) { return true; }
+        func Activate(x, y, size, material)
+        {
+            MissingWeatherCallback();
+            return true;
+        }
         "#;
 
         let mut engine = Engine::with_seed(7);
