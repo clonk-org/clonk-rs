@@ -67,6 +67,12 @@ const MATERIAL_OVERLAY_HUGE_ZOOM: i32 = 4;
 const MATERIAL_OVERLAY_MONOCHROME: i32 = 8;
 /// `C4GFXBLIT_ADDITIVE` (src/C4Surface.h:40).
 const C4GFXBLIT_ADDITIVE: u32 = 1;
+/// `C4GFXBLIT_MOD2`: MOD2 source modulation for the main surface.
+const C4GFXBLIT_MOD2: u32 = 2;
+/// `C4GFXBLIT_CLRSFC_OWNCLR`: do not fold global ColorMod into owner color.
+const C4GFXBLIT_CLRSFC_OWNCLR: u32 = 4;
+/// `C4GFXBLIT_CLRSFC_MOD2`: MOD2 source modulation for the owner surface.
+const C4GFXBLIT_CLRSFC_MOD2: u32 = 8;
 /// `C4GFXBLIT_PARENT` is an exact overlay sentinel, not a combinable flag
 /// (src/C4DefGraphics.cpp:762-768).
 const C4GFXBLIT_PARENT: u32 = 256;
@@ -276,6 +282,42 @@ enum ObjectRenderPass {
     ForegroundParallax,
 }
 
+/// CStdDDraw state established by C4Object::PrepareDrawing or one explicit
+/// C4GraphicsOverlay. Modulation retains C4's packed transparency-alpha color.
+#[derive(Clone, Copy)]
+struct SpriteBlitState {
+    mode: u32,
+    modulation: Option<u32>,
+}
+
+impl SpriteBlitState {
+    const fn normal() -> Self {
+        Self {
+            mode: 0,
+            modulation: None,
+        }
+    }
+
+    fn for_object(object: &ObjectSnapshot) -> Self {
+        let mode = object.blit_mode;
+        let modulation = (object.color_modulation != 0
+            || mode & (C4GFXBLIT_MOD2 | C4GFXBLIT_CLRSFC_MOD2) != 0)
+            .then_some(object.color_modulation);
+        Self { mode, modulation }
+    }
+
+    fn for_overlay(object: &ObjectSnapshot, overlay: &ObjectGraphicsOverlay) -> Self {
+        if overlay.blit_mode == C4GFXBLIT_PARENT {
+            return Self::for_object(object);
+        }
+        Self {
+            mode: overlay.blit_mode,
+            modulation: (overlay.color_modulation != 0x00ff_ffff)
+                .then_some(overlay.color_modulation),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DefinitionSprite {
     pub image: ImageData,
@@ -350,24 +392,113 @@ impl ColorByOwnerMask {
     }
 }
 
-fn blend_color_by_owner(base: Color, mask_value: u8, owner_color: Color) -> Color {
-    let mask = mask_value as u16;
-    if mask == 0 {
-        return base;
-    }
-    let inv_mask = 255u16.saturating_sub(mask);
-    let mix_channel = |base_channel: u8, owner_channel: u8| -> u8 {
-        let tinted = (owner_channel as u16 * mask) / 255;
-        let base_contrib = (base_channel as u16 * inv_mask) / 255;
-        (tinted + base_contrib).min(255) as u8
-    };
+#[derive(Clone, Copy)]
+enum PreparedSpriteFragment {
+    /// Exact pre-existing path for an unmodulated main-surface texel.
+    Legacy(Color),
+    /// StdGL shader output before gamma lookup and framebuffer blending.
+    Shader { rgb: [f32; 3], alpha: u8 },
+}
 
-    Color::new(
-        mix_channel(base.r, owner_color.r),
-        mix_channel(base.g, owner_color.g),
-        mix_channel(base.b, owner_color.b),
-        base.a,
-    )
+impl PreparedSpriteFragment {
+    fn alpha(self) -> u8 {
+        match self {
+            Self::Legacy(color) => color.a,
+            Self::Shader { alpha, .. } => alpha,
+        }
+    }
+}
+
+fn split_c4_color(raw: u32) -> [u8; 4] {
+    [
+        ((raw >> 16) & 0xff) as u8,
+        ((raw >> 8) & 0xff) as u8,
+        (raw & 0xff) as u8,
+        ((raw >> 24) & 0xff) as u8,
+    ]
+}
+
+/// CPU-side `ModulateClr` used to fold global ColorMod into ClrByOwnerClr
+/// before the owner texture reaches the shader (StdDDraw2.cpp:773-777).
+fn modulate_c4_colors(dst: u32, src: u32) -> u32 {
+    let dst = split_c4_color(dst);
+    let src = split_c4_color(src);
+    let mul = |a: u8, b: u8| (u32::from(a) * u32::from(b)) >> 8;
+    let alpha = (u32::from(dst[3]) + u32::from(src[3]) - mul(dst[3], src[3])).min(255);
+    (alpha << 24)
+        | (mul(dst[0], src[0]) << 16)
+        | (mul(dst[1], src[1]) << 8)
+        | mul(dst[2], src[2])
+}
+
+fn shader_modulate_fragment(source: Color, modulation: u32, mod2: bool) -> PreparedSpriteFragment {
+    let modulation = split_c4_color(modulation);
+    if mod2 {
+        let channel = |source: u8, modulation: u8| {
+            (2.0 * f32::from(source) + 2.0 * f32::from(modulation) - 255.0)
+                .clamp(0.0, 255.0)
+        };
+        PreparedSpriteFragment::Shader {
+            rgb: [
+                channel(source.r, modulation[0]),
+                channel(source.g, modulation[1]),
+                channel(source.b, modulation[2]),
+            ],
+            // LC_MOD2 intentionally leaves texture alpha untouched
+            // (StdGL.cpp:1072-1075).
+            alpha: source.a,
+        }
+    } else {
+        let channel = |source: u8, modulation: u8| {
+            f32::from(source) * f32::from(modulation) / 255.0
+        };
+        PreparedSpriteFragment::Shader {
+            rgb: [
+                channel(source.r, modulation[0]),
+                channel(source.g, modulation[1]),
+                channel(source.b, modulation[2]),
+            ],
+            // Textures carry normal opacity in Rust, while StdGL adds C4's
+            // transparency-alpha modulation to texture transparency.
+            alpha: source.a.saturating_sub(modulation[3]),
+        }
+    }
+}
+
+fn prepare_sprite_fragment(
+    source: Color,
+    owner_mask: Option<u8>,
+    owner_color: Option<Color>,
+    blit: SpriteBlitState,
+) -> PreparedSpriteFragment {
+    if let (Some(mask), Some(owner)) = (owner_mask.filter(|mask| *mask != 0), owner_color) {
+        // The mask stores the grey ClrByOwner texture intensity. Its main-sfc
+        // pixel was cleared when C4Surface::CreateColorByOwner split the image
+        // (C4Surface.cpp:288-312).
+        let mut modulation =
+            (u32::from(owner.r) << 16) | (u32::from(owner.g) << 8) | u32::from(owner.b);
+        if let Some(global) = blit.modulation {
+            if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR == 0 {
+                modulation = modulate_c4_colors(modulation, global);
+            }
+        }
+        // PerformBlt explicitly disables MOD2 for a completely black
+        // modulation (StdGL.cpp:471-472).
+        let mod2 = blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0 && modulation != 0;
+        return shader_modulate_fragment(
+            Color::new(mask, mask, mask, source.a),
+            modulation,
+            mod2,
+        );
+    }
+
+    if blit.modulation.is_none() && blit.mode & C4GFXBLIT_MOD2 == 0 {
+        return PreparedSpriteFragment::Legacy(source);
+    }
+
+    let modulation = blit.modulation.unwrap_or(0x00ff_ffff);
+    let mod2 = blit.mode & C4GFXBLIT_MOD2 != 0 && modulation != 0;
+    shader_modulate_fragment(source, modulation, mod2)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1333,7 +1464,7 @@ impl GraphicsSystem {
                     &source,
                     false,
                     None,
-                    0,
+                    SpriteBlitState::normal(),
                     gamma,
                 );
             }
@@ -2370,7 +2501,7 @@ impl GraphicsSystem {
             self.viewport_zoom.max(MIN_VIEWPORT_ZOOM),
             0.0,
             object.draw_transform,
-            object.blit_mode,
+            SpriteBlitState::for_object(object),
             gamma,
         );
     }
@@ -2642,7 +2773,7 @@ impl GraphicsSystem {
                 zoom,
                 0.0,
                 None,
-                object.blit_mode,
+                SpriteBlitState::for_object(object),
                 gamma,
             );
             return;
@@ -2684,7 +2815,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             transform,
-            object.blit_mode,
+            SpriteBlitState::for_object(object),
             gamma,
         );
     }
@@ -2748,7 +2879,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             transform,
-            object.blit_mode,
+            SpriteBlitState::for_object(object),
             gamma,
         );
     }
@@ -2773,7 +2904,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
-        blit_mode: u32,
+        blit: SpriteBlitState,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let (mut dest_x, mut dest_y, mut dest_w, mut dest_h) = dest;
@@ -2843,7 +2974,7 @@ impl GraphicsSystem {
                 &source,
                 flip,
                 owner_color,
-                blit_mode,
+                blit,
                 gamma,
             );
         } else {
@@ -2867,7 +2998,7 @@ impl GraphicsSystem {
                 flip,
                 owner_color,
                 rotation_degrees,
-                blit_mode,
+                blit,
                 gamma,
             );
         }
@@ -2885,7 +3016,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
-        blit_mode: u32,
+        blit: SpriteBlitState,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) -> bool {
         let Some(graphics) = sprite.actions.get(action_name) else {
@@ -2993,7 +3124,7 @@ impl GraphicsSystem {
                 &source_rect,
                 final_flipped,
                 owner_color,
-                blit_mode,
+                blit,
                 gamma,
             );
         } else {
@@ -3009,7 +3140,7 @@ impl GraphicsSystem {
                 final_flipped,
                 owner_color,
                 rotation_degrees,
-                blit_mode,
+                blit,
                 gamma,
             );
         }
@@ -3033,11 +3164,7 @@ impl GraphicsSystem {
         for overlay in &object.graphics_overlays {
             // Parent is a sentinel tested by equality in C++; any ordinary
             // mode, including combinations that carry bit 1, remains local.
-            let blit_mode = if overlay.blit_mode == C4GFXBLIT_PARENT {
-                object.blit_mode
-            } else {
-                overlay.blit_mode
-            };
+            let blit = SpriteBlitState::for_overlay(object, overlay);
             let combined_transform = match (base_transform, overlay.transform) {
                 (Some(base), Some(local)) => Some(base.combined(local)),
                 (Some(base), None) => Some(base),
@@ -3054,7 +3181,7 @@ impl GraphicsSystem {
                     zoom,
                     rotation_degrees,
                     combined_transform,
-                    blit_mode,
+                    blit,
                     gamma,
                 ),
                 GraphicsOverlayMode::Base => self.draw_overlay_base(
@@ -3066,7 +3193,7 @@ impl GraphicsSystem {
                     zoom,
                     rotation_degrees,
                     combined_transform,
-                    blit_mode,
+                    blit,
                     gamma,
                 ),
                 _ => {}
@@ -3084,7 +3211,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
-        blit_mode: u32,
+        blit: SpriteBlitState,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let definition_id = overlay
@@ -3131,7 +3258,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             transform,
-            blit_mode,
+            blit,
             gamma,
         );
     }
@@ -3146,7 +3273,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
-        blit_mode: u32,
+        blit: SpriteBlitState,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let definition_id = overlay
@@ -3234,7 +3361,7 @@ impl GraphicsSystem {
                 &source_rect,
                 flip_x,
                 owner_color,
-                blit_mode,
+                blit,
                 gamma,
             );
         } else {
@@ -3250,7 +3377,7 @@ impl GraphicsSystem {
                 flip_x,
                 owner_color,
                 rotation_degrees,
-                blit_mode,
+                blit,
                 gamma,
             );
         }
@@ -3393,7 +3520,7 @@ impl GraphicsSystem {
             &source,
             false,
             None,
-            0,
+            SpriteBlitState::normal(),
             gamma,
         );
 
@@ -4417,7 +4544,7 @@ fn draw_image_region(
     source: &SourceRect,
     flip_x: bool,
     owner_color: Option<Color>,
-    blit_mode: u32,
+    blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
@@ -4480,49 +4607,21 @@ fn draw_image_region(
                 continue;
             }
 
-            let mut color = Color::new(
+            let color = Color::new(
                 pixels[idx],
                 pixels[idx + 1],
                 pixels[idx + 2],
                 pixels[idx + 3],
             );
-
-            if let (Some(mask_map), Some(owner)) = (mask, owner_color) {
-                if src_x >= 0 && src_y >= 0 {
-                    let mask_value = mask_map.value_at(src_x as u32, src_y as u32);
-                    if mask_value != 0 {
-                        color = blend_color_by_owner(color, mask_value, owner);
-                    }
-                }
-            }
-
-            if color.a == 0 {
+            let owner_mask = mask.map(|mask_map| mask_map.value_at(src_x as u32, src_y as u32));
+            let source = prepare_sprite_fragment(color, owner_mask, owner_color, blit);
+            if source.alpha() == 0 {
                 continue;
             }
-
-            let blended = if blit_mode & C4GFXBLIT_ADDITIVE != 0 {
-                let background = surface
-                    .get_pixel(target_x as u32, target_y as u32)
-                    .unwrap_or_default();
-                blend_fragment_additive(color, background, gamma)
-            } else {
-                match (color.a, gamma) {
-                    (255, Some(gamma)) => gamma_encode_fragment(color, gamma),
-                    (255, None) => color,
-                    (_, Some(gamma)) => {
-                        let background = surface
-                            .get_pixel(target_x as u32, target_y as u32)
-                            .unwrap_or_default();
-                        gamma_blend_fragment_over(color, background, gamma)
-                    }
-                    (_, None) => {
-                        let background = surface
-                            .get_pixel(target_x as u32, target_y as u32)
-                            .unwrap_or_default();
-                        blend_colors(color, background)
-                    }
-                }
-            };
+            let background = surface
+                .get_pixel(target_x as u32, target_y as u32)
+                .unwrap_or_default();
+            let blended = composite_sprite_fragment(source, background, blit, gamma);
 
             let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
         }
@@ -4541,7 +4640,7 @@ fn draw_image_region_rotated(
     flip_x: bool,
     owner_color: Option<Color>,
     rotation_degrees: f32,
-    blit_mode: u32,
+    blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     if dest_width <= 0.0 || dest_height <= 0.0 {
@@ -4649,42 +4748,21 @@ fn draw_image_region_rotated(
                 continue;
             }
 
-            let mut color = Color::new(
+            let color = Color::new(
                 pixels[idx],
                 pixels[idx + 1],
                 pixels[idx + 2],
                 pixels[idx + 3],
             );
-
-            if let (Some(mask_map), Some(owner)) = (mask, owner_color) {
-                if sample_x >= 0 && sample_y >= 0 {
-                    let mask_value = mask_map.value_at(sample_x as u32, sample_y as u32);
-                    if mask_value != 0 {
-                        color = blend_color_by_owner(color, mask_value, owner);
-                    }
-                }
-            }
-
-            if color.a == 0 {
+            let owner_mask =
+                mask.map(|mask_map| mask_map.value_at(sample_x as u32, sample_y as u32));
+            let source = prepare_sprite_fragment(color, owner_mask, owner_color, blit);
+            if source.alpha() == 0 {
                 continue;
             }
-
-            if blit_mode & C4GFXBLIT_ADDITIVE != 0 {
-                let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
-                color = blend_fragment_additive(color, background, gamma);
-            } else if let Some(gamma) = gamma {
-                if color.a == 255 {
-                    color = gamma_encode_fragment(color, gamma);
-                } else {
-                    let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
-                    color = gamma_blend_fragment_over(color, background, gamma);
-                }
-            } else if color.a < 255 {
-                let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
-                color = blend_colors(color, background);
-            }
-
-            let _ = surface.set_pixel(x as u32, y as u32, color);
+            let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
+            let blended = composite_sprite_fragment(source, background, blit, gamma);
+            let _ = surface.set_pixel(x as u32, y as u32, blended);
         }
     }
 }
@@ -5128,6 +5206,65 @@ fn blend_fragment_additive(
             destination.b,
         ),
         destination.a,
+    )
+}
+
+fn composite_sprite_fragment(
+    source: PreparedSpriteFragment,
+    destination: Color,
+    blit: SpriteBlitState,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) -> Color {
+    if let PreparedSpriteFragment::Legacy(source) = source {
+        if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
+            return blend_fragment_additive(source, destination, gamma);
+        }
+        return match (source.a, gamma) {
+            (255, Some(gamma)) => gamma_encode_fragment(source, gamma),
+            (255, None) => source,
+            (_, Some(gamma)) => gamma_blend_fragment_over(source, destination, gamma),
+            (_, None) => blend_colors(source, destination),
+        };
+    }
+
+    let PreparedSpriteFragment::Shader { rgb, alpha } = source else {
+        unreachable!();
+    };
+    if alpha == 0 {
+        return destination;
+    }
+    let alpha_factor = f32::from(alpha) / 255.0;
+    let channel = |gamma_channel, source: f32, destination: u8| {
+        let source = sample_channel(gamma, gamma_channel, source);
+        if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
+            store_channel(f32::from(destination) + source * alpha_factor)
+        } else {
+            store_channel(
+                source * alpha_factor + f32::from(destination) * (1.0 - alpha_factor),
+            )
+        }
+    };
+    Color::new(
+        channel(
+            lc_graphics::gamma::GammaChannel::Red,
+            rgb[0],
+            destination.r,
+        ),
+        channel(
+            lc_graphics::gamma::GammaChannel::Green,
+            rgb[1],
+            destination.g,
+        ),
+        channel(
+            lc_graphics::gamma::GammaChannel::Blue,
+            rgb[2],
+            destination.b,
+        ),
+        if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
+            destination.a
+        } else {
+            blend_color_over(Color::new(0, 0, 0, alpha), destination).a
+        },
     )
 }
 
@@ -5849,6 +5986,393 @@ mod tests {
             graphics.surface().get_pixel(4, 4),
             Some(Color::opaque(234, 244, 254))
         );
+    }
+
+    #[test]
+    fn object_mod2_modulates_base_action_top_and_rotated_faces() {
+        // Object ColorMod is activated around both C4Object::Draw passes
+        // (C4Object.cpp:2410-2499,2648-2672). Bit 2 selects BlitShaderMod2
+        // for the main surface (StdDDraw2.cpp:768-770; StdGL.cpp:1072-1079).
+        let source = Color::new(64, 128, 192, 128);
+        let plain_sprite = |width, height, shape| DefinitionSprite {
+            image: ImageData::new(
+                width,
+                height,
+                (0..width * height)
+                    .flat_map(|_| [source.r, source.g, source.b, source.a])
+                    .collect(),
+            ),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(shape),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut sprites = HashMap::from([(
+            sprite_map_key("BaseMod2", None),
+            plain_sprite(1, 1, DefinitionRect::new(0, 0, 1, 1)),
+        )]);
+        let mut action = plain_sprite(1, 1, DefinitionRect::new(0, 0, 1, 1));
+        action.actions.insert(
+            "Active".to_string(),
+            DefinitionActionGraphics {
+                facet: Some(lc_engine::DefinitionActionFacet {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                    target_x: 0,
+                    target_y: 0,
+                }),
+                length: Some(1),
+                ..DefinitionActionGraphics::default()
+            },
+        );
+        sprites.insert(sprite_map_key("ActionMod2", None), action);
+        sprites.insert(
+            sprite_map_key("TopMod2", None),
+            DefinitionSprite {
+                image: ImageData::new(
+                    2,
+                    1,
+                    vec![0, 0, 0, 0, source.r, source.g, source.b, source.a],
+                ),
+                actions: HashMap::new(),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                stretch_growth: false,
+                top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
+            },
+        );
+        sprites.insert(
+            sprite_map_key("RotatedMod2", None),
+            plain_sprite(3, 3, DefinitionRect::new(-1, -1, 3, 3)),
+        );
+
+        let template = make_snapshot().objects.remove(0);
+        let make_object = |id, definition: &str, position, action: &str, rotation| {
+            let mut object = template.clone();
+            object.id = ObjectId::new(id);
+            object.definition_id = definition.to_string();
+            object.position = position;
+            object.action = lc_engine::ActionState::new(action);
+            object.rotation = rotation;
+            object.blit_mode = 2;
+            object.color_modulation = 0x0020_4080;
+            object.crew_member = false;
+            object
+        };
+        let objects = vec![
+            make_object(1, "BaseMod2", Vector2::new(1, 2), "Idle", 0),
+            make_object(2, "ActionMod2", Vector2::new(3, 2), "Active", 0),
+            make_object(3, "TopMod2", Vector2::new(5, 2), "Idle", 0),
+            make_object(4, "RotatedMod2", Vector2::new(8, 2), "Idle", 45),
+        ];
+        let mut graphics = GraphicsSystem::new(
+            11,
+            5,
+            5,
+            "Object MOD2 routes",
+            test_font(),
+            Arc::new(sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(200, 200, 200));
+
+        graphics.draw_objects(
+            &objects,
+            &[],
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        // Shader MOD2 source: clamp(2*src + 2*mod - 255) = (0,129,255),
+        // then ordinary source-alpha over the framebuffer.
+        let expected = Some(Color::opaque(100, 164, 228));
+        for (route, x) in [("base", 1), ("action", 3), ("top", 5), ("rotated", 8)] {
+            assert_eq!(graphics.surface().get_pixel(x, 2), expected, "{route}");
+        }
+    }
+
+    #[test]
+    fn object_mod2_black_reset_and_additive_gamma_precedence_match_stdgl() {
+        // PerformBlt resets MOD2 when the active modulation is all black
+        // (StdGL.cpp:442-472), yielding a normal black silhouette. Additive
+        // remains an independent framebuffer blend bit (StdGL.cpp:1320-1324).
+        let mut sprites = HashMap::new();
+        sprites.insert(
+            sprite_map_key("BlackMod2", None),
+            DefinitionSprite {
+                image: ImageData::new(1, 1, vec![200, 200, 200, 255]),
+                actions: HashMap::new(),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                stretch_growth: false,
+                top_face: None,
+            },
+        );
+        sprites.insert(
+            sprite_map_key("AddMod2", None),
+            DefinitionSprite {
+                image: ImageData::new(1, 1, vec![64, 128, 192, 128]),
+                actions: HashMap::new(),
+                color_mask: None,
+                shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                stretch_growth: false,
+                top_face: None,
+            },
+        );
+        let template = make_snapshot().objects.remove(0);
+        let mut black = template.clone();
+        black.definition_id = "BlackMod2".to_string();
+        black.position = Vector2::new(1, 1);
+        black.blit_mode = 2;
+        black.color_modulation = 0;
+        black.crew_member = false;
+        let mut combined = template;
+        combined.id = ObjectId::new(2);
+        combined.definition_id = "AddMod2".to_string();
+        combined.position = Vector2::new(3, 1);
+        combined.blit_mode = 1 | 2 | 128;
+        combined.color_modulation = 0x0020_4080;
+        combined.crew_member = false;
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+        let mut graphics = GraphicsSystem::new(
+            5,
+            3,
+            3,
+            "MOD2 precedence",
+            test_font(),
+            Arc::new(sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(100, 100, 100));
+
+        graphics.draw_objects(
+            &[black, combined],
+            &[],
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            Some(&gamma),
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(1, 1),
+            Some(gamma_encode_fragment(Color::opaque(0, 0, 0), &gamma))
+        );
+        let modulated = [0.0, 129.0, 255.0];
+        let alpha = 128.0 / 255.0;
+        let expected = Color::opaque(
+            store_channel(
+                100.0
+                    + sample_channel(
+                        Some(&gamma),
+                        lc_graphics::gamma::GammaChannel::Red,
+                        modulated[0],
+                    ) * alpha,
+            ),
+            store_channel(
+                100.0
+                    + sample_channel(
+                        Some(&gamma),
+                        lc_graphics::gamma::GammaChannel::Green,
+                        modulated[1],
+                    ) * alpha,
+            ),
+            store_channel(
+                100.0
+                    + sample_channel(
+                        Some(&gamma),
+                        lc_graphics::gamma::GammaChannel::Blue,
+                        modulated[2],
+                    ) * alpha,
+            ),
+        );
+        assert_eq!(graphics.surface().get_pixel(3, 1), Some(expected));
+    }
+
+    #[test]
+    fn color_by_owner_bits_four_and_eight_have_distinct_source_modulation() {
+        // Base and owner surfaces are separate C++ passes. Bit 4 keeps the
+        // owner's raw color independent of global ColorMod; bit 8 selects
+        // MOD2 only for the grey owner surface (StdDDraw2.cpp:768-778).
+        let sprite = DefinitionSprite {
+            image: ImageData::new(1, 1, vec![255, 255, 255, 255]),
+            actions: HashMap::new(),
+            color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([64]))),
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let owner = Color::opaque(64, 128, 192);
+        let render = |mode| {
+            let mut object = make_snapshot().objects.remove(0);
+            object.definition_id = "OwnerModes".to_string();
+            object.position = Vector2::new(1, 1);
+            object.blit_mode = mode;
+            object.color_modulation = 0x0080_4020;
+            object.crew_member = false;
+            let mut graphics = GraphicsSystem::new(
+                3,
+                3,
+                3,
+                "Owner modulation modes",
+                test_font(),
+                Arc::new(HashMap::from([(
+                    sprite_map_key("OwnerModes", None),
+                    sprite.clone(),
+                )])),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(Color::opaque(9, 11, 13));
+            graphics.draw_objects(
+                &[object],
+                &[],
+                1.0,
+                &HashMap::from([(0, owner)]),
+                ObjectRenderPass::Normal,
+                None,
+            );
+            graphics.surface().get_pixel(1, 1)
+        };
+
+        // owner ⊗ global is (32,32,24) by C++'s >>8 combine. The owner
+        // texture is grey 64. Bit 8's normalized shader formula is
+        // clamp(2*grey + 2*mod - 255), proving it is not bit-2 aliasing.
+        assert_eq!(render(0), Some(Color::opaque(8, 8, 6)));
+        assert_eq!(render(4), Some(Color::opaque(16, 32, 48)));
+        assert_eq!(render(8), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(render(4 | 8), Some(Color::opaque(1, 129, 255)));
+    }
+
+    #[test]
+    fn overlay_mod2_uses_local_modulation_or_exact_parent_state() {
+        // Explicit overlays activate modulation only when their color differs
+        // from 0x00ffffff (C4DefGraphics.cpp:762-768). Thus mode 2 + default
+        // white is MOD2-to-white, while explicit black triggers the PerformBlt
+        // black reset. Exact parent mode inherits both mode and ColorMod.
+        let sprite = DefinitionSprite {
+            image: ImageData::new(3, 3, [64, 128, 192, 255].repeat(9)),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-1, -1, 3, 3)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let render = |overlay_mode, overlay_modulation, rotation| {
+            let mut object = make_snapshot().objects.remove(0);
+            object.position = Vector2::new(2, 2);
+            object.blit_mode = 2;
+            object.color_modulation = 0x0020_4080;
+            let mut overlay = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base)
+                .with_definition(Some("OverlayMod2".to_string()))
+                .with_blit_mode(overlay_mode);
+            overlay.color_modulation = overlay_modulation;
+            object.graphics_overlays = vec![overlay];
+            let mut graphics = GraphicsSystem::new(
+                5,
+                5,
+                5,
+                "Overlay MOD2",
+                test_font(),
+                Arc::new(HashMap::from([(
+                    sprite_map_key("OverlayMod2", None),
+                    sprite.clone(),
+                )])),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(Color::opaque(9, 11, 13));
+            graphics.draw_object_overlays(
+                &object,
+                None,
+                2.0,
+                2.0,
+                1.0,
+                rotation,
+                None,
+                None,
+            );
+            graphics.surface().get_pixel(2, 2)
+        };
+
+        assert_eq!(render(2, 0x00ff_ffff, 0.0), Some(Color::opaque(255, 255, 255)));
+        assert_eq!(render(2, 0, 0.0), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(render(256, 0x00ff_ffff, 45.0), Some(Color::opaque(0, 129, 255)));
+        assert_eq!(render(0, 0x0020_4080, 0.0), Some(Color::opaque(8, 32, 96)));
+    }
+
+    #[test]
+    fn shipped_firelump_uses_mod2_color_modulation() {
+        // FRBL declares BlitMode=2; Existing() continuously assigns
+        // SetClrModulation(RGB(iR,iG,64)). Use one real sheet texel from its
+        // base face to pin shipped MOD2 behavior.
+        let definition = crate::test_support::repo_root()
+            .join("content/Fantasy.c4d/Magic.c4d/Firelump.c4d/Fball.c4d");
+        let def_core = std::fs::read_to_string(definition.join("DefCore.txt"))
+            .expect("read shipped FRBL DefCore");
+        assert!(def_core.lines().any(|line| line.trim() == "BlitMode=2"));
+        let script = std::fs::read(definition.join("Script.c")).expect("read shipped FRBL Script");
+        assert!(script
+            .windows(b"SetClrModulation(RGB(iR,iG,64))".len())
+            .any(|window| window == b"SetClrModulation(RGB(iR,iG,64))"));
+        let rgba = image::open(definition.join("Graphics.png"))
+            .expect("decode shipped FRBL graphics")
+            .into_rgba8();
+        let (width, height) = rgba.dimensions();
+        let sprite = DefinitionSprite {
+            image: ImageData::new(width, height, rgba.into_raw()),
+            actions: HashMap::from([(
+                "Exist".to_string(),
+                DefinitionActionGraphics {
+                    facet_base: true,
+                    ..DefinitionActionGraphics::default()
+                },
+            )]),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-5, -5, 10, 10)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut firelump = make_snapshot().objects.remove(0);
+        firelump.definition_id = "FRBL".to_string();
+        firelump.position = Vector2::new(10, 10);
+        firelump.action = lc_engine::ActionState::new("Exist");
+        firelump.blit_mode = 2;
+        firelump.color_modulation = 0x0018_2040;
+        firelump.crew_member = false;
+        let mut graphics = GraphicsSystem::new(
+            20,
+            20,
+            20,
+            "Shipped FRBL MOD2",
+            test_font(),
+            Arc::new(HashMap::from([(sprite_map_key("FRBL", None), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(50, 60, 70));
+
+        graphics.draw_objects(
+            &[firelump],
+            &[],
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        // Graphics.png (6,0) = (255,140,0,179). MOD2 with (24,32,64)
+        // produces (255,89,0), then alpha-over gives this framebuffer value.
+        assert_eq!(graphics.surface().get_pixel(11, 5), Some(Color::opaque(194, 80, 21)));
     }
 
     #[test]
