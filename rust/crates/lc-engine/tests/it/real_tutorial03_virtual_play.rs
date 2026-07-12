@@ -324,6 +324,59 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             >= 5
     })?;
 
+    // Script85 physically transfers every sawmill result into LORY
+    // (Tutorial03.c4s/Script.c:99-105). C++ stContents insertion keeps the
+    // five same-ID objects in one chunk, then DrawIDList's iterator emits one
+    // picture stack whose count is five when CanConcatPictureWith succeeds
+    // (C4ObjectList.cpp:144-173,343-372,849-903;
+    // C4Object.cpp:6173-6213).
+    let lorry_after_sawmill = player
+        .engine()
+        .object_snapshot(lorry)
+        .expect("the loaded Tutorial03 LORY remains live");
+    let wood_stack = lorry_after_sawmill
+        .contents
+        .iter()
+        .map(|item| {
+            player
+                .engine()
+                .object_snapshot(*item)
+                .expect("every LORY content remains live")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        wood_stack
+            .iter()
+            .map(|item| item.definition_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["WOOD"; 5],
+        "the real Tutorial03 production flow loads exactly five WOOD objects"
+    );
+    let representative = &wood_stack[0];
+    assert!(
+        wood_stack[1..].iter().all(|item| {
+            player
+                .engine()
+                .can_concat_picture_with(representative, item)
+                && player
+                    .engine()
+                    .can_concat_picture_with(item, representative)
+        }),
+        "all real Tutorial03 WOOD pictures belong to one C++ picture stack"
+    );
+    let cpp_stack_count = 1 + wood_stack[1..]
+        .iter()
+        .filter(|item| {
+            player
+                .engine()
+                .can_concat_picture_with(item, representative)
+        })
+        .count();
+    assert_eq!(
+        cpp_stack_count, 5,
+        "C4ObjectListIterator supplies DrawIDList one five-item WOOD stack"
+    );
+
     player.wait_until("Tutorial03 creates and points to ORE1", 180, |engine| {
         tutorial_message_contains(engine, "dig out the chunk of ore")
             && object_with_definition(engine, "ORE1").is_some()
