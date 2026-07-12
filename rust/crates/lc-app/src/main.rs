@@ -2812,6 +2812,121 @@ enum VerticalAlignment {
     Baseline,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GlobalMessageViewportGeometry {
+    x: i32,
+    y: i32,
+    width: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GlobalPortraitPlacement {
+    viewport: Rect,
+    offset: Vector2,
+    flags: u32,
+}
+
+fn message_extent_i32(extent: u32) -> i32 {
+    i32::try_from(extent).unwrap_or(i32::MAX)
+}
+
+fn message_percent(value: i32, extent: i32) -> i32 {
+    let scaled = i64::from(value) * i64::from(extent) / 100;
+    scaled.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+/// Resolve the global-message fields against the owning viewport facet.
+/// `C4Viewport::Execute` supplies `(DrawX, DrawY, ViewWdt, ViewHgt)` as `cgo`
+/// (src/C4Viewport.cpp:1146-1149), and `C4GameMessage::Draw` applies relative
+/// fields with integer arithmetic before adding `cgo.X/Y`
+/// (src/C4GameMessage.cpp:109-111,136-137).
+fn global_message_viewport_geometry(
+    viewport: Rect,
+    offset: Vector2,
+    width: i32,
+    flags: u32,
+) -> GlobalMessageViewportGeometry {
+    let viewport_width = message_extent_i32(viewport.width);
+    let viewport_height = message_extent_i32(viewport.height);
+    let x = if flags & FLAG_X_REL != 0 {
+        message_percent(offset.x, viewport_width)
+    } else {
+        offset.x
+    };
+    let y = if flags & FLAG_Y_REL != 0 {
+        message_percent(offset.y, viewport_height)
+    } else {
+        offset.y
+    };
+    let width = if flags & FLAG_WIDTH_REL != 0 {
+        message_percent(width, viewport_width)
+    } else {
+        width
+    };
+    GlobalMessageViewportGeometry {
+        x: viewport.x.saturating_add(x),
+        y: viewport.y.saturating_add(y),
+        width,
+    }
+}
+
+/// Position a measured portrait frame from the C4GM positioning reference.
+/// Left/Top mean the viewport origin; Right/Bottom and HCenter/VCenter first
+/// add the respective viewport reference and then subtract the full/half
+/// frame size (src/C4GameMessage.cpp:140-155). The separate integer halves
+/// intentionally preserve C++'s odd-size truncation.
+fn global_portrait_frame_rect(
+    viewport: Rect,
+    offset: Vector2,
+    flags: u32,
+    frame_size: (u32, u32),
+) -> Rect {
+    let geometry = global_message_viewport_geometry(viewport, offset, 0, flags);
+    let viewport_width = message_extent_i32(viewport.width);
+    let viewport_height = message_extent_i32(viewport.height);
+    let frame_width = message_extent_i32(frame_size.0);
+    let frame_height = message_extent_i32(frame_size.1);
+    let mut x = geometry.x;
+    let mut y = geometry.y;
+
+    if flags & FLAG_RIGHT != 0 {
+        x = x
+            .saturating_add(viewport_width)
+            .saturating_sub(frame_width);
+    } else if flags & FLAG_HCENTER != 0 {
+        x = x
+            .saturating_add(viewport_width / 2)
+            .saturating_sub(frame_width / 2);
+    }
+    if flags & FLAG_BOTTOM != 0 {
+        y = y
+            .saturating_add(viewport_height)
+            .saturating_sub(frame_height);
+    } else if flags & FLAG_VCENTER != 0 {
+        y = y
+            .saturating_add(viewport_height / 2)
+            .saturating_sub(frame_height / 2);
+    }
+
+    Rect::new(x, y, frame_size.0, frame_size.1)
+}
+
+/// Text alignment is the C4GM_A* family only. Frame positioning flags such as
+/// C4GM_Left/Right are independent (src/C4GameMessage.cpp:101,140-168).
+fn message_horizontal_alignment(flags: u32, has_frame: bool) -> HorizontalAlignment {
+    if flags & FLAG_ALIGN_LEFT != 0 {
+        HorizontalAlignment::Left
+    } else if flags & FLAG_ALIGN_RIGHT != 0 {
+        HorizontalAlignment::Right
+    } else if flags & FLAG_ALIGN_CENTER != 0 {
+        HorizontalAlignment::Center
+    } else if has_frame {
+        HorizontalAlignment::Left
+    } else {
+        HorizontalAlignment::Center
+    }
+}
+
 fn parse_message_spans(line: &str, base_color: Color) -> Vec<MessageTextSpan> {
     let mut spans = Vec::new();
     let mut current = String::new();
@@ -10881,6 +10996,7 @@ impl GameApp {
 
         struct PreparedMessage {
             anchor: (f32, f32),
+            global_portrait_placement: Option<GlobalPortraitPlacement>,
             lines: Vec<MessageLineLayout>,
             has_frame: bool,
             portrait_requested: bool,
@@ -10949,7 +11065,7 @@ impl GameApp {
                 anchor_y = surface_height - 160.0;
             }
 
-            let (anchor_x, anchor_y) = match message.kind {
+            let (mut anchor_x, mut anchor_y) = match message.kind {
                 MessageKind::Target | MessageKind::TargetPlayer => {
                     let target_id = match message.target {
                         Some(id) => id,
@@ -10986,20 +11102,40 @@ impl GameApp {
                 .and_then(|spec| resolve_message_portrait(&self.engine, spec));
             let has_frame = portrait_requested || has_decoration;
 
-            let default_alignment = if has_frame {
-                HorizontalAlignment::Left
+            // TutorialMessage is a player-global portrait message. C++ draws
+            // it through that player's viewport facet, whose output rectangle
+            // starts at DrawX/DrawY (src/C4Viewport.cpp:852-854,1146-1149),
+            // before applying the global portrait positioning rules
+            // (src/C4GameMessage.cpp:103-168).
+            let global_portrait_placement = if message.kind == MessageKind::GlobalPlayer
+                && portrait_requested
+            {
+                let owner = message.player.unwrap_or(self.local_owner);
+                let Some(viewport) = self.graphics.viewport_rect(owner) else {
+                    continue;
+                };
+                Some(GlobalPortraitPlacement {
+                    viewport,
+                    offset: message.offset,
+                    flags: message.flags,
+                })
             } else {
-                HorizontalAlignment::Center
+                None
             };
-            let alignment = if (message.flags & FLAG_ALIGN_LEFT) != 0 {
-                HorizontalAlignment::Left
-            } else if (message.flags & FLAG_ALIGN_RIGHT) != 0 {
-                HorizontalAlignment::Right
-            } else if (message.flags & FLAG_ALIGN_CENTER) != 0 {
-                HorizontalAlignment::Center
-            } else {
-                default_alignment
-            };
+            let global_portrait_geometry = global_portrait_placement.map(|placement| {
+                global_message_viewport_geometry(
+                    placement.viewport,
+                    placement.offset,
+                    message.width.unwrap_or(0),
+                    placement.flags,
+                )
+            });
+            if let Some(geometry) = global_portrait_geometry {
+                anchor_x = geometry.x as f32;
+                anchor_y = geometry.y as f32;
+            }
+
+            let alignment = message_horizontal_alignment(message.flags, has_frame);
             let vertical_align = if (message.flags & FLAG_TOP) != 0 {
                 VerticalAlignment::Top
             } else if (message.flags & FLAG_BOTTOM) != 0 {
@@ -11010,26 +11146,34 @@ impl GameApp {
                 VerticalAlignment::Baseline
             };
 
-            let mut width_hint = message.width.map(|raw| raw as f32);
-            if let Some(value) = width_hint.as_mut() {
-                if (message.flags & FLAG_WIDTH_REL) != 0 {
-                    *value = surface_width * (*value / 100.0);
+            let width_hint = if let Some(geometry) = global_portrait_geometry {
+                message.width.map(|_| geometry.width as f32)
+            } else {
+                let mut width_hint = message.width.map(|raw| raw as f32);
+                if let Some(value) = width_hint.as_mut() {
+                    if (message.flags & FLAG_WIDTH_REL) != 0 {
+                        *value = surface_width * (*value / 100.0);
+                    }
                 }
-            }
+                width_hint
+            };
+            let available_width = global_portrait_placement
+                .map(|placement| placement.viewport.width as f32)
+                .unwrap_or(surface_width);
 
             let wrap_width = if (message.flags & FLAG_NO_BREAK) != 0 {
                 None
             } else {
                 let fallback = || {
-                    let max_width = (surface_width - 10.0).min(500.0).max(50.0);
+                    let max_width = (available_width - 10.0).min(500.0).max(50.0);
                     if has_frame {
                         if portrait_requested {
-                            Some((surface_width * 0.5).clamp(50.0, max_width))
+                            Some((available_width * 0.5).clamp(50.0, max_width))
                         } else {
-                            Some((surface_width - 50.0).clamp(50.0, max_width))
+                            Some((available_width - 50.0).clamp(50.0, max_width))
                         }
                     } else {
-                        Some((surface_width - 50.0).clamp(50.0, max_width))
+                        Some((available_width - 50.0).clamp(50.0, max_width))
                     }
                 };
                 width_hint.or_else(fallback).filter(|value| *value > 0.0)
@@ -11061,6 +11205,7 @@ impl GameApp {
 
             prepared.push(PreparedMessage {
                 anchor: (anchor_x, anchor_y),
+                global_portrait_placement,
                 lines,
                 has_frame,
                 portrait_requested,
@@ -11100,25 +11245,43 @@ impl GameApp {
                         text_height
                     };
                     let frame_height = (content_height + FRAME_PADDING * 2.0).max(1.0);
-
-                    let frame_x = match message.alignment {
-                        HorizontalAlignment::Left => message.anchor.0,
-                        HorizontalAlignment::Center => message.anchor.0 - frame_width * 0.5,
-                        HorizontalAlignment::Right => message.anchor.0 - frame_width,
-                    };
-                    let frame_y = match message.vertical_align {
-                        VerticalAlignment::Top => message.anchor.1,
-                        VerticalAlignment::Center => message.anchor.1 - frame_height * 0.5,
-                        VerticalAlignment::Bottom => message.anchor.1 - frame_height,
-                        VerticalAlignment::Baseline => message.anchor.1,
-                    };
-
-                    let rect = Rect::new(
-                        frame_x.floor() as i32,
-                        frame_y.floor() as i32,
-                        frame_width.ceil() as u32,
-                        frame_height.ceil() as u32,
-                    );
+                    let frame_size = (frame_width.ceil() as u32, frame_height.ceil() as u32);
+                    let (frame_x, frame_y, rect) =
+                        if let Some(placement) = message.global_portrait_placement {
+                            let rect = global_portrait_frame_rect(
+                                placement.viewport,
+                                placement.offset,
+                                placement.flags,
+                                frame_size,
+                            );
+                            (rect.x as f32, rect.y as f32, rect)
+                        } else {
+                            let frame_x = match message.alignment {
+                                HorizontalAlignment::Left => message.anchor.0,
+                                HorizontalAlignment::Center => {
+                                    message.anchor.0 - frame_width * 0.5
+                                }
+                                HorizontalAlignment::Right => message.anchor.0 - frame_width,
+                            };
+                            let frame_y = match message.vertical_align {
+                                VerticalAlignment::Top => message.anchor.1,
+                                VerticalAlignment::Center => {
+                                    message.anchor.1 - frame_height * 0.5
+                                }
+                                VerticalAlignment::Bottom => message.anchor.1 - frame_height,
+                                VerticalAlignment::Baseline => message.anchor.1,
+                            };
+                            (
+                                frame_x,
+                                frame_y,
+                                Rect::new(
+                                    frame_x.floor() as i32,
+                                    frame_y.floor() as i32,
+                                    frame_size.0,
+                                    frame_size.1,
+                                ),
+                            )
+                        };
 
                     Self::fill_rect(surface, rect, frame_background);
                     let border = Color::new(
@@ -15991,6 +16154,188 @@ mod tests {
             .expect("portrait resolves");
         assert_eq!((portrait.width(), portrait.height()), (1, 1));
         assert_eq!(portrait.pixels(), &[0, 0, 136, 255]);
+    }
+
+    #[test]
+    fn tutorial_portrait_geometry_matches_every_shipped_position_family() {
+        // C4Viewport::Execute supplies the player's DrawX/DrawY/ViewWdt/ViewHgt
+        // facet (src/C4Viewport.cpp:1146-1149). C4GM_XRel, C4GM_YRel and
+        // C4GM_WidthRel are integer percentages of that facet, not the whole
+        // backbuffer (src/C4GameMessage.cpp:109-111,136-137). These rows are
+        // the SetTutorialMessagePos calls in Tutorial01-10: 01/02 use 30%
+        // Top|Left at XRel=50; 03/04/05/06 use 35% Bottom|Left at XRel=10;
+        // 07/08/09/10 use HCenter|Top.
+        let viewport = Rect::new(17, 23, 321, 241);
+        let frame_size = (101, 65);
+        for (tutorials, offset, width, flags, expected_geometry, expected_frame) in [
+            (
+                "Tutorial01/02",
+                Vector2::new(50, 50),
+                30,
+                FLAG_TOP | FLAG_LEFT | FLAG_WIDTH_REL | FLAG_X_REL,
+                GlobalMessageViewportGeometry {
+                    x: 177,
+                    y: 73,
+                    width: 96,
+                },
+                Rect::new(177, 73, 101, 65),
+            ),
+            (
+                "Tutorial03",
+                Vector2::new(10, -50),
+                35,
+                FLAG_BOTTOM | FLAG_LEFT | FLAG_WIDTH_REL | FLAG_X_REL,
+                GlobalMessageViewportGeometry {
+                    x: 49,
+                    y: -27,
+                    width: 112,
+                },
+                Rect::new(49, 149, 101, 65),
+            ),
+            (
+                "Tutorial04/06",
+                Vector2::new(10, -30),
+                35,
+                FLAG_BOTTOM | FLAG_LEFT | FLAG_WIDTH_REL | FLAG_X_REL,
+                GlobalMessageViewportGeometry {
+                    x: 49,
+                    y: -7,
+                    width: 112,
+                },
+                Rect::new(49, 169, 101, 65),
+            ),
+            (
+                "Tutorial05",
+                Vector2::new(10, -10),
+                35,
+                FLAG_BOTTOM | FLAG_LEFT | FLAG_WIDTH_REL | FLAG_X_REL,
+                GlobalMessageViewportGeometry {
+                    x: 49,
+                    y: 13,
+                    width: 112,
+                },
+                Rect::new(49, 189, 101, 65),
+            ),
+            (
+                "Tutorial07-10",
+                Vector2::new(0, 30),
+                0,
+                FLAG_HCENTER | FLAG_TOP,
+                GlobalMessageViewportGeometry {
+                    x: 17,
+                    y: 53,
+                    width: 0,
+                },
+                Rect::new(127, 53, 101, 65),
+            ),
+        ] {
+            let geometry =
+                global_message_viewport_geometry(viewport, offset, width, flags);
+            assert_eq!(geometry, expected_geometry, "{tutorials}");
+            assert_eq!(
+                global_portrait_frame_rect(viewport, offset, flags, frame_size),
+                expected_frame,
+                "{tutorials}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_portrait_relative_right_center_geometry_responds_at_321px() {
+        // Exercise all three relative fields with non-divisible dimensions and
+        // the opposite frame references. Every percentage and half truncates
+        // independently, as in C4GameMessage.cpp:109-111,145-155.
+        let viewport = Rect::new(17, 23, 321, 241);
+        let offset = Vector2::new(33, 67);
+        let flags = FLAG_X_REL
+            | FLAG_Y_REL
+            | FLAG_WIDTH_REL
+            | FLAG_RIGHT
+            | FLAG_VCENTER;
+
+        assert_eq!(
+            global_message_viewport_geometry(viewport, offset, 35, flags),
+            GlobalMessageViewportGeometry {
+                x: 122,
+                y: 184,
+                width: 112,
+            }
+        );
+        assert_eq!(
+            global_portrait_frame_rect(viewport, offset, flags, (101, 65)),
+            Rect::new(342, 272, 101, 65)
+        );
+    }
+
+    #[test]
+    fn global_portrait_position_flags_choose_cpp_frame_references() {
+        // Left/Top leave the offset relative to the viewport origin. Right and
+        // HCenter shift to the corresponding horizontal reference; Bottom and
+        // VCenter do the same vertically, then the frame is moved back by its
+        // full/half size (src/C4GameMessage.cpp:136-155).
+        let viewport = Rect::new(10, 20, 801, 601);
+        let offset = Vector2::new(7, -11);
+        let size = (101, 65);
+        for (flags, expected) in [
+            (FLAG_LEFT | FLAG_TOP, Rect::new(17, 9, 101, 65)),
+            (FLAG_RIGHT | FLAG_TOP, Rect::new(717, 9, 101, 65)),
+            (FLAG_HCENTER | FLAG_TOP, Rect::new(367, 9, 101, 65)),
+            (FLAG_LEFT | FLAG_BOTTOM, Rect::new(17, 545, 101, 65)),
+            (FLAG_LEFT | FLAG_VCENTER, Rect::new(17, 277, 101, 65)),
+        ] {
+            assert_eq!(
+                global_portrait_frame_rect(viewport, offset, flags, size),
+                expected,
+                "flags={flags:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_portrait_centering_truncates_each_odd_half_like_cpp() {
+        // C++ evaluates viewport/2 and frame/2 separately. With one even and
+        // one odd size this differs by one pixel from `(viewport-frame)/2`
+        // (src/C4GameMessage.cpp:145,147,153,155).
+        let rect = global_portrait_frame_rect(
+            Rect::new(0, 0, 800, 600),
+            Vector2::ZERO,
+            FLAG_HCENTER | FLAG_VCENTER,
+            (101, 65),
+        );
+
+        assert_eq!(rect, Rect::new(350, 268, 101, 65));
+    }
+
+    #[test]
+    fn global_portrait_frame_position_is_independent_of_text_alignment() {
+        // C4GM_Left/C4GM_Right position the portrait frame. Only C4GM_ALeft /
+        // ACenter / ARight select TextOut alignment (src/C4GameMessage.cpp:
+        // 101,140-168).
+        let viewport = Rect::new(30, 40, 640, 480);
+        let offset = Vector2::new(12, 18);
+        let positioned = FLAG_LEFT | FLAG_TOP;
+        let frame = global_portrait_frame_rect(viewport, offset, positioned, (121, 77));
+        let aligned_frame = global_portrait_frame_rect(
+            viewport,
+            offset,
+            positioned | FLAG_ALIGN_RIGHT,
+            (121, 77),
+        );
+
+        assert_eq!(frame, aligned_frame);
+        assert_eq!(
+            message_horizontal_alignment(positioned | FLAG_ALIGN_RIGHT, true),
+            HorizontalAlignment::Right
+        );
+        assert_eq!(
+            message_horizontal_alignment(FLAG_RIGHT | FLAG_ALIGN_LEFT, true),
+            HorizontalAlignment::Left
+        );
+        assert_eq!(
+            message_horizontal_alignment(FLAG_RIGHT, true),
+            HorizontalAlignment::Left,
+            "portrait frame position must not change the default text alignment"
+        );
     }
 
     #[test]
