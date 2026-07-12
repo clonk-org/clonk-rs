@@ -5886,6 +5886,15 @@ fn denumerate_script_value(value: &Value, object_numbers: &HashSet<u64>) -> Valu
     }
 }
 
+fn denumerate_object_reference(
+    reference: &mut Option<ObjectId>,
+    object_numbers: &HashSet<u64>,
+) {
+    if reference.is_some_and(|id| !object_numbers.contains(&id.as_u64())) {
+        *reference = None;
+    }
+}
+
 fn denumerate_effect_value(value: &mut EffectVarValue, object_numbers: &HashSet<u64>) {
     match value {
         EffectVarValue::Object(id) if !object_numbers.contains(id) => {
@@ -20971,7 +20980,14 @@ impl Engine {
             .filter(|object| object.state.status != ObjectStatus::Deleted)
             .map(|object| object.id.as_u64())
             .collect();
+        container_assignments.retain(|(object, container)| {
+            object_numbers.contains(&object.as_u64())
+                && object_numbers.contains(&container.as_u64())
+        });
         for object in &mut self.objects {
+            denumerate_object_reference(&mut object.state.action.target, &object_numbers);
+            denumerate_object_reference(&mut object.state.action.target2, &object_numbers);
+            denumerate_object_reference(&mut object.state.layer, &object_numbers);
             if let Some(names) = definition_local_names.get(&object.definition_id) {
                 object.state.local_vars.retain(|name, _| {
                     name.starts_with("__local_") || names.contains(name)
