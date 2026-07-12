@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
-use lc_engine::{COM_RIGHT, COM_THROW};
+use lc_engine::{EffectVarValue, COM_RIGHT, COM_THROW};
 
 #[test]
 fn tutorial_harness_boots_the_installed_cpp_global_script_layer() {
@@ -107,4 +107,54 @@ fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag() {
         Some(mage),
         "MAGE receives KNIG's contents through the real GrabContents call"
     );
+}
+
+#[test]
+fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+    let owner = join_local_player(&mut engine, "Dragon Rock fog parity");
+    let player = engine.player(owner).expect("joined player remains live");
+    assert!(!player.fog_of_war());
+    assert!(!player.force_fog_of_war());
+
+    // The shipped InitializePlayer schedules SetFoW through the installed
+    // Helpers.c IntSchedule effect (Drachenfels.c4s/Script.c:56-71;
+    // planet/System.c4g/Helpers.c:110-132). A failed eval aborts before the
+    // callback's -1 return, so the one-shot effect staying alive would expose
+    // the original unknown-function warning.
+    let schedules = engine
+        .global_effects()
+        .iter()
+        .filter(|effect| effect.name == "IntSchedule")
+        .collect::<Vec<_>>();
+    assert_eq!(schedules.len(), 1);
+    assert_eq!(schedules[0].interval, 1);
+    assert_eq!(
+        schedules[0].var(0),
+        EffectVarValue::String(format!("SetFoW(true, {owner})"))
+    );
+    assert_eq!(schedules[0].var(1), EffectVarValue::Int(1));
+
+    engine
+        .tick()
+        .expect("the real IntSchedule callback evaluates SetFoW");
+
+    // FnSetFoW accepts the live player and calls C4Player::SetFoW
+    // (C4Script.cpp:3671-3678), which enables both the active FoW flag and
+    // its initialized state and forces the script choice
+    // (C4Player.cpp:815-824). The Rust save state exposes the two persistent
+    // fields FogOfWar and ForceFogOfWar (C4Player.cpp:1580-1581).
+    assert!(
+        engine
+            .global_effects()
+            .iter()
+            .all(|effect| effect.name != "IntSchedule"),
+        "successful eval reaches Helpers.c's one-shot kill return"
+    );
+    let player = engine.player(owner).expect("joined player remains live");
+    assert!(player.fog_of_war());
+    assert!(player.force_fog_of_war());
+    let persisted = player.to_state();
+    assert!(persisted.fog_of_war);
+    assert!(persisted.force_fog_of_war);
 }
