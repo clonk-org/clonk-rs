@@ -21945,20 +21945,20 @@ impl Engine {
                     // FnSetCursor's callbacks and SelectCrew branch already
                     // ran synchronously inside the host context. This fold
                     // persists cursor/control metadata only; cursor-only
-                    // calls must never imply C4Object::Select.
-                    let valid = object
-                        .map(|id| self.find_object_index(id).is_some())
-                        .unwrap_or(true);
-                    if valid {
-                        let selection = self.crew_selection.entry(player_id).or_default();
-                        selection.cursor = object;
-                        if selection.is_empty() {
-                            self.crew_selection.remove(&player_id);
-                        }
-                        if let Some(player) = self.players.get_mut(&player_id) {
-                            player.set_cursor(object);
-                            player.control = control;
-                        }
+                    // calls must never imply C4Object::Select. Do not repeat
+                    // FnSetCursor's object validation here: CreateObject is
+                    // live synchronously in C++, while Rust materializes its
+                    // already-validated SpawnConfig later in this outcome.
+                    // Dragon Rock's Redefine3 sets the cursor to exactly such
+                    // a fresh replacement before the spawn queue is folded.
+                    let selection = self.crew_selection.entry(player_id).or_default();
+                    selection.cursor = object;
+                    if selection.is_empty() {
+                        self.crew_selection.remove(&player_id);
+                    }
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.set_cursor(object);
+                        player.control = control;
                     }
                 }
                 PlayerCommand::SetWealth { player_id, value } => {
