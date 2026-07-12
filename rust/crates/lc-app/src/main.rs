@@ -63,10 +63,10 @@ use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
-    ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
-    JoinPlayerConfig, Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection,
-    MenuRequestKind, MessageKind, MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate,
-    PlayerConfig, Recorder,
+    ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError, EngineState,
+    EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet, MenuCommandKind,
+    MenuCommandSelection, MenuRequestKind, MessageKind, MovementProfile, ObjectId, ObjectSnapshot,
+    ObjectUpdate, PlayerConfig, Recorder,
     Recording, RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig,
     SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
     FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
@@ -3344,6 +3344,7 @@ struct GameApp {
     startup_network_connection: Option<StartupNetworkConnection>,
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
+    control_player_infos: ControlPlayerInfoRegistry,
     executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
@@ -6424,6 +6425,7 @@ impl GameApp {
             startup_network_connection: None,
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
+            control_player_infos: ControlPlayerInfoRegistry::default(),
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(|p| p.recordings_dir()),
@@ -11765,6 +11767,7 @@ impl GameApp {
         self.snapshot = self.engine.snapshot();
         self.sync_checks.clear();
         self.network_ticks.clear();
+        self.control_player_infos = ControlPlayerInfoRegistry::default();
         self.refresh_object_menu();
         self.focus_id = None;
         self.focus_snapshot = None;
@@ -12273,6 +12276,7 @@ impl GameApp {
         self.energy_fraction = 0.0;
         self.sync_checks.clear();
         self.network_ticks.clear();
+        self.control_player_infos = ControlPlayerInfoRegistry::default();
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
         self.ingame_menu = None;

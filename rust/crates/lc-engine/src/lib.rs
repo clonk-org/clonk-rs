@@ -75,8 +75,9 @@ pub use control::{
     PLAYER_INFO_FLAG_WON, PLAYER_INFO_TYPE_NONE, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
 };
 pub use control_execution::{
-    prepare_join_player_config, ControlPlayerInfoRegistry, JoinPlayerPreparation,
-    PrepareJoinPlayerError,
+    prepare_join_player_config, resolve_remote_embedded_player_data, ControlPlayerInfoRegistry,
+    JoinPlayerPreparation, PrepareJoinPlayerError, RemoteEmbeddedPlayerData,
+    ResolveRemoteEmbeddedPlayerDataError,
 };
 pub use effect::{EffectState, EffectVarValue};
 pub use input::PlayerInputState;
