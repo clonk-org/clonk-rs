@@ -21090,6 +21090,9 @@ impl Engine {
             for value in object.state.local_vars.values_mut() {
                 *value = denumerate_script_value(value, &object_numbers);
             }
+            object
+                .commands
+                .denumerate_object_references(&object_numbers);
             for effect in &mut object.state.effects {
                 denumerate_effect(effect, &object_numbers);
             }

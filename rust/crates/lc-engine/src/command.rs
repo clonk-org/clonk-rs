@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::math::{self, FixedVec2};
 use crate::pathfinder::PathFinder;
@@ -8985,6 +8985,19 @@ impl CommandStack {
             .collect();
     }
 
+    /// C4Command::DenumeratePointers resolves the saved Target/Target2
+    /// object numbers only after the complete object table has loaded
+    /// (C4Command.cpp:2417-2421; C4Object.cpp:2914-2929).
+    pub(crate) fn denumerate_object_references(&mut self, object_numbers: &HashSet<u64>) {
+        for entry in &mut self.entries {
+            if let Some(request) = &mut entry.request {
+                denumerate_object_reference(&mut request.target, object_numbers);
+                denumerate_object_reference(&mut request.target2, object_numbers);
+            }
+            entry.state.denumerate_object_references(object_numbers);
+        }
+    }
+
     /// Execute the live front while retaining a finished entry for
     /// C4Object::ExecuteCommand's callback/clear tail.
     pub fn execute_front(
@@ -14657,6 +14670,77 @@ impl CommandState {
             }
             _ => {}
         }
+    }
+
+    /// Clear nullable state copies of C4Command's object fields as part of
+    /// the post-load pointer pass. Required state IDs remain harmless when
+    /// absent because command execution resolves them through the same live
+    /// object table before use; the creating request above is the canonical
+    /// FnGetCommand field view.
+    fn denumerate_object_references(&mut self, object_numbers: &HashSet<u64>) {
+        match self {
+            CommandState::MoveTo(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
+            }
+            CommandState::Construct(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
+                denumerate_object_reference(&mut state.construction_id, object_numbers);
+            }
+            CommandState::Activate(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
+                denumerate_object_reference(&mut state.container, object_numbers);
+            }
+            CommandState::PushTo(state) => {
+                denumerate_object_reference(&mut state.container, object_numbers);
+            }
+            CommandState::Put(state) => {
+                denumerate_object_reference(&mut state.requested_item, object_numbers);
+            }
+            CommandState::Drop(state) => {
+                denumerate_object_reference(&mut state.requested_item, object_numbers);
+                denumerate_object_reference(&mut state.delegated_container, object_numbers);
+            }
+            CommandState::Get(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
+                denumerate_object_reference(&mut state.fallback_container, object_numbers);
+            }
+            CommandState::Throw(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
+            }
+            CommandState::Call(state) => {
+                denumerate_object_reference(&mut state.target2, object_numbers);
+            }
+            CommandState::Acquire(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
+                denumerate_object_reference(&mut state.ignore_container, object_numbers);
+                denumerate_object_reference(&mut state.candidate, object_numbers);
+            }
+            CommandState::Sell(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
+                denumerate_object_reference(&mut state.preferred, object_numbers);
+            }
+            CommandState::Buy(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
+            }
+            CommandState::Home(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
+            }
+            CommandState::Energy(state) => {
+                denumerate_object_reference(&mut state.source, object_numbers);
+                denumerate_object_reference(&mut state.linekit, object_numbers);
+                denumerate_object_reference(&mut state.line, object_numbers);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn denumerate_object_reference(
+    reference: &mut Option<ObjectId>,
+    object_numbers: &HashSet<u64>,
+) {
+    if reference.is_some_and(|id| !object_numbers.contains(&id.as_u64())) {
+        *reference = None;
     }
 }
 
