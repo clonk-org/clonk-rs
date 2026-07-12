@@ -17335,7 +17335,10 @@ impl Engine {
             Value::Int(15),
             Value::Bool(true),
         ];
-        let _ = self.call_object_function(index, "Activate", args)?;
+        // C4Object::Call defaults to fPassError=false, so an Activate script
+        // error is logged after preserving partial mutations and weather
+        // execution continues (C4Object.h:240; C4Object.cpp:2224-2227).
+        let _ = tolerate_script_error(self.call_object_function(index, "Activate", args))?;
         Ok(true)
     }
 
@@ -17498,7 +17501,8 @@ impl Engine {
             Value::Int(size),
             Value::Int(lava),
         ];
-        let _ = self.call_object_function(index, "Activate", args)?;
+        // Same fail-safe C4Object::Call contract as LaunchLightning.
+        let _ = tolerate_script_error(self.call_object_function(index, "Activate", args))?;
         Ok(true)
     }
 
