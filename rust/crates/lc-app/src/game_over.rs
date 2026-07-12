@@ -17,9 +17,17 @@ const CLASSIC_PLAYER_ROW_LEFT_INSET: i32 = 6;
 const CLASSIC_PLAYER_ROW_RIGHT_INSET: i32 = 19;
 const CLASSIC_PLAYER_ROW_TOP_INSET: i32 = 3;
 const CLASSIC_PLAYER_LABEL_SPACING: i32 = 2;
+const CLASSIC_CLOSE_BUTTON_SIZE: i32 = 16;
+const CLASSIC_CLOSE_BUTTON_INSET: i32 = 4;
 pub const CLASSIC_FULFILLED_STAR_SOURCE: IntRect = IntRect {
     x: 0,
     y: 320,
+    w: 40,
+    h: 40,
+};
+pub const CLASSIC_CLOSE_ICON_SOURCE: IntRect = IntRect {
+    x: 160,
+    y: 200,
     w: 40,
     h: 40,
 };
@@ -195,6 +203,7 @@ impl EvaluationViewModel {
 pub struct GameOverClassicResources<'a> {
     skin: ClassicGuiSkin<'a>,
     fonts: &'a ClonkFontSet,
+    icon_button_highlight: Option<&'a ImageData>,
     gui_icons: Option<&'a ImageData>,
     player: Option<&'a ImageData>,
     score: Option<&'a ImageData>,
@@ -204,6 +213,7 @@ impl<'a> GameOverClassicResources<'a> {
     pub const fn new(
         skin: ClassicGuiSkin<'a>,
         fonts: &'a ClonkFontSet,
+        icon_button_highlight: Option<&'a ImageData>,
         gui_icons: Option<&'a ImageData>,
         player: Option<&'a ImageData>,
         score: Option<&'a ImageData>,
@@ -211,6 +221,7 @@ impl<'a> GameOverClassicResources<'a> {
         Self {
             skin,
             fonts,
+            icon_button_highlight,
             gui_icons,
             player,
             score,
@@ -222,6 +233,7 @@ impl<'a> GameOverClassicResources<'a> {
 struct ClassicGameOverLayout {
     dialog: IntRect,
     caption: IntRect,
+    close_button: IntRect,
     player_area: IntRect,
     buttons: Vec<IntRect>,
 }
@@ -265,6 +277,7 @@ pub struct GameOverState {
     buttons: Vec<GameOverButton>,
     selected_button: usize,
     pressed_button: Option<usize>,
+    close_pressed: bool,
     classic_button_width: Option<i32>,
     pointer_position: Option<(f32, f32)>,
 }
@@ -341,6 +354,7 @@ impl GameOverState {
             buttons,
             selected_button: 0,
             pressed_button: None,
+            close_pressed: false,
             classic_button_width: None,
             pointer_position: None,
         }
@@ -406,9 +420,18 @@ impl GameOverState {
     pub fn pointer_left(&mut self) {
         self.pointer_position = None;
         self.pressed_button = None;
+        self.close_pressed = false;
     }
 
     pub fn handle_pointer_down(&mut self, surface_width: u32, surface_height: u32) {
+        self.close_pressed = self.pointer_position.is_some_and(|(x, y)| {
+            self.classic_close_button_rect(surface_width, surface_height)
+                .is_some_and(|rect| point_in_rect(x, y, rect))
+        });
+        if self.close_pressed {
+            self.pressed_button = None;
+            return;
+        }
         self.pressed_button = self.pointer_position.and_then(|(x, y)| {
             self.button_rects(surface_width, surface_height)
                 .iter()
@@ -421,6 +444,15 @@ impl GameOverState {
         surface_width: u32,
         surface_height: u32,
     ) -> Option<GameOverAction> {
+        if std::mem::take(&mut self.close_pressed) {
+            return self
+                .pointer_position
+                .filter(|(x, y)| {
+                    self.classic_close_button_rect(surface_width, surface_height)
+                        .is_some_and(|rect| point_in_rect(*x, *y, rect))
+                })
+                .map(|_| GameOverAction::End);
+        }
         let pressed = self.pressed_button.take()?;
         let hovered = self.pointer_position.and_then(|(x, y)| {
             self.button_rects(surface_width, surface_height)
@@ -448,11 +480,26 @@ impl GameOverState {
         surface_width: u32,
         surface_height: u32,
     ) -> Option<GameOverAction> {
+        if self
+            .classic_close_button_rect(surface_width, surface_height)
+            .is_some_and(|rect| point_in_rect(x, y, rect))
+        {
+            return Some(GameOverAction::End);
+        }
         self.button_rects(surface_width, surface_height)
             .iter()
             .position(|rect| point_in_rect(x, y, *rect))
             .and_then(|index| self.buttons.get(index))
             .map(|button| button.action)
+    }
+
+    fn classic_close_button_rect(&self, surface_width: u32, surface_height: u32) -> Option<Rect> {
+        self.classic_button_width.map(|button_width| {
+            surface_rect(
+                self.classic_layout_with_button_width(surface_width, surface_height, button_width)
+                    .close_button,
+            )
+        })
     }
 
     fn panel_rect(&self, surface_width: u32, surface_height: u32) -> Rect {
@@ -563,6 +610,12 @@ impl GameOverState {
             h: caption_height,
             ..dialog
         };
+        let close_button = IntRect {
+            x: caption.x + caption.w - CLASSIC_CLOSE_BUTTON_SIZE - CLASSIC_CLOSE_BUTTON_INSET,
+            y: caption.y + CLASSIC_CLOSE_BUTTON_INSET,
+            w: CLASSIC_CLOSE_BUTTON_SIZE,
+            h: CLASSIC_CLOSE_BUTTON_SIZE,
+        };
         let client_height = (dialog.h - caption_height).max(0);
 
         // ComponentAligner caMain(GetClientRect(), 0, 6, true), followed by
@@ -600,6 +653,7 @@ impl GameOverState {
         ClassicGameOverLayout {
             dialog,
             caption,
+            close_button,
             player_area,
             buttons,
         }
@@ -909,6 +963,7 @@ impl GameOverState {
             TextAlign::Left,
             None,
         );
+        self.render_classic_close_button(surface, resources, layout.close_button);
 
         self.render_classic_evaluation(surface, resources);
         for (index, (button, rect)) in self.buttons.iter().zip(layout.buttons).enumerate() {
@@ -923,6 +978,40 @@ impl GameOverState {
                 },
                 None,
             );
+        }
+    }
+
+    fn render_classic_close_button(
+        &self,
+        surface: &mut Surface,
+        resources: GameOverClassicResources<'_>,
+        rect: IntRect,
+    ) {
+        let hovered = self
+            .pointer_position
+            .is_some_and(|(x, y)| point_in_rect(x, y, surface_rect(rect)));
+        let draw_highlight = |surface: &mut Surface| {
+            if let Some(highlight) = resources.icon_button_highlight {
+                lc_frontend::draw_image_bilinear_additive(
+                    surface,
+                    &lc_gui::Rect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
+                    highlight,
+                    None,
+                );
+            }
+        };
+        if hovered {
+            draw_highlight(surface);
+        }
+        let icon = resources
+            .gui_icons
+            .and_then(|icons| crop_image(icons, CLASSIC_CLOSE_ICON_SOURCE))
+            .map(|icon| lc_frontend::classic_gui::blacken_transparent_pixels(&icon));
+        if let Some(icon) = icon.as_ref() {
+            draw_classic_image(surface, icon, rect);
+        }
+        if hovered && self.close_pressed {
+            draw_highlight(surface);
         }
     }
 
@@ -1310,6 +1399,7 @@ mod tests {
         let resources = GameOverClassicResources::new(
             ClassicGuiSkin::new(&caption, &button, &button_down, None),
             &fonts,
+            None,
             Some(&gui_icons),
             Some(&player),
             Some(&score),
@@ -1634,6 +1724,7 @@ mod tests {
             Some(GameOverClassicResources::new(
                 skin,
                 &fonts,
+                Some(&highlight),
                 Some(&gui_icons),
                 Some(&player),
                 Some(&score),
@@ -1739,6 +1830,7 @@ mod tests {
             Some(GameOverClassicResources::new(
                 skin,
                 &fonts,
+                Some(&highlight),
                 Some(&gui_icons),
                 Some(&player),
                 Some(&score),
@@ -1837,5 +1929,113 @@ mod tests {
         state.handle_pointer_down(1024, 600);
         state.handle_pointer_move(0.0, 0.0, 1024, 600);
         assert_eq!(state.handle_pointer_up(1024, 600), None);
+    }
+
+    #[test]
+    fn classic_caption_close_matches_cpp_icon_button_and_ends_round() {
+        // Dialog::SetTitle places a 16x16 Ico_Close four pixels from the
+        // caption's top-right corner. IconButton draws hover highlight, then
+        // GUIIcons phase 34, and a second additive highlight while pressed;
+        // releasing it closes C4GameOverDlg as an unsuccessful (End) result
+        // (C4GuiDialogs.cpp:397-421; C4Gui.cpp:363-370;
+        // C4GuiLabels.cpp:441-450; C4GuiButton.cpp:203-225;
+        // C4GameOverDlg.cpp:360-388).
+        let fonts = endeavour_fonts();
+        let caption = solid_image(192, 23, [20, 30, 40, 255]);
+        let button = solid_image(128, 32, [0, 120, 0, 255]);
+        let button_down = solid_image(128, 32, [0, 0, 180, 255]);
+        let highlight = solid_image(16, 16, [40, 50, 60, 255]);
+        let mut gui_icon_pixels = vec![0; 240 * 360 * 4];
+        for pixel in gui_icon_pixels.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[220, 0, 0, 255]);
+        }
+        for y in 200..240 {
+            for x in 160..200 {
+                let offset = ((y * 240 + x) * 4) as usize;
+                let color = if (168..192).contains(&x) && (208..232).contains(&y) {
+                    [10, 220, 30, 255]
+                } else {
+                    [0, 0, 0, 0]
+                };
+                gui_icon_pixels[offset..offset + 4].copy_from_slice(&color);
+            }
+        }
+        let gui_icons = ImageData::new(240, 360, gui_icon_pixels);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight));
+        let mut state = GameOverState::new(
+            "A Clonk".into(),
+            vec![entry(1, "Player", GameOverOutcome::Victory, true)],
+        );
+        state.configure_classic_fonts(Some(&fonts));
+        let layout = state.classic_layout(1024, 600, &fonts);
+
+        assert_eq!(
+            CLASSIC_CLOSE_ICON_SOURCE,
+            IntRect {
+                x: 160,
+                y: 200,
+                w: 40,
+                h: 40,
+            },
+            "Ico_Close is GUIIcons phase 34 in the six-column 40px atlas"
+        );
+        assert_eq!(
+            layout.close_button,
+            IntRect {
+                x: layout.caption.x + layout.caption.w - 20,
+                y: layout.caption.y + 4,
+                w: 16,
+                h: 16,
+            }
+        );
+
+        let resources = GameOverClassicResources::new(
+            skin,
+            &fonts,
+            Some(&highlight),
+            Some(&gui_icons),
+            None,
+            None,
+        );
+        let background = Color::opaque(3, 4, 5);
+        let render = |state: &GameOverState| {
+            let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
+            surface.fill(background);
+            state.render(
+                &mut surface,
+                &lc_graphics::BitmapFont::new(),
+                Some(resources),
+            );
+            surface
+        };
+        let close = layout.close_button;
+        let center = (close.x + close.w / 2, close.y + close.h / 2);
+        let idle = render(&state);
+        assert_eq!(
+            idle.get_pixel(center.0 as u32, center.1 as u32),
+            Some(Color::opaque(10, 220, 30)),
+            "the close control crops GUIIcons phase 34"
+        );
+
+        state.handle_pointer_move((close.x + 1) as f32, (close.y + 1) as f32, 1024, 600);
+        let hovered = render(&state);
+        assert_ne!(
+            hovered.get_pixel((close.x + 1) as u32, (close.y + 1) as u32),
+            idle.get_pixel((close.x + 1) as u32, (close.y + 1) as u32),
+            "hover draws GUIButtonHighlight behind the transparent icon edge"
+        );
+
+        state.handle_pointer_move(center.0 as f32, center.1 as f32, 1024, 600);
+        state.handle_pointer_down(1024, 600);
+        let pressed = render(&state);
+        assert_ne!(
+            pressed.get_pixel(center.0 as u32, center.1 as u32),
+            idle.get_pixel(center.0 as u32, center.1 as u32),
+            "pressed IconButton adds a second highlight over the icon"
+        );
+        assert_eq!(
+            state.handle_pointer_up(1024, 600),
+            Some(GameOverAction::End)
+        );
     }
 }
