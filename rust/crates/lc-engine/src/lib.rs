@@ -17479,8 +17479,10 @@ impl Engine {
             return Ok(false);
         }
         let position = position.max(0);
-        let config =
-            SpawnConfig::new(LIGHTNING_DEFINITION).with_position(Vector2::new(position, 0));
+        // LaunchLightning creates FXL1 with no position arguments; x/y are
+        // supplied only to Activate after creation (C4Weather.cpp:158-168).
+        // Keep Initialize at C++'s default origin.
+        let config = SpawnConfig::new(LIGHTNING_DEFINITION);
         let lightning_id = match self.spawn_object(config) {
             Ok(id) => id,
             Err(EngineError::UnknownDefinition(_)) => return Ok(false),
@@ -17639,8 +17641,9 @@ impl Engine {
         if !self.definitions.contains_key(VOLCANO_DEFINITION) {
             return Ok(false);
         }
-        let config =
-            SpawnConfig::new(VOLCANO_DEFINITION).with_position(Vector2::new(x.max(0), y.max(0)));
+        // LaunchVolcano creates FXV1 at the default origin and passes the
+        // requested x/y only to Activate (C4Weather.cpp:178-184).
+        let config = SpawnConfig::new(VOLCANO_DEFINITION);
         let volcano_id = match self.spawn_object(config) {
             Ok(id) => id,
             Err(EngineError::UnknownDefinition(_)) => return Ok(false),
