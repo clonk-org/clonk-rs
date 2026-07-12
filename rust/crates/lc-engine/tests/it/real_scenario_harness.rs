@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
-use lc_engine::{EffectVarValue, COM_RIGHT, COM_THROW};
+use lc_engine::{EffectVarValue, ObjectId, COM_RIGHT, COM_THROW};
 
 #[test]
 fn tutorial_harness_boots_the_installed_cpp_global_script_layer() {
@@ -157,4 +157,53 @@ fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war() {
     let persisted = player.to_state();
     assert!(persisted.fog_of_war);
     assert!(persisted.force_fog_of_war);
+}
+
+#[test]
+fn dragon_rock_objects_keep_their_multidirectional_action_rows() {
+    let engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+
+    // C4Action::CompileFunc reads Dir as an unrestricted int32
+    // (C4Action.cpp:45-54). Loading resolves the action name without replacing
+    // that field (C4Object.cpp:2867-2876), then UpdateFlipDir derives DrawDir
+    // from it (C4GameObjects.cpp:665-674; C4Object.cpp:404-430).
+    for (number, definition, action, direction) in [
+        (294, "BANR", "FlyBack", 13),
+        (293, "BANR", "FlyBack", 13),
+        (292, "BANR", "Fly", 13),
+        (290, "BANR", "Fly", 13),
+        (1159, "FLAG", "FlyBase", 4),
+        (4447, "MUSH", "Exist", 3),
+        (548, "BANR", "Fly", 7),
+    ] {
+        let object = engine
+            .object_snapshot(ObjectId::new(number))
+            .unwrap_or_else(|| panic!("Dragon Rock object #{number} loads"));
+        assert_eq!(object.definition_id, definition, "object #{number}");
+        assert_eq!(object.action.name, action, "object #{number}");
+        assert_eq!(
+            object.direction.to_script_value(),
+            direction,
+            "object #{number} must retain its Objects.txt Dir"
+        );
+    }
+
+    // These are valid graphic rows, not malformed two-way facing values.
+    // BANR's FlipDir=7 maps raw 13 to row 0 mirrored and raw 7 to row 6
+    // mirrored; FLAG and MUSH draw their raw rows directly.
+    for (definition, action, directions, flip_dir) in [
+        ("BANR", "Fly", 14, Some(7)),
+        ("BANR", "FlyBack", 14, Some(7)),
+        ("FLAG", "FlyBase", 9, None),
+        ("MUSH", "Exist", 4, None),
+    ] {
+        let graphics = engine
+            .definition_action_graphics(definition)
+            .unwrap_or_else(|| panic!("{definition} action graphics load"));
+        let graphics = graphics
+            .get(action)
+            .unwrap_or_else(|| panic!("{definition}::{action} action loads"));
+        assert_eq!(graphics.directions, directions);
+        assert_eq!(graphics.flip_dir, flip_dir);
+    }
 }
