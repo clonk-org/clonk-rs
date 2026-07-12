@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
-use lc_engine::{EffectVarValue, ObjectId, COM_RIGHT, COM_THROW};
+use lc_engine::{
+    math, EffectVarValue, ObjectId, COM_RIGHT, COM_THROW, FULL_CON, OWNER_NONE,
+};
 use lc_script::Value;
 
 #[test]
@@ -402,4 +404,90 @@ fn dragon_rock_object_lookup_carries_script1_state_into_script3() {
         globals.get("DRGN_ctrl_stop"),
         None | Some(Value::Nil) | Some(Value::Bool(false)) | Some(Value::Int(0))
     ));
+}
+
+#[test]
+fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+    join_local_player(&mut engine, "Dragon Rock CastObjects parity");
+
+    // Let the shipped counter reach Script15's pause, then resume it through
+    // the real dragon-arrival callback (Drachenfels.c4s/Script.c:286-294).
+    // Counter 20 is intentionally empty; Script21 runs at frame 180 and
+    // Script25 naturally runs at frame 220.
+    for _ in 0..160 {
+        engine.tick().expect("Dragon Rock reaches Script15 pause");
+    }
+    engine
+        .call_scenario_script_function("OnDragonReachTarget", Vec::new())
+        .expect("real dragon arrival resumes the intro counter");
+    for _ in 0..59 {
+        engine.tick().expect("Dragon Rock approaches Script25");
+    }
+    assert_eq!(engine.snapshot().frame, 219);
+
+    let princess_before = engine
+        .object_snapshot(ObjectId::new(1777))
+        .expect("Dragon Rock princess remains live before Script25");
+    let old_sparks = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| object.definition_id == "SPRK")
+        .map(|object| object.id)
+        .collect::<Vec<_>>();
+
+    let frame = engine.tick().expect("natural Script25 callback succeeds");
+    assert_eq!(frame.frame, 220);
+    let sparks = frame
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "SPRK" && !old_sparks.contains(&object.id))
+        .collect::<Vec<_>>();
+
+    // Script25 calls the shipped Sparkle(5, fx, fy), which casts
+    // 5/3+2 == three SPRK objects (Script.c:307-320;
+    // Objects.c4d/Effects.c4d/Spark.c4d/Script.c:25-28). FnCastObjects
+    // applies scenario-global coordinates and NO_OWNER/NO_OWNER, while
+    // C4Game::CastObjects samples rdir, ydir, xdir, rotation in that exact
+    // order for every object (C4Script.cpp:2476-2480;
+    // C4Game.cpp:1727-1739). SPRK is not rotateable, so Init clears the
+    // sampled rotation/rdir but preserves both FIXED10 velocity components
+    // (C4Object.cpp:153-187).
+    assert_eq!(sparks.len(), 3, "Sparkle(5) casts exactly three sparks");
+    let allowed_velocity = (-5..=5).map(math::fixed10).collect::<Vec<_>>();
+    for spark in sparks {
+        assert_eq!(spark.owner, OWNER_NONE);
+        assert_eq!(spark.controller, OWNER_NONE);
+        assert_eq!(spark.position.x, princess_before.position.x);
+        assert_eq!(spark.position.y, princess_before.position.y - 3);
+        let fixed_velocity = spark.fixed_velocity.unwrap_or_else(|| {
+            math::FixedVec2::from_ints(spark.velocity.x, spark.velocity.y)
+        });
+        assert!(allowed_velocity.contains(&fixed_velocity.x));
+        assert!(allowed_velocity.contains(&fixed_velocity.y));
+        assert_eq!(spark.rotation, 0);
+        assert_eq!(spark.rotation_velocity, None);
+        assert_eq!(spark.action.name, "Sparkle");
+        assert!(
+            (FULL_CON..FULL_CON * 2).contains(&spark.construction),
+            "SPRK Completion applies DoCon(Random(100)) after initial FullCon; got {}",
+            spark.construction
+        );
+    }
+
+    // These statements follow Sparkle in Script25. They prove CastObjects
+    // returned normally instead of aborting the callback at the old unknown
+    // function warning.
+    let princess = engine
+        .object_snapshot(ObjectId::new(1777))
+        .expect("princess survives Script25");
+    assert_eq!((princess.position.x, princess.position.y), (2145, 485));
+    assert_eq!(princess.action.name, "Walk");
+    assert_eq!(princess.direction.to_script_value(), 0);
+    let endboss = engine
+        .object_snapshot(ObjectId::new(1758))
+        .expect("endboss survives Script25");
+    assert_eq!(endboss.action.name, "RideMagic");
+    assert_eq!(endboss.action.target, Some(ObjectId::new(202)));
 }
