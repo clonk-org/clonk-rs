@@ -150,9 +150,34 @@ fn carry_gold_to_hut(
                 })
         },
     )?;
-    // The shaft lip leaves the Clonk within ELEC's grab rectangle. A right
-    // tap separates this Down from the descent Down in C++'s LastCom buffer.
-    player.tap(COM_RIGHT)?;
+    // Crossing the freshly blasted pocket can leave the Clonk on either side
+    // of ELEC. Use an ordinary horizontal control to enter its grab rectangle
+    // and to separate this Down from the descent Down in C++'s LastCom buffer.
+    let align_control = player
+        .engine()
+        .object_snapshot(clonk)
+        .zip(player.engine().object_snapshot(elevator_case))
+        .map(|(clonk, elevator_case)| {
+            if clonk.position.x < elevator_case.position.x {
+                COM_RIGHT
+            } else {
+                COM_LEFT
+            }
+        })
+        .expect("the Clonk and ELEC survive the GOLD return");
+    player.hold_until(
+        align_control,
+        "the GOLD-carrying Clonk aligns with ELEC",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .zip(engine.object_snapshot(elevator_case))
+                .is_some_and(|(clonk, elevator_case)| {
+                    (clonk.position.x - elevator_case.position.x).abs() <= 5
+                })
+        },
+    )?;
     player.tap(COM_DOWN)?;
     player.wait_until("the GOLD-carrying Clonk grabs ELEC", 60, |engine| {
         engine.object_snapshot(clonk).is_some_and(|object| {
@@ -509,15 +534,11 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         60,
         |engine| clonk_contents_count(engine, clonk, "FLNT") == 0,
     )?;
-    player.hold_until(
-        COM_RIGHT,
+    climb_right_out_of_blast_pocket(
+        &mut player,
+        clonk,
+        120,
         "the Clonk retreats from the second FLNT blast",
-        100,
-        |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.x >= 120)
-        },
     )?;
     player.assert_milestone("the real FLNT blast exposes GOLD objects", |engine| {
         engine
@@ -1119,131 +1140,34 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         105,
         "the crystal-carrying Clonk climbs into the elevator shaft",
     )?;
-    if player
-        .engine()
-        .object_snapshot(clonk)
-        .is_some_and(|object| object.action.name == "Hangle")
-    {
-        let ceiling_control = player
-            .engine()
-            .object_snapshot(clonk)
-            .zip(player.engine().object_snapshot(elevator_case))
-            .map(|(clonk, elevator)| {
-                if clonk.position.x > elevator.position.x {
-                    COM_LEFT
-                } else {
-                    COM_RIGHT
-                }
+    player.tap(COM_DOWN)?;
+    player.wait_until(
+        "the crystal-carrying Clonk grabs the home elevator",
+        80,
+        |engine| {
+            engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(elevator_case)
             })
-            .expect("Clonk and ELEC survive the lower cave crossing");
-        player.hold_until(
-            ceiling_control,
-            "the crystal-carrying Clonk crosses the lower cave ceiling",
-            180,
-            |engine| {
-                engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.action.name != "Hangle")
-            },
-        )?;
-        player.wait_until(
-            "the crystal-carrying Clonk lands at the elevator shaft",
-            120,
-            |engine| {
-                engine.object_snapshot(clonk).is_some_and(|object| {
-                    object.action.name == "Walk" || object.action.name.starts_with("Scale")
-                })
-            },
-        )?;
-    }
-    if player
-        .engine()
-        .object_snapshot(clonk)
-        .is_some_and(|object| !object.action.name.starts_with("Scale"))
-    {
-        player.tap(COM_UP)?;
-        player.wait_until(
-            "the crystal-carrying Clonk catches the elevator shaft wall",
-            80,
-            |engine| {
-                engine.object_snapshot(clonk).is_some_and(|object| {
-                    object.action.name.starts_with("Scale")
-                        || object.action.name == "Hangle"
-                        || object.position.y <= 270
-                })
-            },
-        )?;
-    }
-    if player
-        .engine()
-        .object_snapshot(clonk)
-        .is_some_and(|object| object.action.name == "Hangle")
-    {
-        let ceiling_control = player
-            .engine()
-            .object_snapshot(clonk)
-            .zip(player.engine().object_snapshot(elevator_case))
-            .map(|(clonk, elevator)| {
-                if clonk.position.x > elevator.position.x {
-                    COM_LEFT
-                } else {
-                    COM_RIGHT
-                }
-            })
-            .expect("Clonk and ELEC survive the shaft ceiling crossing");
-        player.hold_until(
-            ceiling_control,
-            "the crystal-carrying Clonk crosses the shaft ceiling",
-            180,
-            |engine| {
-                engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.action.name != "Hangle")
-            },
-        )?;
-        player.wait_until(
-            "the crystal-carrying Clonk lands inside the elevator shaft",
-            120,
-            |engine| {
-                engine.object_snapshot(clonk).is_some_and(|object| {
-                    object.action.name == "Walk" || object.action.name.starts_with("Scale")
-                })
-            },
-        )?;
-    }
-    if player.engine().object_snapshot(clonk).is_some_and(|object| {
-        !object.action.name.starts_with("Scale") && object.position.y > 270
-    }) {
-        player.tap(COM_UP)?;
-        player.wait_until(
-            "the crystal-carrying Clonk catches the inner elevator shaft wall",
-            80,
-            |engine| {
-                engine.object_snapshot(clonk).is_some_and(|object| {
-                    object.action.name.starts_with("Scale") || object.position.y <= 270
-                })
-            },
-        )?;
-    }
-    let shaft_climb_control = player
-        .engine()
-        .object_snapshot(clonk)
-        .map(|object| {
-            if object.action.name.starts_with("Scale") && object.direction == Direction::Left {
-                COM_LEFT
-            } else {
-                COM_RIGHT
-            }
-        })
-        .expect("the crystal-carrying Clonk survives inside the elevator shaft");
+        },
+    )?;
     player.hold_until(
-        shaft_climb_control,
-        "the crystal-carrying Clonk climbs the home elevator shaft",
-        300,
+        COM_UP,
+        "the home elevator raises the crystal-carrying Clonk",
+        360,
         |engine| {
             engine
                 .object_snapshot(clonk)
-                .is_some_and(|object| object.position.y <= 215 && object.action.name == "Walk")
+                .is_some_and(|object| object.position.y <= 205)
+        },
+    )?;
+    player.double_tap(COM_DOWN)?;
+    player.wait_until(
+        "the crystal-carrying Clonk releases the home elevator",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
         },
     )?;
     player.wait_until(
