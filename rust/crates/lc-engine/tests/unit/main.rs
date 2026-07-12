@@ -21429,6 +21429,101 @@ protected func TumbleStart()
         );
     }
 
+    #[test]
+    fn connect_lines_reduce_redundant_bends_on_tick35_like_cpp() {
+        // C++ oracle: CONNECT calls ReduceLineSegments on !Tick35
+        // (src/C4Object.cpp:5443-5445). On frame 35 Tick2 is set, so the
+        // non-alternate pass removes the middle vertex when endpoint-to-
+        // endpoint PathFree succeeds (src/C4Object.cpp:4683-4694).
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(100, 50));
+
+        let mut line = Definition::from_script("LINE", "Line", "#strict\n").expect("compiles");
+        line.set_line(8); // C4D_Line_Vertex
+        line.set_line_intersect(1);
+        line.set_shape_vertices(vec![
+            ObjectVertex::new(10, 10),
+            ObjectVertex::new(20, 20),
+            ObjectVertex::new(30, 10),
+        ]);
+        line.configure_actions(
+            None,
+            HashMap::from([(
+                "Connect".to_string(),
+                ActionSpec::default()
+                    .with_procedure("CONNECT")
+                    .with_delay(10)
+                    .with_length(1)
+                    .with_next("Connect"),
+            )]),
+        );
+        engine.register_definition(line).expect("line registers");
+
+        let mut anchor =
+            Definition::from_script("ANCR", "Anchor", "#strict\n").expect("compiles");
+        anchor.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        engine.register_definition(anchor).expect("anchor registers");
+
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("ANCR")
+                    .with_category(CATEGORY_STATIC_BACK)
+                    .with_position(Vector2::new(10, 10)),
+            )
+            .expect("first anchor spawns");
+        let second = engine
+            .spawn_object(
+                SpawnConfig::new("ANCR")
+                    .with_category(CATEGORY_STATIC_BACK)
+                    .with_position(Vector2::new(30, 10)),
+            )
+            .expect("second anchor spawns");
+        let line_id = engine
+            .spawn_object(
+                SpawnConfig::new("LINE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_action(ActionState::new("Connect")),
+            )
+            .expect("line spawns");
+        engine
+            .apply_object_update(
+                line_id,
+                ObjectUpdate {
+                    action: Some(
+                        ActionUpdate::default()
+                            .with_name("Connect")
+                            .with_force(true)
+                            .with_target(Some(first))
+                            .with_target2(Some(second)),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .expect("connect action sets");
+
+        for _ in 0..34 {
+            engine.tick().expect("pre-reduction tick succeeds");
+        }
+        let idx = engine.find_object_index(line_id).expect("line exists");
+        assert_eq!(
+            engine.objects[idx].state.vertices.len(),
+            3,
+            "line is unchanged before !Tick35"
+        );
+
+        engine.tick().expect("Tick35 reduction succeeds");
+        let idx = engine.find_object_index(line_id).expect("line survives");
+        assert_eq!(
+            engine.objects[idx]
+                .state
+                .vertices
+                .iter()
+                .map(|vertex| (vertex.x, vertex.y))
+                .collect::<Vec<_>>(),
+            vec![(10, 10), (30, 10)]
+        );
+    }
+
     // DFA_WALK arms Action.t_attach |= CNAT_Bottom every exec
     // (C4Object.cpp:4790-4792): a loaded walker standing one pixel INTO
     // the ground snaps up via Shape.Attach in the same frame (the INDI
