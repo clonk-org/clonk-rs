@@ -7,8 +7,8 @@ record of completed slices.
 
 Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
 01–07 and select Tutorial 08. Pinned Gold Rush seed 424242 now matches through
-frame 14,366; the first live mismatch is frame 14,367, object #4052 at x=351
-(Rust) versus x=350 (C++), a one-pixel fixed-position divergence.
+frame 14,415 after fixing C++ fixed-point script trigonometry. The live run was
+capped there, so the next mismatch is unknown.
 
 ## Gates
 

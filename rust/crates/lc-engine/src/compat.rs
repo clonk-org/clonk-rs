@@ -11711,10 +11711,10 @@ fn sin_func(args: &[Value]) -> Result<Value, RuntimeError> {
         1
     };
 
-    // C++ implementation: modulo to prevent overflow, convert to radians
+    // FnSin uses C4Fixed's shared SineTable; no floating-point arithmetic is
+    // allowed on this lockstep path (C4Script.cpp:3224-3231; Fixed.h:188-202).
     let angle_mod = angle % (360 * precision);
-    let angle_radians = (angle_mod as f64 / precision as f64) * std::f64::consts::PI / 180.0;
-    let result = (angle_radians.sin() * radius as f64).round() as i32;
+    let result = fixtoi_prec(itofix_prec(angle_mod, precision).sin_deg(), radius);
     Ok(Value::Int(result))
 }
 
@@ -11772,10 +11772,10 @@ fn cos_func(args: &[Value]) -> Result<Value, RuntimeError> {
         1
     };
 
-    // C++ implementation: modulo to prevent overflow, convert to radians
+    // FnCos uses the same fixed-point table and scaling path
+    // (C4Script.cpp:3233-3238; Fixed.h:204-218).
     let angle_mod = angle % (360 * precision);
-    let angle_radians = (angle_mod as f64 / precision as f64) * std::f64::consts::PI / 180.0;
-    let result = (angle_radians.cos() * radius as f64).round() as i32;
+    let result = fixtoi_prec(itofix_prec(angle_mod, precision).cos_deg(), radius);
     Ok(Value::Int(result))
 }
 
@@ -29624,6 +29624,41 @@ mod tests {
                 Value::Bool(true),
             ])
         );
+    }
+
+    #[test]
+    fn script_sin_and_cos_use_the_cpp_fixed_point_table() {
+        // FnSin/FnCos convert the angle with itofix(angle, precision), use
+        // C4Fixed's shared SineTable, then fixtoi(result, radius)
+        // (C4Script.cpp:3224-3238; Fixed.h:188-218). Host floating point is
+        // not lockstep-safe and differs by whole pixels at rounding edges.
+        // Gold Rush frame 14367 pins the smallest such edge: WMPF #4052 is
+        // placed by Cos(300, 1). SineTable[3000] is 32767, so C++ rounds to
+        // zero; binary floating point rounded the mathematical 0.5 to one.
+        assert_eq!(
+            cos_func(&[Value::Int(300), Value::Int(1)]).expect("Cos succeeds"),
+            Value::Int(0)
+        );
+
+        for angle in -359..=359 {
+            for radius in -100..=100 {
+                let fixed_angle = itofix_prec(angle, 1);
+                let expected_sin = fixtoi_prec(fixed_angle.sin_deg(), radius);
+                let expected_cos = fixtoi_prec(fixed_angle.cos_deg(), radius);
+                assert_eq!(
+                    sin_func(&[Value::Int(angle), Value::Int(radius)])
+                        .expect("Sin succeeds"),
+                    Value::Int(expected_sin),
+                    "Sin({angle}, {radius})"
+                );
+                assert_eq!(
+                    cos_func(&[Value::Int(angle), Value::Int(radius)])
+                        .expect("Cos succeeds"),
+                    Value::Int(expected_cos),
+                    "Cos({angle}, {radius})"
+                );
+            }
+        }
     }
 
     fn empty_state() -> Value {
