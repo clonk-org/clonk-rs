@@ -74,7 +74,10 @@ pub use control::{
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_FLAG_SAVEGAME_JOIN, PLAYER_INFO_FLAG_VOTED_OUT,
     PLAYER_INFO_FLAG_WON, PLAYER_INFO_TYPE_NONE, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
 };
-pub use control_execution::ControlPlayerInfoRegistry;
+pub use control_execution::{
+    prepare_join_player_config, ControlPlayerInfoRegistry, JoinPlayerPreparation,
+    PrepareJoinPlayerError,
+};
 pub use effect::{EffectState, EffectVarValue};
 pub use input::PlayerInputState;
 pub use landscape::{
