@@ -32459,9 +32459,15 @@ impl Engine {
                 .map(|landscape| landscape.is_solid_at(x, y))
                 .unwrap_or(false)
         };
-        // GBackWind(x, y) is position-dependent in C++; the Rust environment
-        // model only carries a global wind force (visual-only divergence).
-        let wind = move |_x: i32, _y: i32| wind_force;
+        // GBackWind (C4Wrappers.h:189-192): IFT/tunnel-background pixels
+        // suppress wind for both standard drift and smoke particles.
+        let wind = move |x: i32, y: i32| {
+            if landscape.is_some_and(|landscape| landscape.is_ift_at(x, y)) {
+                0
+            } else {
+                wind_force
+            }
+        };
         let env = particles::ParticleEnv {
             gravity,
             frame_counter,

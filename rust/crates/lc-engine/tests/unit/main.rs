@@ -30680,6 +30680,62 @@ func Probe() {
     }
 
     #[test]
+    fn particle_wind_is_suppressed_by_tunnel_background_like_cpp() -> Result<(), EngineError> {
+        // Both fxStdExec WindDrift and fxSmokeExec read GBackWind at the
+        // particle position (C4Particles.cpp:556-562,649-660). GBackWind is
+        // zero exactly where GBackIFT is set (C4Wrappers.h:189-192), while an
+        // adjacent sky pixel receives the current Weather.Wind.
+        const SCRIPT: &str = r#"
+        global func Initialize(state, random) {
+            CreateParticle("Leaf", 5, 10, 0, 0, 0, 1);
+            CreateParticle("Leaf", 6, 10, 0, 0, 0, 1);
+            return nil;
+        }
+        global func Step(state, frame, random) { return nil; }
+        "#;
+
+        let mut engine = Engine::with_seed(3);
+        engine.set_environment(EnvironmentSettings::new(60));
+        let mut landscape = Landscape::flat(32, 100);
+        landscape.set_tunnel_column(5, vec![(0, 20)]);
+        engine.set_landscape(landscape);
+        engine
+            .register_particle_definition(
+                particles::ParticleDefCore {
+                    name: "Leaf".into(),
+                    init_fn: "StdInit".into(),
+                    exec_fn: "StdExec".into(),
+                    draw_fn: "Std".into(),
+                    wind_drift: 100,
+                    delay: 1,
+                    repeats: 1000,
+                    ..Default::default()
+                },
+                4,
+                1.0,
+            )
+            .expect("particle definition registers");
+        engine.install_scenario_script("Scenario", SCRIPT)?;
+
+        engine.tick()?;
+
+        let particles = engine.particle_system().particles();
+        assert_eq!(particles.len(), 2);
+        assert_eq!(
+            particles[0].xdir.to_bits(),
+            0.0f32.to_bits(),
+            "IFT tunnel background blocks wind"
+        );
+        let expected_open_xdir = ((60.0f32 / 15.0) * 80.0) / 800.0;
+        assert_eq!(
+            particles[1].xdir.to_bits(),
+            expected_open_xdir.to_bits(),
+            "adjacent sky receives Weather.Wind"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn remove_player_triggers_on_game_over() -> Result<(), EngineError> {
         const SCRIPT: &str = r#"
         global func Initialize(state, random) { return nil; }
