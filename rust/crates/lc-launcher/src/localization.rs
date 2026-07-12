@@ -171,7 +171,9 @@ fn append_language_codes(codes: &mut Vec<String>, sequence: &str) {
 }
 
 fn parse_language_code(segment: &str) -> Option<String> {
-    let trimmed = segment.trim_start_matches(|character: char| character.is_ascii_whitespace());
+    // C++ IsWhiteSpace intentionally recognizes only these four bytes
+    // (C4Strings.cpp:48-55); notably, form feed remains part of the prefix.
+    let trimmed = segment.trim_start_matches([' ', '\t', '\r', '\n']);
     let prefix = &trimmed.as_bytes()[..trimmed.len().min(2)];
     (!prefix.is_empty()).then(|| String::from_utf8_lossy(prefix).into_owned())
 }
@@ -288,6 +290,24 @@ mod tests {
                 "DE".to_string(),
                 "US".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn configured_language_sequence_skips_only_cpp_whitespace() {
+        // IsWhiteSpace/SAdvanceSpace skip space, tab, CR, and LF only
+        // (src/C4Strings.cpp:48-55,334-339). Vertical tab and form feed are
+        // copied as part of C++'s two-byte language prefix.
+        let mut config = Config::new();
+        config.set_in(
+            Some("General"),
+            "LanguageEx",
+            "\u{000b}DE,\u{000c}US, \t\r\nFR",
+        );
+
+        assert_eq!(
+            discover_language_codes(Some(&config)),
+            vec!["\u{000b}D".to_string(), "\u{000c}U".to_string(), "FR".to_string()]
         );
     }
 
