@@ -3865,6 +3865,48 @@ mod tests {
     }
 
     #[test]
+    fn jump_with_zero_physicals_still_overwrites_both_velocities() {
+        // ObjectComJump always passes its calculated TXDir/iPhysicalJump to
+        // ObjectActionJump (C4ObjectCom.cpp:284-307), which unconditionally
+        // assigns both xdir and ydir (C4ObjectCom.cpp:48-61). Zero physicals
+        // therefore stop any pre-existing motion rather than preserving it.
+        let actor_id = ObjectId::new(404);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.construction = FULL_CON;
+        actor.fixed_velocity = FixedVec2::new(crate::itofix(3), crate::itofix(-4));
+        actor.physical = PhysicalInfo::default();
+
+        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 6,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut state = JumpState::from_request(&CommandRequest::new(CommandId::Jump));
+        let update = state.step(&ctx).update.expect("jump update");
+        assert_eq!(
+            update.fixed_velocity,
+            Some(FixedVec2::new(
+                crate::C4Fixed::ZERO,
+                crate::C4Fixed::ZERO
+            ))
+        );
+    }
+
+    #[test]
     fn jump_skips_action_when_not_walking() {
         let actor_id = ObjectId::new(401);
 
@@ -11241,24 +11283,22 @@ impl JumpState {
             // Jump)·Con/FullCon (applied by ObjectActionJump, :48-61). The
             // dive try (SimFlightHitsLiquid) and the OnActionJump scripted
             // jump are still open.
-            if ctx.object.physical.jump != 0 {
-                let con_scale = math::itofix_prec(ctx.object.construction, FULL_CON);
-                let physical_walk =
-                    math::val_by_physical(280, ctx.object.physical.walk) * con_scale;
-                let physical_jump =
-                    math::val_by_physical(1000, ctx.object.physical.jump) * con_scale;
-                let facing = self.desired_direction(ctx).unwrap_or(ctx.object.direction);
-                let txdir = match ctx.object.command_direction {
-                    CommandDirection::Left | CommandDirection::UpLeft => -physical_walk,
-                    CommandDirection::Right | CommandDirection::UpRight => physical_walk,
-                    _ => match facing {
-                        Direction::Left => -physical_walk,
-                        Direction::Right => physical_walk,
-                        _ => crate::C4Fixed::ZERO,
-                    },
-                };
-                object_update.fixed_velocity = Some(FixedVec2::new(txdir, -physical_jump));
-            }
+            let con_scale = math::itofix_prec(ctx.object.construction, FULL_CON);
+            let physical_walk =
+                math::val_by_physical(280, ctx.object.physical.walk) * con_scale;
+            let physical_jump =
+                math::val_by_physical(1000, ctx.object.physical.jump) * con_scale;
+            let facing = self.desired_direction(ctx).unwrap_or(ctx.object.direction);
+            let txdir = match ctx.object.command_direction {
+                CommandDirection::Left | CommandDirection::UpLeft => -physical_walk,
+                CommandDirection::Right | CommandDirection::UpRight => physical_walk,
+                _ => match facing {
+                    Direction::Left => -physical_walk,
+                    Direction::Right => physical_walk,
+                    _ => crate::C4Fixed::ZERO,
+                },
+            };
+            object_update.fixed_velocity = Some(FixedVec2::new(txdir, -physical_jump));
             update = Some(object_update);
         }
 
