@@ -359,7 +359,7 @@ fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, GroupError> {
     let mut cursor = Cursor::new(bytes);
     let mut id = [0u8; 28];
     cursor.read_exact(&mut id)?;
-    if !id.starts_with(GROUP_FILE_ID) {
+    if !id.starts_with(GROUP_FILE_ID) || id.get(GROUP_FILE_ID.len()) != Some(&0) {
         return Err(GroupError::InvalidGroup("invalid signature".into()));
     }
     let ver1 = cursor.read_i32::<LittleEndian>()?;
@@ -533,6 +533,27 @@ mod tests {
         assert!(matches!(
             Group::open("/path/does/not/exist"),
             Err(GroupError::Missing(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_group_signature_with_non_nul_suffix() {
+        // C4Group::OpenRealGrpFile compares Head.id with C4GroupFileID using
+        // SEqual/strcmp, not a prefix match (src/C4Group.cpp:776-779;
+        // src/C4Strings.cpp:104-108).
+        let mut header = [0u8; GROUP_HEADER_SIZE];
+        let mut cursor = Cursor::new(&mut header[..]);
+        let mut id = [0u8; 28];
+        id[..GROUP_FILE_ID.len()].copy_from_slice(GROUP_FILE_ID);
+        id[GROUP_FILE_ID.len()] = b'X';
+        cursor.write_all(&id).unwrap();
+        cursor.write_i32::<LittleEndian>(1).unwrap();
+        cursor.write_i32::<LittleEndian>(2).unwrap();
+        cursor.write_i32::<LittleEndian>(0).unwrap();
+
+        assert!(matches!(
+            parse_header(&header),
+            Err(GroupError::InvalidGroup(message)) if message == "invalid signature"
         ));
     }
 
