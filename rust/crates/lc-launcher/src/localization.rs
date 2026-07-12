@@ -214,10 +214,28 @@ fn load_language_table(group: &Group, code: &str) -> Result<Option<Config>> {
 
     let content = decode_latin1(&data);
     let mut cursor = Cursor::new(content);
-    let config = Config::from_reader(&mut cursor).with_context(|| {
+    let mut config = Config::from_reader(&mut cursor).with_context(|| {
         format!("failed to parse language pack {filename} as configuration table")
     })?;
+    normalize_language_table_newlines(&mut config);
     Ok(Some(config))
+}
+
+fn normalize_language_table_newlines(config: &mut Config) {
+    let replacements: Vec<_> = config
+        .iter()
+        .filter(|entry| entry.value.contains("\\n"))
+        .map(|entry| {
+            (
+                entry.section.clone(),
+                entry.key.clone(),
+                entry.value.replace("\\n", "\r\n"),
+            )
+        })
+        .collect();
+    for (section, key, value) in replacements {
+        config.set_in(section.as_deref(), key, value);
+    }
 }
 
 fn decode_latin1(bytes: &[u8]) -> String {
@@ -271,5 +289,24 @@ mod tests {
                 "US".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn language_table_converts_escaped_newlines_to_crlf() {
+        // C4ResStrTable replaces each literal "\\n" in a recognized value
+        // with CRLF while loading the selected table
+        // (src/C4ResStrTable.cpp:25-50).
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("LanguageZZ.txt"),
+            b"IDS_LANG_NAME=First\\nSecond\n",
+        )
+        .unwrap();
+        let group = Group::open(directory.path()).unwrap();
+
+        let table = load_language_table(&group, "ZZ")
+            .unwrap()
+            .expect("language table exists");
+        assert_eq!(table.get("IDS_LANG_NAME"), Some("First\r\nSecond"));
     }
 }
