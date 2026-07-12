@@ -73,7 +73,10 @@ impl Config {
                         value: value.into_owned(),
                         comment,
                     };
-                    config.entries.insert((section_clone, key_owned), entry);
+                    config
+                        .entries
+                        .entry((section_clone, key_owned))
+                        .or_insert(entry);
                 }
             }
         }
@@ -323,6 +326,17 @@ mod tests {
         cfg.save(&path).unwrap();
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("#[Audio]"));
+    }
+
+    #[test]
+    fn duplicate_config_values_keep_first_cpp_name_node() {
+        // C++ appends name nodes in source order and selects the first matching
+        // child for a field compiled once (src/StdCompiler.cpp:517-531, 803-855).
+        let data = b"[General]\nLanguage=DE\nLanguage=US\n";
+        let mut cursor = Cursor::new(&data[..]);
+        let cfg = Config::from_reader(&mut cursor).unwrap();
+
+        assert_eq!(cfg.get_in(Some("General"), "Language"), Some("DE"));
     }
 
     #[test]
