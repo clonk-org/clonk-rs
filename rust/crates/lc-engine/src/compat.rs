@@ -4745,8 +4745,9 @@ fn grab_contents(args: &[Value]) -> Result<Value, RuntimeError> {
 /// re-places the object at the caller's position with r = 0 and zeroed
 /// dirs (C4Object.cpp:1549-1553), the y target offset by the SUBJECT's
 /// Shape.y (:385) and rdir scaled `itofix(trdir) / 10` (:388). The
-/// ObjectComCancelAttach and BoundsCheck side arms plus the
-/// Ejection/Departure engine calls stay unmodeled (PORT_STATUS).
+/// ObjectComCancelAttach and BoundsCheck side arms stay unmodeled. Exit
+/// dispatches Ejection then Departure synchronously and returns the live
+/// post-callback `!Contained` state (C4Object.cpp:1559-1563).
 fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 7 {
         return Err(RuntimeError::new(
@@ -4761,14 +4762,14 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
     let txdir = parse_optional_i32(args.get(4), "Exit", "xdir")?.unwrap_or(0);
     let tydir = parse_optional_i32(args.get(5), "Exit", "ydir")?.unwrap_or(0);
     let trdir = parse_optional_i32(args.get(6), "Exit", "rdir")?.unwrap_or(0);
-    HOST_CONTEXT.with(|cell| {
+    let exited = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         };
         let active = context.object_context().map(|object| object.id());
         let Some(target) = subject.or(active) else {
-            return Ok(Value::Bool(false)); // no pObj and no scope object
+            return Ok(None); // no pObj and no scope object
         };
         // Caller-relative offset: the CALLING object, also for foreign
         // subjects (C4Script.cpp:377-381).
@@ -4799,14 +4800,14 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
             })
             .unwrap_or(0);
         if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         }
         let Some(scope) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         };
-        if scope.container().is_none() {
-            return Ok(Value::Bool(false)); // not contained (C4Object.cpp:1539)
-        }
+        let Some(previous_container) = scope.container() else {
+            return Ok(None); // not contained (C4Object.cpp:1539)
+        };
         scope.set_container(None);
         scope.set_position(Vector2::new(abs_x, abs_y.saturating_add(shape_y)));
         // Raw r write — C4Object::Exit assigns without SetRotation's
@@ -4815,8 +4816,45 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
         scope.pending_update.rotation = Some(rotation);
         scope.set_fixed_velocity(FixedVec2::new(itofix(txdir), itofix(tydir)));
         scope.set_rotation_velocity(itofix(trdir) / 10);
-        Ok(Value::Bool(true))
-    })
+        Ok(Some((target, previous_container)))
+    })?;
+    let Some((target, previous_container)) = exited else {
+        return Ok(Value::Bool(false));
+    };
+
+    let call_fail_safe = |callback_target, function: &str, pars: &[Value]| {
+        if let Some(Err(error)) =
+            call_world_object_own_function(callback_target, function, pars)
+        {
+            tracing::warn!(
+                %error,
+                object = callback_target.as_u64(),
+                callback = function,
+                "script error in Exit callback; continuing like C++ fail-safe Call"
+            );
+        }
+    };
+    call_fail_safe(
+        previous_container,
+        "Ejection",
+        &[object_reference_value(target)],
+    );
+    call_fail_safe(
+        target,
+        "Departure",
+        &[object_reference_value(previous_container)],
+    );
+
+    // Ejection may re-enter the object. C++ returns !Contained only after
+    // both callbacks (C4Object.cpp:1560-1563).
+    let outside = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(target))
+            .map(|scope| scope.container().is_none())
+            .unwrap_or(true)
+    });
+    Ok(Value::Bool(outside))
 }
 
 /// FnSetComponent (C4Script.cpp:2659-2663): sets the component count on
