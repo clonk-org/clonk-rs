@@ -397,6 +397,22 @@ impl NetworkTickGate {
         self.ready.remove(&expected_tick)
     }
 
+    fn take_exact_if_ready<F>(
+        &mut self,
+        expected_tick: Tick,
+        pre_execute: F,
+    ) -> Option<Vec<NetworkControl>>
+    where
+        F: FnOnce(&[NetworkControl]) -> bool,
+    {
+        self.ready.retain(|queued_tick, _| *queued_tick >= expected_tick);
+        let controls = self.ready.get(&expected_tick)?;
+        if !pre_execute(controls) {
+            return None;
+        }
+        self.ready.remove(&expected_tick)
+    }
+
     fn clear(&mut self) {
         self.ready.clear();
     }
@@ -20328,6 +20344,27 @@ mod tests {
         let observer = collect_viewport_inputs(&snapshot, Some(focus));
         assert_eq!(observer.len(), 1);
         assert_eq!(observer[0].owner, OWNER_NONE);
+    }
+
+    #[test]
+    fn pending_preflight_retains_the_exact_network_tick() {
+        // C4Control::PreExecute inspects the complete list before execution;
+        // a pending packet leaves iControlReady unchanged so the same tick is
+        // retried intact (src/C4Control.cpp:73-90;
+        // src/C4GameControlNetwork.cpp:687-719).
+        let tick = 7;
+        let controls = vec![NetworkControl::JoinPlayer(
+            lc_engine::JoinPlayerControlData::default(),
+        )];
+        let mut gate = NetworkTickGate::default();
+        gate.queue(tick, tick, controls.clone());
+
+        assert!(gate.take_exact_if_ready(tick, |_| false).is_none());
+        assert_eq!(
+            gate.take_exact_if_ready(tick, |_| true),
+            Some(controls),
+            "the retained tick executes once its preflight becomes ready"
+        );
     }
 
     #[test]
