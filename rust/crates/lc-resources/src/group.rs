@@ -322,6 +322,12 @@ impl PackedGroup {
             .copied()
             .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
         let entry = &self.entries[entry_index];
+        if !entry.is_directory {
+            return Err(GroupError::InvalidGroup(format!(
+                "entry '{}' is not a child group",
+                entry.relative_path.display()
+            )));
+        }
         let data = self.read_entry_bytes(entry)?;
         Group::from_packed_bytes(self.path.join(relative), data)
     }
@@ -668,5 +674,24 @@ mod tests {
 
         assert!(group.exists("HELLO.TXT"));
         assert_eq!(group.read_file("Hello.Txt").unwrap(), b"world");
+    }
+
+    #[test]
+    fn packed_open_child_rejects_entry_without_child_group_flag() {
+        // C4Group::OpenAsChild resolves the entry, then rejects it when the
+        // directory's ChildGroup flag is clear, before parsing its payload
+        // (src/C4Group.cpp:1846-1862).
+        let inner = packed_group_image();
+        let outer = packed_group_image_with_entry("payload.bin", false, &inner);
+        let group =
+            Group::from_memory(PathBuf::from("outer.c4group"), outer).expect("valid outer group");
+
+        let error = group
+            .open_child("payload.bin")
+            .expect_err("plain file must not open as a child group");
+        assert!(matches!(
+            error,
+            GroupError::InvalidGroup(message) if message.contains("not a child group")
+        ));
     }
 }

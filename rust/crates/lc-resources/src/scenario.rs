@@ -1152,10 +1152,13 @@ mod tests {
 
         let child_scenario =
             build_group(&[("Scenario.json", br#"{"name":"Packed Child"}"#.to_vec())]);
-        let folder_bytes = build_group(&[
+        let mut folder_bytes = build_group(&[
             ("Folder.txt", b"Title=Campaign".to_vec()),
             ("Child.c4s", child_scenario),
         ]);
+        // This entry is a packed child group, so its C4GroupEntryCore must
+        // carry ChildGroup=1 (C4Group.cpp:1858-1862).
+        mark_group_entry_child(&mut folder_bytes, 1);
         fs::write(&folder_path, folder_bytes).unwrap();
 
         let entries = discover(dir.path()).expect("discover");
@@ -1580,6 +1583,11 @@ mod tests {
             buffer.extend_from_slice(data);
         }
         buffer
+    }
+
+    fn mark_group_entry_child(group: &mut [u8], entry_index: usize) {
+        let child_flag = GROUP_HEADER_SIZE + entry_index * GROUP_ENTRY_SIZE + 260 + 4;
+        group[child_flag..child_flag + 4].copy_from_slice(&1_i32.to_le_bytes());
     }
 
     fn scramble(buffer: &mut [u8]) {
