@@ -230,6 +230,19 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         .expect("valley CATA survives firing");
     assert_eq!(firing.action.name, "Fire", "ControlThrow starts Fire");
     assert_eq!(firing.action.phase, 1, "Fire starts at 7 - iPhase");
+    assert_eq!(
+        firing.action.target2,
+        Some(valley),
+        "synchronized C++ GetPlrViewMode returns -1, so CATA::Fire stores the pushing CLNK in action target 2 (C4Script.cpp:2579-2584; Catapult.c4d/Script.c:38-47)"
+    );
+    let pusher = player
+        .engine()
+        .object_snapshot(valley)
+        .expect("pushing valley CLNK survives firing");
+    assert!(
+        pusher.command_stack.is_empty(),
+        "truthy CATA::Fire must consume COM_THROW before the CLNK drop fallback; CLNK={pusher:?}"
+    );
     player.wait_until(
         "real CATA Projectile ejects its WOOD after the Fire animation",
         20,

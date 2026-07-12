@@ -4217,6 +4217,19 @@ fn set_plr_view(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(true))
 }
 
+/// FnGetPlrViewMode (C4Script.cpp:2579-2584): synchronized execution
+/// deliberately exposes no local viewport mode, even for a valid player.
+/// The Rust simulation is always synchronized/headless; keep this query
+/// independent from the presentation-only SetPlrView acknowledgement above.
+fn get_plr_view_mode(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _ = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetPlrViewMode",
+        "player",
+    )?;
+    Ok(Value::Int(-1))
+}
+
 /// FnSetPlrViewRange (C4Script.cpp:5286-5293): the object's FoW view
 /// range — presentation/FoW only (PlrViewRange serializes but the
 /// comparator does not cover it); acknowledged (PORT_STATUS).
@@ -6833,6 +6846,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetMenuSize", set_menu_size);
     script.register_host_function("SetMenuTextProgress", set_menu_text_progress);
     script.register_host_function("SetPlrView", set_plr_view);
+    script.register_host_function("GetPlrViewMode", get_plr_view_mode);
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("LandscapeWidth", landscape_width);
     script.register_host_function("LandscapeHeight", landscape_height);
@@ -28032,6 +28046,7 @@ mod tests {
         "GetPlrMagic",
         "GetPlrValue",
         "GetPlrValueGain",
+        "GetPlrViewMode",
         "GetPortrait",
         "GetProcedure",
         "GetR",
