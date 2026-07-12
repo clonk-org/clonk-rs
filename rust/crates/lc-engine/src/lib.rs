@@ -31155,6 +31155,8 @@ impl Engine {
         }
         let x_end = origin.x.saturating_add(width);
         let y_end = origin.y.saturating_add(height);
+        let mut changed_min = None::<i32>;
+        let mut changed_max = None::<i32>;
         for x in origin.x..x_end {
             for y in origin.y..y_end {
                 let matches = self
@@ -31164,12 +31166,26 @@ impl Engine {
                     == Some(material);
                 if matches {
                     let _ = self.dig_free_pix(x, y);
+                    let changed = self
+                        .landscape
+                        .as_ref()
+                        .and_then(|landscape| landscape.material_at(x, y))
+                        != Some(material);
+                    if changed {
+                        changed_min = Some(changed_min.map_or(x, |current| current.min(x)));
+                        changed_max = Some(changed_max.map_or(x, |current| current.max(x)));
+                    }
                 }
             }
         }
-        if let Some(landscape) = self.landscape.as_mut() {
-            let start = origin.x.max(0) as usize;
-            let end = x_end.max(0).min(landscape.width() as i32) as usize;
+        if let (Some(changed_min), Some(changed_max), Some(landscape)) =
+            (changed_min, changed_max, self.landscape.as_mut())
+        {
+            let start = changed_min.max(0) as usize;
+            let end = changed_max
+                .saturating_add(1)
+                .max(0)
+                .min(landscape.width() as i32) as usize;
             landscape.refresh_raster_columns(start..end);
         }
     }
