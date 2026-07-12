@@ -17142,6 +17142,178 @@ mod tests {
     }
 
     #[test]
+    fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar() {
+        // Tutorial09 raises the ready CLNK's temporary Breath physical to
+        // 250000 without rewriting its current 50000 breath
+        // (Tutorial09.c4s/Script.c:18-23; C4Script.cpp:584-598;
+        // C4Object.cpp:192-195). C4Viewport therefore draws the cyan breath
+        // bar because 0 < Breath < GetPhysical()->Breath
+        // (C4Viewport.cpp:920-943; C4Object.cpp:2728-2731).
+        let mut app = real_tutorial_app(9, "Breath HUD parity");
+        wait_for_running(&mut app);
+        app.update().expect("Tutorial09 first running frame");
+
+        let clonk = app
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.id == app.local_owner)
+            .and_then(|player| player.cursor)
+            .expect("Tutorial09 local cursor CLNK");
+        let object = app
+            .snapshot
+            .object(clonk)
+            .expect("Tutorial09 cursor remains in the snapshot");
+        let current_breath = object.breath;
+        let capacity = app
+            .engine
+            .find_object_index(clonk)
+            .map(|index| app.engine.object_physical(index).breath)
+            .expect("Tutorial09 cursor has resolved physicals");
+        assert_eq!(current_breath, 50_000, "CLNK keeps its birth breath");
+        assert_eq!(capacity, 250_000, "Tutorial09 installs AquaClonk capacity");
+
+        let overlays =
+            collect_player_overlays(&app.engine, &app.snapshot, Some(clonk), None, &app.bindings);
+        let crew = overlays
+            .iter()
+            .find(|player| player.owner == app.local_owner)
+            .and_then(|player| player.crew.iter().find(|crew| crew.object_id == clonk))
+            .expect("Tutorial09 cursor reaches the HUD overlay");
+        assert_eq!(crew.breath, 50_000);
+        assert_eq!(crew.breath_capacity, 250_000);
+        assert!(crew.breath != 0 && crew.breath < crew.breath_capacity);
+
+        // The stock EnergyBars.png is split into six 8px columns and three
+        // 12px cap/tile rows (C4GraphicsResource.cpp:231-241). With portraits
+        // enabled, an energy bar already occupying slot zero, and no magic,
+        // the breath bar occupies x=5+(8+1), y=35+10+10, h=200-95. Its
+        // filled pixels come from cyan columns 4/5 selected by bar_idx=2
+        // (C4Facet.cpp:334-387).
+        let hud = app.graphics.hud_graphics();
+        let bars = hud.energy_bars.as_ref().expect("stock EnergyBars.png");
+        assert_eq!((bars.width(), bars.height()), (48, 36));
+        let mut surface = Surface::new(320, 200, PixelFormat::Rgba8888);
+        lc_frontend::hud::draw_level_bar(
+            &mut surface,
+            &hud,
+            lc_graphics::Rect::new(0, 0, 320, 200),
+            lc_frontend::hud::HudBarKind::Breath,
+            1,
+            crew.breath,
+            crew.breath_capacity,
+        );
+
+        let painted = surface
+            .pixels()
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(_, pixel)| pixel[3] != 0)
+            .map(|(index, pixel)| {
+                (
+                    (index % 320) as i32,
+                    (index / 320) as i32,
+                    [pixel[0], pixel[1], pixel[2]],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(!painted.is_empty(), "real cyan breath asset draws pixels");
+        assert!(painted
+            .iter()
+            .all(|(x, y, _)| (14..22).contains(x) && (55..160).contains(y)));
+        assert!(
+            painted.iter().any(|(_, y, [r, g, b])| *y >= 139
+                && *g > r.saturating_add(20)
+                && *b > r.saturating_add(20)),
+            "the lower 20% uses the stock cyan filled breath column"
+        );
+
+        // Exercise the complete GameApp -> GraphicsOverlay -> render_frame
+        // seam with the real scenario and graphics. Setting current breath to
+        // capacity suppresses only C++'s `Breath < GetPhysical()->Breath`
+        // predicate; restoring 50000 must add fragments exclusively inside
+        // the compact second bar slot (C4Viewport.cpp:924-943).
+        let mut frame = vec![0; app.graphics.surface().pixels().len()];
+        app.snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == clonk)
+            .expect("Tutorial09 cursor remains mutable")
+            .breath = capacity;
+        app.render_running(&mut frame)
+            .expect("render Tutorial09 with full breath");
+        app.render_running(&mut frame)
+            .expect("stabilize Tutorial09 full-breath frame");
+        let without_breath = frame.clone();
+
+        app.snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == clonk)
+            .expect("Tutorial09 cursor remains mutable")
+            .breath = current_breath;
+        app.render_running(&mut frame)
+            .expect("render Tutorial09 with partial breath");
+        let with_breath = frame.clone();
+
+        app.snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == clonk)
+            .expect("Tutorial09 cursor remains mutable")
+            .breath = capacity;
+        app.render_running(&mut frame)
+            .expect("render Tutorial09 with breath suppressed again");
+        assert_eq!(
+            frame, without_breath,
+            "the stationary real frame is otherwise deterministic"
+        );
+
+        let viewport = app
+            .graphics
+            .viewport_rect(app.local_owner)
+            .expect("Tutorial09 local viewport");
+        let bar_x = viewport.x + 14;
+        let bar_y = viewport.y + 55;
+        let bar_height = viewport.height as i32 - 95;
+        assert!(bar_height > 0, "C++ viewport height gate permits HUD bars");
+        let fill_y = bar_y + bar_height - current_breath * bar_height / capacity;
+        let changed = with_breath
+            .chunks_exact(4)
+            .zip(without_breath.chunks_exact(4))
+            .enumerate()
+            .filter(|(_, (with, without))| with != without)
+            .map(|(index, (pixel, _))| {
+                (
+                    (index % 320) as i32,
+                    (index / 320) as i32,
+                    [pixel[0], pixel[1], pixel[2]],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !changed.is_empty(),
+            "partial real Tutorial09 breath paints the HUD"
+        );
+        assert!(
+            changed.iter().all(|(x, y, _)| {
+                (bar_x..bar_x + 8).contains(x) && (bar_y..bar_y + bar_height).contains(y)
+            }),
+            "breath-only fragments stay inside the C++ bar rectangle: {changed:?}"
+        );
+        assert!(
+            changed.iter().any(|(_, y, _)| *y < fill_y),
+            "the empty breath source column paints above yBar"
+        );
+        assert!(
+            changed.iter().any(|(_, y, [r, g, b])| {
+                *y >= fill_y && *g > r.saturating_add(10) && *b > r.saturating_add(10)
+            }),
+            "the cyan filled source column paints at and below yBar"
+        );
+    }
+
+    #[test]
     fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
         // DrawCursorInfo forwards the cursor's ordered Contents to DrawIDList
         // (src/C4Viewport.cpp:911-917). DrawIDList keeps each group's first
