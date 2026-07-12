@@ -32071,6 +32071,17 @@ public func Probe(object target) {
                     .with_rotation(356),
             )
             .expect("stiff spawns");
+        // Stabilize normalizes with repeated +/-360 steps, not a single
+        // wrap (C4Movement.cpp:493-494). A raw saved r=716 is therefore -4
+        // and falls inside StableRange.
+        let multi_wrapped = engine
+            .spawn_object(
+                SpawnConfig::new("Tilt")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(55, 3))
+                    .with_rotation(716),
+            )
+            .expect("multi-wrapped tilt spawns");
 
         engine.tick().expect("tick succeeds");
         let rotation_of = |engine: &Engine, id| {
@@ -32104,6 +32115,11 @@ public func Probe(object target) {
             rotation_of(&engine, stiff_id),
             356,
             "NoStabilize opts out (C4Movement.cpp:491)"
+        );
+        assert_eq!(
+            rotation_of(&engine, multi_wrapped),
+            0,
+            "repeated angle normalization brings 716 degrees to -4"
         );
     }
 
