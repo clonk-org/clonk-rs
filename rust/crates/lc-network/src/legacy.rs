@@ -142,10 +142,10 @@ fn decode_sync_check(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Leg
     let frame = reader.read_int32()?;
     let control_tick = reader.read_int32()?;
     let random3 = reader.read_int32()?;
-    let random_count = reader.read_int32()?;
+    let random_count = reader.read_raw_i32()?;
     let crew_positions_sum = reader.read_int32()?;
     let pxs_count = reader.read_int32()?;
-    let mass_mover_index = reader.read_int32()?;
+    let mass_mover_index = reader.read_raw_i32()?;
     let object_count = reader.read_int32()?;
     let object_enumeration_index = reader.read_int32()?;
     let sector_shape_sum = reader.read_int32()?;
@@ -215,6 +215,20 @@ impl<'a> Reader<'a> {
 
         Ok(val)
     }
+
+    fn read_raw_i32(&mut self) -> Result<i32, LegacyControlError> {
+        let end = self
+            .offset
+            .checked_add(size_of::<i32>())
+            .ok_or(LegacyControlError::UnexpectedEof)?;
+        let bytes = self
+            .data
+            .get(self.offset..end)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(LegacyControlError::UnexpectedEof)?;
+        self.offset = end;
+        Ok(i32::from_ne_bytes(bytes))
+    }
 }
 
 fn clear_upper_i32(value: i32) -> i32 {
@@ -240,6 +254,10 @@ fn append_int32(buffer: &mut Vec<u8>, value: i32) {
     buffer.extend(encode_int32(value));
 }
 
+fn append_raw_i32(buffer: &mut Vec<u8>, value: i32) {
+    buffer.extend(value.to_ne_bytes());
+}
+
 fn encode_player_control(buffer: &mut Vec<u8>, data: &PlayerControlData) {
     buffer.push(CID_PLR_CONTROL);
     append_int32(buffer, data.player);
@@ -253,10 +271,10 @@ fn encode_sync_check(buffer: &mut Vec<u8>, data: &SyncCheckPacket) {
     append_int32(buffer, data.frame);
     append_int32(buffer, data.control_tick);
     append_int32(buffer, data.random3);
-    append_int32(buffer, data.random_count);
+    append_raw_i32(buffer, data.random_count);
     append_int32(buffer, data.crew_positions_sum);
     append_int32(buffer, data.pxs_count);
-    append_int32(buffer, data.mass_mover_index);
+    append_raw_i32(buffer, data.mass_mover_index);
     append_int32(buffer, data.object_count);
     append_int32(buffer, data.object_enumeration_index);
     append_int32(buffer, data.sector_shape_sum);
@@ -458,5 +476,50 @@ mod tests {
             }
             other => panic!("expected sync check control, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sync_check_raw_dwords_match_cpp_binary_compiler() {
+        // C++ oracle: C4ControlSyncCheck::CompileFunc packs most fields but
+        // writes RandomCount and MassMoverIndex as plain int32 values
+        // (src/C4Control.cpp:522-534). StdCompilerBinWrite::DWord writes those
+        // four native bytes verbatim (src/StdCompiler.cpp:104-112,125-132).
+        let sync = SyncCheckPacket {
+            frame: 7,
+            control_tick: 8,
+            random3: 9,
+            random_count: 0x0102_0304,
+            crew_positions_sum: 10,
+            pxs_count: 11,
+            mass_mover_index: 0x1213_1415,
+            object_count: 12,
+            object_enumeration_index: 13,
+            sector_shape_sum: 14,
+            by_client: 5,
+        };
+        let frame = LegacyControlFrame {
+            client_id: 5,
+            tick: 6,
+            timestamp_ms: 0,
+            controls: vec![EngineControlPacket::SyncCheck(sync.clone())],
+        };
+
+        let mut expected = vec![5, 6, CID_SYNC_CHECK, 7, 8, 9];
+        expected.extend(sync.random_count.to_ne_bytes());
+        expected.extend([10, 11]);
+        expected.extend(sync.mass_mover_index.to_ne_bytes());
+        expected.extend([12, 13, 14, 5, PID_NONE]);
+
+        assert_eq!(
+            encode_control_payload(&frame).expect("sync check encodes"),
+            expected,
+            "raw DWord fields must not use packed-int encoding"
+        );
+        assert_eq!(
+            decode_control_payload(&expected)
+                .expect("C++ sync-check bytes decode")
+                .controls,
+            frame.controls
+        );
     }
 }
