@@ -709,12 +709,17 @@ impl GameOverState {
             })
             .collect();
 
-        // C4PlayerInfoListBox's scroll window keeps the same top inset and
-        // hidden-scrollbar column even when no scrollbar is visible
-        // (C4GameOverDlg.cpp:210-220; C4Gui.cpp:1346-1384).
+        // GetFromTop plus the resized goal display leaves this extra inset;
+        // without goals caPlayerArea receives caMain.GetAll() directly
+        // (C4GameOverDlg.cpp:151-168,214-229; C4Gui.cpp:975-989,1041-1047).
+        let post_goal_inset = if goal_rows > 0 {
+            CLASSIC_PLAYER_LIST_TOP_INSET
+        } else {
+            0
+        };
         let player_list_y = chrome.player_area.y
             + goal_rows * goal_area_height
-            + CLASSIC_PLAYER_LIST_TOP_INSET;
+            + post_goal_inset;
         let player_list = IntRect {
             x: chrome.player_area.x,
             y: player_list_y,
@@ -1679,6 +1684,75 @@ mod tests {
         assert_eq!(content.goals[0].picture, IntRect { x: 928, y: 213, w: 64, h: 64 });
         assert_eq!(content.player_list, IntRect { x: 330, y: 293, w: 1260, h: 533 });
         assert_eq!(content.players[0].row, IntRect { x: 336, y: 296, w: 1235, h: 54 });
+    }
+
+    #[test]
+    fn classic_zero_goal_evaluation_starts_player_list_at_main_area_top() {
+        // With no goals, C4GameOverDlg does not call GetFromTop/ExpandTop;
+        // caPlayerArea therefore receives caMain.GetAll() directly. The list
+        // itself contributes only its 3px client margin before the first row
+        // (C4GameOverDlg.cpp:151-168,214-229; C4Gui.cpp:1041-1047;
+        // C4GuiListBox.h:108-122; C4GuiListBox.cpp:405-459,532-544).
+        let fonts = endeavour_fonts();
+        let mut state = GameOverState::with_next_mission(
+            "A Clonk".into(),
+            Vec::new(),
+            1024,
+            Some(NextMissionButton {
+                label: "Next tutorial".into(),
+                description: "Continue learning".into(),
+            }),
+        );
+        state.set_evaluation(EvaluationViewModel::new(
+            Vec::new(),
+            vec![evaluation_player(41, "Player")],
+        ));
+
+        let layout = state.classic_evaluation_layout(1024, 600, &fonts);
+        assert_eq!(layout.goal_display, None);
+        assert_eq!(layout.player_list, IntRect { x: 15, y: 34, w: 994, h: 487 });
+        assert_eq!(layout.players[0].row, IntRect { x: 21, y: 37, w: 969, h: 54 });
+
+        let caption = solid_image(192, 23, [200, 0, 0, 255]);
+        let button = solid_image(128, 32, [0, 120, 0, 255]);
+        let button_down = solid_image(128, 32, [0, 0, 180, 255]);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, None);
+        let background = Color::opaque(11, 22, 33);
+        let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
+        surface.fill(background);
+        state.render(
+            &mut surface,
+            &lc_graphics::BitmapFont::new(),
+            Some(GameOverClassicResources::new(
+                skin, &fonts, None, None, None, None,
+            )),
+        );
+
+        let mut expected = Surface::new(1, 1, lc_graphics::PixelFormat::Rgba8888);
+        expected.fill(background);
+        lc_frontend::classic_gui::draw_engine_box(
+            &mut expected,
+            0,
+            0,
+            0,
+            0,
+            lc_frontend::classic_gui::STANDARD_BACKGROUND_COLOR,
+            None,
+        );
+        lc_frontend::classic_gui::draw_engine_box(
+            &mut expected,
+            0,
+            0,
+            0,
+            0,
+            0x4faf_7a00,
+            None,
+        );
+        assert_eq!(
+            surface.get_pixel(500, 37),
+            expected.get_pixel(0, 0),
+            "the zero-goal winner row begins at the C++ list client top"
+        );
     }
 
     #[test]
