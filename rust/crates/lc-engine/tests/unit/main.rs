@@ -18708,6 +18708,39 @@ func Burst() {
     }
 
     #[test]
+    fn presentation_snapshot_preserves_pxs_chunk_slot_identity() {
+        // C4PXSSystem::Draw derives each graphical PXS phase and size from
+        // `cnt2`, the live pixel's slot within its 500-entry chunk
+        // (C4PXS.cpp:285-304). A presentation snapshot therefore cannot
+        // compact live pixels the way `iter()` does.
+        let library = MaterialLibrary::parse("[Material]\nName=Snow\nDensity=25\n")
+            .expect("snow material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let snow = materials.id_of("Snow").expect("snow material exists");
+        let mut engine = Engine::new();
+        engine.set_materials(materials);
+        assert!(engine.pxs_system.create_at(
+            0,
+            417,
+            lc_engine::pxs::Pxs {
+                mat: snow,
+                x: math::itofix(12),
+                y: math::itofix(34),
+                xdir: C4Fixed::ZERO,
+                ydir: C4Fixed::ZERO,
+            },
+        ));
+
+        let particle = engine
+            .snapshot()
+            .particles
+            .into_iter()
+            .find(|particle| particle.definition_id == "material/pxs/snow")
+            .expect("PXS appears in presentation snapshot");
+        assert_eq!(particle.pxs_slot, Some(417));
+    }
+
+    #[test]
     fn cast_objects_matches_cpp_rng_spawn_state_and_completion_order() {
         // FnCastObjects -> C4Game::CastObjects (C4Script.cpp:2476-2480,
         // C4Game.cpp:1727-1739): each object draws rdir, ydir, xdir, then

@@ -1072,7 +1072,9 @@ fn system_particle_snapshot(particle: &particles::Particle) -> ParticleSnapshot 
 /// `fixtof` projections for display; `pxs_fixed` carries the raw sync-relevant
 /// `C4Fixed` state for lossless save/load. `slot` is the saved chunk-major
 /// slot position (C4PXSSystem::Save keeps the chunk layout verbatim,
-/// C4PXS.cpp:346-349); presentation snapshots pass `None`.
+/// C4PXS.cpp:346-349); presentation snapshots retain it because Draw derives
+/// each graphical phase and size from the slot within its 500-entry chunk
+/// (C4PXS.cpp:285-304).
 fn pxs_snapshot(pxs: &pxs::Pxs, materials: &MaterialSet, slot: Option<u32>) -> ParticleSnapshot {
     let definition_id = materials
         .get_by_id(pxs.mat)
@@ -19969,8 +19971,14 @@ impl Engine {
             .collect();
         particles.extend(
             self.pxs_system
-                .iter()
-                .map(|pixel| pxs_snapshot(pixel, &self.materials, None)),
+                .iter_slots()
+                .map(|(chunk, slot, pixel)| {
+                    pxs_snapshot(
+                        pixel,
+                        &self.materials,
+                        Some((chunk * pxs::PXS_CHUNK_SIZE + slot) as u32),
+                    )
+                }),
         );
         particles.extend(
             self.particle_system

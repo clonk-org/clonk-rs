@@ -26,9 +26,9 @@ use lc_engine::{
     DefinitionActionGraphics, DefinitionId, DefinitionRect, DefinitionTargetRect, Direction,
     DrawTransform,
     EnvironmentFrame, EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape,
-    ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, RgbColor, SimulationSnapshot,
-    SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent,
-    CATEGORY_SORT_LIMIT, FULL_CON, OWNER_NONE,
+    ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, ParticleSnapshot, RgbColor,
+    SimulationSnapshot, SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2,
+    WeatherEvent, CATEGORY_SORT_LIMIT, FULL_CON, OWNER_NONE,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -76,6 +76,12 @@ pub struct MaterialRenderInfo {
     texture_overlay: Option<String>,
     overlay_type: i32,
     density: i32,
+    /// Loose-material sprite sheet (`C4MaterialCore::sPXSGfx`). The sheet is
+    /// resolved through the same texture map as landscape patterns.
+    pxs_gfx: Option<String>,
+    /// `C4TargetRect` [x, y, width, height, target-x, target-y].
+    pxs_gfx_rect: [i32; 6],
+    pxs_gfx_size: i32,
 }
 
 impl MaterialRenderInfo {
@@ -92,7 +98,22 @@ impl MaterialRenderInfo {
             texture_overlay,
             overlay_type,
             density,
+            pxs_gfx: None,
+            pxs_gfx_rect: [0; 6],
+            pxs_gfx_size: 0,
         }
+    }
+
+    pub fn with_pxs_graphics(
+        mut self,
+        texture: Option<String>,
+        rect: [i32; 6],
+        size: i32,
+    ) -> Self {
+        self.pxs_gfx = texture;
+        self.pxs_gfx_rect = rect;
+        self.pxs_gfx_size = size;
+        self
     }
 }
 
@@ -241,6 +262,14 @@ pub fn default_owner_color(owner: i32) -> Color {
 const CATEGORY_BACKGROUND_FLAG: i32 = 1 << 20;
 const CATEGORY_PARALLAX_FLAG: i32 = 1 << 21;
 const CATEGORY_FOREGROUND_FLAG: i32 = 1 << 23;
+
+#[derive(Clone, Copy)]
+enum ObjectRenderPass {
+    Background,
+    Normal,
+    ForegroundNonParallax,
+    ForegroundParallax,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DefinitionSprite {
@@ -1041,6 +1070,14 @@ impl GraphicsSystem {
         let lighting = Self::lighting_factor(environment.settings.time_of_day);
 
         self.draw_sky(snapshot.sky.as_ref(), environment, events, lighting);
+        // C4D_Background objects live in Game.BackObjects and draw between
+        // sky and landscape (C4Viewport.cpp:1051-1063).
+        self.draw_objects(
+            &snapshot.objects,
+            lighting,
+            owner_colors,
+            ObjectRenderPass::Background,
+        );
         let textured_landscape = self.draw_ground(
             environment.ambient_temperature,
             snapshot.landscape.as_ref(),
@@ -1058,12 +1095,22 @@ impl GraphicsSystem {
                 lighting,
             );
         }
-        self.draw_objects(&snapshot.objects, lighting, owner_colors);
-        self.draw_precipitation(
-            environment.precipitation,
-            environment.ambient_temperature,
-            snapshot.frame,
+        // C4Viewport draws sync-relevant C4PXS after the landscape and before
+        // objects. Weather precipitation reaches this same path after the
+        // simulation creates rain/snow PXS; there is no procedural viewport
+        // rain layer (C4Viewport.cpp:1056-1078; C4PXS.cpp:242-307).
+        self.draw_pxs(&snapshot.particles, lighting);
+        self.draw_objects(
+            &snapshot.objects,
             lighting,
+            owner_colors,
+            ObjectRenderPass::Normal,
+        );
+        self.draw_objects(
+            &snapshot.objects,
+            lighting,
+            owner_colors,
+            ObjectRenderPass::ForegroundNonParallax,
         );
         // C4Object::Draw attaches no energy/magic bars to world objects —
         // energy presentation lives in the HUD corner (DrawCursorInfo,
@@ -1074,6 +1121,12 @@ impl GraphicsSystem {
         let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, input.focus.id);
         self.draw_selection_marks(snapshot, &highlight_ids, input.owner, origin_x, origin_y, zoom);
         self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom);
+        self.draw_objects(
+            &snapshot.objects,
+            lighting,
+            owner_colors,
+            ObjectRenderPass::ForegroundParallax,
+        );
 
         let content_surface = std::mem::replace(&mut self.surface, main_surface);
 
@@ -1640,65 +1693,199 @@ impl GraphicsSystem {
         }
     }
 
-    fn draw_precipitation(
-        &mut self,
-        precipitation: i32,
-        ambient_temperature: i32,
-        frame: u64,
-        lighting: f32,
-    ) {
-        if precipitation == 0 {
-            return;
+    fn draw_pxs(&mut self, particles: &[ParticleSnapshot], lighting: f32) {
+        // C4PXSSystem::Draw is deliberately two-pass: every old-style
+        // pixel/velocity line first, then every material sprite. Thus a
+        // graphical PXS overlays every old-style PXS regardless of slot
+        // order (C4PXS.cpp:248-307).
+        for particle in particles {
+            if !self.pxs_visible(particle) {
+                continue;
+            }
+            let Some(material_name) = particle
+                .definition_id
+                .strip_prefix("material/pxs/")
+                .map(str::to_ascii_lowercase)
+            else {
+                continue;
+            };
+            let Some(material) = self.material_render_info.get(&material_name) else {
+                continue;
+            };
+            if self.pxs_graphics(material).is_some() {
+                continue;
+            }
+            let material = material.clone();
+            self.draw_old_style_pxs(particle, &material, lighting);
         }
 
-        if precipitation > 0 {
-            if ambient_temperature <= 0 {
-                let intensity = precipitation.clamp(0, 100) as usize;
-                let flakes = intensity.saturating_mul(2).max(16);
-                for idx in 0..flakes {
-                    let offset = frame as usize * 7 + idx * 19;
-                    let x = ((idx * 41 + offset) % self.surface_width as usize) as u32;
-                    let y = (offset % self.surface_height as usize) as u32;
-                    let color = Color::new(236, 236, 252, 220).modulate(lighting);
-                    let _ = self.surface.set_pixel(x, y, color);
-                    if y + 1 < self.surface_height {
-                        let _ = self.surface.set_pixel(x, y + 1, color);
-                    }
-                }
-            } else {
-                let intensity = precipitation.clamp(0, 100) as usize;
-                let streaks = intensity.saturating_mul(3).max(12);
-                for idx in 0..streaks {
-                    let offset = frame as usize * 11 + idx * 17;
-                    let x = ((idx * 53 + offset) % self.surface_width as usize) as u32;
-                    let base_y = (offset % self.surface_height as usize) as i32;
-                    for step in 0..4 {
-                        let y = base_y - step;
-                        if y < 0 {
-                            continue;
-                        }
-                        let color = Color::new(148, 176, 220, 160).modulate(lighting);
-                        let _ = self.surface.set_pixel(x, y as u32, color);
-                    }
-                }
+        let mut compacted_slot = 0u32;
+        for particle in particles {
+            let Some(material_name) = particle
+                .definition_id
+                .strip_prefix("material/pxs/")
+                .map(str::to_ascii_lowercase)
+            else {
+                continue;
+            };
+            let fallback_slot = compacted_slot;
+            compacted_slot = compacted_slot.wrapping_add(1);
+            if !self.pxs_visible(particle) {
+                continue;
             }
-        } else {
-            let dryness = precipitation.saturating_neg().clamp(0, 100) as usize;
-            let shimmer_count = dryness.saturating_mul(2).max(8);
-            for idx in 0..shimmer_count {
-                let offset = frame as usize * 5 + idx * 23;
-                let x = ((idx * 67 + offset) % self.surface_width as usize) as u32;
-                let band = offset % 6;
-                let y = self.surface_height.saturating_sub(1 + band as u32);
-                let color = if band % 2 == 0 {
-                    Color::new(212, 180, 88, 200)
-                } else {
-                    Color::new(176, 132, 64, 180)
-                }
-                .modulate(lighting);
-                let _ = self.surface.set_pixel(x, y, color);
-            }
+            let Some(material) = self.material_render_info.get(&material_name).cloned() else {
+                continue;
+            };
+            let Some((texture, rect)) = self
+                .pxs_graphics(&material)
+                .map(|(texture, rect)| (texture.clone(), rect))
+            else {
+                continue;
+            };
+            let slot = particle.pxs_slot.unwrap_or(fallback_slot) as usize % 500;
+            self.draw_graphical_pxs(particle, &material, &texture, rect, slot, lighting);
         }
+    }
+
+    fn pxs_visible(&self, particle: &ParticleSnapshot) -> bool {
+        // VisibleRect is the world target rectangle enlarged by 20 and tests
+        // the CURRENT fixtoi position before either pass. It intentionally
+        // does not draw a long velocity line merely because that line crosses
+        // the viewport (C4PXS.cpp:245-259,283-288).
+        let [x, y, _, _] = Self::pxs_fixed(particle);
+        let x = lc_engine::math::fixtoi(x);
+        let y = lc_engine::math::fixtoi(y);
+        let zoom = self.viewport_zoom.max(f32::EPSILON);
+        let left = self.viewport_x.floor() as i32 - 20;
+        let top = self.viewport_y.floor() as i32 - 20;
+        let width = (self.surface.width() as f32 / zoom).ceil() as i32 + 40;
+        let height = (self.surface.height() as f32 / zoom).ceil() as i32 + 40;
+        x >= left && x < left + width && y >= top && y < top + height
+    }
+
+    fn pxs_graphics(
+        &self,
+        material: &MaterialRenderInfo,
+    ) -> Option<(&ImageData, [i32; 6])> {
+        let rect = material.pxs_gfx_rect;
+        if rect[2] <= 0 || rect[3] <= 0 || material.pxs_gfx_size <= 0 {
+            return None;
+        }
+        material
+            .pxs_gfx
+            .as_deref()
+            .and_then(|name| self.material_textures.get(&name.to_ascii_lowercase()))
+            .map(|texture| (texture, rect))
+    }
+
+    fn pxs_fixed(particle: &ParticleSnapshot) -> [lc_engine::math::C4Fixed; 4] {
+        particle.pxs_fixed.map_or_else(
+            || {
+                [
+                    lc_engine::math::ftofix(particle.position.x),
+                    lc_engine::math::ftofix(particle.position.y),
+                    lc_engine::math::ftofix(particle.velocity.x),
+                    lc_engine::math::ftofix(particle.velocity.y),
+                ]
+            },
+            |raw| raw.map(lc_engine::math::C4Fixed::from_raw),
+        )
+    }
+
+    fn draw_old_style_pxs(
+        &mut self,
+        particle: &ParticleSnapshot,
+        material: &MaterialRenderInfo,
+        lighting: f32,
+    ) {
+        let [x, y, xdir, ydir] = Self::pxs_fixed(particle);
+        let moving = lc_engine::math::fixtoi(xdir) != 0 || lc_engine::math::fixtoi(ydir) != 0;
+        let mut transparency = i32::from(material.alpha[0]);
+        if moving {
+            let len = lc_engine::math::fixtoi(xdir.abs() + ydir.abs()).max(1);
+            transparency = transparency.max(195 - (195 - transparency) / len);
+        }
+        let color = Color::new(
+            material.color[0],
+            material.color[1],
+            material.color[2],
+            255u8.saturating_sub(transparency as u8),
+        )
+        .modulate(lighting);
+        let screen = |wx: f32, wy: f32| {
+            (
+                (wx - self.viewport_x) * self.viewport_zoom,
+                (wy - self.viewport_y) * self.viewport_zoom,
+            )
+        };
+        let end = screen(x.to_float(), y.to_float());
+        if moving {
+            let start = screen((x - xdir).to_float(), (y - ydir).to_float());
+            draw_pxs_line(&mut self.surface, start, end, color);
+        } else {
+            draw_pxs_pixel(&mut self.surface, end.0.round() as i32, end.1.round() as i32, color);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_graphical_pxs(
+        &mut self,
+        particle: &ParticleSnapshot,
+        material: &MaterialRenderInfo,
+        texture: &ImageData,
+        rect: [i32; 6],
+        slot: usize,
+        lighting: f32,
+    ) {
+        let [x, y, _, _] = Self::pxs_fixed(particle);
+        let facet_width = rect[2];
+        let facet_height = rect[3];
+        let phases_x = texture.width() as i32 / facet_width;
+        let phases_y = texture.height() as i32 / facet_height;
+        if phases_x <= 0 || phases_y <= 0 {
+            self.draw_old_style_pxs(particle, material, lighting);
+            return;
+        }
+        let phase_count = (phases_x * phases_y).max(1) as usize;
+        let z = 1
+            + (((slot / phase_count) ^ 341) % material.pxs_gfx_size as usize) as i32;
+        let phase_x = (slot % phases_x as usize) as i32;
+        let phase_y = ((slot / phases_x as usize) % phases_y as usize) as i32;
+        let world_x = lc_engine::math::fixtoi(x) + z * rect[4] / facet_width;
+        let world_y = lc_engine::math::fixtoi(y) + z * rect[5] / facet_width;
+        let draw_height = z * facet_height / facet_width;
+        if draw_height <= 0 {
+            return;
+        }
+        let target = GuiRect::from_origin_size(
+            GuiPoint::new(
+                (world_x as f32 - self.viewport_x) * self.viewport_zoom,
+                (world_y as f32 - self.viewport_y) * self.viewport_zoom,
+            ),
+            GuiSize::new(
+                z as f32 * self.viewport_zoom,
+                draw_height as f32 * self.viewport_zoom,
+            ),
+        );
+        let source = SourceRect::new(
+            rect[0] + facet_width * phase_x,
+            rect[1] + facet_height * phase_y,
+            facet_width,
+            facet_height,
+        );
+        let facet_third = (facet_width / 3).max(1);
+        // C++ stores transparency in the high byte. The signed expression
+        // intentionally narrows to that byte after its <=255 cap
+        // (C4PXS.cpp:300-304; StdGL.cpp:437-469).
+        let modulation_transparency = ((facet_third - z) * 16).min(255) as u8;
+        draw_pxs_image_region(
+            &mut self.surface,
+            &target,
+            texture,
+            &source,
+            modulation_transparency,
+            lighting,
+        );
     }
 
     /// Per-pixel landscape rendering from the sim plane: every pixel
@@ -1945,11 +2132,9 @@ impl GraphicsSystem {
         objects: &[ObjectSnapshot],
         lighting: f32,
         owner_colors: &HashMap<i32, Color>,
+        pass: ObjectRenderPass,
     ) {
-        let mut background = Vec::new();
-        let mut midground = Vec::new();
-        let mut foreground = Vec::new();
-        let mut parallax = Vec::new();
+        let mut selected = Vec::new();
 
         for object in objects {
             if object.status != ObjectStatus::Normal {
@@ -1960,16 +2145,32 @@ impl GraphicsSystem {
             if object.container.is_some() {
                 continue;
             }
-            if object.category & CATEGORY_BACKGROUND_FLAG != 0 {
-                background.push(object);
-            } else if object.category & CATEGORY_FOREGROUND_FLAG != 0 {
-                if object.category & CATEGORY_PARALLAX_FLAG != 0 {
-                    parallax.push(object);
-                } else {
-                    foreground.push(object);
+            match pass {
+                ObjectRenderPass::Background => {
+                    if object.category & CATEGORY_BACKGROUND_FLAG != 0 {
+                        selected.push(object);
+                    }
                 }
-            } else {
-                midground.push(object);
+                ObjectRenderPass::Normal => {
+                    if object.category & (CATEGORY_BACKGROUND_FLAG | CATEGORY_FOREGROUND_FLAG) == 0
+                    {
+                        selected.push(object);
+                    }
+                }
+                ObjectRenderPass::ForegroundNonParallax => {
+                    if object.category & CATEGORY_FOREGROUND_FLAG != 0
+                        && object.category & CATEGORY_PARALLAX_FLAG == 0
+                    {
+                        selected.push(object);
+                    }
+                }
+                ObjectRenderPass::ForegroundParallax => {
+                    if object.category & CATEGORY_FOREGROUND_FLAG != 0
+                        && object.category & CATEGORY_PARALLAX_FLAG != 0
+                    {
+                        selected.push(object);
+                    }
+                }
             }
         }
 
@@ -1983,27 +2184,11 @@ impl GraphicsSystem {
             });
         }
 
-        sort_for_render(&mut background);
-        sort_for_render(&mut midground);
-        sort_for_render(&mut foreground);
-        sort_for_render(&mut parallax);
-
-        let ordered: Vec<_> = background
-            .into_iter()
-            .chain(midground)
-            .chain(foreground)
-            .collect();
-        for object in &ordered {
+        sort_for_render(&mut selected);
+        for object in &selected {
             self.paint_object(object, lighting, owner_colors);
         }
-        for object in &ordered {
-            self.paint_object_top_face(object, owner_colors);
-        }
-
-        for object in &parallax {
-            self.paint_object(object, lighting, owner_colors);
-        }
-        for object in &parallax {
+        for object in &selected {
             self.paint_object_top_face(object, owner_colors);
         }
     }
@@ -3644,6 +3829,177 @@ fn object_color(object: &ObjectSnapshot) -> Color {
     Color::opaque(r, g, b)
 }
 
+fn draw_pxs_pixel(surface: &mut Surface, x: i32, y: i32, color: Color) {
+    if x < 0 || y < 0 || x >= surface.width() as i32 || y >= surface.height() as i32 {
+        return;
+    }
+    let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
+    let _ = surface.set_pixel(x as u32, y as u32, blend_color_over(color, background));
+}
+
+fn draw_pxs_line(
+    surface: &mut Surface,
+    start: (f32, f32),
+    end: (f32, f32),
+    color: Color,
+) {
+    // Integer raster counterpart of CStdGL::DrawLineDw's GL_LINES call. Its
+    // vertices are shifted by 0.5, and GL's diamond-exit rule makes the
+    // segment half-open at its final endpoint (StdGL.cpp:893-933).
+    let Some((start, end)) = clip_pxs_line(surface, start, end) else {
+        return;
+    };
+    let (mut x0, mut y0) = (start.0.round() as i32, start.1.round() as i32);
+    let (x1, y1) = (end.0.round() as i32, end.1.round() as i32);
+    if x0 == x1 && y0 == y1 {
+        draw_pxs_pixel(surface, x0, y0, color);
+        return;
+    }
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut error = dx + dy;
+    while x0 != x1 || y0 != y1 {
+        draw_pxs_pixel(surface, x0, y0, color);
+        let doubled = error * 2;
+        if doubled >= dy {
+            error += dy;
+            x0 += sx;
+        }
+        if doubled <= dx {
+            error += dx;
+            y0 += sy;
+        }
+    }
+}
+
+fn clip_pxs_line(
+    surface: &Surface,
+    start: (f32, f32),
+    end: (f32, f32),
+) -> Option<((f32, f32), (f32, f32))> {
+    if surface.width() == 0 || surface.height() == 0 {
+        return None;
+    }
+    // GL clips C4PXS velocity lines to the render target. Liang-Barsky keeps
+    // a malicious/extreme xdir from turning the CPU raster into a multi-
+    // billion-step loop while preserving the in-target segment.
+    let (x0, y0) = (f64::from(start.0), f64::from(start.1));
+    let (dx, dy) = (f64::from(end.0) - x0, f64::from(end.1) - y0);
+    if !(x0.is_finite() && y0.is_finite() && dx.is_finite() && dy.is_finite()) {
+        return None;
+    }
+    let mut enter = 0.0f64;
+    let mut exit = 1.0f64;
+    let bounds = [
+        (-dx, x0),
+        (dx, f64::from(surface.width() - 1) - x0),
+        (-dy, y0),
+        (dy, f64::from(surface.height() - 1) - y0),
+    ];
+    for (direction, distance) in bounds {
+        if direction.abs() <= f64::EPSILON {
+            if distance < 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let ratio = distance / direction;
+        if direction < 0.0 {
+            enter = enter.max(ratio);
+        } else {
+            exit = exit.min(ratio);
+        }
+        if enter > exit {
+            return None;
+        }
+    }
+    Some((
+        ((x0 + enter * dx) as f32, (y0 + enter * dy) as f32),
+        ((x0 + exit * dx) as f32, (y0 + exit * dy) as f32),
+    ))
+}
+
+fn draw_pxs_image_region(
+    surface: &mut Surface,
+    target: &GuiRect,
+    image: &ImageData,
+    source: &SourceRect,
+    modulation_transparency: u8,
+    lighting: f32,
+) {
+    if target.size.width <= 0.0
+        || target.size.height <= 0.0
+        || source.width <= 0
+        || source.height <= 0
+    {
+        return;
+    }
+    if image.width() == 0 || image.height() == 0 {
+        return;
+    }
+    let scale_x = target.size.width / source.width as f32;
+    let scale_y = target.size.height / source.height as f32;
+    let right = target.origin.x + target.size.width;
+    let bottom = target.origin.y + target.size.height;
+    let first_x = (target.origin.x - 0.5).ceil() as i32;
+    let first_y = (target.origin.y - 0.5).ceil() as i32;
+    let tile_size = cpp_tex_size(image.width(), image.height()) as i32;
+    for y in first_y.max(0)..surface.height() as i32 {
+        let pixel_y = y as f32 + 0.5;
+        if pixel_y >= bottom {
+            break;
+        }
+        let source_edge_y = source.y as f32 + (pixel_y - target.origin.y) / scale_y;
+        let tile_y = (source_edge_y.floor() as i32).div_euclid(tile_size) * tile_size;
+        let sample_y = source_edge_y - 0.5 - tile_y as f32;
+        for x in first_x.max(0)..surface.width() as i32 {
+            let pixel_x = x as f32 + 0.5;
+            if pixel_x >= right {
+                break;
+            }
+            let source_edge_x = source.x as f32 + (pixel_x - target.origin.x) / scale_x;
+            let tile_x = (source_edge_x.floor() as i32).div_euclid(tile_size) * tile_size;
+            let sample_x = source_edge_x - 0.5 - tile_x as f32;
+            let sample = bilinear_sample_tile(
+                image,
+                tile_x,
+                tile_y,
+                tile_size,
+                sample_x,
+                sample_y,
+            );
+            // PerformBlt's shader and fixed-function paths ADD the filtered
+            // texture and modulation transparency, then clamp. Keep filtered
+            // alpha in float until the final framebuffer store
+            // (StdGL.cpp:490-503,1070-1079,1320-1324).
+            let texture_transparency = 255.0 - sample[3].clamp(0.0, 255.0);
+            let transparency = (texture_transparency + f32::from(modulation_transparency))
+                .min(255.0);
+            let opacity = 255.0 - transparency;
+            if opacity <= 0.0 {
+                continue;
+            }
+            let alpha = opacity / 255.0;
+            let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
+            let blend = |source: f32, destination: u8| -> u8 {
+                ((source * lighting).clamp(0.0, 255.0) * alpha
+                    + f32::from(destination) * (1.0 - alpha))
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            let color = Color::new(
+                blend(sample[0], background.r),
+                blend(sample[1], background.g),
+                blend(sample[2], background.b),
+                255,
+            );
+            let _ = surface.set_pixel(x as u32, y as u32, color);
+        }
+    }
+}
+
 fn blend_color_over(source: Color, dest: Color) -> Color {
     let alpha = source.a as u16;
     if alpha == 0 {
@@ -4672,48 +5028,378 @@ mod tests {
         assert_ne!(ground, Color::opaque(8, 12, 24));
     }
 
-    #[test]
-    fn precipitation_renders_over_world() {
-        let mut snapshot = make_snapshot();
-        snapshot.environment.ambient_temperature = 10;
-        let mut base_settings = snapshot.environment.settings;
-        base_settings = base_settings.with_temperature(10);
-        snapshot.environment.settings = base_settings;
+    fn pxs_particle(
+        material: &str,
+        fixed: [i32; 4],
+        slot: u32,
+    ) -> lc_engine::ParticleSnapshot {
+        lc_engine::ParticleSnapshot {
+            definition_id: format!("material/pxs/{material}"),
+            position: FloatVector2::new(
+                fixed[0] as f32 / 65_536.0,
+                fixed[1] as f32 / 65_536.0,
+            ),
+            velocity: FloatVector2::new(
+                fixed[2] as f32 / 65_536.0,
+                fixed[3] as f32 / 65_536.0,
+            ),
+            life: 0,
+            parameter_a: 0.0,
+            parameter_b: 0,
+            layer: lc_engine::ParticleLayer::Global,
+            pxs_fixed: Some(fixed),
+            pxs_slot: Some(slot),
+        }
+    }
 
-        let focus = &snapshot.objects[0];
+    #[test]
+    fn old_style_pxs_draws_cpp_velocity_line_with_alpha() {
+        // C4PXSSystem::Draw uses the material palette color and turns moving
+        // pixels into x-xdir/y-ydir velocity lines. Its Clonk transparency is
+        // max(alpha, 195-(195-alpha)/fixtoi(|xdir|+|ydir|))
+        // (C4PXS.cpp:242-275).
         let mut graphics = GraphicsSystem::new(
-            320,
-            180,
-            150,
-            "Weather Scenario",
+            12,
+            12,
+            12,
+            "PXS",
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
             empty_hud_graphics(),
         );
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "rain".to_string(),
+            MaterialRenderInfo::new([200, 100, 50, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25),
+        )])));
+        let particle = pxs_particle("rain", [8 << 16, 8 << 16, 2 << 16, 0], 3);
 
-        let dry_viewports = vec![ViewportInput::from_focus(focus)];
-        graphics.render_frame(&snapshot, &dry_viewports);
-        let baseline = graphics.surface().pixels().to_vec();
+        graphics.draw_pxs(std::slice::from_ref(&particle), 1.0);
 
-        let mut rainy = snapshot.clone();
-        rainy.environment.precipitation = 80;
-        let mut rainy_settings = rainy.environment.settings;
-        rainy_settings = rainy_settings.with_precipitation(80);
-        rainy_settings = rainy_settings.with_precipitation_strength(80);
-        rainy.environment.settings = rainy_settings;
-        let rainy_viewports = vec![ViewportInput::from_focus(&rainy.objects[0])];
+        assert_eq!(
+            graphics.surface().get_pixel(6, 8),
+            Some(Color::opaque(123, 61, 30)),
+            "two-pixel velocity has C++ transparency 98 (opacity 157)"
+        );
+        assert_eq!(graphics.surface().get_pixel(7, 8), Some(Color::opaque(123, 61, 30)));
+        assert_eq!(
+            graphics.surface().get_pixel(8, 8),
+            Some(Color::opaque(0, 0, 0)),
+            "GL_LINES applies the diamond-exit rule and omits the final endpoint",
+        );
+    }
 
-        graphics.render_frame(&rainy, &rainy_viewports);
-        let rainy_pixels = graphics.surface().pixels();
-        let differences = rainy_pixels
-            .iter()
-            .zip(baseline.iter())
-            .filter(|(wet, dry)| wet != dry)
-            .count();
-        assert!(
-            differences > 0,
-            "expected precipitation to affect rendered frame"
+    #[test]
+    fn offscreen_pxs_endpoint_culls_crossing_velocity_line() {
+        // The enlarged VisibleRect checks fixtoi(x,y) before drawing the
+        // x-xdir velocity line (C4PXS.cpp:245-275). This endpoint is far
+        // outside that rect even though its 100px line crosses the surface.
+        let mut graphics = GraphicsSystem::new(
+            12,
+            12,
+            12,
+            "PXS",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(1, 2, 3));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "rain".to_string(),
+            MaterialRenderInfo::new([255, 255, 255, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25),
+        )])));
+        let particle = pxs_particle("rain", [100 << 16, 6 << 16, 100 << 16, 0], 3);
+
+        graphics.draw_pxs(std::slice::from_ref(&particle), 1.0);
+
+        assert!(graphics
+            .surface()
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [1, 2, 3, 255]));
+    }
+
+    #[test]
+    fn graphical_pxs_uses_saved_slot_phase_and_falls_back_without_texture() {
+        // The graphical pass derives phase and z from cnt2, the slot WITHIN
+        // the 500-entry chunk, then applies PXSGfxRt offsets and size
+        // (C4PXS.cpp:280-307). A missing PXSGfx texture stays in the first,
+        // old-style pass (C4Material.cpp:382-385; C4PXS.cpp:257-260).
+        let mut graphics = GraphicsSystem::new(
+            16,
+            16,
+            16,
+            "PXS",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        let mut snow_pixels = vec![0; 12 * 6 * 4];
+        for y in 0..6usize {
+            for x in 0..12usize {
+                let index = (y * 12 + x) * 4;
+                if x < 6 {
+                    snow_pixels[index + 2] = 255;
+                } else {
+                    snow_pixels[index] = 255;
+                }
+                snow_pixels[index + 3] = 128;
+            }
+        }
+        graphics.set_material_textures(Arc::new(HashMap::from([(
+            "snow".to_string(),
+            ImageData::new(12, 6, snow_pixels),
+        )])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([
+            (
+                "snow".to_string(),
+                MaterialRenderInfo::new([0, 255, 0, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25)
+                    .with_pxs_graphics(Some("Snow".to_string()), [0, 0, 6, 6, 6, 0], 1),
+            ),
+            (
+                "ash".to_string(),
+                MaterialRenderInfo::new([90, 80, 70, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25)
+                    .with_pxs_graphics(Some("Missing".to_string()), [0, 0, 2, 2, 0, 0], 3),
+            ),
+        ])));
+        let graphical = pxs_particle("snow", [4 << 16, 4 << 16, 0, 0], 507);
+        let fallback = pxs_particle("ash", [10 << 16, 10 << 16, 0, 0], 1);
+
+        graphics.draw_pxs(&[graphical, fallback], 1.0);
+
+        // 507 % 500 = 7: phase x=1; z=1; tx=6 shifts x by one. Texture
+        // transparency 127 plus modulation 16 gives 143, i.e. source opacity
+        // 112 over black (PerformBlt alpha addition).
+        assert_eq!(graphics.surface().get_pixel(5, 4), Some(Color::opaque(112, 0, 0)));
+        assert_eq!(graphics.surface().get_pixel(10, 10), Some(Color::opaque(90, 80, 70)));
+    }
+
+    #[test]
+    fn graphical_pxs_uses_gl_linear_filtering_across_its_source_facet() {
+        // C4Facet::DrawX supplies a 2x4 source facet and a non-exact 4x4
+        // target, which enables GL_LINEAR (C4Facet.cpp:296-303;
+        // StdDDraw2.cpp:663-669; StdGL.cpp:527-531). Internal facet edges are
+        // not sampler boundaries, so the first/last columns blend adjacent
+        // sheet texels too.
+        let columns = [
+            Color::opaque(255, 0, 0),
+            Color::opaque(0, 0, 0),
+            Color::opaque(255, 255, 255),
+            Color::opaque(0, 0, 255),
+        ];
+        let pixels = (0..4)
+            .flat_map(|_| columns)
+            .flat_map(|color| [color.r, color.g, color.b, color.a])
+            .collect();
+        let image = ImageData::new(4, 4, pixels);
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.fill(Color::opaque(0, 0, 0));
+
+        draw_pxs_image_region(
+            &mut surface,
+            &GuiRect::new(0.0, 0.0, 4.0, 4.0),
+            &image,
+            &SourceRect::new(1, 0, 2, 4),
+            0,
+            1.0,
+        );
+
+        assert_eq!(surface.get_pixel(0, 1), Some(Color::opaque(64, 0, 0)));
+        assert_eq!(surface.get_pixel(1, 1), Some(Color::opaque(64, 64, 64)));
+        assert_eq!(surface.get_pixel(2, 1), Some(Color::opaque(191, 191, 191)));
+        assert_eq!(surface.get_pixel(3, 1), Some(Color::opaque(191, 191, 255)));
+    }
+
+    #[test]
+    fn scalar_precipitation_without_real_pxs_does_not_paint_the_viewport() {
+        // C4Viewport has no synthetic precipitation pass: weather launches
+        // the FXP1 precipitation object, whose callback inserts real material
+        // into the simulation (C4Viewport.cpp:1056-1078; C4Weather.cpp:48-58,
+        // 205-214). A scalar alone must not alter otherwise identical pixels.
+        let render = |snapshot: &SimulationSnapshot| {
+            let mut graphics = GraphicsSystem::new(
+                80,
+                60,
+                60,
+                "Weather",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.render_frame(snapshot, &[ViewportInput::from_focus(&snapshot.objects[0])]);
+            graphics.surface().pixels().to_vec()
+        };
+        let dry = make_snapshot();
+        let mut scalar_only = dry.clone();
+        scalar_only.environment.precipitation = 80;
+        scalar_only.environment.settings = scalar_only
+            .environment
+            .settings
+            .with_precipitation(80)
+            .with_precipitation_strength(80);
+
+        assert_eq!(render(&scalar_only), render(&dry));
+    }
+
+    #[test]
+    fn render_frame_places_pxs_between_landscape_and_objects() {
+        // C4Viewport::Draw orders Landscape -> PXS -> Objects
+        // (C4Viewport.cpp:1056-1073). The red 1x1 object must therefore cover
+        // the blue old-style PXS at the same world position.
+        let mut snapshot = make_snapshot();
+        snapshot.particles.push(pxs_particle(
+            "rain",
+            [100 << 16, 100 << 16, 0, 0],
+            0,
+        ));
+        let sprites = solid_sprite(
+            "TestObject",
+            1,
+            1,
+            Color::opaque(240, 0, 0),
+            Some(DefinitionRect::new(0, 0, 1, 1)),
+            false,
+        );
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "PXS order",
+            test_font(),
+            Arc::clone(&sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "rain".to_string(),
+            MaterialRenderInfo::new([0, 0, 240, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25),
+        )])));
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::from_focus(&snapshot.objects[0])],
+        );
+        let (screen_x, screen_y) = graphics
+            .world_to_screen(0, snapshot.objects[0].position)
+            .expect("active viewport");
+
+        assert_eq!(
+            graphics
+                .surface()
+                .get_pixel(screen_x.round() as u32, screen_y.round() as u32),
+            Some(Color::opaque(240, 0, 0)),
+        );
+
+        let mut background_snapshot = snapshot.clone();
+        background_snapshot.objects[0].category |= CATEGORY_BACKGROUND_FLAG;
+        let mut background_graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "PXS background order",
+            test_font(),
+            sprites,
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        background_graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "rain".to_string(),
+            MaterialRenderInfo::new([0, 0, 240, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25),
+        )])));
+        background_graphics.render_frame(
+            &background_snapshot,
+            &[ViewportInput::from_focus(&background_snapshot.objects[0])],
+        );
+        let (screen_x, screen_y) = background_graphics
+            .world_to_screen(0, background_snapshot.objects[0].position)
+            .expect("active viewport");
+        let lighting = GraphicsSystem::lighting_factor(
+            background_snapshot.environment.settings.time_of_day,
+        );
+
+        assert_eq!(
+            background_graphics
+                .surface()
+                .get_pixel(screen_x.round() as u32, screen_y.round() as u32),
+            Some(Color::opaque(0, 0, 240).modulate(lighting)),
+            "PXS must cover C4D_Background objects drawn before landscape",
+        );
+    }
+
+    #[test]
+    fn foreground_parallax_split_straddles_cursor_marks_like_cpp() {
+        // ForeObjects.DrawIfCategory(... C4D_Parallax, true) draws the
+        // non-parallax foreground before Game.DrawCursors; the false pass
+        // draws parallax/custom-GUI objects afterwards
+        // (C4Viewport.cpp:1080-1103; C4ObjectList.cpp:400-409).
+        let render = |category: i32| {
+            let mut snapshot = make_snapshot();
+            snapshot.objects[0].position = Vector2::new(40, 40);
+            snapshot.objects[0].owner = 1;
+            snapshot.objects[0].category = category;
+            snapshot.landscape = Some(Landscape::flat(128, 80));
+            snapshot.players.push(PlayerState {
+                id: 1,
+                cursor: Some(snapshot.objects[0].id),
+                control: lc_engine::PlayerControlState {
+                    select_flash: 30,
+                    ..Default::default()
+                },
+                ..PlayerState::default()
+            });
+            let sprites = solid_sprite(
+                "TestObject",
+                12,
+                12,
+                Color::opaque(220, 0, 0),
+                Some(DefinitionRect::new(-6, -6, 12, 12)),
+                false,
+            );
+            let hud = HudGraphics {
+                select_mark: Some(ImageData::new(
+                    20,
+                    5,
+                    (0..100).flat_map(|_| [0, 220, 0, 255]).collect(),
+                )),
+                ..Default::default()
+            };
+            let mut graphics = GraphicsSystem::new(
+                80,
+                60,
+                60,
+                "Foreground order",
+                test_font(),
+                sprites,
+                empty_cursor_atlas(),
+                Arc::new(hud),
+            );
+            graphics.render_frame(
+                &snapshot,
+                &[ViewportInput::from_focus(&snapshot.objects[0])],
+            );
+            let (viewport_x, viewport_y) = graphics.viewport();
+            let x = snapshot.objects[0].position.x - viewport_x - 6;
+            let y = snapshot.objects[0].position.y - viewport_y - 6;
+            graphics.surface().get_pixel(x as u32, y as u32)
+        };
+
+        assert_eq!(
+            render(lc_engine::DEFAULT_CATEGORY | CATEGORY_FOREGROUND_FLAG),
+            Some(Color::opaque(0, 220, 0)),
+            "cursor mark covers ordinary foreground",
+        );
+        assert_eq!(
+            render(
+                lc_engine::DEFAULT_CATEGORY
+                    | CATEGORY_FOREGROUND_FLAG
+                    | CATEGORY_PARALLAX_FLAG,
+            ),
+            Some(Color::opaque(220, 0, 0)),
+            "custom-GUI/parallax foreground covers cursor mark",
         );
     }
 

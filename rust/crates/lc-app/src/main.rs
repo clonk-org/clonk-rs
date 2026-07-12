@@ -5160,6 +5160,17 @@ fn material_value_array<const N: usize>(values: Option<Vec<i32>>) -> [u8; N] {
     result
 }
 
+fn material_int_array<const N: usize>(values: Option<Vec<i32>>) -> [i32; N] {
+    let mut result = [0; N];
+    values
+        .into_iter()
+        .flatten()
+        .take(N)
+        .enumerate()
+        .for_each(|(index, value)| result[index] = value);
+    result
+}
+
 fn material_render_info(
     material: &lc_resources::MaterialDefinition,
 ) -> lc_frontend::MaterialRenderInfo {
@@ -5173,6 +5184,12 @@ fn material_render_info(
         let value = value.trim();
         (!value.is_empty()).then(|| value.to_string())
     });
+    let pxs_gfx = material.value("PXSGfx").and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    });
+    let pxs_gfx_rect = material_int_array(material.int_list("PXSGfxRt"));
+    let pxs_gfx_size = material.int("PXSGfxSize").unwrap_or(pxs_gfx_rect[2]);
     lc_frontend::MaterialRenderInfo::new(
         color,
         alpha,
@@ -5180,20 +5197,161 @@ fn material_render_info(
         material.int("OverlayType").unwrap_or(0),
         material.int("Density").unwrap_or(0),
     )
+    .with_pxs_graphics(pxs_gfx, pxs_gfx_rect, pxs_gfx_size)
 }
 
 /// Render metadata from every reachable Material.c4g, keyed by lowercase
 /// material name. Scenario-local definitions win the shared overloads.
+fn resolved_material_groups(scenario_path: &Path) -> Vec<Group> {
+    let mut groups = Group::open(scenario_path)
+        .ok()
+        .and_then(|scenario| {
+            let resolver = InstallDefinitionResolver::new(cached_app_paths().ok());
+            resolver
+                .resolve_definition_groups(&scenario, "Material.c4g")
+                .ok()
+        })
+        .unwrap_or_default();
+    let mut seen: HashSet<String> = groups
+        .iter()
+        .map(|group| scenario_root_key(group.root()))
+        .collect();
+    if let Ok(paths) = cached_app_paths() {
+        for candidate in candidate_material_paths(&paths) {
+            let key = scenario_root_key(&candidate);
+            if seen.insert(key) {
+                if let Ok(group) = Group::open(&candidate) {
+                    groups.push(group);
+                }
+            }
+        }
+    }
+    groups
+}
+
+#[derive(Clone)]
+struct AdmittedMaterialGroup {
+    group: Group,
+    materials: bool,
+    textures: bool,
+}
+
+fn read_group_file_case_insensitive(group: &Group, name: &str) -> Option<Vec<u8>> {
+    group.read_file(name).ok().or_else(|| {
+        group.entries().ok().and_then(|entries| {
+            entries
+                .into_iter()
+                .find(|entry| {
+                    !entry.is_directory
+                        && entry
+                            .relative_path
+                            .file_name()
+                            .and_then(|candidate| candidate.to_str())
+                            .map(|candidate| candidate.eq_ignore_ascii_case(name))
+                            .unwrap_or(false)
+                })
+                .and_then(|entry| group.read_file(entry.relative_path).ok())
+        })
+    })
+}
+
+fn material_texture_stems(group: &Group) -> Vec<String> {
+    group
+        .entries()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| !entry.is_directory)
+        .filter_map(|entry| {
+            let extension = entry
+                .relative_path
+                .extension()
+                .and_then(|extension| extension.to_str())?;
+            if !extension.eq_ignore_ascii_case("png") && !extension.eq_ignore_ascii_case("bmp") {
+                return None;
+            }
+            entry
+                .relative_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_ascii_lowercase)
+        })
+        .collect()
+}
+
+fn admitted_material_groups(scenario_path: &Path) -> Vec<AdmittedMaterialGroup> {
+    let groups = resolved_material_groups(scenario_path);
+    let mut admitted = Vec::new();
+    let mut seen_materials = HashSet::new();
+    let mut seen_textures = HashSet::new();
+    let mut load_materials = true;
+    let mut load_textures = true;
+    for (index, group) in groups.into_iter().enumerate() {
+        if !load_materials && !load_textures {
+            break;
+        }
+        let flags = if index == 0 {
+            read_group_file_case_insensitive(&group, "TexMap.txt")
+                .map(|source| {
+                    lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&source))
+                })
+                .unwrap_or_default()
+        } else {
+            let Some(source) = read_group_file_case_insensitive(&group, "TexMap.txt") else {
+                break;
+            };
+            lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&source))
+        };
+        let current_materials = load_materials;
+        let current_textures = load_textures;
+        let mut next_materials = flags.overload_materials;
+        let mut next_textures = flags.overload_textures;
+        if current_materials {
+            let fresh = lc_resources::MaterialLibrary::from_group(&group)
+                .ok()
+                .map(|library| {
+                    library
+                        .iter()
+                        .filter(|material| {
+                            seen_materials.insert(material.name().to_ascii_lowercase())
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            if fresh == 0 {
+                next_materials = true;
+            }
+        }
+        if current_textures {
+            let fresh = material_texture_stems(&group)
+                .into_iter()
+                .filter(|name| seen_textures.insert(name.clone()))
+                .count();
+            if fresh == 0 {
+                next_textures = true;
+            }
+        }
+        admitted.push(AdmittedMaterialGroup {
+            group,
+            materials: current_materials,
+            textures: current_textures,
+        });
+        load_materials = next_materials;
+        load_textures = next_textures;
+    }
+    admitted
+}
+
 fn load_material_render_info(
     scenario_path: &Path,
 ) -> HashMap<String, lc_frontend::MaterialRenderInfo> {
     let mut render_info = HashMap::new();
-    let mut absorb = |group_path: &Path| {
-        let Ok(group) = Group::open(group_path) else {
-            return;
-        };
+    for source in admitted_material_groups(scenario_path) {
+        if !source.materials {
+            continue;
+        }
+        let group = source.group;
         let Ok(library) = lc_resources::MaterialLibrary::from_group(&group) else {
-            return;
+            continue;
         };
         for material in library.iter() {
             let name = material.name().to_ascii_lowercase();
@@ -5201,42 +5359,89 @@ fn load_material_render_info(
                 .entry(name)
                 .or_insert_with(|| material_render_info(material));
         }
-    };
-    absorb(&scenario_path.join("Material.c4g"));
-    if let Ok(paths) = AppPaths::discover() {
-        for candidate in candidate_material_paths(&paths) {
-            absorb(&candidate);
-        }
     }
     render_info
 }
 
-fn load_scenario_material_textures(scenario_path: &Path) -> HashMap<String, ImageData> {
-    let mut textures = HashMap::new();
-    let candidate = scenario_path.join("Material.c4g");
-    if !candidate.exists() {
-        return textures;
-    }
-    let Ok(group) = Group::open(&candidate) else {
-        return textures;
-    };
+fn absorb_material_texture_group(group: &Group, textures: &mut HashMap<String, ImageData>) {
     let Ok(entries) = group.entries() else {
-        return textures;
+        return;
     };
-    let Ok(resource) = lc_resources::graphics::GraphicsResource::open(&candidate) else {
-        return textures;
+    let Ok(resource) = lc_resources::graphics::GraphicsResource::from_group(group.clone()) else {
+        return;
     };
     for entry in entries {
+        if entry.is_directory {
+            continue;
+        }
         let name = entry.relative_path.to_string_lossy().to_string();
-        let lower = name.to_ascii_lowercase();
-        let Some(stem) = lower.strip_suffix(".png") else {
+        let Some(extension) = entry
+            .relative_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+        else {
             continue;
         };
+        // C4Texture stores PNG in Surface32, which PXSFace consumes; BMP is
+        // Surface8-only and still counts for OverloadTextures above but must
+        // not enable graphical PXS (C4Texture.cpp:149-155;
+        // C4Material.cpp:379-385).
+        if !extension.eq_ignore_ascii_case("png") {
+            continue;
+        }
+        let Some(stem) = entry
+            .relative_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_ascii_lowercase)
+        else {
+            continue;
+        };
+        if textures.contains_key(&stem) {
+            continue;
+        }
         if let Ok(image) = resource.load_image(&name) {
             textures.insert(
-                stem.to_string(),
+                stem,
                 ImageData::new(image.width(), image.height(), image.pixels().to_vec()),
             );
+        }
+    }
+}
+
+fn load_scenario_material_textures(scenario_path: &Path) -> HashMap<String, ImageData> {
+    let mut textures = HashMap::new();
+    // Shared direct groups stay in the process cache below; only scenario
+    // and ancestor groups decode here. Resolver order is overload order, so
+    // the nearest group's texture wins by first insertion.
+    let paths = cached_app_paths().ok();
+    let shared: HashSet<String> = paths
+        .as_deref()
+        .map(|paths| {
+            candidate_material_paths(paths)
+                .into_iter()
+                .map(|path| scenario_root_key(&path))
+                .collect()
+        })
+        .unwrap_or_default();
+    for source in admitted_material_groups(scenario_path) {
+        if !source.textures {
+            continue;
+        }
+        let source_key = scenario_root_key(source.group.root());
+        if shared.contains(&source_key) {
+            if let Some(paths) = paths.as_deref() {
+                let cached = shared_material_texture_images(paths);
+                if let Some(group_textures) = cached.get(&source_key) {
+                    for (name, image) in group_textures {
+                        textures
+                            .entry(name.clone())
+                            .or_insert_with(|| image.clone());
+                    }
+                }
+            }
+        } else {
+            absorb_material_texture_group(&source.group, &mut textures);
         }
     }
     textures
@@ -5245,42 +5450,25 @@ fn load_scenario_material_textures(scenario_path: &Path) -> HashMap<String, Imag
 /// The shared (non-scenario) material textures are scenario-independent —
 /// decode them once per process; scenario activation only re-reads the
 /// scenario-local Material.c4g.
-fn shared_material_texture_images(paths: &AppPaths) -> &'static HashMap<String, ImageData> {
-    static SHARED: std::sync::OnceLock<HashMap<String, ImageData>> = std::sync::OnceLock::new();
+fn shared_material_texture_images(
+    paths: &AppPaths,
+) -> &'static HashMap<String, HashMap<String, ImageData>> {
+    static SHARED: std::sync::OnceLock<HashMap<String, HashMap<String, ImageData>>> =
+        std::sync::OnceLock::new();
     SHARED.get_or_init(|| load_material_texture_images(paths))
 }
 
-fn load_material_texture_images(paths: &AppPaths) -> HashMap<String, ImageData> {
-
-    let mut textures = HashMap::new();
+fn load_material_texture_images(paths: &AppPaths) -> HashMap<String, HashMap<String, ImageData>> {
+    let mut by_group = HashMap::new();
     for candidate in candidate_material_paths(paths) {
         let Ok(group) = Group::open(&candidate) else {
             continue;
         };
-        let Ok(entries) = group.entries() else {
-            continue;
-        };
-        let Ok(resource) = lc_resources::graphics::GraphicsResource::open(&candidate) else {
-            continue;
-        };
-        for entry in entries {
-            let name = entry.relative_path.to_string_lossy().to_string();
-            let lower = name.to_ascii_lowercase();
-            let Some(stem) = lower.strip_suffix(".png") else {
-                continue;
-            };
-            if textures.contains_key(stem) {
-                continue;
-            }
-            if let Ok(image) = resource.load_image(&name) {
-                textures.insert(
-                    stem.to_string(),
-                    ImageData::new(image.width(), image.height(), image.pixels().to_vec()),
-                );
-            }
-        }
+        let mut textures = HashMap::new();
+        absorb_material_texture_group(&group, &mut textures);
+        by_group.insert(scenario_root_key(group.root()), textures);
     }
-    textures
+    by_group
 }
 
 fn try_materials_from_path(path: &Path) -> Result<MaterialSet, lc_resources::MaterialError> {
@@ -11375,18 +11563,10 @@ impl GameApp {
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
         {
-            // Scenario-local textures first (Wall/Brick in GoldRush's own
-            // Material.c4g), the shared sets after (decoded once per
-            // process — they are scenario-independent).
-            let mut textures = load_scenario_material_textures(&path);
-            if let Ok(paths) = AppPaths::discover() {
-                for (name, image) in shared_material_texture_images(&paths) {
-                    textures
-                        .entry(name.clone())
-                        .or_insert_with(|| image.clone());
-                }
-            }
-            self.material_texture_images = Arc::new(textures);
+            // The loader follows the independent NRT_Material texture chain;
+            // admitted shared groups copy from the process cache, while
+            // scenario/ancestor groups decode locally.
+            self.material_texture_images = Arc::new(load_scenario_material_textures(&path));
             self.material_render_info = Arc::new(load_material_render_info(&path));
             self.graphics
                 .set_material_textures(Arc::clone(&self.material_texture_images));
@@ -21090,7 +21270,10 @@ mod tests {
              Alpha=21,22,23,24\n\
              Density=50\n\
              TextureOverlay=Smooth\n\
-             OverlayType=8\n",
+             OverlayType=8\n\
+             PXSGfx=Snow\n\
+             PXSGfxRt=1,2,16,8,-8,-4\n\
+             PXSGfxSize=10\n",
         )
         .expect("material library");
         let definition = library.get("Earth").expect("Earth material");
@@ -21103,8 +21286,130 @@ mod tests {
                 Some("Smooth".to_string()),
                 8,
                 50,
-            ),
+            )
+            .with_pxs_graphics(Some("Snow".to_string()), [1, 2, 16, 8, -8, -4], 10),
         );
+    }
+
+    #[test]
+    fn material_render_info_defaults_pxs_size_to_facet_width() {
+        // PXSGfxSize defaults to PXSGfxRt.Wdt during material compilation
+        // (C4Material.cpp:205-207).
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material]\nName=Lava\nPXSGfx=Lava\nPXSGfxRt=0,0,32,32,-16,-16\n",
+        )
+        .expect("material library");
+        let definition = library.get("Lava").expect("Lava material");
+
+        assert_eq!(
+            material_render_info(definition),
+            lc_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 0)
+                .with_pxs_graphics(Some("Lava".to_string()), [0, 0, 32, 32, -16, -16], 32),
+        );
+    }
+
+    #[test]
+    fn hazard_tutorial_inherits_parent_material_metadata_and_textures() {
+        // C4Game opens the NRT_Material chain from the scenario through its
+        // parent groups before the global material group. Hazard's Tutorial
+        // has no local Material.c4g: Rain and Industrial1.png live in the
+        // parent Hazard.c4f/Material.c4g (C4GameParameters.cpp:211-223;
+        // C4Game.cpp:899-965).
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root")
+            .to_path_buf();
+        let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(repository.as_path()))]);
+        let tutorial = repository.join("content/Hazard.c4f/Tutorial.c4s");
+
+        let render_info = load_material_render_info(&tutorial);
+        assert_eq!(
+            render_info.get("rain"),
+            Some(&lc_frontend::MaterialRenderInfo::new(
+                [7, 35, 140, 7, 35, 140, 7, 35, 140],
+                [0; 6],
+                Some("Liquid".to_string()),
+                0,
+                25,
+            )),
+        );
+        assert_eq!(
+            render_info.get("ashes"),
+            Some(
+                &lc_frontend::MaterialRenderInfo::new(
+                    [90, 78, 40, 82, 80, 78, 100, 96, 90],
+                    [0; 6],
+                    Some("Spots".to_string()),
+                    0,
+                    50,
+                )
+                .with_pxs_graphics(
+                    Some("Ashes".to_string()),
+                    [0, 0, 32, 32, -16, -16],
+                    32,
+                ),
+            ),
+            "the parent default PXSGfxSize=32 must beat global Ashes size 6",
+        );
+        assert!(
+            load_scenario_material_textures(&tutorial).contains_key("industrial1"),
+            "parent-group texture must load through Group::open_child"
+        );
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn presentation_material_and_texture_overload_chains_stop_independently() {
+        // InitMaterialTexture carries separate OverloadMaterials and
+        // OverloadTextures booleans to the next NRT_Material source
+        // (C4Game.cpp:914-977). The local group below admits its parent's
+        // material but deliberately stops before Parent.png.
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+        let root = tempdir().expect("temp material chain");
+        let family = root.path().join("Hazard.c4f");
+        let scenario = family.join("Tutorial.c4s");
+        let local = scenario.join("Material.c4g");
+        let parent = family.join("Material.c4g");
+        fs::create_dir_all(&local).expect("local material group");
+        fs::create_dir_all(&parent).expect("parent material group");
+        fs::write(
+            local.join("TexMap.txt"),
+            "OverloadMaterials\n1=Local-Local\n",
+        )
+        .expect("local texmap");
+        fs::write(local.join("Local.c4m"), "[Material]\nName=Local\n")
+            .expect("local material");
+        fs::write(
+            local.join("Local.png"),
+            include_bytes!("../../../../content/Material.c4g/Snow.png"),
+        )
+        .expect("local texture");
+        fs::write(parent.join("TexMap.txt"), "1=Parent-Parent\n").expect("parent texmap");
+        fs::write(parent.join("Parent.c4m"), "[Material]\nName=Parent\n")
+            .expect("parent material");
+        fs::write(
+            parent.join("Parent.png"),
+            include_bytes!("../../../../content/Material.c4g/Snow.png"),
+        )
+        .expect("parent texture");
+
+        let metadata = load_material_render_info(&scenario);
+        let textures = load_scenario_material_textures(&scenario);
+        assert!(metadata.contains_key("local"));
+        assert!(metadata.contains_key("parent"));
+        assert!(textures.contains_key("local"));
+        assert!(
+            !textures.contains_key("parent"),
+            "no OverloadTextures means the parent texture is not admitted",
+        );
+
+        reset_cached_app_paths();
     }
 
     #[test]
