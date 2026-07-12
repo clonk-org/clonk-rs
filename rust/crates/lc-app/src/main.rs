@@ -10350,6 +10350,7 @@ impl GameApp {
             .network
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        let locally_controlled = local_client_id == Some(join.at_client) && !info.is_script_player();
         let player_file = if local_client_id == Some(join.by_client) {
             let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
             match PlayerFile::load_from_path(&path) {
@@ -10383,8 +10384,18 @@ impl GameApp {
                 return;
             }
         };
-        if let Err(error) = self.engine.join_player(config) {
-            tracing::warn!(info_id = join.info_id, %error, "player join failed");
+        match self.engine.join_player(config) {
+            Ok(joined) if locally_controlled => {
+                let mut local_players = self.engine.snapshot().hud.local_players;
+                if !local_players.contains(&joined.number) {
+                    local_players.push(joined.number);
+                    self.engine.set_local_players(local_players);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(info_id = join.info_id, %error, "player join failed");
+            }
         }
     }
 
@@ -20485,6 +20496,12 @@ mod tests {
             .expect("embedded player joined before the simulation tick");
         assert_eq!(joined.name, "Network Tyler");
         assert_eq!((joined.score, joined.total_playing_time), (42, 99));
+        // AtClient, independently of the remote ByClient source selection,
+        // makes this user player local (src/C4Player.cpp:1871-1877).
+        assert!(
+            app.snapshot.hud.local_players.contains(&joined.id),
+            "a user player targeted at the local client is locally controlled"
+        );
     }
 
     #[test]
