@@ -15836,7 +15836,10 @@ fn evaluate_landscape_query(
             // satisfy (C4Wrappers.h:73-76, C4Material.h:202).
             LandscapeQuery::SemiSolid => landscape.is_semi_solid_at(x, y),
             LandscapeQuery::Liquid => landscape.is_liquid_at(x, y),
-            LandscapeQuery::Sky => !landscape.is_solid_at(x, y),
+            // FnGBackSky is the historical background query: sky means the
+            // pixel is not marked IFT, independent of material density
+            // (C4Script.cpp:2252-2256).
+            LandscapeQuery::Sky => !landscape.is_ift_at(x, y),
         },
         None => fallback_without_context(query),
     }
@@ -30288,8 +30291,13 @@ func Trigger(object pOther)
     }
 
     #[test]
-    fn g_back_sky_reports_inverse_of_solid() {
-        let landscape = Landscape::flat(20, 5);
+    fn g_back_sky_reports_inverse_of_ift() {
+        // C++ oracle: FnGBackSky returns !GBackIFT, not !GBackSolid
+        // (src/C4Script.cpp:2252-2256). Ordinary solid earth is therefore
+        // "sky" to this legacy query, while an IFT-marked tunnel is not.
+        let mut landscape = Landscape::flat(20, 5);
+        landscape.set_height(2, 2);
+        landscape.set_tunnel_column(3, vec![(0, 4)]);
         let world = HostWorldContext::with_landscape(
             Vec::<HostWorldObject>::new(),
             Some(landscape),
@@ -30300,18 +30308,20 @@ func Trigger(object pOther)
             1,
             false,
         );
-        let (solid, _) = with_effect_context(None, &[], world.clone(), 1, || {
-            g_back_solid(&[Value::Int(2), Value::Int(2)])
-        });
-        let (sky, _) = with_effect_context(None, &[], world, 1, || {
+        let (ordinary_solid, _) = with_effect_context(None, &[], world.clone(), 1, || {
             g_back_sky(&[Value::Int(2), Value::Int(2)])
         });
-        let solid_value = solid.expect("GBackSolid succeeds");
-        let sky_value = sky.expect("GBackSky succeeds");
-        match (solid_value, sky_value) {
-            (Value::Bool(solid), Value::Bool(sky)) => assert_eq!(sky, !solid),
-            other => panic!("expected bool results, got {:?}", other),
-        }
+        let (tunnel, _) = with_effect_context(None, &[], world, 1, || {
+            g_back_sky(&[Value::Int(3), Value::Int(2)])
+        });
+        assert_eq!(
+            ordinary_solid.expect("GBackSky on ordinary solid succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            tunnel.expect("GBackSky in tunnel succeeds"),
+            Value::Bool(false)
+        );
     }
 
     #[test]
