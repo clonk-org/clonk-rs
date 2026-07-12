@@ -642,14 +642,12 @@ fn emit_frame_controls(
             lc_engine::ControlPacket::SyncCheck(packet) => {
                 controls.push(NetworkControl::SyncCheck(packet));
             }
-            // CID_JoinPlr/CID_PlrInfo (remote player joins): the engine's
-            // join pipeline consumes these in the shadow-diff runtime;
-            // lc-app's network session has no remote-join event yet —
-            // forwarding them (a join NetworkEvent driving
-            // Engine::join_player like ffi.rs handle_join_player) is the
-            // network-multiplayer join feature, not a control input.
-            lc_engine::ControlPacket::JoinPlayer(_)
-            | lc_engine::ControlPacket::PlayerInfo(_) => {}
+            lc_engine::ControlPacket::PlayerInfo(info) => {
+                controls.push(NetworkControl::PlayerInfo(info));
+            }
+            lc_engine::ControlPacket::JoinPlayer(join) => {
+                controls.push(NetworkControl::JoinPlayer(join));
+            }
             lc_engine::ControlPacket::Unknown { .. } => {}
         }
     }
@@ -819,6 +817,58 @@ mod tests {
         assert!(
             event_rx.try_recv().is_err(),
             "one aggregate must produce one scheduling event"
+        );
+    }
+
+    #[test]
+    fn ready_frame_retains_admission_controls_in_decoded_order() {
+        // C4Control executes the same list order used by PreExecute, and the
+        // complete network control preserves each client's packet order
+        // (src/C4Control.cpp:73-109;
+        // src/C4GameControlNetwork.cpp:741-769).
+        let info = lc_engine::PlayerInfoControlData {
+            client_id: 3,
+            by_client: 4,
+            ..Default::default()
+        };
+        let join = lc_engine::JoinPlayerControlData {
+            at_client: 3,
+            info_id: 7,
+            by_client: 4,
+            ..Default::default()
+        };
+        let player = control_packet_for_event(7, ControlEvent::Press(ControlButton::Right), 4)
+            .expect("player control packet");
+        let frame = LegacyControlFrame {
+            client_id: HOST_CLIENT_ID,
+            tick: 23,
+            timestamp_ms: 0,
+            controls: vec![
+                lc_engine::ControlPacket::PlayerInfo(info.clone()),
+                player,
+                lc_engine::ControlPacket::JoinPlayer(join.clone()),
+            ],
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
+
+        let NetworkEvent::ReadyTick { tick, controls } =
+            event_rx.recv().expect("ready event")
+        else {
+            panic!("expected ready tick");
+        };
+        assert_eq!(tick, 23);
+        assert_eq!(
+            controls,
+            vec![
+                NetworkControl::PlayerInfo(info),
+                NetworkControl::Player {
+                    owner: 7,
+                    event: ControlEvent::Press(ControlButton::Right),
+                },
+                NetworkControl::JoinPlayer(join),
+            ]
         );
     }
 
