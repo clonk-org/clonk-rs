@@ -1637,53 +1637,30 @@ impl GraphicsSystem {
             )];
         }
 
-        let columns = match count {
-            1 => 1,
-            2 => 1,
-            _ => (count as f32).sqrt().ceil() as usize,
-        }
-        .max(1);
-        let rows = count.div_ceil(columns).max(1);
-
+        // C4GraphicsSystem::RecalculateViewports uses floor(sqrt(count)) rows.
+        // Any remainder adds one column to the first rows; pixel remainders
+        // from the integer cell divisions stay available for the background.
+        let rows = ((count as f32).sqrt() as usize).max(1);
+        let base_columns = count / rows;
+        let longer_rows = count % rows;
         let available_width = self.surface_width;
-        let base_width = available_width / columns as u32;
-        let leftover_width = available_width % columns as u32;
-        let base_height = (available_height as u32) / rows as u32;
-        let leftover_height = (available_height as u32) % rows as u32;
-
+        let row_height = available_height as u32 / rows as u32;
         let mut rects = Vec::with_capacity(count);
-        let mut viewport_index = 0usize;
-        let mut y = overlay_height.max(0) as u32;
         for row in 0..rows {
-            let mut x = 0u32;
-            let row_height = base_height + if row < leftover_height as usize { 1 } else { 0 };
+            let columns = base_columns + usize::from(row < longer_rows);
+            let column_width = available_width / columns as u32;
             for col in 0..columns {
-                if viewport_index >= count {
-                    break;
-                }
-                let col_width = base_width + if col < leftover_width as usize { 1 } else { 0 };
-                if col_width == 0 || row_height == 0 {
-                    rects.push(SurfaceRect::new(x as i32, y as i32, col_width, row_height));
-                } else {
-                    let margin = if rows == 1 && columns == 1 { 0 } else { 2 };
-                    let mut rect_x = x as i32 + margin;
-                    let mut rect_y = y as i32 + margin;
-                    let mut rect_width = col_width.saturating_sub((margin * 2).max(0) as u32);
-                    let mut rect_height = row_height.saturating_sub((margin * 2).max(0) as u32);
-                    if rect_width == 0 {
-                        rect_width = col_width;
-                        rect_x = x as i32;
-                    }
-                    if rect_height == 0 {
-                        rect_height = row_height;
-                        rect_y = y as i32;
-                    }
-                    rects.push(SurfaceRect::new(rect_x, rect_y, rect_width, rect_height));
-                }
-                x += col_width;
-                viewport_index += 1;
+                // Graphics.SplitscreenDividers defaults to enabled. C++ takes
+                // four pixels only from non-last cells, leaving no outer inset.
+                let divider_width = if col + 1 < columns { 4 } else { 0 };
+                let divider_height = if row + 1 < rows { 4 } else { 0 };
+                rects.push(SurfaceRect::new(
+                    (col as u32 * column_width) as i32,
+                    overlay_height + (row as i32 * row_height as i32),
+                    column_width.saturating_sub(divider_width),
+                    row_height.saturating_sub(divider_height),
+                ));
             }
-            y += row_height;
         }
 
         rects
@@ -7858,6 +7835,69 @@ mod tests {
         assert_eq!(
             rect.height as i32,
             240 - hud::UPPER_BOARD_HEIGHT - board_height
+        );
+    }
+
+    fn viewport_layout(width: u32, height: u32, count: usize) -> Vec<SurfaceRect> {
+        GraphicsSystem::new(
+            width,
+            height,
+            height as i32,
+            "Viewport layout",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        )
+        .layout_viewports(count)
+    }
+
+    #[test]
+    fn splitscreen_layout_matches_cpp_for_two_players() {
+        assert_eq!(
+            viewport_layout(800, 600, 2),
+            vec![
+                SurfaceRect::new(0, 0, 396, 600),
+                SurfaceRect::new(400, 0, 400, 600),
+            ]
+        );
+    }
+
+    #[test]
+    fn splitscreen_layout_matches_cpp_for_three_players() {
+        assert_eq!(
+            viewport_layout(800, 600, 3),
+            vec![
+                SurfaceRect::new(0, 0, 262, 600),
+                SurfaceRect::new(266, 0, 262, 600),
+                SurfaceRect::new(532, 0, 266, 600),
+            ]
+        );
+    }
+
+    #[test]
+    fn splitscreen_layout_matches_cpp_for_four_players() {
+        assert_eq!(
+            viewport_layout(800, 600, 4),
+            vec![
+                SurfaceRect::new(0, 0, 396, 296),
+                SurfaceRect::new(400, 0, 400, 296),
+                SurfaceRect::new(0, 300, 396, 300),
+                SurfaceRect::new(400, 300, 400, 300),
+            ]
+        );
+    }
+
+    #[test]
+    fn splitscreen_layout_leaves_cpp_integer_division_remainder_unassigned() {
+        assert_eq!(
+            viewport_layout(801, 601, 4),
+            vec![
+                SurfaceRect::new(0, 0, 396, 296),
+                SurfaceRect::new(400, 0, 400, 296),
+                SurfaceRect::new(0, 300, 396, 300),
+                SurfaceRect::new(400, 300, 400, 300),
+            ]
         );
     }
 

@@ -365,7 +365,8 @@ impl RawPacket {
 
         // Packet names come from `PktHandlingData` on the C++ side. The values we care about are
         // a small subset so far; everything else is recorded as `Unknown`.
-        const PID_NONE: u8 = 0x00;
+        // C4PacketType::PID_None (src/C4PacketBase.h).
+        const PID_NONE: u8 = 0xff;
         const CID_PLR_CONTROL: u8 = 0xA1;
 
         if id == PID_NONE {
@@ -760,7 +761,7 @@ mod tests {
       ByClient=1\r\n\
 \r\n\
   [IDPacket]\r\n\
-    ID=0\r\n";
+    ID=255\r\n";
 
         let packets = parse_control_ini(input).expect("parse control log");
         assert_eq!(
@@ -888,7 +889,7 @@ mod tests {
         let input = "\
 [Control]\n\
   [IDPacket]\n\
-    ID=255\n\
+    ID=0\n\
     [Mystery]\n\
       Foo=\"bar\"\n";
 
@@ -896,7 +897,7 @@ mod tests {
         assert_eq!(packets.len(), 1);
         match &packets[0] {
             ControlPacket::Unknown { id, name, fields } => {
-                assert_eq!(id.raw(), 255);
+                assert_eq!(id.raw(), 0);
                 assert_eq!(name.as_deref(), Some("Mystery"));
                 assert_eq!(fields.get("Foo").map(String::as_str), Some("bar"));
             }

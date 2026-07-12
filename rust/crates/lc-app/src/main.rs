@@ -66,7 +66,7 @@ use lc_engine::{
     ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
     JoinPlayerConfig, Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection,
     MenuRequestKind, MessageKind, MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate,
-    PlayerConfig, PlayerStatus, Recorder,
+    PlayerConfig, Recorder,
     Recording, RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig,
     SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
     FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
@@ -84,7 +84,7 @@ use lc_graphics::{
     Transform, TrueTypeFont,
 };
 use lc_gui::{ButtonTextures, Rect as GuiRect};
-use lc_network::{ClientId, ParticipantKind};
+use lc_network::{ClientId, ParticipantKind, Tick};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
     load_endeavour_font, scenario as resource_scenario, DefCore as ResourceDefCore,
@@ -92,7 +92,9 @@ use lc_resources::{
     ResourceDefinition as ResourceDefinitionData,
 };
 use menu_controls::map_menu_control_event;
-use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
+use network::{
+    ClientSettings, HostSettings, NetworkControl, NetworkEvent, NetworkManager, NetworkMode,
+};
 use object_menu::{
     definition_menu_picture, engine_script_menu_pointer_target,
     render_engine_script_menu_with_gamma, EngineScriptMenuPointerTarget, ObjectMenuAction,
@@ -373,6 +375,30 @@ impl SyncCheckState {
     fn prune_before(&mut self, threshold: i32) {
         self.local.retain(|&frame, _| frame >= threshold);
         self.remote.retain(|&frame, _| frame >= threshold);
+    }
+}
+
+#[derive(Debug, Default)]
+struct NetworkTickGate {
+    ready: BTreeMap<Tick, Vec<NetworkControl>>,
+}
+
+impl NetworkTickGate {
+    fn queue(&mut self, expected_tick: Tick, tick: Tick, controls: Vec<NetworkControl>) {
+        self.ready.retain(|queued_tick, _| *queued_tick >= expected_tick);
+        if tick < expected_tick {
+            return;
+        }
+        self.ready.entry(tick).or_insert(controls);
+    }
+
+    fn take_exact(&mut self, expected_tick: Tick) -> Option<Vec<NetworkControl>> {
+        self.ready.retain(|queued_tick, _| *queued_tick >= expected_tick);
+        self.ready.remove(&expected_tick)
+    }
+
+    fn clear(&mut self) {
+        self.ready.clear();
     }
 }
 
@@ -3317,6 +3343,8 @@ struct GameApp {
     network_lobby: Option<NetworkLobbyState>,
     startup_network_connection: Option<StartupNetworkConnection>,
     sync_checks: SyncCheckState,
+    network_ticks: NetworkTickGate,
+    executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
     recording: Option<RecordingSession>,
@@ -6395,6 +6423,8 @@ impl GameApp {
             network_lobby,
             startup_network_connection: None,
             sync_checks: SyncCheckState::new(),
+            network_ticks: NetworkTickGate::default(),
+            executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(|p| p.recordings_dir()),
             recording: None,
@@ -7156,12 +7186,26 @@ impl GameApp {
         // (C4Player::DirectCom, src/C4Player.cpp:1376).
         self.show_startup_hint = false;
         let mut event = event;
+        let local_main_menu_control = self.ingame_menu.is_some()
+            || self.save_browser.is_some()
+            || matches!(
+                event,
+                ControlEvent::Command {
+                    command: ControlCommand::PlayerMenu,
+                    ..
+                }
+            );
         if self.menu_controls_active() {
             if let Some(mapped) = map_menu_control_event(event) {
                 event = mapped;
             }
         }
-        if self.mode == AppMode::Running {
+        // C4Game::LocalPlayerControl handles COM_PlayerMenu and an active
+        // C4MainMenu locally; only cursor/object-menu controls enter the
+        // synchronized input queue (src/C4Game.cpp:3595-3624).
+        if self.mode == AppMode::Running
+            && (self.network.is_none() || local_main_menu_control)
+        {
             let consumed = if let ControlEvent::Command { command, kind } = event {
                 self.handle_menu_command_failsafe(command, kind)?
             } else {
@@ -7194,9 +7238,9 @@ impl GameApp {
             return Ok(());
         }
         if let Some(network) = self.network.as_ref() {
-            let frame = self.engine.frame();
-            let tick = u32::try_from(frame).unwrap_or(u32::MAX);
+            let tick = self.local_control_submission_tick();
             network.submit_local_control(self.local_owner, event, tick);
+            return Ok(());
         }
         self.dispatch_control_event_for_owner(self.local_owner, event)
     }
@@ -7246,11 +7290,17 @@ impl GameApp {
             && (self.object_menu.is_some() || self.ingame_menu.is_some())
     }
 
+    fn local_control_submission_tick(&self) -> Tick {
+        self.executing_ready_tick
+            .map(|tick| tick.saturating_add(1))
+            .unwrap_or_else(|| u32::try_from(self.engine.frame()).unwrap_or(u32::MAX))
+    }
+
     fn clear_local_controls(&mut self) -> Result<(), EngineError> {
         if let Some(network) = self.network.as_ref() {
-            let frame = self.engine.frame();
-            let tick = u32::try_from(frame).unwrap_or(u32::MAX);
+            let tick = self.local_control_submission_tick();
             network.submit_local_control(self.local_owner, ControlEvent::ClearPressed, tick);
+            return Ok(());
         }
         let _ = self.input.handle_event(
             &mut self.engine,
@@ -7267,7 +7317,6 @@ impl GameApp {
             return Ok(());
         }
         self.close_object_menu();
-        self.clear_local_controls()?;
         self.ingame_menu = IngameMenuState::main_menu(&self.main_menu_conditions());
         Ok(())
     }
@@ -7292,6 +7341,16 @@ impl GameApp {
 
     fn close_ingame_menu(&mut self) {
         self.ingame_menu = None;
+    }
+
+    fn close_ingame_menu_by_user(&mut self) -> Result<(), EngineError> {
+        if self.ingame_menu.take().is_some() {
+            // C4MainMenu::OnClosed queues exactly one synchronized clear;
+            // teardown/reset calls use close_ingame_menu and stay silent
+            // (src/C4MainMenu.cpp:319-329; src/C4Player.cpp:1392-1395).
+            self.clear_local_controls()?;
+        }
+        Ok(())
     }
 
     fn open_object_menu(&mut self) -> Result<bool, EngineError> {
@@ -7367,9 +7426,9 @@ impl GameApp {
                     if reopen {
                         self.open_ingame_menu()?;
                     }
-                } else if self.object_menu.is_some() {
-                    self.close_object_menu();
-                } else if !self.open_object_menu()? {
+                } else if self.ingame_menu.is_some() {
+                    self.close_ingame_menu_by_user()?;
+                } else {
                     self.open_ingame_menu()?;
                 }
             }
@@ -7682,12 +7741,12 @@ impl GameApp {
         match outcome {
             MenuOutcome::Action { action, close_menu } => {
                 if close_menu {
-                    self.close_ingame_menu();
+                    self.close_ingame_menu_by_user()?;
                 }
                 self.apply_ingame_menu_action(action)?;
             }
             MenuOutcome::Closed { close_action } => {
-                self.close_ingame_menu();
+                self.close_ingame_menu_by_user()?;
                 if let Some(action) = close_action {
                     self.apply_ingame_menu_action(action)?;
                 }
@@ -8266,13 +8325,12 @@ impl GameApp {
         {
             for event in events {
                 match event {
-                    NetworkEvent::Control { owner, event } => {
+                    NetworkEvent::ReadyTick { tick, controls } => {
                         if self.mode == AppMode::Running {
-                            self.dispatch_control_event_for_owner(owner, event)?;
+                            let expected_tick =
+                                u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                            self.network_ticks.queue(expected_tick, tick, controls);
                         }
-                    }
-                    NetworkEvent::SyncCheck { packet } => {
-                        self.handle_sync_check(packet);
                     }
                     NetworkEvent::PeerConnected {
                         client_id,
@@ -8567,7 +8625,7 @@ impl GameApp {
                 AppMode::Running => {
                     if state == ElementState::Pressed {
                         if self.ingame_menu.is_some() {
-                            self.close_ingame_menu();
+                            self.close_ingame_menu_by_user()?;
                         } else {
                             self.open_ingame_menu()?;
                         }
@@ -10241,6 +10299,38 @@ impl GameApp {
         Ok(())
     }
 
+    fn apply_ready_controls(
+        &mut self,
+        tick: Tick,
+        controls: Vec<NetworkControl>,
+    ) -> Result<(), EngineError> {
+        debug_assert!(self.executing_ready_tick.is_none());
+        self.executing_ready_tick = Some(tick);
+        let mut result = Ok(());
+        for control in controls {
+            result = match control {
+                NetworkControl::Player { owner, event } => {
+                    self.dispatch_control_event_for_owner(owner, event)
+                }
+                NetworkControl::SyncCheck(packet) => {
+                    self.handle_sync_check(packet);
+                    Ok(())
+                }
+            };
+            if result.is_err()
+                || !matches!(self.mode, AppMode::Running)
+                || self.network.is_none()
+            {
+                break;
+            }
+        }
+        // Controls generated reentrantly above used tick + 1. Clear the
+        // marker before propagating errors or returning after session state
+        // changes so later local input cannot inherit a stale target tick.
+        self.executing_ready_tick = None;
+        result
+    }
+
     fn update(&mut self) -> Result<(), EngineError> {
         self.poll_startup_network_connection();
         self.process_network_events()?;
@@ -10260,6 +10350,22 @@ impl GameApp {
                     let frame = self.engine.frame();
                     let tick = u32::try_from(frame).unwrap_or(u32::MAX);
                     network.finalize_tick(tick);
+
+                    // Network mode mirrors C4Game::Execute's Prepare gate:
+                    // CtrlReady(ControlTick) must succeed or the frame returns
+                    // before control/simulation (src/C4GameControl.cpp:262-265;
+                    // src/C4Game.cpp:786-797). The decoded packet order is
+                    // authoritative, including interleaved SyncCheck packets.
+                    let Some(controls) = self.network_ticks.take_exact(tick) else {
+                        return Ok(());
+                    };
+                    self.apply_ready_controls(tick, controls)?;
+                    // A client mismatch disconnects and returns to the menu.
+                    // Do not execute one extra simulation frame after the
+                    // ordered SyncCheck has changed session state.
+                    if !matches!(self.mode, AppMode::Running) || self.network.is_none() {
+                        return Ok(());
+                    }
                 }
                 self.snapshot = self.engine.tick()?;
                 self.handle_menu_requests();
@@ -10460,9 +10566,14 @@ impl GameApp {
         if let Some((local, remote)) = self.sync_checks.record_local(check.clone()) {
             self.evaluate_sync_checks(local, remote);
         }
-        let tick = u32::try_from(self.snapshot.frame).unwrap_or(u32::MAX);
-        if let Some(network) = self.network.as_ref() {
-            network.submit_sync_check(tick, check);
+        // C4GameControl::DoSyncCheck stores a client's local check for later
+        // comparison; only the host queues a C4ControlSyncCheck into network
+        // control (src/C4GameControl.cpp:441-468).
+        if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            let tick = u32::try_from(self.snapshot.frame).unwrap_or(u32::MAX);
+            if let Some(network) = self.network.as_ref() {
+                network.submit_sync_check(tick, check);
+            }
         }
         self.sync_checks
             .prune_before(frame_i32.saturating_sub(SYNC_CHECK_HISTORY));
@@ -10797,7 +10908,7 @@ impl GameApp {
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
-        let viewports = collect_viewport_inputs(&self.snapshot, self.local_owner, self.focus_id);
+        let viewports = collect_viewport_inputs(&self.snapshot, self.focus_id);
         // Capture CStdDDraw's installed ramp before render_frame latches any
         // runtime SetGamma controls for the next pass. C++ draws every GUI
         // overlay below with this same pre-latch ramp
@@ -11652,6 +11763,7 @@ impl GameApp {
         self.sky = None;
         self.snapshot = self.engine.snapshot();
         self.sync_checks.clear();
+        self.network_ticks.clear();
         self.refresh_object_menu();
         self.focus_id = None;
         self.focus_snapshot = None;
@@ -11857,6 +11969,10 @@ impl GameApp {
             );
             return Err(format!("Failed to start {}: {err}", scenario.title));
         }
+        // Scenario state application may replace the engine's local-player
+        // projection. C++ derives LocalControl at the actual player join, so
+        // restore the authoritative local set after that join completes.
+        self.engine.set_local_players([self.local_owner]);
 
         self.sky = scenario_data.sky().map(sky_render_state_from_config);
         self.snapshot = self.engine.snapshot();
@@ -12155,6 +12271,7 @@ impl GameApp {
         self.status_text.clear();
         self.energy_fraction = 0.0;
         self.sync_checks.clear();
+        self.network_ticks.clear();
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
         self.ingame_menu = None;
@@ -12724,14 +12841,26 @@ fn copy_surface(src: &[u8], width: u32, height: u32, dest: &mut [u8]) {
 
 fn collect_viewport_inputs<'a>(
     snapshot: &'a SimulationSnapshot,
-    local_owner: i32,
     fallback_focus: Option<ObjectId>,
 ) -> Vec<ViewportInput<'a>> {
-    let mut seen = HashSet::new();
     let mut inputs = Vec::new();
+    let fallback_object = fallback_focus
+        .and_then(|focus_id| snapshot.object(focus_id))
+        .or_else(|| snapshot.objects.first());
 
-    for state in &snapshot.players {
-        if state.status == PlayerStatus::Eliminated {
+    // C++ creates viewports from C4Player::LocalControl, not from the global
+    // player list (C4Game.cpp:2736-2746). The snapshot's local_players list is
+    // the authoritative projection of that flag. Keep its order and keep
+    // eliminated players until they are actually removed.
+    for owner in &snapshot.hud.local_players {
+        let Some(state) = snapshot.players.iter().find(|state| state.id == *owner) else {
+            continue;
+        };
+        if state.viewports.is_empty() {
+            if let Some(object) = fallback_object {
+                let center = Vector2::new(object.position.x, object.position.y);
+                inputs.push(ViewportInput::new(state.id, center, 1.0, object));
+            }
             continue;
         }
         for viewport in &state.viewports {
@@ -12739,13 +12868,10 @@ fn collect_viewport_inputs<'a>(
                 .focus
                 .or(state.cursor)
                 .or_else(|| state.crew.first().copied());
-            let Some(focus_id) = focus_id else {
-                continue;
-            };
-            if !seen.insert(focus_id) {
-                continue;
-            }
-            if let Some(object) = snapshot.object(focus_id) {
+            if let Some(object) = focus_id
+                .and_then(|focus_id| snapshot.object(focus_id))
+                .or(fallback_object)
+            {
                 let center = Vector2::new(viewport.center.x, viewport.center.y);
                 inputs.push(ViewportInput::new(state.id, center, viewport.zoom, object));
             }
@@ -12753,28 +12879,13 @@ fn collect_viewport_inputs<'a>(
     }
 
     if inputs.is_empty() {
-        if let Some(focus_id) = fallback_focus {
-            if let Some(object) = snapshot.object(focus_id) {
-                let center = Vector2::new(object.position.x, object.position.y);
-                if seen.insert(object.id) {
-                    inputs.push(ViewportInput::new(object.owner, center, 1.0, object));
-                }
-            }
-        }
-    }
-
-    if inputs.is_empty() {
-        if let Some(object) = snapshot.objects.first() {
+        // Fullscreen C++ owns exactly one NO_OWNER observer viewport when no
+        // local player viewport exists (C4FullScreen.cpp:499-535).
+        if let Some(object) = fallback_object {
             let center = Vector2::new(object.position.x, object.position.y);
-            inputs.push(ViewportInput::new(object.owner, center, 1.0, object));
+            inputs.push(ViewportInput::new(OWNER_NONE, center, 1.0, object));
         }
     }
-
-    inputs.sort_by(|a, b| {
-        let a_key = (a.owner != local_owner, a.owner);
-        let b_key = (b.owner != local_owner, b.owner);
-        a_key.cmp(&b_key)
-    });
 
     inputs
 }
@@ -20070,6 +20181,269 @@ mod tests {
             .expect("start sandbox scenario");
         wait_for_running(&mut app);
         app
+    }
+
+    #[test]
+    fn viewport_selection_uses_only_authoritative_local_players() {
+        // C++ creates one viewport for each LocalControl player, keeps it
+        // through elimination, and falls back to one NO_OWNER observer only
+        // when no local viewport exists (C4Game.cpp:2736-2746;
+        // C4Player.cpp:2015-2037; C4FullScreen.cpp:499-535).
+        let app = new_running_sandbox_app();
+        let mut snapshot = app.snapshot.clone();
+        let local_owner = app.local_owner;
+        let local = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == local_owner)
+            .cloned()
+            .expect("sandbox local player");
+        let focus = local
+            .viewports
+            .first()
+            .and_then(|viewport| viewport.focus)
+            .or(local.cursor)
+            .or_else(|| local.crew.first().copied())
+            .expect("sandbox local viewport focus");
+        let mut second = local.clone();
+        second.id = local_owner + 1;
+        second.name = "Second".to_string();
+
+        // A remote player appears first and even shares focus; locality, not
+        // global focus de-duplication or player-list order, decides selection.
+        snapshot.players = vec![second.clone(), local.clone()];
+        snapshot.hud.local_players = vec![local_owner];
+        assert_eq!(
+            collect_viewport_inputs(&snapshot, Some(focus))
+                .iter()
+                .map(|viewport| viewport.owner)
+                .collect::<Vec<_>>(),
+            vec![local_owner]
+        );
+
+        // Two local players retain two viewports even when both currently
+        // focus the same object.
+        snapshot.hud.local_players = vec![local_owner, second.id];
+        assert_eq!(
+            collect_viewport_inputs(&snapshot, Some(focus))
+                .iter()
+                .map(|viewport| viewport.owner)
+                .collect::<Vec<_>>(),
+            vec![local_owner, second.id]
+        );
+
+        // Elimination does not close C++ viewports; removal from the player
+        // list does. Preserve the viewport's own center and zoom as proof this
+        // is not the observer fallback.
+        let mut eliminated = local.clone();
+        eliminated.status = lc_engine::PlayerStatus::Eliminated;
+        eliminated.viewports[0].center = Vector2::new(123, 456);
+        eliminated.viewports[0].zoom = 1.75;
+        snapshot.players = vec![eliminated];
+        snapshot.hud.local_players = vec![local_owner];
+        let eliminated_views = collect_viewport_inputs(&snapshot, Some(focus));
+        assert_eq!(eliminated_views.len(), 1);
+        assert_eq!(eliminated_views[0].owner, local_owner);
+        assert_eq!(eliminated_views[0].center, Vector2::new(123, 456));
+        assert_eq!(eliminated_views[0].zoom, 1.75);
+
+        // A stale local ID without a player produces no phantom viewport.
+        snapshot.players = vec![local.clone()];
+        snapshot.hud.local_players = vec![local_owner, second.id];
+        assert_eq!(collect_viewport_inputs(&snapshot, Some(focus)).len(), 1);
+
+        // With no locals, remote ownership must not leak into the observer.
+        snapshot.players = vec![second];
+        snapshot.hud.local_players.clear();
+        let observer = collect_viewport_inputs(&snapshot, Some(focus));
+        assert_eq!(observer.len(), 1);
+        assert_eq!(observer[0].owner, OWNER_NONE);
+    }
+
+    #[test]
+    fn network_tick_waits_for_exact_ready_batch_and_ignores_duplicate() {
+        // C4Game::Execute returns before simulation when control preparation
+        // is not ready (src/C4Game.cpp:786-787), then executes the retrieved
+        // control before game ticks (src/C4Game.cpp:797-805).
+        let mut app = new_running_sandbox_app();
+        let remote_owner = app.local_owner + 1;
+        app.engine
+            .register_player(PlayerConfig::new(remote_owner, "Remote"))
+            .expect("register remote player");
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        app.engine
+            .player_mut(remote_owner)
+            .expect("remote player")
+            .control
+            .control_style = true;
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let initial_frame = app.engine.frame();
+        app.dispatch_control_event(ControlEvent::Press(ControlButton::Right))
+            .expect("submit local input");
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_RIGHT),
+            0,
+            "network input is submitted but not dispatched immediately"
+        );
+
+        app.update().expect("wait without ready batch");
+        assert_eq!(
+            app.engine.frame(),
+            initial_frame,
+            "simulation cannot advance before its exact ready tick"
+        );
+
+        let controls = vec![
+            NetworkControl::Player {
+                owner: app.local_owner,
+                event: ControlEvent::Press(ControlButton::Right),
+            },
+            NetworkControl::Player {
+                owner: remote_owner,
+                event: ControlEvent::Press(ControlButton::Left),
+            },
+        ];
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: controls.clone(),
+            })
+            .expect("queue ready aggregate");
+        app.update().expect("execute ready batch");
+        assert_eq!(app.engine.frame(), initial_frame + 1);
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_RIGHT),
+            0,
+            "local aggregate control is applied"
+        );
+        assert_ne!(
+            app.engine
+                .player(remote_owner)
+                .expect("remote player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+            "remote aggregate control is applied"
+        );
+        let local_last_com = app
+            .engine
+            .player(app.local_owner)
+            .expect("local player")
+            .control
+            .last_com;
+
+        event_tx
+            .send(NetworkEvent::ReadyTick { tick, controls })
+            .expect("queue duplicate aggregate");
+        app.update().expect("ignore duplicate ready batch");
+        assert_eq!(
+            app.engine.frame(),
+            initial_frame + 1,
+            "a stale duplicate cannot advance simulation twice"
+        );
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .last_com,
+            local_last_com,
+            "a stale duplicate cannot dispatch its controls twice"
+        );
+    }
+
+    #[test]
+    fn network_main_menu_is_local_and_clears_only_when_user_closes_it() {
+        // COM_PlayerMenu and C4MainMenu navigation are local UI; closing the
+        // menu queues only COM_ClearPressedComs for synchronized execution
+        // (src/C4Game.cpp:3595-3615; src/C4MainMenu.cpp:319-329).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let player_menu = ControlEvent::Command {
+            command: ControlCommand::PlayerMenu,
+            kind: CommandKind::Press,
+        };
+
+        app.dispatch_control_event(player_menu)
+            .expect("open local player menu");
+        assert!(app.ingame_menu.is_some(), "player menu opens immediately");
+        assert!(
+            commands.take_submitted_local().is_empty(),
+            "opening C4MainMenu does not submit synchronized control"
+        );
+
+        app.dispatch_control_event(player_menu)
+            .expect("close local player menu");
+        assert!(app.ingame_menu.is_none(), "player menu closes immediately");
+        assert_eq!(
+            commands.take_submitted_local(),
+            vec![(app.local_owner, ControlEvent::ClearPressed, tick)],
+            "one user-driven close queues one clear for the still-open tick"
+        );
+    }
+
+    #[test]
+    fn ready_tick_follow_on_uses_next_open_tick_and_clears_marker() {
+        // Input generated while C4Control::Execute is running goes back into
+        // Game.Input for the next unsent control tick
+        // (src/C4GameControl.cpp:314-318; src/C4GameControlNetwork.cpp:145-176).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.open_ingame_menu().expect("open local menu");
+        assert!(
+            commands.take_submitted_local().is_empty(),
+            "opening the main menu does not clear controls"
+        );
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![NetworkControl::Player {
+                    owner: app.local_owner,
+                    event: ControlEvent::Command {
+                        command: ControlCommand::MenuClose,
+                        kind: CommandKind::Press,
+                    },
+                }],
+            })
+            .expect("queue synchronized close");
+
+        app.update().expect("apply ready close");
+
+        assert_eq!(
+            commands.take_submitted_local(),
+            vec![(
+                app.local_owner,
+                ControlEvent::ClearPressed,
+                tick.saturating_add(1),
+            )],
+            "a reentrant follow-on targets the next open tick"
+        );
+        assert_eq!(
+            app.executing_ready_tick, None,
+            "the ready marker is cleared after application"
+        );
     }
 
     #[test]
