@@ -346,3 +346,60 @@ fn dragon_rock_scroll_transfer_zone_callbacks_persist_cpp_names() {
         );
     }
 }
+
+#[test]
+fn dragon_rock_object_lookup_carries_script1_state_into_script3() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+    join_local_player(&mut engine, "Dragon Rock intro object parity");
+
+    // InitializePlayer starts the ordinary C4GameScriptHost counter. Its
+    // every-tenth-frame Execute post-increments Counter before calling
+    // Script%d (C4ScriptHost.cpp:222-230), so Script1 runs on frame 20.
+    for _ in 0..20 {
+        engine.tick().expect("Dragon Rock reaches shipped Script1");
+    }
+
+    // GetEndboss calls Object(EVIL_MAGE_OBJ), where EVIL_MAGE_OBJ is the
+    // Objects.txt Number 1758 (Drachenfels.c4s/Script.c:10,194-198,243-279).
+    // FnObject resolves that exact number through SafeObjectPointer
+    // (C4Script.cpp:3327-3330), whose Game.Objects override searches both
+    // active and inactive lists and whose final guard rejects only Status=0
+    // (C4GameObjects.cpp:270-276; C4ObjectList.cpp:544-557).
+    let globals = &engine.snapshot().script_globals.named;
+    for (name, number) in [
+        ("g_pEndboss", 1758),
+        ("g_pDragon", 202),
+        ("g_pKing", 5129),
+        ("g_pPrincess", 1777),
+    ] {
+        assert_eq!(
+            globals.get(name),
+            Some(&Value::Object(number)),
+            "Script1 persists {name} for later callbacks"
+        );
+    }
+    for (number, definition) in [(1758, "MAGE"), (202, "DRGN")] {
+        let object = engine
+            .object_snapshot(ObjectId::new(number))
+            .unwrap_or_else(|| panic!("Script1 target #{number} remains live"));
+        assert_eq!(object.definition_id, definition);
+        assert_eq!(object.position.x, 1000, "Script1 moved #{number}");
+        assert_eq!(object.position.y, 800, "Script1 moved #{number}");
+    }
+
+    // Script3 runs on frame 40 and dereferences the Script1 result through
+    // g_pDragon->IntroControl(400, 1050) (Drachenfels.c4s/Script.c:281-284).
+    // The shipped DRGN append writes all three globals before returning true
+    // (Drachenfels.c4s/System.c4g/Dragon.c:17,26-32). If Script1 aborted at
+    // Object(), this is the original "target is zero" failure instead.
+    for _ in 0..20 {
+        engine.tick().expect("Dragon Rock reaches shipped Script3");
+    }
+    let globals = &engine.snapshot().script_globals.named;
+    assert_eq!(globals.get("DRGN_ctrl_tx"), Some(&Value::Int(400)));
+    assert_eq!(globals.get("DRGN_ctrl_ty"), Some(&Value::Int(1050)));
+    assert!(matches!(
+        globals.get("DRGN_ctrl_stop"),
+        None | Some(Value::Nil) | Some(Value::Bool(false)) | Some(Value::Int(0))
+    ));
+}
