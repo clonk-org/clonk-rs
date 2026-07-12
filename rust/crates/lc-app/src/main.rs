@@ -21324,8 +21324,11 @@ mod tests {
             app_object_with_definition(&app, "ELEV").expect("Tutorial05 creates its partial ELEV");
         let valley_cata = app_object_with_definition_near_x(&app, "CATA", 240)
             .expect("Tutorial05 creates the valley CATA");
+        let hill_cata = app_object_with_definition_near_x(&app, "CATA", 540)
+            .expect("Tutorial05 creates the right-hill CATA");
         let wood = app_object_with_definition_near_x(&app, "WOOD", 280)
             .expect("Tutorial05 creates the valley WOOD");
+        assert_ne!(hill_cata, valley_cata);
 
         advance_app_until(
             &mut app,
@@ -21502,6 +21505,83 @@ mod tests {
         assert!((460..640).contains(&landed.position.x));
         assert!((150..290).contains(&landed.position.y));
         assert!(!landed.mobile, "right-hill WOOD must finish its flight");
+
+        // Script64 waits for the physical CursorRight selection, then
+        // Script65 waits until that exact flung object enters catapult_clnk
+        // before targeting hill_cata
+        // (content/Tutorial.c4f/Tutorial05.c4s/Script.c:160-175).
+        // C++ collection is driven by the carried object crossing the crew
+        // member's collection rectangle, independent of its former flight
+        // state (src/C4GameObjects.cpp:155-196). Keep both operations behind
+        // the app's E/Z/C keyboard mapping.
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E selects the right-hill CLNK");
+        let catapult_clonk = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("Tutorial05 has a right-hill CLNK");
+        assert_ne!(catapult_clonk, constructor);
+        assert_ne!(catapult_clonk, valley);
+        assert!(
+            app.engine
+                .object_snapshot(catapult_clonk)
+                .is_some_and(|object| object.position.x >= 450 && object.position.y < 350),
+            "second physical CursorRight must select Tutorial05's right-hill CLNK"
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 asks the right-hill CLNK to collect the flung material",
+            300,
+            |app| app_tutorial_message_contains(app, "Collect the material you just flung up"),
+        );
+
+        let catapult_clonk_x = app
+            .engine
+            .object_snapshot(catapult_clonk)
+            .expect("right-hill CLNK survives")
+            .position
+            .x;
+        let collect_key = if landed.position.x < catapult_clonk_x {
+            VirtualKeyCode::Z
+        } else {
+            VirtualKeyCode::C
+        };
+        hold_app_key_until(
+            &mut app,
+            collect_key,
+            "the right-hill CLNK naturally collects the exact flung WOOD",
+            200,
+            |app| {
+                app.engine
+                    .object_snapshot(wood)
+                    .is_some_and(|object| object.container == Some(catapult_clonk))
+            },
+        );
+        assert_eq!(
+            app.engine
+                .object_snapshot(wood)
+                .expect("collected flung WOOD survives")
+                .container,
+            Some(catapult_clonk),
+            "physical Z/C movement must collect the original valley WOOD"
+        );
+
+        advance_app_until(
+            &mut app,
+            "Tutorial05 Script65 points at the right-hill CATA",
+            300,
+            |app| app_tutorial_message_contains(app, "grab the other catapult"),
+        );
+        assert_eq!(
+            app.snapshot
+                .script_globals
+                .named
+                .get("arrow_target")
+                .and_then(|value| serde_json::to_value(value).ok()),
+            Some(serde_json::json!({ "Object": hill_cata.as_u64() })),
+            "SetArrowToObj must identify Tutorial05's real right-hill CATA"
+        );
     }
 
     fn two_item_script_menu(cursor: ObjectId) -> lc_engine::ObjectMenuState {

@@ -6,9 +6,10 @@ record of completed slices.
 ## Focus
 
 Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
-01–03, reach Tutorial 04's replacement-flint objective, and deliver Tutorial
-05's first catapult load. Finish exact tutorial presentation/interaction before
-resuming Goldrush at its pinned frame-3327 Decay/DoCon mismatch.
+01–03, reach Tutorial 04's replacement-flint objective, and carry Tutorial
+05's first catapult load to the right-hill Clonk. Finish exact tutorial
+presentation/interaction before resuming Goldrush at its pinned frame-3327
+Decay/DoCon mismatch.
 
 ## Gates
 
