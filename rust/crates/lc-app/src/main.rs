@@ -26752,7 +26752,7 @@ mod tests {
                 );
             }
         }
-        for segment in 1..=8 {
+        for segment in 1..=20 {
             let start_position = app
                 .engine
                 .object_snapshot(clonk)
@@ -27349,6 +27349,167 @@ mod tests {
         caught_wipf
     }
 
+    fn app_tutorial08_put_carried_wipf_in_hut(
+        app: &mut GameApp,
+        clonk: ObjectId,
+        hut: ObjectId,
+        milestone: &str,
+    ) -> ObjectId {
+        let wipf = app
+            .engine
+            .object_snapshot(clonk)
+            .and_then(|object| object.contents.first().copied())
+            .unwrap_or_else(|| panic!("{milestone}: CLNK carries a WIPF"));
+        assert_eq!(
+            app.engine
+                .object_snapshot(wipf)
+                .expect("carried Tutorial08 WIPF survives")
+                .definition_id,
+            "WIPF"
+        );
+        for key in [
+            VirtualKeyCode::Z,
+            VirtualKeyCode::C,
+            VirtualKeyCode::S,
+            VirtualKeyCode::X,
+        ] {
+            AppVirtualKeyboard::new(app)
+                .release(key)
+                .unwrap_or_else(|error| {
+                    panic!("release physical {key:?} before {milestone}: {error}")
+                });
+        }
+        for _ in 0..12 {
+            app.update().expect("wait out cave-return key buffer");
+        }
+        let toward_hut = app
+            .engine
+            .object_snapshot(clonk)
+            .zip(app.engine.object_snapshot(hut))
+            .map(|(clonk, hut)| {
+                if clonk.position.x < hut.position.x + 10 {
+                    VirtualKeyCode::C
+                } else {
+                    VirtualKeyCode::Z
+                }
+            })
+            .expect("WIPF-carrying CLNK and HUT3 remain observable");
+        hold_app_key_until(app, toward_hut, milestone, 1_200, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .zip(app.engine.object_snapshot(hut))
+                .is_some_and(|(clonk, hut)| {
+                    let dx = clonk.position.x - hut.position.x;
+                    (2..19).contains(&dx) && clonk.action.name == "Walk"
+                })
+        });
+        AppVirtualKeyboard::new(app)
+            .tap(VirtualKeyCode::S)
+            .unwrap_or_else(|error| panic!("physical S enters HUT3 for {milestone}: {error}"));
+        advance_app_until(app, "WIPF-carrying CLNK enters HUT3", 80, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+        let context_identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
+            .expect("context identification deserializes");
+        advance_app_until(app, "HUT3 opens context for carried WIPF", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
+        app_navigate_object_menu_to(app, "Put", |item| item.caption == "Put");
+        AppVirtualKeyboard::new(app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A transfers carried WIPF into HUT3");
+        advance_app_until(app, "context Put transfers WIPF into HUT3", 40, |app| {
+            app.engine
+                .object_snapshot(wipf)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+        advance_app_until(app, "HUT3 restores context after WIPF Put", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
+        app_navigate_object_menu_to(app, "Exit", |item| item.caption == "Exit");
+        AppVirtualKeyboard::new(app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A exits HUT3 after WIPF Put");
+        advance_app_until(app, "CLNK exits HUT3 after WIPF Put", 80, |app| {
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.container.is_none() && object.action.name == "Walk"
+            })
+        });
+        wipf
+    }
+
+    fn app_tutorial08_climb_up_left_tunnel(
+        app: &mut GameApp,
+        clonk: ObjectId,
+        milestone: &str,
+    ) {
+        {
+            let mut keyboard = AppVirtualKeyboard::new(app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .unwrap_or_else(|error| panic!("physical Z starts {milestone}: {error}"));
+            keyboard
+                .press(VirtualKeyCode::S)
+                .unwrap_or_else(|error| panic!("physical S starts {milestone}: {error}"));
+        }
+        let mut previous_action = app
+            .engine
+            .object_snapshot(clonk)
+            .unwrap_or_else(|| panic!("CLNK starts {milestone}"))
+            .action
+            .name;
+        for _ in 0..900 {
+            if app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.position.y <= 400 && object.action.name == "Walk"
+            }) {
+                break;
+            }
+            let action = app
+                .engine
+                .object_snapshot(clonk)
+                .unwrap_or_else(|| panic!("CLNK survives {milestone}"))
+                .action
+                .name;
+            let entered_scale =
+                action.starts_with("Scale") && !previous_action.starts_with("Scale");
+            let landed = action == "Walk" && previous_action != "Walk";
+            if entered_scale || landed {
+                let mut keyboard = AppVirtualKeyboard::new(app);
+                keyboard
+                    .release(VirtualKeyCode::S)
+                    .expect("release physical S on tunnel transition");
+                keyboard
+                    .press(VirtualKeyCode::S)
+                    .expect("repress physical S on tunnel transition");
+            }
+            previous_action = action;
+            app.update()
+                .unwrap_or_else(|error| panic!("advance {milestone}: {error}"));
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(app);
+            keyboard
+                .release(VirtualKeyCode::S)
+                .expect("release physical S above tunnel");
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z above tunnel");
+        }
+        assert!(
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.position.y <= 400 && object.action.name == "Walk"
+            }),
+            "{milestone}; clonk={:?}",
+            app.engine.object_snapshot(clonk)
+        );
+    }
+
     #[test]
     fn app_virtual_keyboard_delivers_tutorial08_surface_wipfs_to_hut() {
         // Tutorial08 starts the real scenario RNG animal placement, creates
@@ -27678,6 +27839,416 @@ mod tests {
             app_tutorial08_wipfs_in_lorry(&app, lorry),
             0,
             "LORY's C++ Entrance callback empties its surface WIPFs into HUT3"
+        );
+        let emerged_wipf = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .filter(|object| object.definition_id == "WIPF" && object.container.is_none())
+            .min_by_key(|object| object.position.y)
+            .expect("a default-seed cave WIPF emerges near HUT3")
+            .id;
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D starts the shallow WIPF tunnel");
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::X)
+                .expect("held physical X aims the shallow WIPF tunnel down");
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("held physical Z aims the shallow WIPF tunnel left");
+        }
+        advance_app_until(
+            &mut app,
+            "CLNK digs to the shallow default-seed WIPF",
+            300,
+            |app| {
+                app.engine
+                    .object_snapshot(emerged_wipf)
+                    .is_some_and(|object| object.container == Some(clonk))
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z after shallow WIPF catch");
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release physical X after shallow WIPF catch");
+        }
+        let delivered = app_tutorial08_put_carried_wipf_in_hut(
+            &mut app,
+            clonk,
+            hut,
+            "emerged-WIPF CLNK returns to HUT3",
+        );
+        assert_eq!(delivered, emerged_wipf);
+
+        let shallow_cave_wipf = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .filter(|object| object.definition_id == "WIPF" && object.container.is_none())
+            .min_by_key(|object| object.position.y)
+            .expect("default seed retains a WIPF in the shallow eastern cave")
+            .id;
+        let (clonk_position, wipf_position) = app
+            .engine
+            .object_snapshot(clonk)
+            .zip(app.engine.object_snapshot(shallow_cave_wipf))
+            .map(|(clonk, wipf)| (clonk.position, wipf.position))
+            .expect("CLNK and shallow-cave WIPF remain observable");
+        let tunnel_entry_x = wipf_position
+            .x
+            .saturating_sub(wipf_position.y - clonk_position.y)
+            .clamp(clonk_position.x, 760);
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "CLNK reaches the shallow-cave tunnel entry",
+            500,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.position.x >= tunnel_entry_x && object.action.name == "Walk"
+                })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D starts the shallow-cave diagonal tunnel");
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::X)
+                .expect("held physical X aims the shallow-cave tunnel down");
+            keyboard
+                .press(VirtualKeyCode::C)
+                .expect("held physical C aims the shallow-cave tunnel right");
+        }
+        for _ in 0..400 {
+            if app
+                .engine
+                .object_snapshot(shallow_cave_wipf)
+                .is_some_and(|object| object.container == Some(clonk))
+            {
+                break;
+            }
+            app.update()
+                .expect("advance shallow eastern WIPF tunnel");
+        }
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::C)
+                .expect("release physical C after shallow-cave WIPF catch");
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release physical X after shallow-cave WIPF catch");
+        }
+        if app
+            .engine
+            .object_snapshot(shallow_cave_wipf)
+            .is_some_and(|object| object.container.is_none())
+        {
+            hold_app_key_until(
+                &mut app,
+                VirtualKeyCode::C,
+                "CLNK closes the final gap to the shallow-cave WIPF",
+                120,
+                |app| {
+                    app.engine
+                        .object_snapshot(shallow_cave_wipf)
+                        .is_some_and(|object| object.container == Some(clonk))
+                },
+            );
+        }
+        assert_eq!(
+            app.engine
+                .object_snapshot(shallow_cave_wipf)
+                .expect("shallow-cave WIPF survives tunnel")
+                .container,
+            Some(clonk),
+            "physical diagonal tunnel catches shallow-cave WIPF; clonk={:?}; wipf={:?}",
+            app.engine.object_snapshot(clonk),
+            app.engine.object_snapshot(shallow_cave_wipf)
+        );
+        app_tutorial08_climb_up_left_tunnel(
+            &mut app,
+            clonk,
+            "physical UpLeft climb returns from eastern WIPF cave",
+        );
+        let delivered = app_tutorial08_put_carried_wipf_in_hut(
+            &mut app,
+            clonk,
+            hut,
+            "shallow-cave WIPF CLNK climbs back to HUT3",
+        );
+        assert_eq!(delivered, shallow_cave_wipf);
+
+        let upper_lower_cave_wipf = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .filter(|object| object.definition_id == "WIPF" && object.container.is_none())
+            .min_by_key(|object| object.position.y)
+            .expect("default seed retains an upper WIPF in the lower cave")
+            .id;
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "CLNK reaches the unobstructed lower-cave shaft",
+            400,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.position.x >= 231 && object.action.name == "Walk"
+                })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D starts the lower-cave vertical tunnel");
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::X)
+            .expect("held physical X aims the lower-cave tunnel down");
+        advance_app_until(
+            &mut app,
+            "vertical lower-cave shaft reaches its diagonal throat",
+            800,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.position.y >= 590 && object.action.name == "Dig"
+                })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("held physical C turns the lower shaft down-right");
+        advance_app_until(
+            &mut app,
+            "diagonal throat opens into the upper WIPF pocket",
+            360,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.position.y >= 610 && object.action.name == "Walk"
+                })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::X)
+            .expect("release physical X inside the upper WIPF pocket");
+        advance_app_until(
+            &mut app,
+            "horizontal tunnel opens into the upper WIPF pocket",
+            700,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.position.x >= 160 && object.action.name == "Walk"
+                })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C inside the upper WIPF pocket");
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "CLNK steps off the tunnel lip onto the upper-pocket floor",
+            180,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.y >= 618)
+            },
+        );
+        while let Some(incidental) = app
+            .engine
+            .object_snapshot(clonk)
+            .and_then(|object| object.contents.first().copied())
+            .filter(|object_id| *object_id != upper_lower_cave_wipf)
+        {
+            assert_ne!(
+                app.engine
+                    .object_snapshot(incidental)
+                    .expect("incidental tunnel object survives")
+                    .definition_id,
+                "WIPF",
+                "the upper-pocket route must not discard a caught WIPF"
+            );
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::A)
+                .expect("physical A drops an incidental object in the open pocket");
+            advance_app_until(
+                &mut app,
+                "incidental tunnel object leaves CLNK in the open pocket",
+                30,
+                |app| {
+                    app.engine
+                        .object_snapshot(incidental)
+                        .is_some_and(|object| object.container.is_none())
+                },
+            );
+        }
+        let intercept_key = if app
+            .engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.position.x < 240)
+        {
+            VirtualKeyCode::C
+        } else {
+            VirtualKeyCode::Z
+        };
+        AppVirtualKeyboard::new(&mut app)
+            .press(intercept_key)
+            .expect("physical direction approaches the upper WIPF patrol center");
+        for _ in 0..300 {
+            if app
+                .engine
+                .object_snapshot(upper_lower_cave_wipf)
+                .is_some_and(|object| object.container == Some(clonk))
+                || app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    if intercept_key == VirtualKeyCode::Z {
+                        object.position.x <= 240
+                    } else {
+                        object.position.x >= 240
+                    }
+                })
+            {
+                break;
+            }
+            if app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name.starts_with("Scale")
+            }) {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .release(intercept_key)
+                    .expect("release physical direction on upper-pocket wall");
+                keyboard
+                    .press(intercept_key)
+                    .expect("repress physical direction away from upper-pocket wall");
+            }
+            app.update()
+                .expect("approach the upper WIPF patrol center");
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .release(intercept_key)
+            .expect("release physical direction at the upper WIPF patrol center");
+        assert!(
+            app.engine
+                .object_snapshot(upper_lower_cave_wipf)
+                .is_some_and(|object| object.container == Some(clonk))
+                || app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    if intercept_key == VirtualKeyCode::Z {
+                        object.position.x <= 240
+                    } else {
+                        object.position.x >= 240
+                    }
+                }),
+            "CLNK reaches the center of the upper WIPF patrol; clonk={:?}; wipf={:?}",
+            app.engine.object_snapshot(clonk),
+            app.engine.object_snapshot(upper_lower_cave_wipf)
+        );
+        if app
+            .engine
+            .object_snapshot(upper_lower_cave_wipf)
+            .is_some_and(|object| object.container.is_none())
+        {
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::D)
+                .expect("physical D opens the final upper-pocket shelf");
+            {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .press(VirtualKeyCode::X)
+                    .expect("held physical X aims through the upper-pocket shelf");
+                keyboard
+                    .press(VirtualKeyCode::Z)
+                    .expect("held physical Z aims the shelf tunnel toward the WIPF");
+            }
+            for _ in 0..180 {
+                if app
+                    .engine
+                    .object_snapshot(upper_lower_cave_wipf)
+                    .is_some_and(|object| object.container == Some(clonk))
+                    || app
+                        .engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.position.y >= 618)
+                {
+                    break;
+                }
+                app.update().expect("dig through the upper-pocket shelf");
+            }
+            {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .release(VirtualKeyCode::Z)
+                    .expect("release physical Z below the upper-pocket shelf");
+                keyboard
+                    .release(VirtualKeyCode::X)
+                    .expect("release physical X below the upper-pocket shelf");
+            }
+        }
+        for _ in 0..4_000 {
+            if app
+                .engine
+                .object_snapshot(upper_lower_cave_wipf)
+                .is_some_and(|object| object.container == Some(clonk))
+            {
+                break;
+            }
+            app.update()
+                .expect("wait for the live upper-pocket WIPF to cross CLNK");
+        }
+        assert_eq!(
+            app.engine
+                .object_snapshot(upper_lower_cave_wipf)
+                .expect("upper lower-cave WIPF survives tunnel")
+                .container,
+            Some(clonk),
+            "physical diagonal tunnel catches upper lower-cave WIPF; clonk={:?}; wipf={:?}",
+            app.engine.object_snapshot(clonk),
+            app.engine.object_snapshot(upper_lower_cave_wipf)
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "upper lower-cave WIPF CLNK returns to the diagonal shaft",
+            360,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x >= 245)
+            },
+        );
+        app_tutorial08_climb_up_left_tunnel(
+            &mut app,
+            clonk,
+            "upper lower-cave WIPF CLNK climbs its physical tunnel",
+        );
+        let delivered = app_tutorial08_put_carried_wipf_in_hut(
+            &mut app,
+            clonk,
+            hut,
+            "upper lower-cave WIPF CLNK returns to HUT3",
+        );
+        assert_eq!(delivered, upper_lower_cave_wipf);
+        assert_eq!(
+            app.engine
+                .snapshot()
+                .objects
+                .into_iter()
+                .filter(|object| {
+                    object.definition_id == "WIPF" && object.container == Some(hut)
+                })
+                .count(),
+            9,
+            "physical Tutorial08 route delivers nine exact WIPFs into HUT3"
         );
     }
 
