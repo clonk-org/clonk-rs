@@ -21043,6 +21043,22 @@ impl Engine {
                 container_assignments.push((snapshot.id, container));
             }
         }
+        // C4Object::DenumeratePointers runs only after every object has loaded
+        // and recursively resolves both numbered Local and LocalNamed values
+        // (C4Object.cpp:2914-2924; C4Value.cpp:684-713). Inactive objects are
+        // valid targets through Game.Objects.InactiveObjects; deleted ones are
+        // not part of either lookup list.
+        let object_numbers: HashSet<u64> = self
+            .objects
+            .iter()
+            .filter(|object| object.state.status != ObjectStatus::Deleted)
+            .map(|object| object.id.as_u64())
+            .collect();
+        for object in &mut self.objects {
+            for value in object.state.local_vars.values_mut() {
+                *value = denumerate_script_value(value, &object_numbers);
+            }
+        }
         // Backward compatibility for states written before ObjectSnapshot
         // carried C4Object::Select: project the legacy per-player list onto
         // the now-authoritative object bits. New states serialize both views

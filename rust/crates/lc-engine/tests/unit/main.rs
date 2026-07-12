@@ -9148,6 +9148,69 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn object_local_restore_denumerates_missing_object_references() {
+        // C++ oracle: after every object is loaded, C4Object::DenumeratePointers
+        // recursively denumerates both numbered Local and LocalNamed values
+        // (src/C4Object.cpp:2914-2924; src/C4Value.cpp:684-713). A saved
+        // C4V_C4ObjectEnum whose object no longer exists becomes nil.
+        let holder_script = r#"
+        local named_refs;
+        func Seed(object target) {
+            named_refs = [target, [target]];
+            Local(2) = [target];
+        }
+        func Read() { return [named_refs, Local(2)]; }
+        "#;
+        let register = |engine: &mut Engine| {
+            engine
+                .register_definition(
+                    Definition::from_script("HOLD", "Holder", holder_script)
+                        .expect("holder compiles"),
+                )
+                .expect("holder registers");
+            engine
+                .register_definition(simple_definition("TARG"))
+                .expect("target registers");
+        };
+
+        let mut engine = Engine::with_seed(7);
+        register(&mut engine);
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD"))
+            .expect("holder spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let holder_idx = engine.find_object_index(holder).expect("holder exists");
+        engine
+            .call_object_function(
+                holder_idx,
+                "Seed",
+                vec![Value::Object(target.as_u64())],
+            )
+            .expect("locals seed");
+
+        let mut state = engine.capture_state();
+        state.objects.retain(|object| object.snapshot.id != target);
+
+        let mut restored = Engine::with_seed(0);
+        register(&mut restored);
+        restored.restore_state(&state).expect("state restores");
+        let holder_idx = restored
+            .find_object_index(holder)
+            .expect("holder restores");
+        assert_eq!(
+            restored
+                .call_object_function(holder_idx, "Read", Vec::new())
+                .expect("locals read"),
+            Value::Array(vec![
+                Value::Array(vec![Value::Nil, Value::Array(vec![Value::Nil])]),
+                Value::Array(vec![Value::Nil]),
+            ])
+        );
+    }
+
+    #[test]
     fn legacy_state_without_script_globals_restores_defaults() {
         // Saves from before script-global persistence have no corresponding
         // C4AulScriptEngine section. Treat that omission as empty `Globals`
