@@ -1666,6 +1666,120 @@ mod tests {
     }
 
     #[test]
+    fn real_tutorial_one_guide_uses_clean_keyboard_one_labels() {
+        // Tutorial01 Script21 enables the Up/Left/Down/Right cells, their
+        // labels and their blinking layer. StringBitEval preserves each
+        // character position (C4Script.cpp:209-216), so use the shipped
+        // script string rather than reconstructing the mask.
+        let script_path = crate::test_support::repo_root()
+            .join("content/Tutorial.c4f/Tutorial01.c4s/Script.c");
+        let script = std::fs::read_to_string(&script_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", script_path.display()));
+        let script21 = script
+            .split("func Script21()")
+            .nth(1)
+            .and_then(|tail| tail.split("func Script50()").next())
+            .expect("Tutorial01 Script21 block");
+        let controls = script21
+            .split("SetPlrShowControl(0,\"")
+            .nth(1)
+            .and_then(|tail| tail.split('"').next())
+            .expect("Tutorial01 Script21 control string");
+        let show_control = controls
+            .bytes()
+            .enumerate()
+            .filter(|(_, byte)| !matches!(byte, b'_' | b' '))
+            .fold(0_i32, |mask, (position, _)| mask | (1_i32 << position));
+        let movement_mask = (1 << 4) | (1 << 6) | (1 << 7) | (1 << 8);
+        assert_eq!(
+            show_control,
+            movement_mask | (movement_mask << 10) | (movement_mask << 20)
+        );
+
+        // C4ConfigControls keyboard set one is Q/W/E/A/S/D/Z/X/C/R in
+        // CON_* order (C4Config.cpp:624-633). PlrControlKeyName returns those
+        // short configured names; in the guide's spatial order this is S
+        // above Z/X/C, with no arrow-key aliases.
+        let labels = ["Q", "W", "E", "A", "S", "D", "Z", "X", "C", "R"]
+            .map(str::to_string);
+        assert_eq!(
+            [labels[6].as_str(), labels[4].as_str(), labels[7].as_str(), labels[8].as_str()],
+            ["Z", "S", "X", "C"]
+        );
+        assert!(labels.iter().all(|label| !label.contains("Arrow")));
+
+        let viewport = SurfaceRect::new(0, 0, 1068, 780);
+        let hud = HudGraphics {
+            control: Some(crate::test_support::load_graphics_png("Control.png")),
+            ..HudGraphics::default()
+        };
+        let fonts = crate::test_support::endeavour_font_set();
+        let render = |key_labels: &[String], frame: u64| {
+            let mut target = Surface::new(1068, 780, PixelFormat::Rgba8888);
+            target.fill(Color::opaque(12, 24, 40));
+            draw_player_controls_with_gamma(
+                &mut target,
+                &HudFont::Clonk(&fonts.text),
+                &HudFont::Clonk(&fonts.mini),
+                &hud,
+                viewport,
+                show_control,
+                3,
+                0,
+                key_labels,
+                frame,
+                Some(crate::test_support::standard_gamma()),
+            );
+            target
+        };
+        let no_labels = vec![String::new(); 10];
+        let unlabeled = render(&no_labels, 18);
+        let guide = render(&labels, 18);
+        assert_eq!(guide.snapshot().to_string(), "1068x780#54938995");
+
+        // At the user's high-resolution viewport size, prove each glyph's
+        // changed pixels remain inside its own C++ 3x4 grid cell. This catches
+        // the former UpArrow/RightArrow spill and split labels directly.
+        let size = (viewport.width as i32 / 3).min(7 * viewport.height as i32 / 24);
+        let tx = viewport.x + viewport.width as i32 / 4 - size / 2;
+        let ty = viewport.y + 15;
+        let cell_width = size / 3;
+        let cell_height = size / 4;
+        for control in [4, 6, 7, 8] {
+            let mut one_label = no_labels.clone();
+            one_label[control] = labels[control].clone();
+            let rendered = render(&one_label, 18);
+            let cell = SurfaceRect::new(
+                tx + cell_width * (control as i32 % 3),
+                ty + cell_height * (control as i32 / 3),
+                cell_width as u32,
+                cell_height as u32,
+            );
+            let changed = rendered
+                .pixels()
+                .chunks_exact(4)
+                .zip(unlabeled.pixels().chunks_exact(4))
+                .enumerate()
+                .filter(|(_, (actual, base))| actual != base)
+                .map(|(index, _)| {
+                    (
+                        (index % viewport.width as usize) as i32,
+                        (index / viewport.width as usize) as i32,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert!(!changed.is_empty(), "control {control} label renders");
+            assert!(changed.iter().all(|&(x, y)| {
+                x >= cell.x
+                    && x < cell.x + cell.width as i32
+                    && y >= cell.y
+                    && y < cell.y + cell.height as i32
+            }));
+        }
+        assert_eq!(render(&labels, 19).pixels(), unlabeled.pixels());
+    }
+
+    #[test]
     fn bottom_command_pair_sits_right_aligned_in_23px_cells() {
         // C4Viewport::DrawCursorInfo (src/C4Viewport.cpp:948-961):
         // iSize = 2*C4SymbolSize/3 = 23; the bottom bar spans the viewport
