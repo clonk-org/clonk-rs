@@ -14622,6 +14622,29 @@ mod tests {
             })
     }
 
+    fn app_navigate_object_menu_to(
+        app: &mut GameApp,
+        target: &str,
+        mut matches: impl FnMut(&lc_engine::ObjectMenuItem) -> bool,
+    ) {
+        let item_count = app
+            .engine
+            .cursor_object_menu(app.local_owner)
+            .unwrap_or_else(|| panic!("object menu exists while selecting {target}"))
+            .1
+            .items
+            .len();
+        for _ in 0..item_count {
+            if app_selected_object_menu_item(app).is_some_and(&mut matches) {
+                return;
+            }
+            AppVirtualKeyboard::new(app)
+                .tap(VirtualKeyCode::X)
+                .unwrap_or_else(|error| panic!("physical X selects {target}: {error}"));
+        }
+        panic!("physical menu navigation could not select {target}");
+    }
+
     fn app_collect_one_gold_around_blast_debris(app: &mut GameApp, clonk: ObjectId) {
         // Blasts also expose collectible ROCK. C++ CLNK has exactly one
         // nonspecial slot, so a real player must throw incidental debris away
@@ -23928,7 +23951,7 @@ mod tests {
     }
 
     #[test]
-    fn app_virtual_keyboard_collects_tutorial06_crystal_and_opens_pit() {
+    fn app_virtual_keyboard_completes_tutorial06_and_selects_tutorial07() {
         // Tutorial06 creates the real CRYS, waits for it to become contained,
         // then launches FXQ1 and calls ShakeFree(60,160,50) before displaying
         // the instability warning
@@ -23937,6 +23960,8 @@ mod tests {
         // carryable crosses the crew member's collection rectangle, and
         // ShakeFree clears every DigFree pixel in its circle
         // (src/C4GameObjects.cpp:155-196; src/C4Landscape.cpp:928-938,999-1009).
+        // The rest of this route keeps every construction, drainage, CRYS
+        // transfer, and sale behind those same physical app-key boundaries.
         let mut app = real_tutorial_app(6, "Tutorial 6 app virtual player");
         let first_clonk = app
             .engine
@@ -24001,6 +24026,1112 @@ mod tests {
             "Tutorial06 advances to its instability warning",
             300,
             |app| app_tutorial_message_contains(app, "area seems to be unstable"),
+        );
+
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "the CRYS-carrying CLNK reaches the trapped cavern",
+            800,
+            |app| {
+                app.engine
+                    .object_snapshot(first_clonk)
+                    .is_some_and(|object| object.position.x >= 160 && object.position.y >= 350)
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial06 asks the other CLNK to build ELEV",
+            2_400,
+            |app| app_tutorial_message_contains(app, "With the other clonk"),
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E selects Tutorial06's surface CLNK");
+        let builder = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("CursorRight selects Tutorial06's surface CLNK");
+        assert_ne!(
+            builder, first_clonk,
+            "physical CursorRight must leave the CRYS-carrying CLNK"
+        );
+        let hut = app_object_with_definition(&app, "HUT3")
+            .expect("Tutorial06 creates the player's exact HUT3");
+        let conkit = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "CNKT" && object.container == Some(hut))
+            .expect("Tutorial06 puts one exact CNKT in HUT3")
+            .id;
+        let context_identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
+            .expect("context identification deserializes");
+        let contents_identification = serde_json::from_value(serde_json::json!({ "Int": 18 }))
+            .expect("contents identification deserializes");
+        let construction_identification =
+            serde_json::from_value(serde_json::json!({ "C4Id": "CXCN" }))
+                .expect("construction identification deserializes");
+
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S enters Tutorial06 HUT3");
+        advance_app_until(&mut app, "surface CLNK enters exact HUT3", 80, |app| {
+            app.engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.container == Some(hut))
+        });
+        advance_app_until(&mut app, "HUT3 opens its context menu", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
+        app_navigate_object_menu_to(&mut app, "Contents", |item| item.caption == "Contents");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A opens HUT3 Contents");
+        advance_app_until(&mut app, "HUT3 opens its real Contents menu", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == contents_identification)
+        });
+        app_navigate_object_menu_to(&mut app, "CNKT", |item| item.item_id == "CNKT");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A takes Tutorial06's exact CNKT");
+        advance_app_until(&mut app, "surface CLNK takes exact CNKT", 80, |app| {
+            app.engine
+                .object_snapshot(conkit)
+                .is_some_and(|object| object.container == Some(builder))
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D closes HUT3 Contents");
+        advance_app_until(&mut app, "HUT3 restores its context menu", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
+        app_navigate_object_menu_to(&mut app, "Exit", |item| item.caption == "Exit");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A exits HUT3 with CNKT");
+        advance_app_until(
+            &mut app,
+            "CNKT-carrying CLNK exits exact HUT3",
+            80,
+            |app| {
+                app.engine.object_snapshot(builder).is_some_and(|object| {
+                    object.container.is_none() && object.action.name == "Walk"
+                })
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "builder reaches the ELEV construction site",
+            100,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| (329..=333).contains(&object.position.x))
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("first physical D primes CNKT activation");
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("second physical D activates CNKT");
+        }
+        advance_app_until(
+            &mut app,
+            "CNKT opens its ELEV construction menu",
+            30,
+            |app| {
+                app.engine
+                    .cursor_object_menu(app.local_owner)
+                    .is_some_and(|(_, menu)| menu.identification == construction_identification)
+            },
+        );
+        app_navigate_object_menu_to(&mut app, "ELEV", |item| item.item_id == "ELEV");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A creates Tutorial06 ELEV");
+        advance_app_until(&mut app, "exact Tutorial06 ELEV is created", 30, |app| {
+            app_object_with_definition(app, "ELEV").is_some()
+        });
+        let elevator = app_object_with_definition(&app, "ELEV")
+            .expect("preserve Tutorial06's exact ELEV identity");
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X leaves ELEV construction");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X leaves ELEV construction");
+        }
+        advance_app_until(
+            &mut app,
+            "ELEV finishes and creates its exact ELEC",
+            3_000,
+            |app| {
+                app_object_with_definition(app, "ELEC").is_some()
+                    && app
+                        .engine
+                        .object_snapshot(elevator)
+                        .is_some_and(|object| object.construction == 100_000)
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "automatic Energy command connects ELEV to POWR",
+            1_200,
+            |app| app_object_with_definition(app, "PWRL").is_some(),
+        );
+
+        advance_app_until(
+            &mut app,
+            "Tutorial06 points at the surface coal",
+            300,
+            |app| app_tutorial_message_contains(app, "dig out a few pieces of coal"),
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "surface CLNK reaches the coal seam",
+            300,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.x >= 440)
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "surface CLNK steps off the coal wall",
+            40,
+            |app| {
+                app.engine.object_snapshot(builder).is_some_and(|object| {
+                    object.action.name == "Walk" && object.position.x <= 420
+                })
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::C)
+                .expect("physical C holds the surface CLNK toward coal");
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("physical D starts digging coal");
+        }
+        advance_app_until(&mut app, "surface CLNK starts digging coal", 30, |app| {
+            app.engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name == "Dig")
+        });
+        for _ in 0..300 {
+            if app
+                .engine
+                .snapshot()
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "COAL")
+                .count()
+                >= 3
+            {
+                break;
+            }
+            app.update().expect("advance Tutorial06 coal Dig");
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::C)
+            .expect("release physical C after Tutorial06 coal Dig");
+        let coal = app
+            .engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .filter(|object| object.definition_id == "COAL")
+            .map(|object| (object.id, object.position, object.container))
+            .collect::<Vec<_>>();
+        assert!(
+            coal.len() >= 3,
+            "real coal seam must yield three chunks; builder={:?}, coal={coal:?}",
+            app.engine.object_snapshot(builder)
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial06 asks for coal in POWR",
+            300,
+            |app| app_tutorial_message_contains(app, "Throw the coal chunks"),
+        );
+        advance_app_until(&mut app, "coal miner returns to Walk", 80, |app| {
+            app.engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        let power_plant = app_object_with_definition(&app, "POWR")
+            .expect("preserve Tutorial06's exact POWR identity");
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "COAL-carrying CLNK reaches POWR's chute",
+            160,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.x <= 424)
+            },
+        );
+        let carried_coal = app
+            .engine
+            .object_snapshot(builder)
+            .expect("Tutorial06 builder survives at POWR's chute")
+            .contents
+            .into_iter()
+            .next()
+            .filter(|object_id| {
+                app.engine
+                    .object_snapshot(*object_id)
+                    .is_some_and(|object| object.definition_id == "COAL")
+            })
+            .expect("the builder's exact first content is real COAL at the chute");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A throws the exact COAL into POWR");
+        advance_app_until(
+            &mut app,
+            "exact thrown COAL leaves the builder's inventory",
+            60,
+            |app| {
+                app.engine
+                    .object_snapshot(carried_coal)
+                    .is_none_or(|coal| coal.container != Some(builder))
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "exact POWR starts burning the thrown COAL",
+            180,
+            |app| {
+                app.engine
+                    .object_snapshot(power_plant)
+                    .is_some_and(|object| object.action.name == "Burning")
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial06 asks the builder to drill the elevator shaft",
+            300,
+            |app| app_tutorial_message_contains(app, "drill an elevator shaft"),
+        );
+        let elevator_case = app_object_with_definition(&app, "ELEC")
+            .expect("preserve Tutorial06's exact ELEC identity");
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "builder returns to the elevator shaft",
+            180,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.x <= 340)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X calls ELEC to the waiting builder");
+        for _ in 0..12 {
+            app.update().expect("wait out ELEC call double-click window");
+        }
+        advance_app_until(&mut app, "ELEC returns to the builder", 600, |app| {
+            app.engine
+                .object_snapshot(builder)
+                .zip(app.engine.object_snapshot(elevator_case))
+                .is_some_and(|(builder, elevator_case)| {
+                    elevator_case.action.name == "Wait"
+                        && (builder.position.y - elevator_case.position.y).abs() <= 24
+                })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S jumps toward ELEC");
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "builder jumps onto ELEC's center",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.x <= 331)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X centers the builder on ELEC");
+        advance_app_until(&mut app, "builder lands centered on ELEC", 80, |app| {
+            app.engine.object_snapshot(builder).is_some_and(|object| {
+                object.action.name == "Walk" && (327..=333).contains(&object.position.x)
+            })
+        });
+        for _ in 0..12 {
+            app.update().expect("wait out ELEC grab double-click window");
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs ELEC under AutoStopControl");
+        advance_app_until(&mut app, "builder grabs exact ELEC", 100, |app| {
+            app.engine.object_snapshot(builder).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(elevator_case)
+            })
+        });
+
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::D)
+            .expect("held physical D starts ELEC drilling");
+        advance_app_until(&mut app, "ELEC starts drilling the real shaft", 80, |app| {
+            app.engine
+                .object_snapshot(elevator_case)
+                .is_some_and(|object| object.action.name == "Drill")
+        });
+        app.update().expect("advance one exact ELEC drill frame");
+        assert!(
+            app.engine.object_snapshot(builder).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(elevator_case)
+            }),
+            "the exact builder must stay attached to drilling ELEC"
+        );
+        advance_app_until(
+            &mut app,
+            "ELEC carries builder to Tutorial06's lower cavern",
+            1_200,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.y >= 300)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::D)
+            .expect("release physical D at Tutorial06's lower cavern");
+        advance_app_until(
+            &mut app,
+            "Tutorial06 introduces the flooded passage",
+            600,
+            |app| app_tutorial_message_contains(app, "get the water out of the way"),
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::D)
+            .expect("held physical D resumes ELEC drilling");
+        advance_app_until(
+            &mut app,
+            "ELEC resumes drilling below the flooded shelf",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(elevator_case)
+                    .is_some_and(|object| object.action.name == "Drill")
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "ELEC drills to the drainage-tunnel level",
+            600,
+            |app| {
+                app.engine
+                    .object_snapshot(elevator_case)
+                    .is_some_and(|object| object.position.y >= 325)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::D)
+            .expect("release physical D at drainage level");
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes lower ELEC release");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X releases lower ELEC");
+        }
+        advance_app_until(
+            &mut app,
+            "builder releases exact ELEC in lower cavern",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
+
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D starts the dry basin approach");
+        advance_app_until(
+            &mut app,
+            "builder starts passage above the water shelf",
+            40,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Dig")
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("physical Z aims the dry approach left");
+            keyboard
+                .press(VirtualKeyCode::X)
+                .expect("physical X aims the dry approach down-left");
+        }
+        advance_app_until(&mut app, "dry approach reaches basin wall", 100, |app| {
+            app.engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.position.x <= 320)
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release physical X at dry basin wall");
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z at dry basin wall");
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X stops builder at dry basin wall");
+        advance_app_until(&mut app, "builder stops at dry basin wall", 40, |app| {
+            app.engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name == "Walk")
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D starts the diagonal upper passage");
+        advance_app_until(
+            &mut app,
+            "builder starts diagonal basin passage",
+            40,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Dig")
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("physical Z aims the upper passage left");
+            keyboard
+                .press(VirtualKeyCode::S)
+                .expect("physical S aims the upper passage up-left");
+        }
+        advance_app_until(
+            &mut app,
+            "builder pre-clears the dry upper passage",
+            120,
+            |app| {
+                app.engine.object_snapshot(builder).is_some_and(|object| {
+                    object.action.name == "Dig" && object.position.x <= 296
+                })
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::S)
+                .expect("release physical S after upper-passage Dig");
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z after upper-passage Dig");
+        }
+        advance_app_until(
+            &mut app,
+            "builder stops before breaching upper passage",
+            40,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "builder returns from the dry upper passage",
+            140,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.x >= 327)
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "builder aligns with the lower basin wall",
+            100,
+            |app| {
+                app.engine.object_snapshot(builder).is_some_and(|object| {
+                    object.action.name == "Walk" && object.position.x <= 330
+                })
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "lower-shelf builder comes to a full stop",
+            40,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.velocity.x == 0)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D starts lower basin drain");
+        advance_app_until(&mut app, "builder starts lower basin drain", 40, |app| {
+            app.engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name == "Dig")
+        });
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("physical Z aims lower drain left");
+            keyboard
+                .press(VirtualKeyCode::X)
+                .expect("physical X aims lower drain down-left");
+        }
+        advance_app_until(
+            &mut app,
+            "lower drain reaches dry basin wall",
+            100,
+            |app| {
+                app.engine.object_snapshot(builder).is_some_and(|object| {
+                    object.action.name == "Dig" && object.position.x <= 305
+                })
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::X)
+                .expect("release physical X before opening lower drain");
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z before opening lower drain");
+        }
+        advance_app_until(
+            &mut app,
+            "builder stops before opening lower drain",
+            40,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::D)
+            .expect("physical D resumes lower basin drain");
+        advance_app_until(
+            &mut app,
+            "builder resumes lower basin drain",
+            40,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Dig")
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::Z)
+            .expect("held physical Z aims lower drain left");
+        advance_app_until(
+            &mut app,
+            "lower drain reaches its diagonal turn",
+            80,
+            |app| {
+                app.engine.object_snapshot(builder).is_some_and(|object| {
+                    object.action.name == "Dig" && object.position.x <= 298
+                })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::S)
+            .expect("held physical S turns lower drain up-left");
+        assert_eq!(
+            app.engine
+                .object_snapshot(builder)
+                .expect("builder survives lower-drain steering")
+                .command_direction,
+            CommandDirection::UpLeft,
+            "held physical Left+Up must turn the lower drain up-left"
+        );
+        advance_app_until(
+            &mut app,
+            "diagonal passage opens the basin drain",
+            240,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Swim")
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z after entering basin water");
+            keyboard
+                .release(VirtualKeyCode::S)
+                .expect("release physical S after entering basin water");
+        }
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::S,
+            "rescuer rises through pre-cleared upper passage",
+            160,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "rescuer exits the flowing basin drain",
+            120,
+            |app| {
+                app.engine.object_snapshot(builder).is_some_and(|object| {
+                    object.position.x >= 310 && object.action.name != "Swim"
+                })
+            },
+        );
+        if app_clonk_carries(&app, builder, "COAL") {
+            let incidental_coal = app
+                .engine
+                .object_snapshot(builder)
+                .expect("rescuer survives outside drain")
+                .contents
+                .into_iter()
+                .find(|object_id| {
+                    app.engine
+                        .object_snapshot(*object_id)
+                        .is_some_and(|object| object.definition_id == "COAL")
+                })
+                .expect("rescuer carries exact incidental COAL");
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::A)
+                .expect("physical A drops incidental COAL outside drain");
+            advance_app_until(
+                &mut app,
+                "rescuer drops exact incidental COAL",
+                60,
+                |app| {
+                    app.engine
+                        .object_snapshot(incidental_coal)
+                        .is_none_or(|coal| coal.container != Some(builder))
+                },
+            );
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X stops rescuer above drained outlet");
+        advance_app_until(
+            &mut app,
+            "lower outlet drains the upper passage",
+            1_200,
+            |app| !app.engine.debug_landscape_is_liquid(290, 310),
+        );
+        advance_app_until(
+            &mut app,
+            "rescuer stands above the drained outlet",
+            80,
+            |app| {
+                app.engine.object_snapshot(builder).is_some_and(|object| {
+                    object.action.name == "Walk" && object.velocity.x == 0
+                })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E selects the CRYS-carrying CLNK");
+        assert_eq!(
+            app.engine.crew_cursor(app.local_owner),
+            Some(first_clonk),
+            "physical CursorRight must select the exact trapped CLNK"
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::C)
+                .expect("physical C faces trapped CLNK toward escape tunnel");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("physical X settles trapped CLNK at escape tunnel");
+            keyboard
+                .tap(VirtualKeyCode::D)
+                .expect("physical D starts trapped CLNK's escape tunnel");
+        }
+        advance_app_until(
+            &mut app,
+            "trapped CLNK starts an escape tunnel",
+            40,
+            |app| {
+                app.engine
+                    .object_snapshot(first_clonk)
+                    .is_some_and(|object| object.action.name == "Dig")
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::C)
+                .expect("held physical C aims escape Dig right");
+            keyboard
+                .press(VirtualKeyCode::S)
+                .expect("held physical S aims escape Dig up-right");
+        }
+        advance_app_until(
+            &mut app,
+            "trapped CLNK reaches the drained basin",
+            400,
+            |app| {
+                app.engine
+                    .object_snapshot(first_clonk)
+                    .is_some_and(|object| object.action.name == "Swim")
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .release(VirtualKeyCode::S)
+                .expect("release physical S in the drained basin");
+            keyboard
+                .release(VirtualKeyCode::C)
+                .expect("release physical C in the drained basin");
+        }
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::S,
+            "CRYS carrier rises through the drained passage",
+            160,
+            |app| {
+                app.engine
+                    .object_snapshot(first_clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "CRYS carrier swims through opened passage",
+            240,
+            |app| {
+                app.engine
+                    .object_snapshot(first_clonk)
+                    .is_some_and(|object| object.position.x >= 300)
+            },
+        );
+        for _ in 0..2 {
+            if !app_clonk_carries(&app, first_clonk, "CRYS") {
+                break;
+            }
+            let previous_count = app
+                .engine
+                .object_snapshot(first_clonk)
+                .expect("escaped CRYS carrier survives")
+                .contents
+                .len();
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::A)
+                .expect("physical A drops one escaped-CLNK content");
+            advance_app_until(
+                &mut app,
+                "escaped CLNK drops one carried object",
+                60,
+                |app| {
+                    app.engine
+                        .object_snapshot(first_clonk)
+                        .is_some_and(|object| object.contents.len() < previous_count)
+                },
+            );
+            for _ in 0..12 {
+                app.update()
+                    .expect("wait out CRYS transfer double-click window");
+            }
+        }
+        assert!(
+            app.engine
+                .object_snapshot(crystal)
+                .is_some_and(|crystal| crystal.container != Some(first_clonk)),
+            "the escaped CLNK must release the exact CRYS"
+        );
+
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E returns to the elevator builder");
+        assert_eq!(
+            app.engine.crew_cursor(app.local_owner),
+            Some(builder),
+            "physical CursorRight must return to the exact builder"
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "builder re-enters the drain",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Swim")
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::X,
+            "builder dives to the dropped CRYS",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.y >= 325)
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "builder retrieves exact CRYS from drain",
+            180,
+            |app| {
+                app.engine
+                    .object_snapshot(crystal)
+                    .is_some_and(|crystal| crystal.container == Some(builder))
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "CRYS-carrying builder reaches ELEC shaft",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.x >= 300)
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::S,
+            "CRYS-carrying builder surfaces by ELEC",
+            180,
+            |app| {
+                app.engine.object_snapshot(builder).is_some_and(|object| {
+                    object.action.name == "Walk" && object.position.y <= 316
+                })
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "CRYS-carrying builder centers over ELEC",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.x >= 329)
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "CRYS-carrying builder settles on ELEC",
+            80,
+            |app| {
+                app.engine.object_snapshot(builder).is_some_and(|object| {
+                    object.action.name == "Walk" && (327..=333).contains(&object.position.x)
+                })
+            },
+        );
+        for _ in 0..12 {
+            app.update()
+                .expect("wait out CRYS-carrying ELEC grab buffer");
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X grabs ELEC under AutoStopControl");
+        advance_app_until(
+            &mut app,
+            "CRYS-carrying builder grabs exact ELEC",
+            100,
+            |app| {
+                app.engine.object_snapshot(builder).is_some_and(|object| {
+                    object.action.name == "Push" && object.action.target == Some(elevator_case)
+                })
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::S,
+            "ELEC carries exact CRYS back to surface",
+            600,
+            |app| {
+                app.engine
+                    .object_snapshot(elevator_case)
+                    .is_some_and(|object| object.position.y <= 160)
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("first physical X primes surface ELEC release");
+            keyboard
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X releases surface ELEC");
+        }
+        advance_app_until(
+            &mut app,
+            "CRYS-carrying builder releases exact ELEC",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
+        let hut_x = app
+            .engine
+            .object_snapshot(hut)
+            .expect("Tutorial06 keeps exact HUT3")
+            .position
+            .x;
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "CRYS-carrying builder returns to HUT3",
+            120,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.x <= hut_x + 4)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S enters HUT3 with exact CRYS");
+        advance_app_until(
+            &mut app,
+            "CRYS-carrying builder enters exact HUT3",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.container == Some(hut))
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial06 asks player to sell CRYS",
+            240,
+            |app| app_tutorial_message_contains(app, "Sell the crystal"),
+        );
+        advance_app_until(
+            &mut app,
+            "HUT3 opens context for carried CRYS",
+            30,
+            |app| {
+                app.engine
+                    .cursor_object_menu(app.local_owner)
+                    .is_some_and(|(_, menu)| menu.identification == context_identification)
+            },
+        );
+        app_navigate_object_menu_to(&mut app, "Put", |item| item.caption == "Put");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A puts exact CRYS into HUT3");
+        advance_app_until(
+            &mut app,
+            "context Put transfers exact CRYS into HUT3",
+            40,
+            |app| {
+                app.engine
+                    .object_snapshot(crystal)
+                    .is_some_and(|object| object.container == Some(hut))
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "HUT3 restores context after putting CRYS",
+            30,
+            |app| {
+                app.engine
+                    .cursor_object_menu(app.local_owner)
+                    .is_some_and(|(_, menu)| menu.identification == context_identification)
+            },
+        );
+        app_navigate_object_menu_to(&mut app, "Sell", |item| item.caption == "Sell");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A opens HUT3 Sell menu");
+        let sell_identification = serde_json::from_value(serde_json::json!({ "Int": 5 }))
+            .expect("sell identification deserializes");
+        advance_app_until(&mut app, "HUT3 opens its real Sell menu", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == sell_identification)
+        });
+        app_navigate_object_menu_to(&mut app, "CRYS", |item| item.item_id == "CRYS");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::A)
+            .expect("physical A sells Tutorial06's exact CRYS");
+        advance_app_until(
+            &mut app,
+            "selling CRYS removes exact objective object",
+            60,
+            |app| app.engine.object_snapshot(crystal).is_none(),
+        );
+        advance_app_until(&mut app, "Tutorial06 selects Tutorial07", 320, |app| {
+            app.engine.next_mission().path == r"Tutorial.c4f\Tutorial07.c4s"
+        });
+        advance_app_until(
+            &mut app,
+            "Tutorial06 fulfilled goal reaches GameOver",
+            320,
+            |app| app.snapshot.game_over && app.game_over_dialog.is_some(),
+        );
+        assert!(
+            app.snapshot
+                .round_results
+                .fulfilled_goals
+                .iter()
+                .any(|goal| goal == "SCRG"),
+            "Tutorial06 must record fulfilled SCRG before GameOver"
+        );
+        assert!(
+            app.engine.object_snapshot(crystal).is_none(),
+            "Tutorial06's exact CRYS must be sold before SCRG fulfillment"
+        );
+        assert_eq!(
+            app.engine.next_mission().path,
+            r"Tutorial.c4f\Tutorial07.c4s"
         );
     }
 
