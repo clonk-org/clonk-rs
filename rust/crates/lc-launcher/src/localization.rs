@@ -134,7 +134,7 @@ fn discover_language_codes(config: Option<&Config>) -> Vec<String> {
             .get_in(Some("General"), "LanguageEx")
             .or_else(|| config.get("LanguageEx"))
         {
-            append_language_codes(&mut codes, &mut seen, sequence);
+            append_language_codes(&mut codes, sequence);
         }
 
         if codes.is_empty() {
@@ -162,12 +162,10 @@ fn discover_language_codes(config: Option<&Config>) -> Vec<String> {
     codes
 }
 
-fn append_language_codes(codes: &mut Vec<String>, seen: &mut HashSet<String>, sequence: &str) {
+fn append_language_codes(codes: &mut Vec<String>, sequence: &str) {
     for segment in sequence.split(',') {
         if let Some(code) = parse_language_code(segment) {
-            if seen.insert(code.clone()) {
-                codes.push(code);
-            }
+            codes.push(code);
         }
     }
 }
@@ -254,6 +252,24 @@ mod tests {
         assert_eq!(
             discover_language_codes(Some(&config)),
             vec!["de".to_string(), "x".to_string(), "--".to_string()]
+        );
+    }
+
+    #[test]
+    fn configured_language_sequence_preserves_duplicate_order() {
+        // GetLanguageSequence appends every nonempty segment without a
+        // uniqueness check (src/C4Config.cpp:1497-1505).
+        let mut config = Config::new();
+        config.set_in(Some("General"), "LanguageEx", "DE,US,DE,US");
+
+        assert_eq!(
+            discover_language_codes(Some(&config)),
+            vec![
+                "DE".to_string(),
+                "US".to_string(),
+                "DE".to_string(),
+                "US".to_string(),
+            ]
         );
     }
 }
