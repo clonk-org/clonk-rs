@@ -1,11 +1,10 @@
-
+use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
 use lc_engine::{
     Definition, Engine, ObjectId, PlayerConfig, SpawnConfig, COM_DIG, COM_DOWN, COM_RIGHT,
     COM_SPECIAL,
 };
 use lc_script::Value;
 use std::error::Error;
-use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
 
 const CONTROL_PROBE_SCRIPT: &str = r#"
 #strict 2
@@ -93,6 +92,51 @@ fn physical_controls_preserve_cpp_press_release_double_and_single_timing(
         local(player.engine(), crew, "dig_single"),
         Some(Value::Int(1)),
         "the buffered single fires only when LastComDelay > C4DoubleClick"
+    );
+    Ok(())
+}
+
+#[test]
+fn route_checkpoint_reset_changes_only_the_physical_input_ledger() -> Result<(), Box<dyn Error>> {
+    let (mut engine, _) = fixture()?;
+    {
+        let control = &mut engine.player_mut(1)?.control;
+        control.last_com = COM_RIGHT;
+        control.last_com_delay = 7;
+        control.last_com_down_double = 3;
+        control.pressed_coms = 1 << COM_RIGHT;
+        control.control_style = false;
+        control.auto_context_menu = true;
+        control.cursor_flash = 11;
+        control.select_flash = 12;
+        control.cursor_selection = 13;
+        control.cursor_toggled = 14;
+    }
+
+    let mut player = VirtualPlayer::new(&mut engine, 1);
+    player.reset_input_ledger_with_control_style(true)?;
+
+    let control = player.engine().player(1).expect("player remains").control;
+    assert_eq!(
+        (
+            control.last_com,
+            control.last_com_delay,
+            control.last_com_down_double,
+            control.pressed_coms,
+            control.control_style,
+        ),
+        (0, 0, 0, 0, true)
+    );
+    assert_eq!(
+        (
+            control.auto_context_menu,
+            control.cursor_flash,
+            control.select_flash,
+            control.cursor_selection,
+            control.cursor_toggled,
+        ),
+        (true, 11, 12, 13, 14),
+        "the checkpoint must not reset menu or cursor/selection state"
     );
     Ok(())
 }

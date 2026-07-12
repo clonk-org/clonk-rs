@@ -2,12 +2,12 @@
 
 use std::error::Error;
 
+use crate::support::real_scenario::load_tutorial;
+use crate::support::virtual_player::VirtualPlayer;
 use lc_engine::{
     Engine, JoinPlayerConfig, ObjectId, COM_CURSOR_RIGHT, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT,
     COM_THROW, COM_UP,
 };
-use crate::support::real_scenario::load_tutorial;
-use crate::support::virtual_player::VirtualPlayer;
 
 fn load_tutorial06() -> (Engine, i32) {
     let mut engine = load_tutorial(6, 0);
@@ -66,7 +66,8 @@ fn object_menu_identification(engine: &Engine, owner: i32) -> Option<lc_script::
 }
 
 #[test]
-fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn Error>> {
+fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
+) -> Result<(), Box<dyn Error>> {
     let (mut engine, owner) = load_tutorial06();
     let crystal =
         object_with_definition(&engine, "CRYS").expect("Tutorial06 creates the collectible CRYS");
@@ -374,10 +375,15 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         tutorial_message_contains(engine, "get the water out of the way")
     })?;
 
+    // Isolate the user-facing default Jump'n'Run/AutoStop route at the
+    // Tutorial06 endgame checkpoint. Resetting the input ledger models a
+    // player loading this live state with no keys held; every subsequent
+    // movement still uses physical press/hold/release through InCom.
+    player.reset_input_ledger_with_control_style(true)?;
+
     // Continue to the flooded shelf before releasing the case. From this
     // ledge the Clonk is already in contact with the Earth wall, so a live
     // up-left dig can cut a body-sized diagonal passage into the basin.
-    player.tap(COM_DIG)?;
     player.press(COM_DIG)?;
     player.wait_until(
         "ELEC resumes drilling below the flooded shelf",
@@ -417,11 +423,17 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .is_some_and(|object| object.action.name == "Dig")
         },
     )?;
-    player.wait_until("the dry approach reaches the basin wall", 100, |engine| {
-        engine
-            .object_snapshot(builder)
-            .is_some_and(|object| object.position.x <= 320)
-    })?;
+    player.press(COM_LEFT)?;
+    player.press(COM_DOWN)?;
+    let dry_approach =
+        player.wait_until("the dry approach reaches the basin wall", 100, |engine| {
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.position.x <= 320)
+        });
+    player.release(COM_DOWN)?;
+    player.release(COM_LEFT)?;
+    dry_approach?;
     player.tap(COM_DOWN)?;
     player.wait_until("the builder stops at the dry basin wall", 40, |engine| {
         engine
@@ -438,14 +450,11 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .is_some_and(|object| object.action.name == "Dig")
         },
     )?;
-    // Dig begins down-left. Left rotates it horizontal; an ignored Up press
-    // clears the double-click buffer so the second Left is another ordinary
-    // direction step, rotating the live dig to up-left without an 11-frame
-    // detour into the basin floor.
-    player.tap(COM_LEFT)?;
-    player.tap(COM_UP)?;
-    player.tap(COM_LEFT)?;
-    player.wait_until(
+    // AutoStop derives the live dig direction from the physically held
+    // direction keys. Hold up-left until the dry upper route is open.
+    player.press(COM_LEFT)?;
+    player.press(COM_UP)?;
+    let upper_passage = player.wait_until(
         "the builder pre-clears the dry upper passage",
         120,
         |engine| {
@@ -453,8 +462,10 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .object_snapshot(builder)
                 .is_some_and(|object| object.action.name == "Dig" && object.position.x <= 296)
         },
-    )?;
-    player.tap(COM_DOWN)?;
+    );
+    player.release(COM_UP)?;
+    player.release(COM_LEFT)?;
+    upper_passage?;
     player.wait_until(
         "the builder stops before breaching the upper passage",
         40,
@@ -484,7 +495,6 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .is_some_and(|object| object.action.name == "Walk" && object.position.x <= 330)
         },
     )?;
-    player.tap(COM_DOWN)?;
     player.wait_until(
         "the lower-shelf builder comes to a full stop",
         40,
@@ -494,8 +504,6 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .is_some_and(|object| object.velocity.x == 0)
         },
     )?;
-    player.tap(COM_LEFT)?;
-    player.tap(COM_DOWN)?;
 
     player.tap(COM_DIG)?;
     player.wait_until("the builder starts the lower basin drain", 40, |engine| {
@@ -503,7 +511,9 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             .object_snapshot(builder)
             .is_some_and(|object| object.action.name == "Dig")
     })?;
-    player.wait_until(
+    player.press(COM_LEFT)?;
+    player.press(COM_DOWN)?;
+    let lower_approach = player.wait_until(
         "the lower drain reaches the dry basin wall",
         100,
         |engine| {
@@ -511,8 +521,10 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .object_snapshot(builder)
                 .is_some_and(|object| object.action.name == "Dig" && object.position.x <= 305)
         },
-    )?;
-    player.tap(COM_DOWN)?;
+    );
+    player.release(COM_DOWN)?;
+    player.release(COM_LEFT)?;
+    lower_approach?;
     player.wait_until(
         "the builder stops before opening the lower drain",
         40,
@@ -528,17 +540,19 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             .object_snapshot(builder)
             .is_some_and(|object| object.action.name == "Dig")
     })?;
-    player.tap(COM_LEFT)?;
-    player.wait_until("the lower drain reaches its diagonal turn", 80, |engine| {
-        engine
-            .object_snapshot(builder)
-            .is_some_and(|object| object.action.name == "Dig" && object.position.x <= 298)
-    })?;
+    player.press(COM_LEFT)?;
+    let diagonal_turn =
+        player.wait_until("the lower drain reaches its diagonal turn", 80, |engine| {
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name == "Dig" && object.position.x <= 298)
+        });
+    diagonal_turn?;
     // Turn the live dig up-left while CNAT_Bottom is still available. A
     // straight horizontal cut leaves a body-blocking Earth lip; C++ stops
     // DFA_DIG as soon as that support is gone (C4Object.cpp:4906-4911).
-    player.tap(COM_LEFT)?;
-    player.wait_until(
+    player.press(COM_UP)?;
+    let opened_drain = player.wait_until(
         "the diagonal passage opens the basin drain",
         240,
         |engine| {
@@ -546,7 +560,10 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .object_snapshot(builder)
                 .is_some_and(|object| object.action.name == "Swim")
         },
-    )?;
+    );
+    player.release(COM_UP)?;
+    player.release(COM_LEFT)?;
+    opened_drain?;
     player.hold_until(
         COM_UP,
         "the rescuer rises through the pre-cleared upper passage",
@@ -573,9 +590,11 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     // collected first and fills the single collection slot.
     if clonk_carries(player.engine(), builder, "COAL") {
         player.tap(COM_THROW)?;
-        player.wait_until("the rescuer drops incidental COAL outside the drain", 60, |engine| {
-            !clonk_carries(engine, builder, "COAL")
-        })?;
+        player.wait_until(
+            "the rescuer drops incidental COAL outside the drain",
+            60,
+            |engine| !clonk_carries(engine, builder, "COAL"),
+        )?;
     }
     player.tap(COM_DOWN)?;
     player.wait_until(
@@ -604,10 +623,9 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             .object_snapshot(first_clonk)
             .is_some_and(|object| object.action.name == "Dig")
     })?;
-    player.tap(COM_RIGHT)?;
-    player.tap(COM_UP)?;
-    player.tap(COM_RIGHT)?;
-    player.wait_until(
+    player.press(COM_RIGHT)?;
+    player.press(COM_UP)?;
+    let escaped_into_water = player.wait_until(
         "the trapped CLNK reaches the drained basin",
         400,
         |engine| {
@@ -615,7 +633,10 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .object_snapshot(first_clonk)
                 .is_some_and(|object| object.action.name == "Swim")
         },
-    )?;
+    );
+    player.release(COM_UP)?;
+    player.release(COM_RIGHT)?;
+    escaped_into_water?;
     player.hold_until(
         COM_RIGHT,
         "the CRYS carrier swims through the opened passage",
@@ -712,7 +733,7 @@ fn tutorial06_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         })
     })?;
     player.ticks(12)?;
-    player.double_tap(COM_DOWN)?;
+    player.tap(COM_DOWN)?;
     player.wait_until("the CRYS-carrying builder grabs ELEC", 100, |engine| {
         engine.object_snapshot(builder).is_some_and(|object| {
             object.action.name == "Push" && object.action.target == Some(elevator_case)

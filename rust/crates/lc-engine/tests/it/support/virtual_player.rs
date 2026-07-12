@@ -136,6 +136,22 @@ impl<'engine> VirtualPlayer<'engine> {
         self.engine
     }
 
+    /// Start a route checkpoint with a clean physical-key ledger under the
+    /// selected C4Player control style. Scenario state is untouched; future
+    /// controls still enter through `C4Player::InCom`.
+    pub fn reset_input_ledger_with_control_style(
+        &mut self,
+        control_style: bool,
+    ) -> Result<(), VirtualPlayerError> {
+        let control = &mut self.engine.player_mut(self.owner)?.control;
+        control.last_com = 0;
+        control.last_com_delay = 0;
+        control.last_com_down_double = 0;
+        control.pressed_coms = 0;
+        control.control_style = control_style;
+        Ok(())
+    }
+
     /// Send a physical key-down control through `C4Player::InCom`.
     pub fn press(&mut self, control: u8) -> Result<(), VirtualPlayerError> {
         self.validate_control(control)?;
