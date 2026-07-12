@@ -1611,9 +1611,12 @@ fn main() -> Result<()> {
                 // leaves the running game. Do not carry a fractional tick
                 // from the old cadence across that boundary
                 // (C4Application.cpp:510-531; C4Game.cpp:443).
-                synchronize_frame_interval(app.mode, &mut frame_interval, &mut accumulator);
-                let clamped = frame_time.min(MAX_ACCUMULATED_TIME);
-                accumulator = (accumulator + clamped).min(MAX_ACCUMULATED_TIME);
+                accumulate_frame_time_for_mode(
+                    app.mode,
+                    &mut frame_interval,
+                    &mut accumulator,
+                    frame_time,
+                );
 
                 while accumulator >= frame_interval {
                     let executed_interval = frame_interval;
@@ -3483,6 +3486,17 @@ fn synchronize_frame_interval(
     *frame_interval = next_interval;
     *accumulator = Duration::ZERO;
     true
+}
+
+fn accumulate_frame_time_for_mode(
+    mode: AppMode,
+    frame_interval: &mut Duration,
+    accumulator: &mut Duration,
+    elapsed: Duration,
+) {
+    let clamped = elapsed.min(MAX_ACCUMULATED_TIME);
+    *accumulator = (*accumulator + clamped).min(MAX_ACCUMULATED_TIME);
+    synchronize_frame_interval(mode, frame_interval, accumulator);
 }
 
 struct MenuState {
@@ -15470,27 +15484,33 @@ mod tests {
 
         let mut interval = STARTUP_FRAME_INTERVAL;
         let mut accumulator = Duration::from_millis(15);
-        assert!(synchronize_frame_interval(
+        accumulate_frame_time_for_mode(
             AppMode::Running,
             &mut interval,
             &mut accumulator,
-        ));
+            Duration::from_millis(10),
+        );
         assert_eq!(interval, INGAME_FRAME_INTERVAL);
-        assert_eq!(accumulator, Duration::ZERO);
+        assert_eq!(
+            accumulator,
+            Duration::ZERO,
+            "elapsed time measured under the startup cadence must not leak into the game timer"
+        );
 
-        accumulator = Duration::from_millis(27);
-        assert!(!synchronize_frame_interval(
+        accumulate_frame_time_for_mode(
             AppMode::Running,
             &mut interval,
             &mut accumulator,
-        ));
+            Duration::from_millis(27),
+        );
         assert_eq!(accumulator, Duration::from_millis(27));
 
-        assert!(synchronize_frame_interval(
+        accumulate_frame_time_for_mode(
             AppMode::Menu,
             &mut interval,
             &mut accumulator,
-        ));
+            Duration::from_millis(1),
+        );
         assert_eq!(interval, STARTUP_FRAME_INTERVAL);
         assert_eq!(accumulator, Duration::ZERO);
     }
