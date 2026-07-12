@@ -7,6 +7,7 @@ mod support;
 mod action_attach;
 mod action_build;
 mod action_procedure;
+mod dragon_rock_audio;
 mod engine_snapshots;
 mod flight_movement;
 mod gamma;
