@@ -665,6 +665,79 @@ impl RgbColor {
     }
 }
 
+/// The nine independent C4GraphicsSystem gamma controls, each with the
+/// black/mid/white curve points stored as raw 0xRRGGBB values
+/// (`C4MaxGammaRamps`, C4Constants.h:45-46; C4GraphicsSystem.h:51).
+pub const GAMMA_RAMP_COUNT: usize = 9;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GammaControlState {
+    pub ramps: [[u32; 3]; GAMMA_RAMP_COUNT],
+}
+
+impl GammaControlState {
+    pub const RAMP_COUNT: usize = GAMMA_RAMP_COUNT;
+    pub const DEFAULT_RAMP: [u32; 3] = [0x000000, 0x808080, 0xffffff];
+
+    pub const fn new() -> Self {
+        Self {
+            ramps: [Self::DEFAULT_RAMP; Self::RAMP_COUNT],
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// `C4GraphicsSystem::SetGamma` index gate and slot write
+    /// (C4GraphicsSystem.cpp:772-784). Returns false for the silent invalid
+    /// index path.
+    pub fn set_ramp(&mut self, index: i32, points: [u32; 3]) -> bool {
+        let Ok(index) = usize::try_from(index) else {
+            return false;
+        };
+        let Some(ramp) = self.ramps.get_mut(index) else {
+            return false;
+        };
+        *ramp = points;
+        true
+    }
+
+    pub fn ramp(&self, index: usize) -> Option<[u32; 3]> {
+        self.ramps.get(index).copied()
+    }
+
+    /// `C4GraphicsSystem::ApplyGamma` adds every control's per-channel
+    /// displacement from the default curve, then clamps the three combined
+    /// points (`C4GraphicsSystem.cpp:787-809`).
+    pub fn combined_control_points(&self) -> [u32; 3] {
+        const DEFAULT_CHANNEL: [i32; 3] = [0x00, 0x80, 0xff];
+        let mut combined = [0_u32; 3];
+        for (point, output) in combined.iter_mut().enumerate() {
+            let default = DEFAULT_CHANNEL[point];
+            let mut channels = [default; 3];
+            for (channel, value) in channels.iter_mut().enumerate() {
+                let shift = 16 - channel * 8;
+                for ramp in &self.ramps {
+                    let component = ((ramp[point] >> shift) & 0xff) as i32;
+                    *value += component - default;
+                }
+                *value = (*value).clamp(0, 255);
+            }
+            *output = ((channels[0] as u32) << 16)
+                | ((channels[1] as u32) << 8)
+                | channels[2] as u32;
+        }
+        combined
+    }
+}
+
+impl Default for GammaControlState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// What a joining player brings to `Engine::join_player` — the data
 /// C4Player::Init/ScenarioInit reads from the C4PlayerInfo and the loaded
 /// .c4p file (C4Player.cpp:246-352, 670-777).
@@ -1980,6 +2053,10 @@ pub struct EnvironmentFrame {
     pub precipitation: i32,
     #[serde(default)]
     pub sky_color: Option<RgbColor>,
+    /// Presentation state is recorded with the simulation frame but remains
+    /// intentionally absent from C4ControlSyncCheck.
+    #[serde(default, skip_serializing_if = "GammaControlState::is_default")]
+    pub gamma: GammaControlState,
 }
 
 fn default_wind_min() -> i32 {
@@ -5878,6 +5955,10 @@ pub struct EngineState {
     pub game_time: i32,
     pub physics: PhysicsSettings,
     pub environment: EnvironmentSettings,
+    /// C4Weather::CompileFunc persists Game.GraphicsSystem.dwGamma under
+    /// `Gamma` with default controls for legacy saves (C4Weather.cpp:302-309).
+    #[serde(default, skip_serializing_if = "GammaControlState::is_default")]
+    pub gamma: GammaControlState,
     pub next_object_id: u64,
     #[serde(default)]
     pub landscape: Option<Landscape>,
@@ -6011,6 +6092,7 @@ impl EngineState {
             game_time: snapshot.game_time,
             physics,
             environment: snapshot.environment.settings,
+            gamma: snapshot.environment.gamma,
             next_object_id,
             landscape: snapshot.landscape.clone(),
             objects,
@@ -10618,6 +10700,8 @@ pub struct Engine {
     #[doc(hidden)] pub sectors: Option<SectorMap>,
     #[doc(hidden)] pub physics: PhysicsSettings,
     #[doc(hidden)] pub environment: EnvironmentSettings,
+    /// Game.GraphicsSystem.dwGamma: nine independently additive ramps.
+    #[doc(hidden)] pub gamma: GammaControlState,
     sky: Option<SkyState>,
     global_effects: Vec<EffectState>,
     particles: Vec<ActiveParticle>,
@@ -12379,6 +12463,7 @@ impl Engine {
             sectors: None,
             physics: PhysicsSettings::default(),
             environment: EnvironmentSettings::default(),
+            gamma: GammaControlState::default(),
             sky: None,
             global_effects: Vec::new(),
             particles: Vec::new(),
@@ -14170,6 +14255,24 @@ impl Engine {
 
     pub fn environment(&self) -> EnvironmentSettings {
         self.environment
+    }
+
+    /// The nine raw Game.GraphicsSystem.dwGamma controls. Applying these to
+    /// the renderer LUT is deliberately outside this engine-state slice.
+    pub fn gamma_controls(&self) -> &GammaControlState {
+        &self.gamma
+    }
+
+    /// Add the nine controls exactly like C4GraphicsSystem::ApplyGamma
+    /// (C4GraphicsSystem.cpp:787-809), returning its three packed RGB points.
+    pub fn effective_gamma_control_points(&self) -> [u32; 3] {
+        self.gamma.combined_control_points()
+    }
+
+    /// C4GraphicsSystem::Default (C4GraphicsSystem.cpp:277-281), used at a
+    /// fresh scenario boundary before its Initialize script may set slot 0.
+    pub(crate) fn reset_gamma_controls(&mut self) {
+        self.gamma = GammaControlState::default();
     }
 
     pub fn set_environment(&mut self, environment: EnvironmentSettings) {
@@ -20065,6 +20168,7 @@ impl Engine {
             ambient_temperature,
             precipitation: self.environment.precipitation(),
             sky_color: Some(sky_color),
+            gamma: self.gamma,
         };
         let sky_snapshot = self.sky.as_ref().map(SkyState::snapshot);
         let weather_events = self.weather_events.clone();
@@ -20433,6 +20537,7 @@ impl Engine {
             game_time: self.game_time,
             physics: self.physics,
             environment: self.environment,
+            gamma: self.gamma,
             next_object_id: self.next_object_id,
             landscape: self.landscape.clone(),
             objects,
@@ -20481,6 +20586,7 @@ impl Engine {
         self.physics = state.physics;
         self.environment = state.environment;
         self.environment.refresh_runtime_fields();
+        self.gamma = state.gamma;
         self.landscape_insert_thrust = state.landscape_insert_thrust;
         self.landscape = state.landscape.clone();
         // C4MassMoverSet::Load semantics (C4MassMover.cpp:204-217): the
@@ -30582,6 +30688,11 @@ impl Engine {
                 } => self.execute_blast_circle_operation(center, radius, controller),
                 LandscapeOperation::ShakeCircle { center, radius } => {
                     self.execute_shake_circle_operation(center, radius)
+                }
+                LandscapeOperation::GammaRamp { index, points } => {
+                    // The host already applied SetGamma's silent valid-index
+                    // gate. Retain it here for robust operation replay.
+                    self.gamma.set_ramp(index, points);
                 }
                 LandscapeOperation::SkyAdjust {
                     modulation,

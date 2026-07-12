@@ -394,6 +394,10 @@ fn describe_snapshot_mismatch(
         problems.push("landscape mismatch".into());
     }
 
+    if expected.environment.gamma != actual.environment.gamma {
+        problems.push("gamma controls mismatch".into());
+    }
+
     if expected.rng != actual.rng {
         problems.push("rng mismatch".into());
     }

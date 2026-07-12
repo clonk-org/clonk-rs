@@ -9024,6 +9024,11 @@ pub enum LandscapeOperation {
         position: Vector2,
         amount: i32,
     },
+    /// FnSetGamma/FnResetGamma -> C4GraphicsSystem::SetGamma
+    /// (C4Script.cpp:4998-5006; C4GraphicsSystem.cpp:772-784). Gamma is
+    /// presentation-only, but this existing ordered global-operation channel
+    /// preserves callback write order without making it sync-relevant.
+    GammaRamp { index: i32, points: [u32; 3] },
     /// FnSetSkyAdjust (C4Script.cpp:4620-4624) -> C4Sky::SetModulation
     /// (C4Sky.cpp:238-244).
     SkyAdjust { modulation: u32, back_color: u32 },
@@ -16344,19 +16349,60 @@ fn shake_objects(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Nil)
 }
 
-/// FnSetGamma (C4Script.cpp:5004-5008) -> C4GraphicsSystem::SetGamma
-/// (C4GraphicsSystem.cpp:772-786): a display gamma ramp write — pure
-/// presentation (out-of-range ramp index silently ignored, DisableGamma
-/// config gate). Nothing sim-side reads the ramp back; the port only
-/// guarantees the call SUCCEEDS so the calling script continues. The
-/// renderer-side ramp is not modeled.
-fn set_gamma(_args: &[Value]) -> Result<Value, RuntimeError> {
+/// FnSetGamma (C4Script.cpp:4998-5006) -> C4GraphicsSystem::SetGamma
+/// (C4GraphicsSystem.cpp:772-784). Missing arguments are C4Aul integer zero;
+/// in particular, an omitted ramp index selects the script/user slot 0.
+/// Remaining app-config gap: Rust does not yet pass
+/// `Config.Graphics.DisableGamma` into an engine callback. C++ skips even the
+/// stored write when that flag is set (C4GraphicsSystem.cpp:774-776); until
+/// that boundary exists, every otherwise-valid Rust write is retained.
+fn set_gamma(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut points = [0_u32; 3];
+    for (slot, point) in points.iter_mut().enumerate() {
+        *point = value_to_i32(
+            args.get(slot).unwrap_or(&Value::Nil),
+            "SetGamma",
+            "control point",
+        )? as u32;
+    }
+    let index = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "SetGamma",
+        "ramp index",
+    )?;
+
+    // C4GraphicsSystem::SetGamma silently returns for every index outside
+    // [0,C4MaxGammaRamps), before touching the stored controls.
+    if !(0..crate::GAMMA_RAMP_COUNT as i32).contains(&index) {
+        return Ok(Value::Nil);
+    }
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.register_landscape_operation(LandscapeOperation::GammaRamp { index, points });
+        }
+    });
     Ok(Value::Nil)
 }
 
-/// FnResetGamma (C4Script.cpp:5010-5013): SetGamma with the default
-/// 0x000000/0x808080/0xffffff ramp — the same presentation no-op.
-fn reset_gamma(_args: &[Value]) -> Result<Value, RuntimeError> {
+/// FnResetGamma (C4Script.cpp:5004-5006): restore the selected ramp to the
+/// C4GraphicsSystem default 0x000000/0x808080/0xffffff control points.
+fn reset_gamma(args: &[Value]) -> Result<Value, RuntimeError> {
+    let index = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "ResetGamma",
+        "ramp index",
+    )?;
+    if !(0..crate::GAMMA_RAMP_COUNT as i32).contains(&index) {
+        return Ok(Value::Nil);
+    }
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.register_landscape_operation(LandscapeOperation::GammaRamp {
+                index,
+                points: crate::GammaControlState::DEFAULT_RAMP,
+            });
+        }
+    });
     Ok(Value::Nil)
 }
 
@@ -31007,24 +31053,49 @@ func Trigger(object pOther)
     }
 
     #[test]
-    fn gamma_host_fns_succeed_as_presentation_no_ops() {
-        // FnSetGamma/FnResetGamma (C4Script.cpp:5004-5013) write a display
-        // gamma ramp (C4GraphicsSystem::SetGamma,
-        // C4GraphicsSystem.cpp:772-786) — nothing sim-side ever reads it
-        // back; the sim-observable contract is only that the calls SUCCEED
-        // so the calling Initialize continues (Tutorial06/07/10,
-        // ArcticOcean, Chasm, PolarNight call them).
+    fn gamma_host_fns_queue_valid_ramp_writes_and_ignore_invalid_indices() {
+        // FnSetGamma/FnResetGamma (C4Script.cpp:4998-5006) write one of the
+        // nine C4GraphicsSystem ramps; SetGamma silently ignores indices
+        // outside 0..C4MaxGammaRamps (C4GraphicsSystem.cpp:772-784).
         let args = [
             Value::Int(0x000000),
-            Value::Int(0x808080),
-            Value::Int(0xffffff),
-            Value::Int(4),
+            Value::Int(0x646464),
+            Value::Int(0xc8c8c8),
         ];
-        assert_eq!(set_gamma(&args).expect("SetGamma succeeds"), Value::Nil);
-        assert_eq!(
-            reset_gamma(&[Value::Int(4)]).expect("ResetGamma succeeds"),
-            Value::Nil
-        );
+        let (result, outcome) = with_object_host_context(|| set_gamma(&args));
+        assert_eq!(result.expect("SetGamma succeeds"), Value::Nil);
+        assert!(matches!(
+            outcome.landscape.as_slice(),
+            [LandscapeOperation::GammaRamp {
+                index: 0,
+                points: [0x000000, 0x646464, 0xc8c8c8]
+            }]
+        ));
+
+        let (result, outcome) = with_object_host_context(|| reset_gamma(&[]));
+        assert_eq!(result.expect("ResetGamma succeeds"), Value::Nil);
+        assert!(matches!(
+            outcome.landscape.as_slice(),
+            [LandscapeOperation::GammaRamp {
+                index: 0,
+                points: [0x000000, 0x808080, 0xffffff]
+            }]
+        ));
+
+        let invalid = [Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(9)];
+        let (result, outcome) = with_object_host_context(|| set_gamma(&invalid));
+        assert_eq!(result.expect("invalid SetGamma is a no-op"), Value::Nil);
+        assert!(outcome.landscape.is_empty());
+
+        let invalid = [
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(-1),
+        ];
+        let (result, outcome) = with_object_host_context(|| set_gamma(&invalid));
+        assert_eq!(result.expect("negative SetGamma is a no-op"), Value::Nil);
+        assert!(outcome.landscape.is_empty());
     }
 
     #[test]

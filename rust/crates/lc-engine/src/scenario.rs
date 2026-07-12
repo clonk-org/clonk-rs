@@ -664,6 +664,12 @@ impl Scenario {
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
         engine.clear_scenario_script();
+        // C4GraphicsSystem::Default initializes all nine controls before a
+        // fresh scenario-apply boundary, after which scenario Initialize may
+        // call SetGamma. Save loading restores its captured controls after
+        // this resource/setup pass (C4GraphicsSystem.cpp:277-281;
+        // C4Game.cpp:882-960).
+        engine.reset_gamma_controls();
         engine.configure_objectives(self.objectives.clone());
         // C4Player::InitControl applies the scenario head override to every
         // subsequent join (C4Player.cpp:1747,2369-2389).
@@ -7402,10 +7408,12 @@ Objects=STNE=1;TREE=1
 
         let mut engine = Engine::with_seed(0);
         engine.set_environment(EnvironmentSettings::new(5));
+        assert!(engine.gamma.set_ramp(0, [0, 0x646464, 0xc8c8c8]));
         scenario.apply(&mut engine).expect("scenario applies");
 
         let configured = engine.environment();
         assert_eq!(configured, EnvironmentSettings::default());
+        assert!(engine.gamma_controls().is_default());
     }
 
     #[test]
