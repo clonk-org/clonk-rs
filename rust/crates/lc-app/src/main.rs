@@ -10418,6 +10418,7 @@ impl GameApp {
         if let Some(_focus) = self.focus_snapshot.as_ref() {
             let startup_hint_owner = self.show_startup_hint.then_some(self.local_owner);
             let mut players = collect_player_overlays(
+                &self.engine,
                 &self.snapshot,
                 self.focus_id,
                 startup_hint_owner,
@@ -12515,6 +12516,7 @@ fn default_rank_name(rank: i32) -> Option<String> {
 }
 
 fn collect_player_overlays(
+    engine: &Engine,
     snapshot: &SimulationSnapshot,
     focus_id: Option<ObjectId>,
     startup_hint_owner: Option<i32>,
@@ -12530,9 +12532,22 @@ fn collect_player_overlays(
         let mut crew = Vec::with_capacity(player.crew.len());
         let cursor = detail_map.get(&player.owner).and_then(|state| state.cursor);
         for object_id in &player.crew {
-            let (label, energy_fraction, is_focus) =
+            let (
+                label,
+                energy_fraction,
+                magic_energy,
+                magic_capacity,
+                breath,
+                breath_capacity,
+                is_focus,
+            ) =
                 if let Some(object) = snapshot.object(*object_id) {
                     let label = format!("{} #{}", object.definition_id, object.id.as_u64());
+                    let physical = engine
+                        .find_object_index(object.id)
+                        .map(|index| engine.object_physical(index))
+                        .or(object.temporary_physical)
+                        .or(object.info_physical);
                     // Energy runs on the C4MaxPhysical scale against the
                     // crew's physical Energy (C4Object::DrawEnergy,
                     // src/C4Object.cpp:2692-2695).
@@ -12544,16 +12559,32 @@ fn collect_player_overlays(
                         .unwrap_or(100);
                     let energy_fraction =
                         (object.energy.max(0) as f32 / max_energy as f32).clamp(0.0, 1.0);
+                    let magic_capacity = physical
+                        .map(|physical| physical.magic)
+                        .unwrap_or(object.magic_capacity);
+                    let breath_capacity = physical.map(|physical| physical.breath).unwrap_or(0);
                     let is_focus = focus_id == Some(object.id) || cursor == Some(object.id);
-                    (label, energy_fraction, is_focus)
+                    (
+                        label,
+                        energy_fraction,
+                        object.magic_energy,
+                        magic_capacity,
+                        object.breath,
+                        breath_capacity,
+                        is_focus,
+                    )
                 } else {
                     let label = format!("Object #{}", object_id.as_u64());
-                    (label, 0.0, false)
+                    (label, 0.0, 0, 0, 0, 0, false)
                 };
             crew.push(CrewOverlay {
                 object_id: *object_id,
                 label,
                 energy_fraction,
+                magic_energy,
+                magic_capacity,
+                breath,
+                breath_capacity,
                 is_focus,
                 portrait: None,
                 rank: 0,
@@ -14028,8 +14059,13 @@ mod tests {
         clonk: ObjectId,
         definition: &str,
     ) -> bool {
-        let mut overlays =
-            collect_player_overlays(&app.snapshot, Some(clonk), None, &app.bindings);
+        let mut overlays = collect_player_overlays(
+            &app.engine,
+            &app.snapshot,
+            Some(clonk),
+            None,
+            &app.bindings,
+        );
         populate_crew_inventories(&app.engine, &app.snapshot, &mut overlays);
         overlays
             .iter()
@@ -15363,7 +15399,7 @@ mod tests {
                 need_energy: false,
                 construction: lc_engine::FULL_CON,
                 damage: 0,
-                magic_energy: 0,
+                magic_energy: 25_000,
                 magic_capacity: 0,
                 action: ActionState::default(),
                 direction: Direction::default(),
@@ -15398,10 +15434,15 @@ mod tests {
                 on_fire: false,
                 fire_phase: 0,
                 fire_caused_by: -1,
-                info_physical: None,
+                info_physical: Some(lc_engine::PhysicalInfo {
+                    energy: 100,
+                    breath: 100,
+                    magic: 50_000,
+                    ..lc_engine::PhysicalInfo::default()
+                }),
                 temporary_physical: None,
                 physical_changes: Vec::new(),
-                breath: 0,
+                breath: 50,
                 last_energy_loss_cause: -1,
                 base: -1,
                 fixed_position: None,
@@ -15527,7 +15568,9 @@ mod tests {
         });
 
         let bindings = KeyboardBindings::load(None);
-        let overlay = collect_player_overlays(&snapshot, Some(focus), Some(1), &bindings);
+        let engine = Engine::new();
+        let overlay =
+            collect_player_overlays(&engine, &snapshot, Some(focus), Some(1), &bindings);
         assert_eq!(overlay.len(), 1);
         let player = &overlay[0];
         assert_eq!(player.owner, 1);
@@ -15562,6 +15605,10 @@ mod tests {
         let focus_entry = focused.pop().expect("focus highlight present");
         assert!(focus_entry.label.contains("Clonk"));
         assert!((focus_entry.energy_fraction - 0.8).abs() < f32::EPSILON);
+        assert_eq!(focus_entry.magic_energy, 25_000);
+        assert_eq!(focus_entry.magic_capacity, 50_000);
+        assert_eq!(focus_entry.breath, 50);
+        assert_eq!(focus_entry.breath_capacity, 100);
         assert_eq!(focus_entry.object_id, focus);
         assert!(focus_entry.portrait.is_none());
 
@@ -15646,7 +15693,8 @@ mod tests {
         });
 
         let bindings = KeyboardBindings::load(None);
-        let mut overlays = collect_player_overlays(&snapshot, Some(crew_id), None, &bindings);
+        let mut overlays =
+            collect_player_overlays(&engine, &snapshot, Some(crew_id), None, &bindings);
         populate_crew_inventories(&engine, &snapshot, &mut overlays);
 
         let inventory = &overlays[0].crew[0].inventory;

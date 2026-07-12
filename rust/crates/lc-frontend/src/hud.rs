@@ -865,11 +865,61 @@ pub fn draw_commands(
 /// bar left of the viewport. `EnergyBars.png` is a 6x3 cell grid — column
 /// `bar_idx*2` filled, `+1` empty; rows top cap / middle tile / bottom cap
 /// (src/C4GraphicsResource.cpp:236-241).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HudBarKind {
+    Energy = 0,
+    Magic = 1,
+    Breath = 2,
+}
+
 pub fn draw_energy_bar(
     surface: &mut Surface,
     hud: &HudGraphics,
     viewport: SurfaceRect,
     energy_fraction: f32,
+) {
+    draw_bar(
+        surface,
+        hud,
+        viewport,
+        HudBarKind::Energy,
+        0,
+        |height| {
+            let fraction = energy_fraction.clamp(0.0, 1.0);
+            height - (fraction * height as f32).round() as i32
+        },
+    );
+}
+
+/// Integer-level variant of `C4Facet::DrawEnergyLevelEx`. `slot` is the
+/// compact left-to-right position after applying C++'s optional-bar gates;
+/// `kind` selects the corresponding filled/empty pair in EnergyBars.png.
+pub fn draw_level_bar(
+    surface: &mut Surface,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    kind: HudBarKind,
+    slot: u32,
+    level: i32,
+    range: i32,
+) {
+    draw_bar(surface, hud, viewport, kind, slot, |height| {
+        let bounded = if range > 0 {
+            level.clamp(0, range)
+        } else {
+            0
+        };
+        height - (i64::from(bounded) * i64::from(height) / i64::from(range.max(1))) as i32
+    });
+}
+
+fn draw_bar(
+    surface: &mut Surface,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    kind: HudBarKind,
+    slot: u32,
+    y_bar_for_height: impl FnOnce(i32) -> i32,
 ) {
     let Some(bars) = hud.energy_bars.as_ref() else {
         return;
@@ -887,7 +937,7 @@ pub fn draw_energy_bar(
     }
     // iYOff = 10 with portraits shown (src/C4Viewport.cpp:927).
     let y_off = 10;
-    let x = viewport.x + SYMBOL_BORDER;
+    let x = viewport.x + SYMBOL_BORDER + slot as i32 * (cell_w as i32 + 1);
     let y = viewport.y + SYMBOL_SIZE + 2 * SYMBOL_BORDER + y_off;
     let height = vp_height - 3 * SYMBOL_BORDER - 2 * SYMBOL_SIZE - y_off;
     if height <= 0 {
@@ -895,8 +945,7 @@ pub fn draw_energy_bar(
     }
 
     // yBar = Hgt - level*Hgt/range (src/C4Facet.cpp:339).
-    let fraction = energy_fraction.clamp(0.0, 1.0);
-    let y_bar = height - (fraction * height as f32).round() as i32;
+    let y_bar = y_bar_for_height(height);
     let cell_h_i = cell_h as i32;
     for row in 0..height {
         let (vidx, dy) = if row >= height - cell_h_i {
@@ -906,7 +955,7 @@ pub fn draw_energy_bar(
         } else {
             (1, row % cell_h_i)
         };
-        let column = if row >= y_bar { 0 } else { 1 };
+        let column = kind as u32 * 2 + u32::from(row < y_bar);
         draw_image_strip(
             surface,
             x,

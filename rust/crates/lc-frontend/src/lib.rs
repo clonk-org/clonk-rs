@@ -60,6 +60,8 @@ const CAMERA_SMOOTHING_ALPHA: f32 = 0.2;
 const CAMERA_SNAP_THRESHOLD: f32 = 1.0;
 const CAMERA_JUMP_THRESHOLD: f32 = 256.0;
 const PICK_TOLERANCE: f32 = 6.0;
+/// `MagicPhysicalFactor` (src/C4Object.h:81).
+const MAGIC_PHYSICAL_FACTOR: i32 = 1_000;
 const MATERIAL_OVERLAY_EXACT: i32 = 1;
 const MATERIAL_OVERLAY_HUGE_ZOOM: i32 = 4;
 const MATERIAL_OVERLAY_MONOCHROME: i32 = 8;
@@ -553,6 +555,16 @@ pub struct CrewOverlay {
     /// The crew member's name (`C4ObjectInfo::sName`).
     pub label: String,
     pub energy_fraction: f32,
+    /// Raw `C4Object::MagicEnergy` and resolved `GetPhysical()->Magic`.
+    /// A non-zero level inserts the optional middle HUD bar
+    /// (src/C4Viewport.cpp:934-938; src/C4Object.cpp:2722-2726).
+    pub magic_energy: i32,
+    pub magic_capacity: i32,
+    /// Raw `C4Object::Breath` and resolved `GetPhysical()->Breath`.
+    /// C++ draws this bar only while breath is non-zero and below capacity
+    /// (src/C4Viewport.cpp:939-943; src/C4Object.cpp:2728-2731).
+    pub breath: i32,
+    pub breath_capacity: i32,
     pub is_focus: bool,
     pub portrait: Option<ImageData>,
     /// `C4ObjectInfo::Rank` (src/C4ObjectInfo.cpp:330).
@@ -3097,6 +3109,30 @@ impl GraphicsSystem {
                     rect,
                     crew.energy_fraction,
                 );
+                let mut bar_slot = 1;
+                if crew.magic_energy != 0 {
+                    hud::draw_level_bar(
+                        &mut self.surface,
+                        &self.hud_graphics,
+                        rect,
+                        hud::HudBarKind::Magic,
+                        bar_slot,
+                        crew.magic_energy / MAGIC_PHYSICAL_FACTOR,
+                        crew.magic_capacity / MAGIC_PHYSICAL_FACTOR,
+                    );
+                    bar_slot += 1;
+                }
+                if crew.breath != 0 && crew.breath < crew.breath_capacity {
+                    hud::draw_level_bar(
+                        &mut self.surface,
+                        &self.hud_graphics,
+                        rect,
+                        hud::HudBarKind::Breath,
+                        bar_slot,
+                        crew.breath,
+                        crew.breath_capacity,
+                    );
+                }
             }
 
             // Command rows (src/C4Viewport.cpp:947-961), gated on
@@ -5692,6 +5728,10 @@ mod tests {
                 object_id,
                 label: "Joe".to_string(),
                 energy_fraction: 1.0,
+                magic_energy: 0,
+                magic_capacity: 0,
+                breath: 0,
+                breath_capacity: 0,
                 is_focus: true,
                 portrait: None,
                 rank: 0,
@@ -5795,6 +5835,73 @@ mod tests {
         assert!(
             ranked_top < name_only_top,
             "rank line must raise the label block (ranked_top={ranked_top}, name_only_top={name_only_top})"
+        );
+    }
+
+    #[test]
+    fn focused_crew_draws_partial_breath_in_the_next_cpp_bar_slot() {
+        // C4Viewport::DrawCursorInfo places Breath after Energy and the
+        // optional MagicEnergy bar; C4Object::DrawBreath selects bar_idx=2,
+        // i.e. EnergyBars columns 4/5 (src/C4Viewport.cpp:920-943;
+        // src/C4Object.cpp:2728-2731; src/C4Facet.cpp:334-387).
+        let (mut snapshot, mut graphics) = cursor_label_fixture(Some("Joe"));
+        snapshot.objects[0].breath = 50;
+        snapshot.objects[0].info_physical = Some(lc_engine::PhysicalInfo {
+            breath: 100,
+            ..lc_engine::PhysicalInfo::default()
+        });
+        graphics.hud_players[0].crew[0].breath = 50;
+        graphics.hud_players[0].crew[0].breath_capacity = 100;
+
+        // Sentinel 6x3 EnergyBars sheet: every source column has a distinct
+        // opaque color, repeated for top/middle/bottom cells.
+        let columns = [
+            [220, 0, 0, 255],
+            [70, 0, 0, 255],
+            [0, 220, 0, 255],
+            [0, 70, 0, 255],
+            [0, 0, 220, 255],
+            [0, 0, 70, 255],
+        ];
+        let pixels = (0..3)
+            .flat_map(|_| columns.into_iter().flatten())
+            .collect();
+        graphics.hud_graphics = Arc::new(HudGraphics {
+            energy_bars: Some(ImageData::new(6, 3, pixels)),
+            ..HudGraphics::default()
+        });
+
+        let focus = &snapshot.objects[0];
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+
+        let bar_bottom_y = 180 - hud::SYMBOL_SIZE - hud::SYMBOL_BORDER - 1;
+        let energy_x = hud::SYMBOL_BORDER as u32;
+        let breath_x = energy_x + 2; // one-pixel bar + C++'s one-pixel gap
+        assert_eq!(
+            graphics.surface().get_pixel(energy_x, bar_bottom_y as u32),
+            Some(Color::opaque(220, 0, 0)),
+            "energy remains in bar index 0"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(breath_x, bar_bottom_y as u32),
+            Some(Color::opaque(0, 0, 220)),
+            "partial breath uses filled source column 4 immediately after energy"
+        );
+
+        graphics.hud_players[0].crew[0].magic_energy = 1_000;
+        graphics.hud_players[0].crew[0].magic_capacity = 2_000;
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+        assert_eq!(
+            graphics.surface().get_pixel(breath_x, bar_bottom_y as u32),
+            Some(Color::opaque(0, 220, 0)),
+            "present magic occupies the middle slot with source column 2"
+        );
+        assert_eq!(
+            graphics
+                .surface()
+                .get_pixel(breath_x + 2, bar_bottom_y as u32),
+            Some(Color::opaque(0, 0, 220)),
+            "breath shifts one compact slot right when magic is present"
         );
     }
 
