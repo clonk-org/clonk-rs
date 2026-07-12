@@ -15374,6 +15374,52 @@ func Activate(inMat, inLength, inStrength)
     }
 
     #[test]
+    fn earthquake_event_requires_truthy_activate_like_cpp() {
+        // LaunchEarthquake returns true only when FXQ1::Activate returns a
+        // truthy C4Value (C4Weather.cpp:196-203). Object creation alone does
+        // not make the launch successful.
+        let script = r#"
+        func Initialize(state, random) { return nil; }
+        func Step(state, frame, random) { return nil; }
+        func Activate() { return false; }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FXQ1", "Earthquake", script)
+                    .expect("definition builds"),
+            )
+            .expect("definition registers");
+        engine.set_landscape(Landscape::flat(64, 40));
+        let mut environment = engine.environment();
+        environment.earthquake = 100;
+        engine.set_environment(environment);
+
+        for frame in (10..=20_000).step_by(10) {
+            engine
+                .tick_weather_events(frame)
+                .expect("weather tick succeeds");
+            if engine
+                .objects
+                .iter()
+                .any(|object| object.definition_id == "FXQ1")
+            {
+                assert!(
+                    !engine
+                        .snapshot()
+                        .weather_events
+                        .iter()
+                        .any(|event| matches!(event, WeatherEvent::Earthquake { .. })),
+                    "false Activate rejects the earthquake launch in C++"
+                );
+                return;
+            }
+        }
+        panic!("seed should reach an earthquake gate in the bounded weather sweep");
+    }
+
+    #[test]
     fn spawn_object_tracks_owner() {
         let mut engine = Engine::with_seed(99);
         engine

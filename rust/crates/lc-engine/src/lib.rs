@@ -17633,8 +17633,14 @@ impl Engine {
         let Some(index) = self.find_object_index(quake_id) else {
             return Ok(false);
         };
-        let _ = self.call_object_function(index, "Activate", Vec::new())?;
-        Ok(true)
+        // Unlike lightning/volcano, LaunchEarthquake succeeds only when the
+        // fail-safe Activate call returns truthy (C4Weather.cpp:196-203).
+        let activated = tolerate_script_error(self.call_object_function(
+            index,
+            "Activate",
+            Vec::new(),
+        ))?;
+        Ok(activated.is_some_and(|value| compat::value_raw_truthy(&value)))
     }
 
     /// `LaunchVolcano` (C4Weather.cpp:178-184): FXV1 + Activate(x, y, size,
