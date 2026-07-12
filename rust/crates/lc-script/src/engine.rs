@@ -402,6 +402,15 @@ impl Engine {
         self.functions.len()
     }
 
+    /// Final per-object local declarations after includes/appends have been
+    /// linked and engine-global statics have been adopted.
+    pub fn local_variable_names(&self) -> impl Iterator<Item = &str> {
+        self.var_decls
+            .iter()
+            .filter(|declaration| declaration.kind == crate::ast::VarDeclKind::Local)
+            .map(|declaration| declaration.name.as_str())
+    }
+
     pub fn includes(&self) -> Vec<String> {
         // Extract includes from the loaded script
         // Note: This is a simplified version that returns empty since we don't

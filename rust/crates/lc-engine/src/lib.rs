@@ -20934,6 +20934,26 @@ impl Engine {
                 container_assignments.push((snapshot.id, container));
             }
         }
+        // C4ValueMapData compiles LocalNamed through a temporary saved name
+        // list, then C4Object::CompileFunc switches it to the freshly linked
+        // definition list and copies matching values by name
+        // (C4ValueMap.cpp:163-195,236-293; C4Object.cpp:2815,2858-2865).
+        // Numbered Local slots use our reserved keys and are independent.
+        let definition_local_names: HashMap<DefinitionId, HashSet<String>> = self
+            .definitions
+            .iter()
+            .map(|(id, definition)| {
+                (
+                    id.clone(),
+                    definition
+                        .script
+                        .local_variable_names()
+                        .map(str::to_string)
+                        .collect(),
+                )
+            })
+            .collect();
+
         // C4Object::DenumeratePointers runs only after every object has loaded
         // and recursively resolves both numbered Local and LocalNamed values
         // (C4Object.cpp:2914-2924; C4Value.cpp:684-713). Inactive objects are
@@ -20946,6 +20966,11 @@ impl Engine {
             .map(|object| object.id.as_u64())
             .collect();
         for object in &mut self.objects {
+            if let Some(names) = definition_local_names.get(&object.definition_id) {
+                object.state.local_vars.retain(|name, _| {
+                    name.starts_with("__local_") || names.contains(name)
+                });
+            }
             for value in object.state.local_vars.values_mut() {
                 *value = denumerate_script_value(value, &object_numbers);
             }
