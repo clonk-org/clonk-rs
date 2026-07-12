@@ -3700,7 +3700,7 @@ mod tests {
     }
 
     #[test]
-    fn jump_sets_direction_and_action_when_walking() {
+    fn jump_command_defers_targeted_jump_to_the_live_engine() {
         let actor_id = ObjectId::new(400);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
@@ -3732,11 +3732,18 @@ mod tests {
         );
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
-        let update = result.update.expect("jump should update actor");
-        assert_eq!(update.direction, Some(Direction::Right));
-        let action = update.action.expect("jump should trigger action");
-        assert_eq!(action.name.as_deref(), Some("Jump"));
+        // C4Command::Jump calls ObjectComJump before Finish(true), so the
+        // live event must run while the command is still active
+        // (C4Command.cpp:1056-1067).
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::ObjectComJump {
+                object_id: actor_id,
+                tx: actor.position.x + 10,
+            }]
+        );
     }
 
     #[test]
@@ -3776,13 +3783,12 @@ mod tests {
             rng: None,
         };
 
-        let mut state = JumpState::from_request(
-            &CommandRequest::new(CommandId::Jump).with_tx(Some(actor.position.x + 10)),
+        let velocity = object_com_jump_launch(
+            ctx.object.construction,
+            ctx.object.physical,
+            ctx.object.command_direction,
+            Direction::Right,
         );
-        let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
-        let update = result.update.expect("jump should update actor");
-        let velocity = update.fixed_velocity.expect("launch velocity set");
         // Full Con: TXDir = +ValByPhysical(280, 35000) = raw 64225,
         // ydir = -ValByPhysical(1000, 40000) = raw -262144.
         assert_eq!(velocity.x.val(), 64225);
@@ -3808,12 +3814,12 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
             rng: None,
         };
-        let mut state = JumpState::from_request(
-            &CommandRequest::new(CommandId::Jump).with_tx(Some(small.position.x + 10)),
+        let velocity = object_com_jump_launch(
+            ctx.object.construction,
+            ctx.object.physical,
+            ctx.object.command_direction,
+            Direction::Right,
         );
-        let result = state.step(&ctx);
-        let update = result.update.expect("jump should update actor");
-        let velocity = update.fixed_velocity.expect("launch velocity set");
         assert_eq!(velocity.x.val(), 32112);
         assert_eq!(velocity.y.val(), -131072);
     }
@@ -3853,13 +3859,12 @@ mod tests {
             rng: None,
         };
 
-        let mut state = JumpState::from_request(&CommandRequest::new(CommandId::Jump));
-        let velocity = state
-            .step(&ctx)
-            .update
-            .expect("jump update")
-            .fixed_velocity
-            .expect("launch velocity");
+        let velocity = object_com_jump_launch(
+            ctx.object.construction,
+            ctx.object.physical,
+            ctx.object.command_direction,
+            ctx.object.direction,
+        );
         assert_eq!(velocity.x, crate::C4Fixed::ZERO);
         assert!(velocity.y < crate::C4Fixed::ZERO);
     }
@@ -3895,19 +3900,20 @@ mod tests {
             rng: None,
         };
 
-        let mut state = JumpState::from_request(&CommandRequest::new(CommandId::Jump));
-        let update = state.step(&ctx).update.expect("jump update");
+        let velocity = object_com_jump_launch(
+            ctx.object.construction,
+            ctx.object.physical,
+            ctx.object.command_direction,
+            ctx.object.direction,
+        );
         assert_eq!(
-            update.fixed_velocity,
-            Some(FixedVec2::new(
-                crate::C4Fixed::ZERO,
-                crate::C4Fixed::ZERO
-            ))
+            velocity,
+            FixedVec2::new(crate::C4Fixed::ZERO, crate::C4Fixed::ZERO)
         );
     }
 
     #[test]
-    fn jump_skips_action_when_not_walking() {
+    fn jump_command_defers_the_walk_gate_to_live_object_com_jump() {
         let actor_id = ObjectId::new(401);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
@@ -3939,12 +3945,14 @@ mod tests {
         );
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
-        let update = result.update.expect("jump should update actor");
-        assert_eq!(update.direction, Some(Direction::Left));
-        assert!(
-            update.action.is_none(),
-            "jump should not change action when not walking"
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::ObjectComJump {
+                object_id: actor_id,
+                tx: actor.position.x - 15,
+            }]
         );
     }
 
@@ -8299,6 +8307,14 @@ pub enum CommandEvent {
         object_id: ObjectId,
         complete_command_on_success: bool,
     },
+    /// Execute C4Command::Jump against the live object. ObjectComJump may run
+    /// the object's OnActionJump hook synchronously, so it cannot be reduced
+    /// to a pure snapshot update (C4Command.cpp:1056-1067;
+    /// C4ObjectCom.cpp:48-61,280-307).
+    ObjectComJump {
+        object_id: ObjectId,
+        tx: i32,
+    },
     /// Assign a fresh command stack to another object. C4CMD_Activate
     /// uses `Target->SetCommand(C4CMD_Exit)` rather than exiting the
     /// target inline (C4Command.cpp:1335-1362).
@@ -8825,6 +8841,19 @@ impl CommandStack {
         if let Some(front) = self.entries.front() {
             if front.id() == Some(id) {
                 self.entries.pop_front();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Mark the matching front as successfully finished without clearing it.
+    /// Live command events use this so `ControlCommandFinished` still sees
+    /// the command after the event's synchronous callbacks return.
+    pub fn finish_front_if(&mut self, id: CommandId) -> bool {
+        if let Some(front) = self.entries.front_mut() {
+            if front.id() == Some(id) {
+                front.finished = Some(CommandStatus::Completed);
                 return true;
             }
         }
@@ -11236,6 +11265,29 @@ struct JumpState {
     evaluated: bool,
 }
 
+/// ObjectComJump's fixed launch calculation (C4ObjectCom.cpp:284-296).
+/// The live engine owns the WALK gate, script callback, and action change.
+pub(crate) fn object_com_jump_launch(
+    construction: i32,
+    physical: PhysicalInfo,
+    command_direction: CommandDirection,
+    direction: Direction,
+) -> FixedVec2 {
+    let con_scale = math::itofix_prec(construction, FULL_CON);
+    let physical_walk = math::val_by_physical(280, physical.walk) * con_scale;
+    let physical_jump = math::val_by_physical(1000, physical.jump) * con_scale;
+    let txdir = match command_direction {
+        CommandDirection::Left | CommandDirection::UpLeft => -physical_walk,
+        CommandDirection::Right | CommandDirection::UpRight => physical_walk,
+        _ => match direction {
+            Direction::Left => -physical_walk,
+            Direction::Right => physical_walk,
+            _ => crate::C4Fixed::ZERO,
+        },
+    };
+    FixedVec2::new(txdir, -physical_jump)
+}
+
 impl JumpState {
     fn from_request(request: &CommandRequest) -> Self {
         Self {
@@ -11244,65 +11296,17 @@ impl JumpState {
         }
     }
 
-    fn desired_direction(&self, ctx: &CommandRuntimeContext<'_>) -> Option<Direction> {
-        let target_x = self.tx?;
-        if target_x < ctx.position.x {
-            Some(Direction::Left)
-        } else if target_x > ctx.position.x {
-            Some(Direction::Right)
-        } else {
-            None
-        }
-    }
-
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         if self.evaluated {
             return CommandStepResult::completed(None);
         }
         self.evaluated = true;
-
-        let mut update: Option<ObjectUpdate> = None;
-
-        if let Some(direction) = self.desired_direction(ctx) {
-            let mut object_update = update.unwrap_or_default();
-            object_update.direction = Some(direction);
-            update = Some(object_update);
-        }
-
-        if ctx.object.action_procedure == ActionProcedure::Walk {
-            let mut object_update = update.unwrap_or_default();
-            let action_update = ActionUpdate::default()
-                .with_name("Jump")
-                .with_phase(0)
-                .with_ticks(0)
-                .with_force(true);
-            object_update = object_update.with_action_update(action_update);
-            // ObjectComJump launch velocities (C4ObjectCom.cpp:284-296) with
-            // a Jump physical: TXDir = ±ValByPhysical(280, Walk)·Con/FullCon
-            // by ComDir, else by facing; ydir = -ValByPhysical(1000,
-            // Jump)·Con/FullCon (applied by ObjectActionJump, :48-61). The
-            // dive try (SimFlightHitsLiquid) and the OnActionJump scripted
-            // jump are still open.
-            let con_scale = math::itofix_prec(ctx.object.construction, FULL_CON);
-            let physical_walk =
-                math::val_by_physical(280, ctx.object.physical.walk) * con_scale;
-            let physical_jump =
-                math::val_by_physical(1000, ctx.object.physical.jump) * con_scale;
-            let facing = self.desired_direction(ctx).unwrap_or(ctx.object.direction);
-            let txdir = match ctx.object.command_direction {
-                CommandDirection::Left | CommandDirection::UpLeft => -physical_walk,
-                CommandDirection::Right | CommandDirection::UpRight => physical_walk,
-                _ => match facing {
-                    Direction::Left => -physical_walk,
-                    Direction::Right => physical_walk,
-                    _ => crate::C4Fixed::ZERO,
-                },
-            };
-            object_update.fixed_velocity = Some(FixedVec2::new(txdir, -physical_jump));
-            update = Some(object_update);
-        }
-
-        CommandStepResult::completed(update)
+        CommandStepResult::running(None).with_events(vec![CommandEvent::ObjectComJump {
+            object_id: ctx.object.id,
+            // C4Command::Tx is an integer value; absent/nil and explicit zero
+            // are the same sentinel for C4Command::Jump (:1058-1063).
+            tx: self.tx.unwrap_or(0),
+        }])
     }
 }
 

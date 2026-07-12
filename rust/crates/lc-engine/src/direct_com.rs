@@ -2960,6 +2960,58 @@ impl Engine {
         self.object_action_jump_com(index, itofix(xdirf), crate::C4Fixed::from_raw(0), true)
     }
 
+    /// `C4Command::Jump` followed by `ObjectComJump` (C4Command.cpp:
+    /// 1056-1067; C4ObjectCom.cpp:280-307). This stays live because
+    /// ObjectActionJump synchronously invokes the object's OnActionJump hook.
+    pub(crate) fn execute_jump_command(
+        &mut self,
+        object_id: ObjectId,
+        tx: i32,
+    ) -> Result<(), EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        // Tx==0 is the C++ sentinel: do not reinterpret it as world x=0.
+        if tx != 0 {
+            let x = self.objects[index].state.position.x;
+            let direction = if tx < x {
+                Some(Direction::Left)
+            } else if tx > x {
+                Some(Direction::Right)
+            } else {
+                None
+            };
+            if let Some(direction) = direction {
+                let definition_id = self.objects[index].definition_id.clone();
+                self.set_command_action_direction(index, &definition_id, direction)?;
+            }
+        }
+        let _ = self.object_com_jump(index)?;
+        // C4Command::Jump calls Finish(true) only after ObjectComJump and its
+        // synchronous OnActionJump callback return (C4Command.cpp:1064-1067).
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects[index]
+                .commands
+                .finish_front_if(CommandId::Jump);
+        }
+        Ok(())
+    }
+
+    /// `ObjectComJump` without its still-open SimFlightHitsLiquid/Dive branch.
+    /// This slice deliberately restores only the live OnActionJump ordering.
+    fn object_com_jump(&mut self, index: usize) -> Result<bool, EngineError> {
+        if self.object_procedure(index) != ActionProcedure::Walk {
+            return Ok(false);
+        }
+        let launch = crate::command::object_com_jump_launch(
+            self.objects[index].state.construction,
+            self.object_physical(index),
+            self.objects[index].state.command_direction,
+            self.objects[index].state.direction,
+        );
+        self.object_action_jump_com(index, launch.x, launch.y, true)
+    }
+
     /// `ObjectActionJump` (C4ObjectCom.cpp:48-61): the scripted OnActionJump
     /// override, then the hardcoded Jump action with launch velocity.
     fn object_action_jump_com(
@@ -2979,7 +3031,7 @@ impl Engine {
             return Ok(true);
         }
         let definition_id = self.objects[index].definition_id.clone();
-        if !self.force_action_with_calls(index, &definition_id, "Jump")? {
+        if !self.action_with_calls(index, &definition_id, "Jump")? {
             return Ok(false);
         }
         let object = &mut self.objects[index];
@@ -2992,6 +3044,7 @@ impl Engine {
         // Unstick from ground: attach-values were already determined for
         // this frame (:58-59).
         object.frame_t_attach &= !crate::CNAT_BOTTOM;
+        object.state.t_attach &= !crate::CNAT_BOTTOM;
         Ok(true)
     }
 
@@ -3721,6 +3774,142 @@ protected func ControlLeft() { return(0); }
             snapshot.command_stack.command_names(),
             vec!["Jump".to_string()],
             "COM_Up in WALK issues the jump command"
+        );
+    }
+
+    #[test]
+    fn queued_jump_runs_live_on_action_jump_before_hardcoded_launch() {
+        // C4Command::Jump calls live ObjectComJump (C4Command.cpp:1056-1067),
+        // whose ObjectActionJump first calls the object-owned fail-safe hook
+        // OnActionJump(xdir*100, ydir*100, true). A truthy result suppresses
+        // the hardcoded Jump action and velocity assignment
+        // (C4ObjectCom.cpp:48-61,280-307).
+        let script = r#"
+#strict
+local jump_calls, jump_xdir, jump_ydir, jump_by_com;
+protected func OnActionJump(int xdir, int ydir, bool by_com)
+{
+    jump_calls++;
+    jump_xdir = xdir;
+    jump_ydir = ydir;
+    jump_by_com = by_com;
+    return true;
+}
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", script);
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+
+        engine.player_in_com(1, COM_UP, 0).expect("queue jump");
+        engine.tick().expect("execute queued jump");
+
+        let snapshot = engine.object_snapshot(crew).expect("crew survives");
+        assert_eq!(snapshot.action.name, "Walk");
+        assert_eq!(snapshot.velocity, Vector2::ZERO);
+        assert!(snapshot.command_stack.command_names().is_empty());
+        let index = engine.find_object_index(crew).expect("crew exists");
+        let locals = &engine.objects[index].state.local_vars;
+        assert_eq!(locals.get("jump_calls"), Some(&Value::Int(1)));
+        assert_eq!(locals.get("jump_xdir"), Some(&Value::Int(-196)));
+        assert_eq!(locals.get("jump_ydir"), Some(&Value::Int(-400)));
+        assert_eq!(locals.get("jump_by_com"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn queued_jump_honors_no_other_action_selected_by_false_hook() {
+        // ObjectActionJump uses ordinary SetActionByName("Jump"), not a
+        // forced transition. A false OnActionJump may therefore select a
+        // NoOtherAction action that rejects the hardcoded jump
+        // (C4ObjectCom.cpp:48-61; C4Object.cpp:4111-4115).
+        let script = r#"
+#strict
+protected func OnActionJump()
+{
+    SetAction("Locked");
+    return false;
+}
+"#;
+        let mut engine = Engine::new();
+        let mut definition = Definition::from_script("CLNK", "CLNK", script)
+            .expect("script compiles");
+        let mut actions = clonk_actions();
+        actions.insert(
+            "Locked".to_string(),
+            ActionSpec::default()
+                .with_procedure("walk")
+                .with_no_other_action(true),
+        );
+        definition.configure_actions(Some("Walk".to_string()), actions);
+        definition.set_movement_profile(MovementProfile::default());
+        definition.set_physical(PhysicalInfo {
+            walk: 70_000,
+            jump: 40_000,
+            ..Default::default()
+        });
+        engine.register_definition(definition).expect("register");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+
+        engine.player_in_com(1, COM_UP, 0).expect("queue jump");
+        engine.tick().expect("execute queued jump");
+
+        let snapshot = engine.object_snapshot(crew).expect("crew survives");
+        assert_eq!(snapshot.action.name, "Locked");
+        assert_eq!(snapshot.velocity, Vector2::ZERO);
+        assert!(snapshot.command_stack.command_names().is_empty());
+    }
+
+    #[test]
+    fn object_com_jump_clears_script_visible_bottom_attachment() {
+        // ObjectActionJump clears Action.t_attach's bottom bit immediately,
+        // before C4Command::Finish and ControlCommandFinished
+        // (C4ObjectCom.cpp:54-61; C4Object.cpp:3997-4008).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[index].state.t_attach = crate::CNAT_BOTTOM | crate::CNAT_LEFT;
+        engine.objects[index].frame_t_attach = crate::CNAT_BOTTOM | crate::CNAT_LEFT;
+
+        engine
+            .execute_jump_command(crew, 0)
+            .expect("execute live jump command");
+
+        let index = engine.find_object_index(crew).expect("crew survives");
+        assert_eq!(engine.objects[index].state.t_attach, crate::CNAT_LEFT);
+        assert_eq!(engine.objects[index].frame_t_attach, crate::CNAT_LEFT);
+    }
+
+    #[test]
+    fn queued_jump_target_direction_obeys_current_action_direction_count() {
+        // C4Command::Jump targets through C4Object::SetDir. Directions=1
+        // rejects DIR_Right, even though Tx lies to the object's right
+        // (C4Command.cpp:1058-1063; C4Object.cpp:4235-4253).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let index = engine.find_object_index(crew).expect("crew exists");
+        let target_x = engine.objects[index].state.position.x + 10;
+        engine.objects[index].apply_command_operations([CommandOperation::PushFront(
+            CommandRequest::new(CommandId::Jump).with_tx(Some(target_x)),
+        )]);
+
+        engine.tick().expect("execute targeted jump");
+
+        assert_eq!(
+            engine.object_snapshot(crew).expect("crew survives").direction,
+            Direction::Left
         );
     }
 

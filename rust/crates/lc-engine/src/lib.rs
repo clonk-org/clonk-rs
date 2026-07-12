@@ -23986,6 +23986,45 @@ impl Engine {
         Ok(())
     }
 
+    /// Exact `C4Object::SetDir` gate for direct command paths
+    /// (C4Object.cpp:4235-4253). Unlike the legacy ExecAction helper above,
+    /// this rejects idle/out-of-range directions and uses non-forced
+    /// SetActionByName for TurnAction.
+    pub(crate) fn set_command_action_direction(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        direction: Direction,
+    ) -> Result<(), EngineError> {
+        let Some((current_direction, turn_action)) = self
+            .definitions
+            .get(definition_id)
+            .and_then(|definition| {
+                let library = definition.action_library();
+                let action_name = &self.objects[idx].state.action.name;
+                let raw_direction = direction.to_script_value();
+                (!library.is_idle_action(action_name)
+                    && raw_direction >= 0
+                    && raw_direction < library.directions_for(action_name) as i32)
+                    .then(|| {
+                        (
+                            self.objects[idx].state.direction,
+                            library.turn_action_for(action_name).map(str::to_string),
+                        )
+                    })
+            })
+        else {
+            return Ok(());
+        };
+        if direction != current_direction {
+            if let Some(turn_action) = turn_action {
+                self.action_with_calls(idx, definition_id, &turn_action)?;
+            }
+        }
+        self.objects[idx].state.direction = direction;
+        Ok(())
+    }
+
     /// SetActionByName-style forced transition from an engine path
     /// (ObjectActionWalk et al., C4ObjectCom.cpp:34-39): applies the named
     /// action when the def has it, refreshes OCF, resyncs the fixed coords,
@@ -23998,7 +24037,18 @@ impl Engine {
         definition_id: &DefinitionId,
         name: &str,
     ) -> Result<bool, EngineError> {
-        self.force_action_with_optional_target_and_calls(idx, definition_id, name, None)
+        self.action_with_optional_target_and_calls(idx, definition_id, name, None, true)
+    }
+
+    /// Ordinary non-forced SetActionByName transition, including the same
+    /// synchronous StartCall/AbortCall sequence as the forced engine helper.
+    pub(crate) fn action_with_calls(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        name: &str,
+    ) -> Result<bool, EngineError> {
+        self.action_with_optional_target_and_calls(idx, definition_id, name, None, false)
     }
 
     fn force_action_with_target_and_calls(
@@ -24008,15 +24058,16 @@ impl Engine {
         name: &str,
         target: ObjectId,
     ) -> Result<bool, EngineError> {
-        self.force_action_with_optional_target_and_calls(idx, definition_id, name, Some(target))
+        self.action_with_optional_target_and_calls(idx, definition_id, name, Some(target), true)
     }
 
-    fn force_action_with_optional_target_and_calls(
+    fn action_with_optional_target_and_calls(
         &mut self,
         idx: usize,
         definition_id: &DefinitionId,
         name: &str,
         target: Option<ObjectId>,
+        force: bool,
     ) -> Result<bool, EngineError> {
         let Some(library) = self
             .definitions
@@ -24035,7 +24086,7 @@ impl Engine {
             name: Some(name.to_string()),
             phase: Some(0),
             ticks: Some(0),
-            force: true,
+            force,
             data: None,
             // SetAction assigns a target before SetOCF and callbacks when one
             // is supplied (C4Object.cpp:4148-4178). None preserves the old
@@ -30010,6 +30061,9 @@ impl Engine {
                 if success && complete_command_on_success {
                     self.complete_command(actor_id, CommandId::Throw)?;
                 }
+            }
+            CommandEvent::ObjectComJump { object_id, tx } => {
+                self.execute_jump_command(object_id, tx)?;
             }
             CommandEvent::SetObjectCommand {
                 object_id,
