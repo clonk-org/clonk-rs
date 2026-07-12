@@ -20565,7 +20565,7 @@ impl Engine {
                 .map(|index| i64::from(fixtoi_prec(self.objects[index].fixed_position.x, 100)))
                 .sum()
         };
-        let pxs_count = i32::try_from(self.pxs_system.count()).unwrap_or(i32::MAX);
+        let pxs_count = i32::try_from(self.pxs_system.execute_count()).unwrap_or(i32::MAX);
         // MassMover.CreatePtr (C4Control.cpp:454)
         let mass_mover_index = self.mass_movers.create_ptr();
         let object_count = i32::try_from(self.objects.len()).unwrap_or(i32::MAX);
@@ -28372,6 +28372,9 @@ impl Engine {
         // MassMover.Synchronize() (C4Game.cpp:3700): consolidate the slot
         // set and reset CreatePtr (C4MassMover.cpp:249-252).
         self.mass_movers.synchronize();
+        // PXS.Synchronize() resets only the per-Execute Count ledger; live
+        // chunk contents stay in place (C4PXS.cpp:401-404).
+        self.pxs_system.synchronize();
         // C4Game::Synchronize's tail: TransferZones.Synchronize()
         // broadcasts ~UpdateTransferZone to every active Game.Objects entry
         // AFTER the FixRandom re-fix (C4Game.cpp:3713-3714,3727-3729;
@@ -31804,6 +31807,10 @@ impl Engine {
     /// C4PXS.cpp:195-202).
     #[doc(hidden)]
     pub fn tick_pxs(&mut self) {
+        // C4PXSSystem::Execute resets Count before visiting slots. Count is
+        // incremented after every live slot's Execute, even if that call
+        // deactivates the pixel (C4PXS.cpp:212-234).
+        self.pxs_system.begin_execute();
         self.pxs_system.free_empty_chunks();
         for chunk in 0..pxs::PXS_MAX_CHUNK {
             if !self.pxs_system.chunk_allocated(chunk) {
@@ -31817,6 +31824,7 @@ impl Engine {
                     Some(updated) => self.pxs_system.put_slot(chunk, slot, updated),
                     None => self.pxs_system.clear_slot(chunk, slot),
                 }
+                self.pxs_system.note_executed();
             }
         }
     }
