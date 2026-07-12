@@ -1,9 +1,13 @@
 use lc_engine::landscape::PixelGrid;
 use lc_engine::{
-    Definition, DefinitionTargetRect, Engine, EngineError, JoinPlayerConfig, Landscape,
-    ObjectUpdate, PhysicsSettings, SpawnConfig, Vector2, CATEGORY_STATIC_BACK,
+    command::CommandId, ActionSpec, ActionState, CommandDirection, Definition,
+    DefinitionTargetRect, Direction, Engine, EngineError, JoinPlayerConfig, Landscape,
+    ObjectUpdate, ObjectVertex, PhysicsSettings, SpawnConfig, Vector2, CATEGORY_STATIC_BACK,
+    CNAT_BOTTOM,
 };
+use lc_resources::PhysicalInfo;
 use lc_script::Value;
+use std::collections::HashMap;
 
 use crate::support::real_scenario::load_tutorial;
 
@@ -411,4 +415,271 @@ fn real_clnk_dolphin_jump_uses_sim_flight_to_select_dive() {
             .name,
         "Dive"
     );
+}
+
+#[test]
+fn real_tutorial09_clnk_command_jump_dives_into_deep_water() {
+    // ObjectComJump predicts from the bottom CNAT vertex and selects Dive
+    // instead of ObjectActionJump when the flight lands in liquid that is at
+    // least nine pixels deep (C4ObjectCom.cpp:280-307;
+    // C4Movement.cpp:623-670). Tutorial09 is the shipped swimming tutorial.
+    let mut engine = load_tutorial(9, 0);
+    let joined = engine
+        .join_player(JoinPlayerConfig {
+            name: "Dive tester".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0xff_00_00,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: true,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        })
+        .expect("Tutorial09 player joins");
+    let clonk = engine.crew_cursor(joined.number).expect("CLNK joins");
+    engine.set_landscape(raster_landscape_with_densities(
+        240,
+        100,
+        vec![0, 25],
+        |_, y| u8::from(y >= 50),
+    ));
+    engine.set_physics(PhysicsSettings::new(100, 20, -20));
+    engine
+        .apply_object_update(
+            clonk,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(120, 40))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .with_direction(Direction::Right)
+                .with_command_direction(CommandDirection::Right),
+        )
+        .expect("place CLNK one pixel above the water by its bottom vertex");
+
+    engine
+        .player_object_command(joined.number, CommandId::Jump, None, 0, 0)
+        .expect("queue C4CMD_Jump");
+    engine.tick().expect("execute ObjectComJump");
+
+    let snapshot = engine.object_snapshot(clonk).expect("CLNK survives");
+    assert_eq!(snapshot.action.name, "Dive");
+    assert_eq!(snapshot.velocity, Vector2::new(2, -4));
+}
+
+#[test]
+fn script_jump_native_uses_object_com_jump_deep_water_dive() {
+    // FnJump calls ObjectComJump directly (C4Script.cpp:358-363), so it
+    // must take the same SimFlightHitsLiquid/ObjectActionDive branch as a
+    // queued C4CMD_Jump (C4ObjectCom.cpp:280-307).
+    let mut actions = HashMap::new();
+    actions.insert(
+        "Walk".to_string(),
+        ActionSpec::default().with_procedure("walk"),
+    );
+    actions.insert(
+        "Jump".to_string(),
+        ActionSpec::default().with_procedure("flight"),
+    );
+    actions.insert(
+        "Dive".to_string(),
+        ActionSpec::default().with_procedure("swim"),
+    );
+    let mut definition = Definition::from_script(
+        "DVER",
+        "Script dive probe",
+        "#strict\nfunc Probe() { return Jump(); }\n",
+    )
+    .expect("probe compiles");
+    definition.configure_actions(Some("Walk".to_string()), actions);
+    definition.set_shape_vertices(vec![ObjectVertex::new(0, 9).with_cnat(CNAT_BOTTOM)]);
+    definition.set_physical(PhysicalInfo {
+        walk: 70_000,
+        jump: 40_000,
+        ..Default::default()
+    });
+
+    let mut engine = Engine::new();
+    engine.set_landscape(raster_landscape_with_densities(
+        240,
+        100,
+        vec![0, 25],
+        |_, y| u8::from(y >= 50),
+    ));
+    engine.set_physics(PhysicsSettings::new(100, 20, -20));
+    engine
+        .register_definition(definition)
+        .expect("probe registers");
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("DVER")
+                // The bottom vertex starts at y=50 inside liquid. C++ first
+                // simulates at most ten frames to escape into air, then
+                // continues the landing probe (C4Movement.cpp:657-664).
+                .with_position(Vector2::new(120, 41))
+                .with_action(ActionState::new("Walk"))
+                .with_direction(Direction::Right)
+                .with_command_direction(CommandDirection::Right),
+        )
+        .expect("probe spawns");
+    let index = engine.find_object_index(object).expect("probe exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "Probe", Vec::new())
+            .expect("Probe calls native Jump"),
+        Value::Bool(true)
+    );
+    let snapshot = engine.object_snapshot(object).expect("probe survives");
+    assert_eq!(snapshot.action.name, "Dive");
+    assert_eq!(snapshot.velocity, Vector2::new(2, -4));
+}
+
+#[test]
+fn script_jump_native_respects_contact_density_dive_gate() {
+    // ObjectComJump only attempts SimFlightHitsLiquid when the live shape's
+    // ContactDensity is greater than C4M_Liquid (C4ObjectCom.cpp:297-305).
+    // A liquid-contact object therefore takes the ordinary Jump fallback.
+    let mut actions = HashMap::new();
+    actions.insert(
+        "Walk".to_string(),
+        ActionSpec::default().with_procedure("walk"),
+    );
+    actions.insert(
+        "Jump".to_string(),
+        ActionSpec::default().with_procedure("flight"),
+    );
+    actions.insert(
+        "Dive".to_string(),
+        ActionSpec::default().with_procedure("swim"),
+    );
+    let mut definition = Definition::from_script(
+        "LDVR",
+        "Liquid contact probe",
+        "#strict\nfunc Probe() { return Jump(); }\n",
+    )
+    .expect("probe compiles");
+    definition.configure_actions(Some("Walk".to_string()), actions);
+    definition.set_shape_vertices(vec![ObjectVertex::new(0, 9).with_cnat(CNAT_BOTTOM)]);
+    definition.set_contact_density(25);
+    definition.set_physical(PhysicalInfo {
+        walk: 70_000,
+        jump: 40_000,
+        ..Default::default()
+    });
+
+    let mut engine = Engine::new();
+    engine.set_landscape(raster_landscape_with_densities(
+        240,
+        100,
+        vec![0, 25],
+        |_, y| u8::from(y >= 50),
+    ));
+    engine.set_physics(PhysicsSettings::new(100, 20, -20));
+    engine
+        .register_definition(definition)
+        .expect("probe registers");
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("LDVR")
+                .with_position(Vector2::new(120, 40))
+                .with_action(ActionState::new("Walk"))
+                .with_direction(Direction::Right)
+                .with_command_direction(CommandDirection::Right),
+        )
+        .expect("probe spawns");
+    let index = engine.find_object_index(object).expect("probe exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "Probe", Vec::new())
+            .expect("Probe calls native Jump"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        engine.object_snapshot(object).expect("probe survives").action.name,
+        "Jump"
+    );
+}
+
+#[test]
+fn script_jump_native_runs_on_action_jump_before_hardcoded_launch() {
+    // FnJump delegates to ObjectComJump (C4Script.cpp:358-363), whose
+    // non-dive fallback calls OnActionJump with precision 100 before any
+    // hardcoded action or velocity write (C4ObjectCom.cpp:48-61,280-307).
+    let mut actions = HashMap::new();
+    actions.insert(
+        "Walk".to_string(),
+        ActionSpec::default().with_procedure("walk"),
+    );
+    actions.insert(
+        "Jump".to_string(),
+        ActionSpec::default().with_procedure("flight"),
+    );
+    let script = r#"
+#strict
+local jump_calls, jump_xdir, jump_ydir, jump_by_com, allow_hardcoded;
+protected func OnActionJump(int xdir, int ydir, bool by_com)
+{
+    jump_calls++;
+    jump_xdir = xdir;
+    jump_ydir = ydir;
+    jump_by_com = by_com;
+    return !allow_hardcoded;
+}
+func Probe() { return Jump(); }
+func ProbeFallback() { allow_hardcoded = true; return Jump(); }
+"#;
+    let mut definition =
+        Definition::from_script("JHOK", "Jump hook probe", script).expect("probe compiles");
+    definition.configure_actions(Some("Walk".to_string()), actions);
+    definition.set_physical(PhysicalInfo {
+        walk: 70_000,
+        jump: 40_000,
+        ..Default::default()
+    });
+
+    let mut engine = Engine::new();
+    engine
+        .register_definition(definition)
+        .expect("probe registers");
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("JHOK")
+                .with_action(ActionState::new("Walk"))
+                .with_direction(Direction::Right)
+                .with_command_direction(CommandDirection::Right),
+        )
+        .expect("probe spawns");
+    let index = engine.find_object_index(object).expect("probe exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "Probe", Vec::new())
+            .expect("Probe calls native Jump"),
+        Value::Bool(true)
+    );
+    let snapshot = engine.object_snapshot(object).expect("probe survives");
+    assert_eq!(snapshot.action.name, "Walk");
+    assert_eq!(snapshot.velocity, Vector2::ZERO);
+    assert_eq!(snapshot.local_vars.get("jump_calls"), Some(&Value::Int(1)));
+    assert_eq!(snapshot.local_vars.get("jump_xdir"), Some(&Value::Int(196)));
+    assert_eq!(snapshot.local_vars.get("jump_ydir"), Some(&Value::Int(-400)));
+    assert_eq!(snapshot.local_vars.get("jump_by_com"), Some(&Value::Bool(true)));
+
+    let index = engine.find_object_index(object).expect("probe remains");
+    assert_eq!(
+        engine
+            .call_object_function(index, "ProbeFallback", Vec::new())
+            .expect("false hook allows the hardcoded jump"),
+        Value::Bool(true)
+    );
+    let snapshot = engine.object_snapshot(object).expect("probe survives");
+    assert_eq!(snapshot.action.name, "Jump");
+    assert_eq!(snapshot.velocity, Vector2::new(2, -4));
+    assert!(snapshot.mobile);
+    assert_eq!(snapshot.local_vars.get("jump_calls"), Some(&Value::Int(2)));
 }

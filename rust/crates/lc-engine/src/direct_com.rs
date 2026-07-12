@@ -113,6 +113,52 @@ const COM_DIG_D: u8 = COM_DIG | COM_DOUBLE;
 const COM_THROW_D: u8 = COM_THROW | COM_DOUBLE;
 const COM_DOWN_R: u8 = COM_DOWN + COM_RELEASE_OFFSET;
 
+/// `SimFlight` (C4Movement.cpp:623-653): fixed-point frame integration with
+/// sign-step pixel traversal and an inclusive density contact interval.
+pub(crate) fn sim_flight_to_density(
+    position: &mut FixedVec2,
+    velocity: &mut FixedVec2,
+    density_min: i32,
+    density_max: i32,
+    mut iterations: i32,
+    gravity: crate::C4Fixed,
+    width: i32,
+    height: i32,
+    density_at: &impl Fn(i32, i32) -> i32,
+) -> bool {
+    let mut x = crate::math::fixtoi(position.x);
+    let mut y = crate::math::fixtoi(position.y);
+    loop {
+        if iterations == 0 {
+            return false;
+        }
+        iterations = iterations.wrapping_sub(1);
+        position.x += velocity.x;
+        position.y += velocity.y;
+        let target_x = crate::math::fixtoi(position.x);
+        let target_y = crate::math::fixtoi(position.y);
+        if !(0..=width).contains(&target_x) || target_y >= height {
+            return false;
+        }
+
+        let contact = loop {
+            x += (target_x - x).signum();
+            y += (target_y - y).signum();
+            if (density_min..=density_max).contains(&density_at(x, y)) {
+                break true;
+            }
+            if x == target_x && y == target_y {
+                break false;
+            }
+        };
+        velocity.y += gravity;
+        if contact {
+            *position = FixedVec2::from_ints(x, y);
+            return true;
+        }
+    }
+}
+
 impl Engine {
     /// `C4Player::InCom` (C4Player.cpp:1490-1554): pressed-com bookkeeping
     /// plus COM_Single/COM_Double synthesis around the LastCom buffer.
@@ -2997,8 +3043,9 @@ impl Engine {
         Ok(())
     }
 
-    /// `ObjectComJump` without its still-open SimFlightHitsLiquid/Dive branch.
-    /// This slice deliberately restores only the live OnActionJump ordering.
+    /// `ObjectComJump` (C4ObjectCom.cpp:280-307): predict a deep-liquid
+    /// landing from the shape's bottom vertex before falling back to the
+    /// script-overridable regular jump.
     fn object_com_jump(&mut self, index: usize) -> Result<bool, EngineError> {
         if self.object_procedure(index) != ActionProcedure::Walk {
             return Ok(false);
@@ -3009,7 +3056,105 @@ impl Engine {
             self.objects[index].state.command_direction,
             self.objects[index].state.direction,
         );
+        let contact_density = self
+            .definitions
+            .get(&self.objects[index].definition_id)
+            .map(crate::Definition::contact_density)
+            .unwrap_or(crate::CONTACT_DENSITY_SOLID);
+        if contact_density > 25
+            && self.object_com_jump_hits_liquid(index, launch)
+            && self.object_action_dive(index, launch.x, launch.y)?
+        {
+            return Ok(true);
+        }
         self.object_action_jump_com(index, launch.x, launch.y, true)
+    }
+
+    /// `SimFlightHitsLiquid` (C4Movement.cpp:657-670), including the
+    /// ten-frame escape when the bottom vertex already starts in water.
+    fn object_com_jump_hits_liquid(&self, index: usize, launch: FixedVec2) -> bool {
+        let Some(object) = self.objects.get(index) else {
+            return false;
+        };
+        // Despite the name, C4Shape::GetBottomVertex selects the CNAT_Bottom
+        // vertex with the smallest VtxY (C4Shape.cpp:445-455).
+        let bottom = object
+            .state
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.cnat & crate::CNAT_BOTTOM != 0)
+            .min_by_key(|vertex| vertex.y);
+        let mut position = object.fixed_position;
+        if let Some(bottom) = bottom {
+            position.x += bottom.x;
+            position.y += bottom.y;
+        }
+        let mut velocity = launch;
+        let Some(landscape) = self.landscape.as_ref() else {
+            return false;
+        };
+        let solid_mask_indices = (0..self.objects.len()).collect::<Vec<_>>();
+        let solid_masks = self.solid_masks_for_movement(&solid_mask_indices);
+        let density_at =
+            |x, y| crate::movement_density_at(landscape, &self.materials, &solid_masks, None, x, y);
+        let width = landscape.width() as i32;
+        let height = landscape.estimated_height();
+        let gravity = self.physics.gravity_as_c4fixed();
+        let liquid = |density| (25..50).contains(&density);
+
+        if liquid(density_at(
+            crate::math::fixtoi(position.x),
+            crate::math::fixtoi(position.y),
+        )) && !sim_flight_to_density(
+            &mut position,
+            &mut velocity,
+            0,
+            24,
+            10,
+            gravity,
+            width,
+            height,
+            &density_at,
+        ) {
+            return false;
+        }
+        if !sim_flight_to_density(
+            &mut position,
+            &mut velocity,
+            25,
+            100,
+            -1,
+            gravity,
+            width,
+            height,
+            &density_at,
+        ) {
+            return false;
+        }
+        let x = crate::math::fixtoi(position.x);
+        let y = crate::math::fixtoi(position.y);
+        liquid(density_at(x, y)) && liquid(density_at(x, y + 9))
+    }
+
+    /// `ObjectActionDive` (C4ObjectCom.cpp:63-72): unlike a regular jump,
+    /// Dive has no OnActionJump callback.
+    fn object_action_dive(
+        &mut self,
+        index: usize,
+        xdir: crate::C4Fixed,
+        ydir: crate::C4Fixed,
+    ) -> Result<bool, EngineError> {
+        let definition_id = self.objects[index].definition_id.clone();
+        if !self.action_with_calls(index, &definition_id, "Dive")? {
+            return Ok(false);
+        }
+        let object = &mut self.objects[index];
+        object.fixed_velocity = FixedVec2::new(xdir, ydir);
+        object.state.velocity = Vector2::new(crate::math::fixtoi(xdir), crate::math::fixtoi(ydir));
+        object.state.mobile = true;
+        object.frame_t_attach &= !crate::CNAT_BOTTOM;
+        object.state.t_attach &= !crate::CNAT_BOTTOM;
+        Ok(true)
     }
 
     /// `ObjectActionJump` (C4ObjectCom.cpp:48-61): the scripted OnActionJump
@@ -3884,6 +4029,39 @@ protected func OnActionJump()
             .expect("execute live jump command");
 
         let index = engine.find_object_index(crew).expect("crew survives");
+        assert_eq!(engine.objects[index].state.t_attach, crate::CNAT_LEFT);
+        assert_eq!(engine.objects[index].frame_t_attach, crate::CNAT_LEFT);
+    }
+
+    #[test]
+    fn script_native_jump_applies_mobile_and_bottom_unstick() {
+        // FnJump delegates synchronously to ObjectComJump, whose regular
+        // fallback sets Mobile and clears CNAT_Bottom after installing Jump
+        // (C4Script.cpp:358-363; C4ObjectCom.cpp:48-61,280-307).
+        let mut engine = Engine::new();
+        register_clonk(
+            &mut engine,
+            "CLNK",
+            "#strict\nfunc Probe() { return Jump(); }\n",
+        );
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[index].state.t_attach = crate::CNAT_BOTTOM | crate::CNAT_LEFT;
+        engine.objects[index].frame_t_attach = crate::CNAT_BOTTOM | crate::CNAT_LEFT;
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Probe", Vec::new())
+                .expect("Probe calls native Jump"),
+            Value::Bool(true)
+        );
+
+        let index = engine.find_object_index(crew).expect("crew survives");
+        assert_eq!(engine.objects[index].state.action.name, "Jump");
+        assert!(engine.objects[index].state.mobile);
         assert_eq!(engine.objects[index].state.t_attach, crate::CNAT_LEFT);
         assert_eq!(engine.objects[index].frame_t_attach, crate::CNAT_LEFT);
     }

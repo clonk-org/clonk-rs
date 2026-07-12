@@ -14277,6 +14277,9 @@ impl Engine {
                 )
                 .with_fixed_motion(object.fixed_position, object.fixed_velocity)
                 .with_move_to_range(definition.map_or(0, Definition::move_to_range))
+                .with_contact_density(
+                    definition.map_or(CONTACT_DENSITY_SOLID, Definition::contact_density),
+                )
                 .with_direction(object.state.direction.to_script_value())
                 .with_selected(object.state.selected)
                 .with_crew_disabled(object.state.crew_disabled)

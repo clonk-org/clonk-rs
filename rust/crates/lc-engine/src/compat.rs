@@ -99,6 +99,9 @@ pub(crate) struct HostWorldObject {
     /// C4Object::NeedEnergy at call entry, overlaid from active scopes.
     pub need_energy: bool,
     pub construction: i32,
+    /// Current C4Shape::ContactDensity. Dynamic SetContactDensity is not yet
+    /// modeled, so engine contexts seed this from the parsed definition.
+    contact_density: i32,
     #[allow(dead_code)]
     pub damage: i32,
     pub ocf: u32,
@@ -401,6 +404,7 @@ impl HostWorldObject {
             energy,
             need_energy: false,
             construction: construction.clamp(0, FULL_CON),
+            contact_density: crate::CONTACT_DENSITY_SOLID,
             damage,
             ocf: ocf::NORMAL,
             move_to_range: 0,
@@ -455,6 +459,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_need_energy(mut self, need_energy: bool) -> Self {
         self.need_energy = need_energy;
+        self
+    }
+
+    pub(crate) fn with_contact_density(mut self, contact_density: i32) -> Self {
+        self.contact_density = contact_density;
         self
     }
 
@@ -540,6 +549,10 @@ impl HostWorldObject {
 
     pub fn construction(&self) -> i32 {
         self.construction
+    }
+
+    pub fn contact_density(&self) -> i32 {
+        self.contact_density
     }
 
     #[allow(dead_code)]
@@ -15072,9 +15085,73 @@ fn fling(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(true))
 }
 
-/// FnJump (C4Script.cpp:358-363): ObjectComJump — routed as a
-/// front-pushed Jump command on the target (the executor runs the
-/// walking gate + jump kinematics).
+/// The `SimFlightHitsLiquid` probe used by `ObjectComJump`
+/// (C4Movement.cpp:657-670; C4ObjectCom.cpp:297-305).
+fn script_jump_hits_liquid(
+    context: &EffectHostContext,
+    object: &ObjectScopeContext,
+    launch: FixedVec2,
+    gravity: C4Fixed,
+) -> bool {
+    if context
+        .get_world_object(object.id())
+        .map(|object| object.contact_density())
+        .unwrap_or(crate::CONTACT_DENSITY_SOLID)
+        <= 25
+    {
+        return false;
+    }
+    let mut position = object.fixed_position();
+    if let Some(bottom) = object
+        .vertices()
+        .iter()
+        .filter(|vertex| vertex.cnat & CNAT_BOTTOM != 0)
+        .min_by_key(|vertex| vertex.y)
+    {
+        // C4Shape::GetBottomVertex (C4Shape.cpp:445-455).
+        position.x += bottom.x;
+        position.y += bottom.y;
+    }
+    let mut velocity = launch;
+    let Some(landscape) = context.world.landscape_ref() else {
+        return false;
+    };
+    let density_at = |x, y| context.world.movement_density_at(x, y).unwrap_or(0);
+    let liquid = |density| (25..50).contains(&density);
+    if liquid(density_at(fixtoi(position.x), fixtoi(position.y)))
+        && !crate::direct_com::sim_flight_to_density(
+            &mut position,
+            &mut velocity,
+            0,
+            24,
+            10,
+            gravity,
+            landscape.width() as i32,
+            landscape.estimated_height(),
+            &density_at,
+        )
+    {
+        return false;
+    }
+    if !crate::direct_com::sim_flight_to_density(
+        &mut position,
+        &mut velocity,
+        25,
+        100,
+        -1,
+        gravity,
+        landscape.width() as i32,
+        landscape.estimated_height(),
+        &density_at,
+    ) {
+        return false;
+    }
+    let x = fixtoi(position.x);
+    let y = fixtoi(position.y);
+    liquid(density_at(x, y)) && liquid(density_at(x, y + 9))
+}
+
+/// FnJump (C4Script.cpp:358-363): synchronous `ObjectComJump`.
 fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
     let target = args
         .first()
@@ -15098,12 +15175,17 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4ObjectCom.cpp:280-312): the snake's Activity jump takes effect
     // THIS frame, before its movement — a queued command would lag one
     // frame. Gates: only while the WALK procedure runs.
+    let gravity = PHYSICS_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| fixed100(context.gravity()) / 5)
+    });
     let launch = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
             return None;
         };
-        let object = context.object_context_mut()?;
+        let object = context.object_context()?;
         let action_name = object.effective_action_name().to_string();
         if !matches!(
             object.action_library.procedure_for_action(&action_name),
@@ -15125,13 +15207,54 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
                 _ => C4Fixed::ZERO,
             },
         };
-        // The dive branch (SimFlightHitsLiquid → ObjectActionDive,
-        // C4ObjectCom.cpp:301-305) is a documented PORT_STATUS gap.
-        Some((txdir, -physical_jump))
+        let launch = FixedVec2::new(txdir, -physical_jump);
+        let dive = gravity.is_some_and(|gravity| {
+            script_jump_hits_liquid(context, object, launch, gravity)
+        });
+        Some((object.id(), txdir, -physical_jump, dive))
     });
-    let Some((txdir, tydir)) = launch else {
+    let Some((object_id, txdir, tydir, dive)) = launch else {
         return Ok(Value::Bool(false));
     };
+    if dive {
+        let set = set_action(&[Value::String("Dive".to_string())])?;
+        if matches!(set, Value::Bool(true)) {
+            HOST_CONTEXT.with(|cell| {
+                if let Some(object) = cell
+                    .borrow_mut()
+                    .as_mut()
+                    .and_then(EffectHostContext::object_context_mut)
+                {
+                    object.set_fixed_velocity(FixedVec2::new(txdir, tydir));
+                    object.set_mobile(true);
+                    object.set_t_attach(object.t_attach() & !CNAT_BOTTOM);
+                }
+            });
+            return Ok(Value::Bool(true));
+        }
+    }
+    let jump_handled = match call_world_object_own_function(
+        object_id,
+        "OnActionJump",
+        &[
+            Value::Int(fixtoi_prec(txdir, 100)),
+            Value::Int(fixtoi_prec(tydir, 100)),
+            Value::Bool(true),
+        ],
+    ) {
+        Some(Ok(value)) => value_raw_truthy(&value),
+        Some(Err(error)) => {
+            tracing::warn!(
+                %error,
+                "OnActionJump error; continuing like the C++ fail-safe exec"
+            );
+            false
+        }
+        None => false,
+    };
+    if jump_handled {
+        return Ok(Value::Bool(true));
+    }
     // ObjectActionJump (C4ObjectCom.cpp:48-61): SetActionByName("Jump")
     // with its Abort/Start calls, then the launch velocities. A failed
     // SetAction (no Jump in the ActMap) returns false without touching
@@ -15147,6 +15270,8 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         if let Some(object) = context.object_context_mut() {
             object.set_fixed_velocity(FixedVec2::new(txdir, tydir));
+            object.set_mobile(true);
+            object.set_t_attach(object.t_attach() & !CNAT_BOTTOM);
         }
         Ok(Value::Bool(true))
     })
